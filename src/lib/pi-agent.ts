@@ -8,10 +8,22 @@
  * Start the daemon in dev with:  pnpm agent
  */
 
+export type PiModelInfo = {
+  provider: string;
+  id: string;
+  name: string;
+  reasoning: boolean;
+};
+
 export type PiAgentState = {
   connected: boolean;
   sessionId?: string;
+  cwd?: string;
+  daemonProtocol?: number;
   model?: string;
+  thinkingLevel?: string;
+  thinkingLevels?: string[];
+  availableModels?: PiModelInfo[];
   isStreaming: boolean;
 };
 
@@ -30,16 +42,98 @@ export type PiSessionGroup = {
   sessions: PiSessionSummary[];
 };
 
+// ---------- Workbench data types ----------
+
+export type PiUsageDay = {
+  date: string;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost: number;
+  sessions: number;
+};
+
+export type PiUsageModel = {
+  model: string;
+  provider: string;
+  input: number;
+  output: number;
+  cost: number;
+  calls: number;
+};
+
+export type PiUsageReport = {
+  totalInput: number;
+  totalOutput: number;
+  totalCacheRead: number;
+  totalCacheWrite: number;
+  totalCost: number;
+  totalSessions: number;
+  totalCalls: number;
+  byModel: PiUsageModel[];
+  byDay: PiUsageDay[];
+};
+
+export type PiSkillInfo = {
+  name: string;
+  description: string;
+  path: string;
+  userInvocable: boolean;
+  triggers: string[];
+};
+
+export type PiPluginInfo = {
+  packages: string[];
+  enabledModels: string[];
+  extensionsDir: string;
+  extensionCount: number;
+};
+
+export type PiSettingsInfo = {
+  defaultModel: string | null;
+  defaultProvider: string | null;
+  defaultThinkingLevel: string | null;
+  hasAuth: boolean;
+  authProviders: string[];
+  settingsPath: string;
+};
+
+export type ChatPart =
+  | { type: 'text'; text: string }
+  | { type: 'thinking'; text: string; done?: boolean }
+  | {
+      type: 'tool'
+      toolName: string
+      toolCallId: string
+      input?: unknown
+      output?: unknown
+      isError?: boolean
+    }
+
+export type ChatMessage = { role: 'user' | 'assistant'; parts: ChatPart[] }
+
 export type PiAgentEvents = {
-  ready: (msg: { sessionId: string }) => void;
+  ready: (msg: { sessionId: string; cwd?: string; protocol?: number }) => void;
+  project: (msg: { cwd: string }) => void;
   delta: (msg: { text: string }) => void;
   thinking: (msg: { text: string }) => void;
-  tool_start: (msg: { toolName: string }) => void;
-  tool_end: (msg: { toolName: string; isError: boolean }) => void;
+  tool_start: (msg: { toolCallId: string; toolName: string; args: unknown }) => void;
+  tool_end: (msg: { toolCallId: string; toolName: string; result: unknown; isError: boolean }) => void;
   agent_end: (msg: Record<string, never>) => void;
-  state: (msg: { model?: string; isStreaming: boolean }) => void;
+  state: (msg: {
+    model?: string;
+    thinkingLevel?: string;
+    thinkingLevels?: string[];
+    isStreaming: boolean;
+  }) => void;
+  models: (msg: { models: PiModelInfo[] }) => void;
   sessions: (msg: { groups: PiSessionGroup[] }) => void;
-  session_opened: (msg: { path: string }) => void;
+  session_opened: (msg: { path: string; messages: ChatMessage[] }) => void;
+  usage: (msg: { usage: PiUsageReport }) => void;
+  skills: (msg: { skills: PiSkillInfo[] }) => void;
+  plugins: (msg: { plugins: PiPluginInfo }) => void;
+  settings_info: (msg: { settings: PiSettingsInfo }) => void;
   error: (msg: { message: string }) => void;
   status: (connected: boolean) => void;
 };
@@ -89,15 +183,33 @@ export class PiAgentClient {
         return;
       }
       if (msg.type === "ready") {
-        this.state = { ...this.state, sessionId: msg.sessionId as string };
-        this.emit("ready", { sessionId: msg.sessionId as string });
+        const cwd = msg.cwd as string | undefined;
+        const protocol = msg.protocol as number | undefined;
+        this.state = { ...this.state, sessionId: msg.sessionId as string, cwd, daemonProtocol: protocol };
+        this.emit("ready", { sessionId: msg.sessionId as string, cwd, protocol });
+      } else if (msg.type === "project") {
+        const cwd = msg.cwd as string;
+        this.state = { ...this.state, cwd, isStreaming: false };
+        this.emit("project", { cwd });
       } else if (msg.type === "state") {
+        const thinkingLevels = msg.thinkingLevels as string[] | undefined;
         this.state = {
           ...this.state,
           model: msg.model as string | undefined,
+          thinkingLevel: msg.thinkingLevel as string | undefined,
+          thinkingLevels,
           isStreaming: msg.isStreaming as boolean,
         };
-        this.emit("state", { model: msg.model as string | undefined, isStreaming: Boolean(msg.isStreaming) });
+        this.emit("state", {
+          model: msg.model as string | undefined,
+          thinkingLevel: msg.thinkingLevel as string | undefined,
+          thinkingLevels,
+          isStreaming: Boolean(msg.isStreaming),
+        });
+      } else if (msg.type === "models") {
+        const models = (msg.models as PiModelInfo[] | undefined) ?? [];
+        this.state = { ...this.state, availableModels: models };
+        this.emit("models", { models });
       } else if (
         msg.type in {
           delta: 1,
@@ -107,6 +219,10 @@ export class PiAgentClient {
           agent_end: 1,
           sessions: 1,
           session_opened: 1,
+          usage: 1,
+          skills: 1,
+          plugins: 1,
+          settings_info: 1,
           error: 1,
         }
       ) {
@@ -141,7 +257,13 @@ export class PiAgentClient {
   }
 
   private send(msg: Record<string, unknown>) {
-    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
+    // A closed/reconnecting socket must never swallow messages silently —
+    // reconnect and let the caller retry on the next event.
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      this.connect();
+      return;
+    }
+    this.ws.send(JSON.stringify(msg));
   }
 
   /** Send a prompt to the agent. Results arrive via delta/agent_end events. */
@@ -164,9 +286,42 @@ export class PiAgentClient {
     this.send({ type: "list_sessions" });
   }
 
+  /** Start a fresh session anchored at a newly picked project folder. */
+  setProject(cwd: string) {
+    this.send({ type: "set_project", cwd });
+  }
+
   /** Switch the daemon's active session to a previously saved one. */
   openSession(path: string) {
     this.send({ type: "open_session", path });
+  }
+
+  /** Change the model for the active session (arrives via `state`). */
+  setModel(provider: string, modelId: string) {
+    this.send({ type: "set_model", provider, modelId });
+  }
+
+  /** Change the thinking/effort level for the active session (arrives via `state`). */
+  setThinkingLevel(level: string) {
+    this.send({ type: "set_thinking_level", level });
+  }
+
+  // ---------- Workbench data requests ----------
+
+  requestUsage() {
+    this.send({ type: "get_usage" });
+  }
+
+  requestSkills() {
+    this.send({ type: "list_skills" });
+  }
+
+  requestPlugins() {
+    this.send({ type: "list_plugins" });
+  }
+
+  requestSettingsInfo() {
+    this.send({ type: "get_settings_info" });
   }
 }
 

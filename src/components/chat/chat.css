@@ -1,0 +1,23 @@
+/**
+ * Chat-specific styles that cannot reasonably be expressed through
+ * Tailwind/shadcn utilities.
+ *
+ * The only real need: Shiki's dual-theme output uses `--shiki-light` /
+ * `--shiki-dark` CSS variables, and this app toggles dark mode via the
+ * `.dark` class (not `prefers-color-scheme`), so we map them here.
+ */
+
+.shiki {
+  color: var(--shiki-light);
+  background-color: var(--shiki-light-bg);
+}
+
+.dark .shiki {
+  color: var(--shiki-dark);
+  background-color: var(--shiki-dark-bg);
+}
+
+/* Keep Shiki token spans from breaking mid-token when wrapping is on. */
+.shiki span {
+  white-space: inherit;
+}

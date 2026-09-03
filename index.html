@@ -1,10 +1,25 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Orbit</title>
+  <script>
+    // Apply the saved (or system) theme before first paint to avoid a flash.
+    (function () {
+      try {
+        var stored = localStorage.getItem("orbit-theme");
+        var media = window.matchMedia("(prefers-color-scheme: dark)");
+        var dark = stored === "dark" || ((stored === "system" || stored === null) && media.matches);
+        document.documentElement.classList.toggle("dark", dark);
+        var accent = localStorage.getItem("orbit-accent");
+        if (["teal", "blue", "violet", "rose", "amber", "green", "slate"].indexOf(accent) !== -1) {
+          document.documentElement.dataset.accent = accent;
+        }
+      } catch (e) {}
+    })();
+  </script>
   
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

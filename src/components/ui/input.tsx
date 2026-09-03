@@ -41,12 +41,12 @@ export function InputGroup({ className, ...props }: GroupProps) {
         'relative isolate block',
         // icon
         'has-[>[data-slot=icon]:first-child]:[&_input]:ps-10 has-[>[data-slot=icon]:last-child]:[&_input]:pe-10 sm:has-[>[data-slot=icon]:first-child]:[&_input]:ps-8 sm:has-[>[data-slot=icon]:last-child]:[&_input]:pe-8',
-        '*:data-[slot=icon]:pointer-events-none *:data-[slot=icon]:absolute *:data-[slot=icon]:top-3 *:data-[slot=icon]:z-10 *:data-[slot=icon]:size-5 sm:*:data-[slot=icon]:top-2.5 sm:*:data-[slot=icon]:size-4',
+        '*:data-[slot=icon]:pointer-events-none *:data-[slot=icon]:absolute *:data-[slot=icon]:top-1/2 *:data-[slot=icon]:z-10 *:data-[slot=icon]:-translate-y-[calc(50%+1px)] *:data-[slot=icon]:size-5 sm:*:data-[slot=icon]:size-4',
         '[&>[data-slot=icon]:first-child]:start-3 sm:[&>[data-slot=icon]:first-child]:start-2.5 [&>[data-slot=icon]:last-child]:end-3 sm:[&>[data-slot=icon]:last-child]:end-2.5',
 
         // loader
         'has-[[data-slot=loader]:first-child]:[&_input]:ps-10 has-[[data-slot=loader]:last-child]:[&_input]:pe-10 sm:has-[[data-slot=loader]:first-child]:[&_input]:ps-8 sm:has-[[data-slot=loader]:last-child]:[&_input]:pe-8',
-        '*:data-[slot=loader]:pointer-events-none *:data-[slot=loader]:absolute *:data-[slot=loader]:top-3 *:data-[slot=loader]:z-10 *:data-[slot=loader]:size-5 sm:*:data-[slot=loader]:top-2.5 sm:*:data-[slot=loader]:size-4',
+        '*:data-[slot=loader]:pointer-events-none *:data-[slot=loader]:absolute *:data-[slot=loader]:top-1/2 *:data-[slot=loader]:z-10 *:data-[slot=loader]:-translate-y-[calc(50%+1px)] *:data-[slot=loader]:size-5 sm:*:data-[slot=loader]:size-4',
         '[&>[data-slot=loader]:first-child]:start-3 sm:[&>[data-slot=loader]:first-child]:start-2.5 [&>[data-slot=loader]:last-child]:end-3 sm:[&>[data-slot=loader]:last-child]:end-2.5',
 
         // text

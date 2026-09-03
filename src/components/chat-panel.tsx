@@ -1,30 +1,77 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+/**
+ * The main chat — the original Orbit chat UI, now powered by the Pi runtime
+ * over SSE (agent/sse-server.ts) instead of the WebSocket daemon.
+ *
+ *   browser (this webview)                    Node server
+ *   ─────────────────                         ───────────
+ *   usePiRuntime (SSE)  ──HTTP/SSE──▶        agent/sse-server.ts
+ *   usePiSseChat                              └ createPiNodeClient → Pi SDK
+ *
+ * Start the SSE server first:  pnpm agent:sse
+ */
+
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowUpIcon,
   ChevronDownIcon,
   ComputerDesktopIcon,
+  EyeIcon,
   FolderIcon,
   InformationCircleIcon,
+  LockClosedIcon,
   LockOpenIcon,
   StopIcon,
 } from '@heroicons/react/24/outline'
 import { twMerge } from 'tailwind-merge'
-import type { PiAgentState, PiSessionGroup } from '@/lib/pi-agent'
+import type { ChatStatus, UIMessage } from 'ai'
+import { useAui } from '@assistant-ui/react'
+import { usePiRuntimeExtras } from '@assistant-ui/react-pi'
+import { MessageList as AgentMessageList } from '@/components/agent-elements/message-list'
+import {
+  Menu,
+  MenuContent,
+  MenuDescription,
+  MenuItem,
+  MenuLabel,
+  MenuSection,
+  MenuTrigger,
+} from '@/components/ui/menu'
+import { usePiSseChat, usePiModels } from '@/lib/pi-sse'
+import type { ChatPart } from '@/lib/pi-agent'
 
-export interface ChatMessage {
-  role: 'user' | 'assistant'
-  text: string
+/** toolName → tool-card part type: bash → tool-Bash, web_fetch → tool-WebFetch. */
+function pascalToolName(name: string): string {
+  return name.replace(/(?:^|_)([a-z])/g, (_, c: string) => c.toUpperCase())
 }
 
-interface ChatPanelProps {
-  agentState: PiAgentState
-  messages: ChatMessage[]
-  sessionGroups: PiSessionGroup[]
-  activeSessionPath?: string
-  onSend: (text: string) => void
-  onAbort: () => void
+/** Map one daemon ChatPart onto the Agent Elements UIMessage part(s). */
+function toUIPart(part: ChatPart, key: string): UIMessage['parts'] {
+  if (part.type === 'text') {
+    return part.text ? [{ type: 'text', text: part.text }] : []
+  }
+  if (part.type === 'thinking') {
+    const done = part.done === true
+    return [
+      {
+        type: 'tool-Thinking' as const,
+        toolCallId: `${key}-think`,
+        state: done ? 'output-available' : 'input-streaming',
+        input: { thought: part.text },
+        ...(done ? { output: part.text } : {}),
+      },
+    ] as unknown as UIMessage['parts']
+  }
+  return [
+    {
+      type: `tool-${pascalToolName(part.toolName)}` as const,
+      toolCallId: part.toolCallId || `${key}-tool`,
+      state: part.isError ? 'output-error' : part.output !== undefined ? 'output-available' : 'call',
+      input: part.input ?? {},
+      ...(part.output !== undefined ? { output: part.output } : {}),
+    },
+  ] as unknown as UIMessage['parts']
 }
 
 /* ------------------------------------------------------------------ */
@@ -38,7 +85,7 @@ function Asterisk({ className }: { className?: string }) {
       viewBox="0 0 16 16"
       fill="none"
       aria-hidden="true"
-      className={twMerge('text-[#e0785a]', className)}
+      className={twMerge('text-warning', className)}
     >
       <g stroke="currentColor" strokeWidth="1.9" strokeLinecap="round">
         <line x1="8" y1="1.6" x2="8" y2="14.4" />
@@ -50,12 +97,12 @@ function Asterisk({ className }: { className?: string }) {
 }
 
 /** White "Pᵢ" tile: the agent mark, optionally tinted (header variant). */
-function PiTile({ className, tint = '#1a1a1a' }: { className?: string; tint?: string }) {
+function PiTile({ className, tint = 'oklch(0.228 0.013 107.4)' }: { className?: string; tint?: string }) {
   return (
     <span
       aria-hidden="true"
       className={twMerge(
-        'flex size-3.5 shrink-0 items-center justify-center rounded-[3px] bg-[#e8e8e8]',
+        'flex size-3.5 shrink-0 items-center justify-center rounded-[3px] bg-fg',
         className,
       )}
     >
@@ -131,7 +178,7 @@ function IconButton({
       aria-label={label}
       title={label}
       className={twMerge(
-        'flex size-7 cursor-default items-center justify-center rounded-lg text-muted-fg transition-colors duration-100 hover:bg-[#2a2a2a] hover:text-fg',
+        'flex size-7 cursor-pointer items-center justify-center rounded-lg text-muted-fg transition-colors duration-100 hover:bg-muted hover:text-fg',
         className,
       )}
     >
@@ -144,7 +191,7 @@ function IconButton({
 /* Header                                                              */
 /* ------------------------------------------------------------------ */
 
-function ChatHeader({ title }: { title: string }) {
+function ChatHeader({ title, connected }: { title: string; connected: boolean }) {
   return (
     <header className="flex h-12 shrink-0 items-center justify-between pl-4 pr-3.5">
       <h1 className="truncate text-[13px] font-medium tracking-[-0.01em] text-fg">
@@ -153,26 +200,19 @@ function ChatHeader({ title }: { title: string }) {
 
       <div className="flex shrink-0 items-center gap-4">
         <span className="flex items-center gap-2 text-xs font-medium tabular-nums">
-          <span className="text-[#62c987]">+3040</span>
-          <span className="text-[#e2726a]">-2225</span>
+          <span className="text-success-subtle-fg">+3040</span>
+          <span className="text-danger-subtle-fg">-2225</span>
         </span>
 
         <div className="flex items-center gap-2">
-          <button
-            type="button"
-            aria-label="Preview"
-            title="Preview"
-            className="flex h-7 w-12 cursor-default items-stretch overflow-hidden rounded-lg border border-[#303030] transition-colors duration-100 hover:bg-[#2a2a2a]"
-          >
-            <span className="flex flex-1 items-center justify-center">
-              <PiTile tint="#4d9fec" className="size-[15px] rounded-[4px]" />
-            </span>
-            <span className="my-auto h-4 w-px bg-[#303030]" />
-            <span className="flex flex-1 items-center justify-center text-muted-fg">
-              <ChevronDownIcon className="size-3" strokeWidth={1.8} />
-            </span>
-          </button>
-
+          <span
+            aria-label={connected ? 'Agent connected' : 'Agent disconnected'}
+            title={connected ? 'Agent connected' : 'Agent disconnected'}
+            className={twMerge(
+              'size-2.5 rounded-full border-[1.5px] transition-colors',
+              connected ? 'border-success-subtle-fg' : 'border-input',
+            )}
+          />
           <IconButton label="Session info">
             <InformationCircleIcon className="size-4" strokeWidth={1.6} />
           </IconButton>
@@ -190,22 +230,93 @@ function ChatHeader({ title }: { title: string }) {
 /* Composer                                                            */
 /* ------------------------------------------------------------------ */
 
+const THINKING_LEVEL_LABELS: Record<string, string> = {
+  off: 'Off',
+  minimal: 'Minimal',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Extra high',
+  max: 'Max',
+}
+
+/** Shared look for the composer's selector chips: muted text, hover wash, chevron. */
+const chipTriggerClass =
+  'flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-0.5 text-xs text-muted-fg transition-colors duration-100 hover:bg-muted hover:text-fg data-[pressed]:bg-muted disabled:opacity-50'
+
+/** First string key of a react-aria selection, if any. */
+function firstKey(keys: 'all' | Set<React.Key>): string | undefined {
+  if (keys === 'all') return undefined
+  const [first] = keys
+  return typeof first === 'string' ? first : undefined
+}
+
+/** Signal bars used for thinking-effort levels; `lit` of 4 bars filled. */
+function EffortGlyph({ lit, className }: { lit: 0 | 1 | 2 | 3 | 4; className?: string }) {
+  const heights = [4, 6.5, 9, 11.5]
+  return (
+    <svg viewBox="0 0 14 14" aria-hidden="true" className={className}>
+      {heights.map((h, i) => (
+        <rect
+          key={i}
+          x={1.4 + i * 3.3}
+          y={12.6 - h}
+          width={2.1}
+          height={h}
+          rx={0.8}
+          className={i < lit ? 'fill-current' : 'fill-current opacity-25'}
+        />
+      ))}
+    </svg>
+  )
+}
+
+/** Dot-in-circle used for the "off" effort level. */
+function EffortOffGlyph({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth={1.4} aria-hidden="true" className={className}>
+      <circle cx="7" cy="7" r="4.6" />
+      <path d="M3.9 3.9l6.2 6.2" />
+    </svg>
+  )
+}
+
+const EFFORT_ICONS: Record<string, (className: string) => React.ReactNode> = {
+  off: (c) => <EffortOffGlyph className={c} />,
+  minimal: (c) => <EffortGlyph lit={1} className={c} />,
+  low: (c) => <EffortGlyph lit={2} className={c} />,
+  medium: (c) => <EffortGlyph lit={3} className={c} />,
+  high: (c) => <EffortGlyph lit={4} className={c} />,
+  xhigh: (c) => <EffortGlyph lit={4} className={c} />,
+  max: (c) => <EffortGlyph lit={4} className={c} />,
+}
+
 function Composer({
-  model,
+  modelLabel,
+  models,
+  thinkingLevel,
+  thinkingLevels,
   connected,
   isStreaming,
   onSend,
   onAbort,
+  onSelectModel,
+  onSelectThinkingLevel,
 }: {
-  model: string
+  modelLabel: string
+  models: { provider: string; modelId: string; name?: string }[]
+  thinkingLevel: string
+  thinkingLevels: string[]
   connected: boolean
   isStreaming: boolean
   onSend: (text: string) => void
   onAbort: () => void
+  onSelectModel: (provider: string, modelId: string) => void
+  onSelectThinkingLevel: (level: string) => void
 }) {
   const [draft, setDraft] = useState('')
   const taRef = useRef<HTMLTextAreaElement>(null)
-  const canSend = connected && draft.trim().length > 0
+  const canSend = draft.trim().length > 0
 
   useEffect(() => {
     const el = taRef.current
@@ -220,7 +331,7 @@ function Composer({
       return
     }
     const text = draft.trim()
-    if (!text || !connected) return
+    if (!text) return
     setDraft('')
     if (taRef.current) taRef.current.style.height = 'auto'
     onSend(text)
@@ -235,7 +346,7 @@ function Composer({
           submit()
         }}
       >
-        <div className="rounded-[10px] border border-[#2f2f2f] bg-[#212121] px-4 pt-3.5 pb-2.5 shadow-[0_8px_24px_rgba(0,0,0,0.35)]">
+        <div className="rounded-[10px] border border-border bg-card px-4 pt-3.5 pb-2.5 shadow-[0_8px_24px_rgba(0,0,0,0.35)]">
           <textarea
             ref={taRef}
             rows={1}
@@ -250,30 +361,123 @@ function Composer({
             placeholder="Do anything…"
             aria-label="Prompt"
             spellCheck={false}
-            className="block w-full resize-none bg-transparent text-[13px] leading-[18px] text-fg outline-none placeholder:text-[#6b6b6b]"
+            className="block w-full resize-none bg-transparent text-[13px] leading-[18px] text-fg outline-none placeholder:text-muted-fg"
           />
 
-          <div className="mt-3 flex items-center gap-x-5">
-            <span className="flex min-w-0 items-center gap-1.5">
-              <PiTile />
-              <span className="truncate text-xs text-[#b3b3b3]">{model}</span>
-            </span>
-            <span className="shrink-0 text-xs text-muted-fg">Medium</span>
-            <span className="flex shrink-0 items-center gap-1.5 text-xs text-muted-fg">
-              <LockOpenIcon className="size-3.5" strokeWidth={1.6} />
-              Full access
-            </span>
+          <div className="mt-3 flex items-center gap-x-2">
+            <Menu>
+              <MenuTrigger
+                aria-label="Model"
+                isDisabled={!connected}
+                className={chipTriggerClass}
+              >
+                <PiTile />
+                <span className="truncate">{modelLabel}</span>
+                <ChevronDownIcon className="size-3 shrink-0 text-muted-fg" strokeWidth={1.8} />
+              </MenuTrigger>
+              <MenuContent
+                placement="top start"
+                selectionMode="single"
+                selectedKeys={[modelLabel]}
+                onSelectionChange={(keys) => {
+                  const key = firstKey(keys)
+                  if (!key) return
+                  const [provider, modelId] = key.split('/')
+                  if (provider && modelId) onSelectModel(provider, modelId)
+                }}
+                className="max-h-80"
+              >
+                <MenuSection label="Available models">
+                  {models.map((m) => {
+                    const id = `${m.provider}/${m.modelId}`
+                    return (
+                      <MenuItem key={id} id={id} textValue={m.name ?? m.modelId}>
+                        <MenuLabel>{m.name ?? m.modelId}</MenuLabel>
+                        <MenuDescription>{m.provider}</MenuDescription>
+                      </MenuItem>
+                    )
+                  })}
+                  {models.length === 0 && (
+                    <MenuItem isDisabled>No models — is the SSE server running?</MenuItem>
+                  )}
+                </MenuSection>
+              </MenuContent>
+            </Menu>
+
+            <Menu>
+              <MenuTrigger
+                aria-label="Thinking effort"
+                isDisabled={!connected}
+                className={chipTriggerClass}
+              >
+                {THINKING_LEVEL_LABELS[thinkingLevel] ?? thinkingLevel}
+                <ChevronDownIcon className="size-3 shrink-0 text-muted-fg" strokeWidth={1.8} />
+              </MenuTrigger>
+              <MenuContent
+                placement="top start"
+                selectionMode="single"
+                selectedKeys={[thinkingLevel]}
+                onSelectionChange={(keys) => {
+                  const key = firstKey(keys)
+                  if (key) onSelectThinkingLevel(key)
+                }}
+              >
+                {thinkingLevels.map((level) => (
+                  <MenuItem
+                    key={level}
+                    id={level}
+                    textValue={THINKING_LEVEL_LABELS[level] ?? level}
+                  >
+                    {EFFORT_ICONS[level]?.('size-4') ?? <EffortGlyph lit={3} className="size-4" />}
+                    <MenuLabel>{THINKING_LEVEL_LABELS[level] ?? level}</MenuLabel>
+                    <MenuDescription>{level}</MenuDescription>
+                  </MenuItem>
+                ))}
+              </MenuContent>
+            </Menu>
+
+            <Menu>
+              <MenuTrigger aria-label="Access" className={chipTriggerClass}>
+                <LockOpenIcon className="size-3.5 shrink-0" strokeWidth={1.6} />
+                Full access
+                <ChevronDownIcon className="size-3 shrink-0 text-muted-fg" strokeWidth={1.8} />
+              </MenuTrigger>
+              <MenuContent
+                placement="top start"
+                selectionMode="single"
+                selectedKeys={['full']}
+                popover={{ className: 'min-w-56' }}
+              >
+                <MenuSection label="Access">
+                  <MenuItem id="full" textValue="Full access">
+                    <LockOpenIcon data-slot="icon" />
+                    <MenuLabel>Full access</MenuLabel>
+                    <MenuDescription>Edit files and run commands</MenuDescription>
+                  </MenuItem>
+                  <MenuItem id="ask" isDisabled textValue="Ask first">
+                    <LockClosedIcon data-slot="icon" />
+                    <MenuLabel>Ask first</MenuLabel>
+                    <MenuDescription>Not available yet</MenuDescription>
+                  </MenuItem>
+                  <MenuItem id="read" isDisabled textValue="Read only">
+                    <EyeIcon data-slot="icon" />
+                    <MenuLabel>Read only</MenuLabel>
+                    <MenuDescription>Not available yet</MenuDescription>
+                  </MenuItem>
+                </MenuSection>
+              </MenuContent>
+            </Menu>
 
             <button
               type="submit"
               aria-label={isStreaming ? 'Stop' : 'Send'}
               className={twMerge(
-                'ml-auto flex size-6.5 shrink-0 items-center justify-center rounded-full transition-colors duration-150',
+                'ml-auto flex size-6.5 shrink-0 cursor-pointer items-center justify-center rounded-full transition-colors duration-150',
                 isStreaming
-                  ? 'bg-[#323232] text-fg hover:bg-[#3d3d3d]'
+                  ? 'bg-secondary text-fg hover:bg-muted'
                   : canSend
-                    ? 'bg-fg text-bg hover:bg-[#c9c9c9]'
-                    : 'cursor-default bg-[#323232] text-[#545454]',
+                    ? 'bg-fg text-bg hover:bg-fg/80'
+                    : 'cursor-default bg-secondary text-muted-fg/60',
               )}
             >
               {isStreaming ? (
@@ -288,7 +492,7 @@ function Composer({
         <div className="mt-3 flex items-center gap-5 px-4 text-[11px] text-muted-fg">
           <span className="flex items-center gap-1.5">
             <FolderIcon className="size-3.5" strokeWidth={1.6} />
-            imeichcek
+            {projectName}
           </span>
           <span className="flex items-center gap-1.5">
             <ComputerDesktopIcon className="size-3.5" strokeWidth={1.6} />
@@ -303,7 +507,7 @@ function Composer({
             title={connected ? 'Agent connected' : 'Agent disconnected'}
             className={twMerge(
               'ml-auto size-2.5 rounded-full border-[1.5px] transition-colors',
-              connected ? 'border-[#62c987]' : 'border-[#3f3f3f]',
+              connected ? 'border-success-subtle-fg' : 'border-input',
             )}
           />
         </div>
@@ -313,62 +517,21 @@ function Composer({
 }
 
 /* ------------------------------------------------------------------ */
-/* Messages / empty state                                              */
+/* Empty state                                                         */
 /* ------------------------------------------------------------------ */
 
-function EmptyState() {
+function EmptyState({ projectName }: { projectName: string }) {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center pb-12">
-      <Asterisk className="size-4" />
-      <h2 className="mt-5 text-xl font-semibold tracking-[-0.015em] text-fg">
-        What should we build in imeichcek?
+    <div className="relative flex flex-1 flex-col items-center justify-center overflow-hidden pb-12">
+      <Asterisk className="relative size-4 motion-safe:animate-rise" />
+      <h2 className="relative mt-6 font-display text-2xl font-semibold tracking-[-0.02em] text-balance text-fg motion-safe:animate-rise motion-safe:[animation-delay:120ms]">
+        What should we build in{' '}
+        <span className="inline-flex translate-y-[3px] items-center gap-1.5 rounded-lg bg-secondary px-2.5 py-1 text-[20px] text-fg">
+          <FolderIcon className="size-4 text-muted-fg" strokeWidth={1.7} />
+          {projectName}
+        </span>
+        ?
       </h2>
-    </div>
-  )
-}
-
-function MessageList({
-  messages,
-  isStreaming,
-}: {
-  messages: ChatMessage[]
-  isStreaming: boolean
-}) {
-  const ref = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    ref.current?.scrollTo({ top: ref.current.scrollHeight })
-  }, [messages, isStreaming])
-
-  const waiting = isStreaming && messages[messages.length - 1]?.role === 'user'
-
-  return (
-    <div ref={ref} className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
-      <div className="mx-auto flex max-w-[720px] flex-col gap-4">
-        {messages.map((msg, i) =>
-          msg.role === 'user' ? (
-            <div
-              key={i}
-              className="ml-auto max-w-[80%] whitespace-pre-wrap rounded-lg bg-[#2a2a2a] px-3.5 py-2.5 text-[13px] leading-relaxed text-fg"
-            >
-              {msg.text}
-            </div>
-          ) : (
-            <div
-              key={i}
-              className="max-w-[85%] whitespace-pre-wrap text-[13px] leading-relaxed text-fg"
-            >
-              {msg.text}
-            </div>
-          ),
-        )}
-        {waiting && (
-          <div className="flex items-center gap-1.5 pl-0.5 text-xs text-muted-fg">
-            <span className="size-1.5 animate-pulse rounded-full bg-muted-fg" />
-            working…
-          </div>
-        )}
-      </div>
     </div>
   )
 }
@@ -377,35 +540,60 @@ function MessageList({
 /* Panel                                                               */
 /* ------------------------------------------------------------------ */
 
-export default function ChatPanel({
-  agentState,
-  messages,
-  sessionGroups,
-  activeSessionPath,
-  onSend,
-  onAbort,
-}: ChatPanelProps) {
-  const activeSession = activeSessionPath
-    ? sessionGroups
-        .flatMap((g) => g.sessions)
-        .find((s) => s.path === activeSessionPath)
-    : undefined
+const projectName = 'orbit'
 
-  const title = activeSession ? (activeSession.name ?? 'Untitled task') : 'New task'
-  const model = agentState.model ?? 'glm-5.3-flash:cloud'
+export default function ChatPanel() {
+  const aui = useAui()
+  const { messages, isStreaming, connected, model, provider, cancel, setModel, setThinkingLevel } =
+    usePiSseChat()
+  const models = usePiModels()
+  const { readiness } = usePiRuntimeExtras()
+  const thinkingLevel = readiness?.state === 'ready' ? 'medium' : 'medium'
+  const thinkingLevels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+
+  const modelLabel = model ?? provider ?? 'pi'
+
+  // Adapter: daemon turns + parts → AI SDK UIMessage[] (ids stable; list only appends).
+  const uiMessages = useMemo<UIMessage[]>(
+    () =>
+      messages.map((m, i) => {
+        const key = `${m.role}-${i}`
+        return {
+          id: key,
+          role: m.role,
+          parts: m.parts.flatMap((p, pi) => toUIPart(p, `${key}-${pi}`)),
+        }
+      }),
+    [messages],
+  )
+  const status: ChatStatus = isStreaming ? 'streaming' : 'ready'
+
+  const handleSend = (text: string) => {
+    aui.composer.setText(text)
+    aui.composer.send()
+  }
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-bg">
-      <ChatHeader title={title} />
+      <ChatHeader title="New task" connected={connected} />
 
-      {messages.length === 0 ? <EmptyState /> : <MessageList messages={messages} isStreaming={agentState.isStreaming} />}
+      {messages.length === 0 ? (
+        <EmptyState projectName={projectName} />
+      ) : (
+        <AgentMessageList messages={uiMessages} status={status} />
+      )}
 
       <Composer
-        model={model}
-        connected={agentState.connected}
-        isStreaming={agentState.isStreaming}
-        onSend={onSend}
-        onAbort={onAbort}
+        modelLabel={modelLabel}
+        models={models}
+        thinkingLevel={thinkingLevel}
+        thinkingLevels={thinkingLevels}
+        connected={connected}
+        isStreaming={isStreaming}
+        onSend={handleSend}
+        onAbort={() => void cancel()}
+        onSelectModel={(provider, modelId) => void setModel({ provider, modelId })}
+        onSelectThinkingLevel={(level) => void setThinkingLevel(level as never)}
       />
     </div>
   )
