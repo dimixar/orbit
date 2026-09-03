@@ -1,5 +1,7 @@
-This starter kit helps you build web applications using the UI blocks from [design.intentui.com](https://design.intentui.com). It's built with Next.js and takes full advantage of the latest React features.
+# Tauri + React + Typescript
 
-## Other Starter Kits
-- [Laravel Starter Kit](https://design.intentui.com/starter-kits/laravel)
-- [Next.js Starter Kit](https://design.intentui.com/starter-kits/nextjs)
+This template should help get you started developing with Tauri, React and Typescript in Vite.
+
+## Recommended IDE Setup
+
+- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
