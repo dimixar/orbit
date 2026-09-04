@@ -1,6 +1,7 @@
 import { Square3Stack3DIcon } from '@heroicons/react/24/outline'
-import { useEffect, useState } from 'react'
-import { piAgent, type PiPluginInfo } from '@/lib/pi-agent'
+import { useCallback, useEffect, useState } from 'react'
+import { fetchPlugins } from '@/lib/pi-client'
+import type { PiPluginInfo } from '@/lib/pi-agent'
 import { Skeleton, WorkbenchCard, WorkbenchPage, WorkbenchSection } from './page'
 
 /** Split "npm:@ollama/pi-web-search" into { registry, name } */
@@ -17,15 +18,18 @@ const REGISTRY_STYLES: Record<string, string> = {
 }
 
 export function PluginsPage() {
-  const [plugins, setPlugins] = useState<PiPluginInfo | null>(null)
+  const [plugins, setPlugins] = useState<PiPluginInfo | null | undefined>(undefined)
 
-  useEffect(() => {
-    const off = piAgent.on('plugins', ({ plugins }) => setPlugins(plugins))
-    piAgent.requestPlugins()
-    return off
+  const load = useCallback(async () => {
+    setPlugins(undefined)
+    setPlugins(await fetchPlugins())
   }, [])
 
-  const loading = plugins === null
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const loading = plugins === undefined
 
   return (
     <WorkbenchPage
@@ -38,6 +42,16 @@ export function PluginsPage() {
             <Skeleton key={i} className="h-24" />
           ))}
         </div>
+      ) : plugins === null ? (
+        <WorkbenchCard className="py-14 text-center">
+          <Square3Stack3DIcon className="mx-auto mb-3 size-8 text-muted-fg" />
+          <p className="font-medium">Couldn't load plugins</p>
+          <p className="mx-auto mt-1.5 max-w-sm text-muted-fg text-sm leading-6">
+            The pi agent server isn't reachable. Start it with{' '}
+            <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">pnpm agent:sse</code>{' '}
+            and try again.
+          </p>
+        </WorkbenchCard>
       ) : (
         <>
           <WorkbenchSection title={`Packages (${plugins.packages.length})`}>

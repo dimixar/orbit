@@ -7,13 +7,17 @@
  * (agent/sse-server.ts) instead of the WebSocket daemon.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   usePiRuntimeExtras,
   usePiThreadState,
   type PiModelInfo,
 } from "@assistant-ui/react-pi";
-import { piClient } from "./pi-client";
+import {
+  fetchScopedModels,
+  piClient,
+  saveScopedModels,
+} from "./pi-client";
 import type { PiAgentMessage } from "@assistant-ui/react-pi";
 import type { ChatMessage, ChatPart } from "@/lib/pi-agent";
 
@@ -99,6 +103,98 @@ export function usePiModels(): PiModelInfo[] {
     };
   }, []);
   return models;
+}
+
+/** Scoped-models state: the resolved ids (null = unscoped, every model
+ * usable — pi treats that as “all enabled”), a toggle that persists through
+ * the SSE server, and the last save outcome for status surfaces. `saving`
+ * guards double-clicks on the checkboxes. */
+export function useScopedModels(): {
+  /** Scoped model ids as "provider/modelId", or null when unscoped. */
+  scopedIds: string[] | null;
+  /** Raw `enabledModels` patterns from settings.json — may be globs like
+   * "anthropic/*:high" that match more than `scopedIds` resolves to. */
+  patterns: string[] | null;
+  saving: boolean;
+  /** "saved" after a successful persist, "error" after a failed one (the
+   * optimistic state has been reverted), null before the first save. */
+  saveState: "saved" | "error" | null;
+  /** Adds/removes one model from the scope and persists the new set. Passing
+   * the full catalog lets an unscoped state (null) toggle off to “everything
+   * except this one”, and re-enabling every model clears the scope entirely —
+   * both matching pi CLI /scoped-models persist semantics. */
+  toggleScoped: (id: string, allIds: string[]) => void;
+  /** Clears the scope entirely (removes `enabledModels` from settings) —
+   * every available model goes back to being enabled. */
+  resetScope: () => void;
+} {
+  const [scopedIds, setScopedIds] = useState<string[] | null>(null);
+  const [patterns, setPatterns] = useState<string[] | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveState, setSaveState] = useState<"saved" | "error" | null>(null);
+  const scopedIdsRef = useRef<string[] | null>(null);
+  useEffect(() => {
+    scopedIdsRef.current = scopedIds;
+  }, [scopedIds]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchScopedModels().then((state) => {
+      if (!cancelled && state) {
+        setScopedIds(state.ids);
+        setPatterns(state.patterns);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const toggleScoped = useCallback((id: string, allIds: string[]) => {
+    // Unscoped means every model is enabled — toggling one off scopes to the
+    // rest, matching the pi CLI selector.
+    const current = scopedIdsRef.current ?? allIds;
+    const next = current.includes(id)
+      ? current.filter((x) => x !== id)
+      : [...current, id];
+    // Re-enabling every available model clears the scope (pi CLI: persisting
+    // an all-enabled selection writes no patterns).
+    const everythingEnabled =
+      allIds.length > 0 && allIds.every((x) => next.includes(x));
+    const persisted = everythingEnabled ? null : next;
+    // Optimistic flip; the server reply is authoritative on resolve, and a
+    // failure reverts to the previous set.
+    scopedIdsRef.current = everythingEnabled ? null : next;
+    setScopedIds(everythingEnabled ? null : next);
+    setSaving(true);
+    saveScopedModels(persisted)
+      .then((state) => {
+        scopedIdsRef.current = state.ids;
+        setScopedIds(state.ids);
+        setPatterns(state.patterns);
+        setSaveState("saved");
+      })
+      .catch(() => {
+        scopedIdsRef.current = current;
+        setScopedIds(current);
+        setSaveState("error");
+      })
+      .finally(() => setSaving(false));
+  }, []);
+
+  const resetScope = useCallback(() => {
+    setSaving(true);
+    saveScopedModels(null)
+      .then((state) => {
+        scopedIdsRef.current = state.ids;
+        setScopedIds(state.ids);
+        setPatterns(state.patterns);
+        setSaveState("saved");
+      })
+      .catch(() => setSaveState("error"))
+      .finally(() => setSaving(false));
+  }, []);
+  return { scopedIds, patterns, saving, saveState, toggleScoped, resetScope };
 }
 
 /**

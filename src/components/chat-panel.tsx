@@ -821,7 +821,7 @@ const PROVIDER_ICONS: Record<string, ProviderIconDef> = {
 };
 
 /** Provider brand icon, or null when the provider has no known mark. */
-function ProviderIcon({
+export function ProviderIcon({
   provider,
   className,
 }: {

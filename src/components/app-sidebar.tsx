@@ -31,6 +31,7 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   Cog6ToothIcon,
+  CubeTransparentIcon,
   DocumentTextIcon,
   EllipsisHorizontalIcon,
   FolderIcon,
@@ -70,7 +71,7 @@ import { usePiRuntimeExtras } from '@assistant-ui/react-pi'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { piClient } from '@/lib/pi-client'
 
-export type WorkbenchView = 'chat' | 'usage' | 'skills' | 'plugins' | 'settings'
+export type WorkbenchView = 'chat' | 'usage' | 'skills' | 'plugins' | 'models' | 'settings'
 
 interface AppSidebarProps extends React.ComponentProps<typeof Sidebar> {
   view?: WorkbenchView
@@ -809,6 +810,11 @@ export default function AppSidebar({
                 <Square3Stack3DIcon />
                 <MenuLabel>Plugins</MenuLabel>
                 {view === 'plugins' && <CheckIcon />}
+              </MenuItem>
+              <MenuItem onAction={() => onNavigate?.('models')}>
+                <CubeTransparentIcon />
+                <MenuLabel>Scoped models</MenuLabel>
+                {view === 'models' && <CheckIcon />}
               </MenuItem>
               <MenuItem onAction={() => onNavigate?.('settings')}>
                 <Cog6ToothIcon />

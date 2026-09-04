@@ -4,10 +4,43 @@
  */
 
 import { createPiHttpClient } from "@assistant-ui/react-pi";
+import type {
+  PiPluginInfo,
+  PiSkillInfo,
+  PiUsageReport,
+} from "./pi-agent";
 
 export const SSE_BASE_URL = "http://localhost:8913";
 
 export const piClient = createPiHttpClient({ baseUrl: SSE_BASE_URL });
+
+/**
+ * Workbench data (usage report, skills, plugins) from the SSE server's
+ * read-only `/workbench/*` endpoints — the same aggregators the chat runs on.
+ * Resolves `null` when the server is unreachable so callers can show an
+ * error/empty state instead of hanging.
+ */
+async function fetchWorkbench<T>(path: string): Promise<T | null> {
+  try {
+    const res = await fetch(`${SSE_BASE_URL}${path}`);
+    if (!res.ok) return null;
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
+export function fetchUsageReport(): Promise<PiUsageReport | null> {
+  return fetchWorkbench<PiUsageReport>("/workbench/usage");
+}
+
+export function fetchSkills(): Promise<PiSkillInfo[] | null> {
+  return fetchWorkbench<PiSkillInfo[]>("/workbench/skills");
+}
+
+export function fetchPlugins(): Promise<PiPluginInfo | null> {
+  return fetchWorkbench<PiPluginInfo>("/workbench/plugins");
+}
 
 /**
  * Current git branch of a workspace folder, via the SSE server's best-effort
@@ -42,6 +75,42 @@ export async function fetchWorkspaceBranches(
   } catch {
     return null;
   }
+}
+
+/**
+ * Pi's scoped models — the `enabledModels` setting (pi CLI /scoped-models)
+ * resolved against the available catalog. `ids` is null when unscoped, meaning
+ * every available model is usable. Resolves null when the server is
+ * unreachable so callers can hide the control instead of hanging.
+ */
+type ScopedModelState = {
+  patterns: string[] | null;
+  ids: string[] | null;
+};
+
+export async function fetchScopedModels(): Promise<ScopedModelState | null> {
+  return fetchWorkbench("/scoped-models");
+}
+
+/**
+ * Persist the scoped-model set (pi CLI /scoped-models semantics: an empty or
+ * null list clears the scope) and apply it to live sessions. Throws on server
+ * failure so callers can surface the error.
+ */
+export async function saveScopedModels(
+  patterns: string[] | null,
+): Promise<ScopedModelState> {
+  const res = await fetch(`${SSE_BASE_URL}/scoped-models`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ patterns }),
+  });
+  if (!res.ok) {
+    throw new Error(
+      `Failed to save scoped models (${res.status}): ${(await res.text()) || res.statusText}`,
+    );
+  }
+  return (await res.json()) as ScopedModelState;
 }
 
 /** Checkout an existing branch. Throws with git's message on failure. */

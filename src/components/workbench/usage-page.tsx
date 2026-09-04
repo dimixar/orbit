@@ -1,7 +1,8 @@
 import { ArrowPathIcon } from '@heroicons/react/24/outline'
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
-import { piAgent, type PiUsageReport } from '@/lib/pi-agent'
+import { fetchUsageReport } from '@/lib/pi-client'
+import type { PiUsageReport } from '@/lib/pi-agent'
 import { Skeleton, WorkbenchCard, WorkbenchPage, WorkbenchSection } from './page'
 
 /** Compact number: 1.2k, 3.4M */
@@ -84,19 +85,18 @@ export function UsagePage() {
   const [usage, setUsage] = useState<PiUsageReport | null>(null)
   const [loading, setLoading] = useState(true)
 
-  useEffect(() => {
-    const off = piAgent.on('usage', ({ usage }) => {
-      setUsage(usage)
-      setLoading(false)
-    })
-    piAgent.requestUsage()
-    return off
+  const load = useCallback(async () => {
+    setLoading(true)
+    const report = await fetchUsageReport()
+    setUsage(report)
+    setLoading(false)
   }, [])
 
-  const refresh = () => {
-    setLoading(true)
-    piAgent.requestUsage()
-  }
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const refresh = () => void load()
 
   return (
     <WorkbenchPage
@@ -116,7 +116,16 @@ export function UsagePage() {
           ))}
           <Skeleton className="col-span-full h-44" />
         </div>
-      ) : !usage || usage.totalCalls === 0 ? (
+      ) : usage === null ? (
+        <WorkbenchCard className="py-14 text-center">
+          <p className="font-medium">Couldn't load usage</p>
+          <p className="mx-auto mt-1.5 max-w-sm text-muted-fg text-sm leading-6">
+            The pi agent server isn't reachable. Start it with{' '}
+            <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">pnpm agent:sse</code>{' '}
+            and try again.
+          </p>
+        </WorkbenchCard>
+      ) : usage.totalCalls === 0 ? (
         <WorkbenchCard className="py-14 text-center">
           <p className="font-medium">No usage yet</p>
           <p className="mx-auto mt-1.5 max-w-sm text-muted-fg text-sm leading-6">

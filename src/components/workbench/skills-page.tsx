@@ -1,7 +1,8 @@
 import { MagnifyingGlassIcon, SparklesIcon } from '@heroicons/react/20/solid'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Input, InputGroup } from '@/components/ui/input'
-import { piAgent, type PiSkillInfo } from '@/lib/pi-agent'
+import { fetchSkills } from '@/lib/pi-client'
+import type { PiSkillInfo } from '@/lib/pi-agent'
 import { Skeleton, WorkbenchCard, WorkbenchPage } from './page'
 
 function SkillBadge({ children }: { children: React.ReactNode }) {
@@ -13,14 +14,17 @@ function SkillBadge({ children }: { children: React.ReactNode }) {
 }
 
 export function SkillsPage() {
-  const [skills, setSkills] = useState<PiSkillInfo[] | null>(null)
+  const [skills, setSkills] = useState<PiSkillInfo[] | null | undefined>(undefined)
   const [query, setQuery] = useState('')
 
-  useEffect(() => {
-    const off = piAgent.on('skills', ({ skills }) => setSkills(skills))
-    piAgent.requestSkills()
-    return off
+  const load = useCallback(async () => {
+    setSkills(undefined)
+    setSkills(await fetchSkills())
   }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load])
 
   const filtered = useMemo(() => {
     if (!skills) return []
@@ -34,7 +38,7 @@ export function SkillsPage() {
     )
   }, [skills, query])
 
-  const loading = skills === null
+  const loading = skills === undefined
 
   return (
     <WorkbenchPage
@@ -64,12 +68,18 @@ export function SkillsPage() {
         <WorkbenchCard className="py-14 text-center">
           <SparklesIcon className="mx-auto mb-3 size-8 text-muted-fg" />
           <p className="font-medium">
-            {skills.length === 0 ? 'No skills installed' : `No skills match “${query.trim()}”`}
+            {skills === null
+              ? "Couldn't load skills"
+              : skills.length === 0
+                ? 'No skills installed'
+                : `No skills match “${query.trim()}”`}
           </p>
           <p className="mx-auto mt-1.5 max-w-sm text-muted-fg text-sm leading-6">
-            {skills.length === 0
-              ? 'Install pi skills to extend the agent with specialized capabilities. They appear here automatically.'
-              : 'Try a different search term.'}
+            {skills === null
+              ? 'The pi agent server isn\'t reachable. Start it with pnpm agent:sse and try again.'
+              : skills.length === 0
+                ? 'Install pi skills to extend the agent with specialized capabilities. They appear here automatically.'
+                : 'Try a different search term.'}
           </p>
         </WorkbenchCard>
       ) : (

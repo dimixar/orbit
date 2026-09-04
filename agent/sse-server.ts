@@ -32,6 +32,7 @@ import {
   SessionManager,
   type SessionInfo,
 } from "@earendil-works/pi-coding-agent";
+import { getUsage, listPlugins, listSkills } from "./workbench.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -832,6 +833,27 @@ const server = createServer(async (req, res) => {
     })(req, res, body);
   }
 
+  // GET /workbench/usage — token/cost report across every session on disk
+  if (method === "GET" && path === "/workbench/usage") {
+    return route(async (_req, res) => {
+      sendJson(res, 200, await getUsage());
+    })(req, res, body);
+  }
+
+  // GET /workbench/skills — skills installed in ~/.pi/agent/skills
+  if (method === "GET" && path === "/workbench/skills") {
+    return route(async (_req, res) => {
+      sendJson(res, 200, await listSkills());
+    })(req, res, body);
+  }
+
+  // GET /workbench/plugins — packages + local extensions from settings.json
+  if (method === "GET" && path === "/workbench/plugins") {
+    return route(async (_req, res) => {
+      sendJson(res, 200, await listPlugins());
+    })(req, res, body);
+  }
+
   // GET /models
   if (method === "GET" && path === "/models") {
     return route(async (_req, res) => {
@@ -839,6 +861,26 @@ const server = createServer(async (req, res) => {
         workspacePath: url.searchParams.get("workspacePath") ?? undefined,
       });
       sendJson(res, 200, models);
+    })(req, res, body);
+  }
+
+  // GET /scoped-models — pi's `enabledModels` setting resolved against the
+  // available catalog (`ids` is null when unscoped = every model usable).
+  if (method === "GET" && path === "/scoped-models") {
+    return route(async (_req, res) => {
+      sendJson(res, 200, await client.getScopedModels());
+    })(req, res, body);
+  }
+
+  // PUT /scoped-models — persist the scoped set ({ patterns: string[] | null,
+  // pi CLI /scoped-models semantics) and apply it to live sessions.
+  if (method === "PUT" && path === "/scoped-models") {
+    return route(async (_req, res, body) => {
+      const { patterns } = (body ?? {}) as { patterns?: string[] | null };
+      if (patterns !== null && patterns !== undefined && !Array.isArray(patterns)) {
+        throw new Error("PUT /scoped-models requires { patterns: string[] | null }");
+      }
+      sendJson(res, 200, await client.setScopedModels(patterns ?? null));
     })(req, res, body);
   }
 

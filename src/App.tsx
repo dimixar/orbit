@@ -3,6 +3,7 @@ import { SidebarInset } from "@/components/ui/sidebar";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import AppSidebar from "@/components/app-sidebar";
 import { PluginsPage } from "@/components/workbench/plugins-page";
+import { ModelsPage } from "@/components/workbench/models-page";
 import { SettingsPage } from "@/components/workbench/settings-page";
 import { SkillsPage } from "@/components/workbench/skills-page";
 import { UsagePage } from "@/components/workbench/usage-page";
@@ -12,14 +13,20 @@ import { usePiRuntime } from "@assistant-ui/react-pi";
 import { piClient } from "@/lib/pi-client";
 import { useTheme } from "@/hooks/use-theme";
 
-export type WorkbenchView = "chat" | "usage" | "skills" | "plugins" | "settings";
+export type WorkbenchView =
+  | "chat"
+  | "usage"
+  | "skills"
+  | "plugins"
+  | "models"
+  | "settings";
 
 function App() {
   const { theme, setTheme, accent, setAccent } = useTheme();
   const [view, setView] = useState<WorkbenchView>(() => {
     // Allow deep-linking to a view via the URL hash, e.g. #usage.
     const hash = window.location.hash.replace("#", "") as WorkbenchView;
-    return ["chat", "usage", "skills", "plugins", "settings"].includes(hash)
+    return ["chat", "usage", "skills", "plugins", "models", "settings"].includes(hash)
       ? hash
       : "chat";
   });
@@ -41,6 +48,7 @@ function App() {
           {view === "usage" && <UsagePage />}
           {view === "skills" && <SkillsPage />}
           {view === "plugins" && <PluginsPage />}
+          {view === "models" && <ModelsPage />}
           {view === "settings" && (
             <SettingsPage
               theme={theme}

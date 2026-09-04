@@ -1,5 +1,27 @@
+diff --git a/dist/node/ThreadSupervisor.d.ts b/dist/node/ThreadSupervisor.d.ts
+index a74b97a40e6f49fd98573ab7ed2c35943d880214..b00f8b4f2041f995d617d98590ae5336ec24c198 100644
+--- a/dist/node/ThreadSupervisor.d.ts
++++ b/dist/node/ThreadSupervisor.d.ts
+@@ -56,6 +56,17 @@ declare class PiThreadSupervisor {
+     followUp: string[];
+   }>;
+   getAvailableModels(): Promise<PiModelInfo[]>;
++  /** Orbit: pi's scoped models — `enabledModels` setting resolved against the
++   *  available catalog. `ids` is null when unscoped. */
++  getScopedModels(): Promise<{
++    patterns: string[] | null;
++    ids: string[] | null;
++  }>;
++  /** Orbit: persist the scoped-model set and apply it to live sessions. */
++  setScopedModels(patterns: string[] | null): Promise<{
++    patterns: string[] | null;
++    ids: string[] | null;
++  }>;
+   setModel(threadId: string, input: {
+     provider: string;
+     modelId: string;
 diff --git a/dist/node/ThreadSupervisor.js b/dist/node/ThreadSupervisor.js
-index af8594c5c49cd6936d393288f3d3f43da9c11ff3..11b4193628c1c68a2b3484dc0683400088949de9 100644
+index af8594c5c49cd6936d393288f3d3f43da9c11ff3..8252691985d2b560d4e6c3897c6233507ba876d6 100644
 --- a/dist/node/ThreadSupervisor.js
 +++ b/dist/node/ThreadSupervisor.js
 @@ -3,7 +3,7 @@ import { errorText } from "../utils.js";
@@ -7,11 +29,48 @@ index af8594c5c49cd6936d393288f3d3f43da9c11ff3..11b4193628c1c68a2b3484dc06834000
  import { deriveContextUsage } from "./contextUsage.js";
  import { createSupervisorUiBridge } from "./extensionUi.js";
 -import { ModelRuntime, SessionManager, createAgentSession } from "@earendil-works/pi-coding-agent";
-+import { DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, createAgentSession, getAgentDir } from "@earendil-works/pi-coding-agent";
++import { DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, createAgentSession, getAgentDir, resolveModelScopeWithDiagnostics } from "@earendil-works/pi-coding-agent";
  import { unlink } from "node:fs/promises";
  //#region src/node/ThreadSupervisor.ts
  /**
-@@ -232,10 +232,44 @@ var PiThreadSupervisor = class {
+@@ -98,6 +98,36 @@ var PiThreadSupervisor = class {
+ 		const available = runtime.getAvailableSnapshot();
+ 		return (available.length > 0 ? available : runtime.getModels()).map(mapModelInfo);
+ 	}
++	/** Orbit patch: pi's scoped models — the `enabledModels` setting (pi CLI:
++	* /scoped-models) resolved against the available catalog. `ids` is null when
++	* unscoped, meaning every available model is usable. */
++	async getScopedModels() {
++		const settings = SettingsManager.create(this.workspacePath, this.agentDir ?? getAgentDir());
++		const patterns = settings.getEnabledModels();
++		if (!patterns || patterns.length === 0) return { patterns: null, ids: null };
++		const runtime = await this.getModelRuntime();
++		const scoped = (await resolveModelScopeWithDiagnostics(patterns, runtime)).scopedModels;
++		return { patterns, ids: scoped.map((s) => `${s.model.provider}/${s.model.id}`) };
++	}
++	/** Orbit patch: persist the scoped-model set to the `enabledModels` setting
++	* and apply it to every live session; cold threads pick it up in openSession.
++	* An empty/null list clears the scope (all models usable). */
++	async setScopedModels(patterns) {
++		const settings = SettingsManager.create(this.workspacePath, this.agentDir ?? getAgentDir());
++		const effective = patterns && patterns.length > 0 ? [...patterns] : undefined;
++		settings.setEnabledModels(effective);
++		let scopedModels = [];
++		if (effective) {
++			const runtime = await this.getModelRuntime();
++			scopedModels = (await resolveModelScopeWithDiagnostics(effective, runtime)).scopedModels;
++		}
++		for (const record of this.records.values()) {
++			try {
++				record.session.setScopedModels(scopedModels);
++			} catch {}
++		}
++		return { patterns: effective ?? null, ids: effective ? scopedModels.map((s) => `${s.model.provider}/${s.model.id}`) : null };
++	}
+ 	async setModel(threadId, input) {
+ 		const record = await this.ensureOpen(threadId);
+ 		const model = (await this.getModelRuntime()).getModel(input.provider, input.modelId);
+@@ -232,20 +262,62 @@ var PiThreadSupervisor = class {
  	*  failure (e.g. the async availability refresh timing out) clears the cache so
  	*  the next call retries instead of rejecting forever. */
  	getModelRuntime() {
@@ -60,6 +119,38 @@ index af8594c5c49cd6936d393288f3d3f43da9c11ff3..11b4193628c1c68a2b3484dc06834000
  		return this.modelRuntimePromise;
  	}
  	async openSession(sessionManager, cwd, signal) {
+ 		const generation = this.generation;
+ 		this.throwIfOpenCancelled(signal, generation);
++		// Orbit patch: honor the `enabledModels` setting (pi's scoped models — the
++		// /scoped-models surface in the CLI) so sessions open with the same scope.
++		let scopedModels;
++		try {
++			const patterns = SettingsManager.create(cwd, this.agentDir ?? getAgentDir()).getEnabledModels();
++			if (patterns && patterns.length > 0) scopedModels = (await resolveModelScopeWithDiagnostics(patterns, await this.getModelRuntime())).scopedModels;
++		} catch {}
+ 		const { session } = await createAgentSession({
+ 			cwd,
+ 			sessionManager,
+ 			...this.agentDir ? { agentDir: this.agentDir } : {},
+-			...this.model ? { model: this.model } : {}
++			...this.model ? { model: this.model } : {},
++			...(scopedModels && scopedModels.length > 0 ? { scopedModels } : {})
+ 		});
+ 		if (this.openWasCancelled(signal, generation)) {
+ 			session.dispose();
+diff --git a/dist/node/client.js b/dist/node/client.js
+index 39111e13e7f1aa74f7d334d51c3d029deaaa2be4..ffffe19f3a7353674bb4f701a0298fb12c5ac36c 100644
+--- a/dist/node/client.js
++++ b/dist/node/client.js
+@@ -40,6 +40,8 @@ const createPiNodeClient = (options = {}) => {
+ 		getAvailableModels: (input) => {
+ 			return supervisor.getAvailableModels();
+ 		},
++		getScopedModels: () => supervisor.getScopedModels(),
++		setScopedModels: (patterns) => supervisor.setScopedModels(patterns),
+ 		setModel: (threadId, input) => supervisor.setModel(threadId, input),
+ 		setThinkingLevel: (threadId, level) => supervisor.setThinkingLevel(threadId, level),
+ 		renameThread: (threadId, title) => supervisor.renameThread(threadId, title),
 diff --git a/dist/runtime/messageProjection.js b/dist/runtime/messageProjection.js
 index 6455b1e3d078ece39f5b9248af0972e72e66b899..0095ceb68e25ede8f4d3997f21a3f0131b536d52 100644
 --- a/dist/runtime/messageProjection.js
@@ -149,3 +240,24 @@ index 6455b1e3d078ece39f5b9248af0972e72e66b899..0095ceb68e25ede8f4d3997f21a3f013
  				projectAssistantInto(group, message, index, input, toolResults);
  				if (isLast) flush(true);
  				break;
+diff --git a/dist/types.d.ts b/dist/types.d.ts
+index 61afcbeace47fbb0d36252f896329a504b019652..3046a6bd1027e0bedc335486772f6ea44b788f70 100644
+--- a/dist/types.d.ts
++++ b/dist/types.d.ts
+@@ -487,6 +487,16 @@ interface PiClient {
+   getAvailableModels(input?: {
+     workspacePath?: string;
+   }): Promise<PiModelInfo[]>;
++  /** Orbit: pi's scoped models (pi CLI /scoped-models). `ids` is null when
++   * unscoped — every available model is usable. */
++  getScopedModels?(input?: { workspacePath?: string }): Promise<{
++    patterns: string[] | null;
++    ids: string[] | null;
++  }>;
++  setScopedModels?(patterns: string[] | null): Promise<{
++    patterns: string[] | null;
++    ids: string[] | null;
++  }>;
+   setModel(threadId: string, input: {
+     provider: string;
+     modelId: string;
