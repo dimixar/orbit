@@ -73,6 +73,8 @@ export type PiUsageReport = {
   totalCalls: number;
   byModel: PiUsageModel[];
   byDay: PiUsageDay[];
+  /** Per-model totals restricted to the last 30 days. */
+  recentByModel: PiUsageModel[];
 };
 
 export type PiSkillInfo = {

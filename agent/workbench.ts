@@ -36,6 +36,17 @@ export type UsageModel = {
   calls: number;
 };
 
+/** Per-model-per-day slice (used to compute recent-window per-model usage). */
+export type UsageModelDay = {
+  date: string;
+  provider: string;
+  model: string;
+  input: number;
+  output: number;
+  cost: number;
+  calls: number;
+};
+
 export type UsageReport = {
   totalInput: number;
   totalOutput: number;
@@ -46,6 +57,8 @@ export type UsageReport = {
   totalCalls: number;
   byModel: UsageModel[];
   byDay: UsageDay[];
+  /** Per-model totals restricted to the last 30 days (by entry timestamp). */
+  recentByModel: UsageModel[];
 };
 
 export type SkillInfo = {
@@ -171,6 +184,7 @@ type FileUsage = {
   calls: number;
   byModel: [string, UsageModel][];
   byDay: [string, UsageDay][];
+  byModelDay: [string, UsageModelDay][];
 };
 
 const usageCache = new Map<string, FileUsage>();
@@ -180,10 +194,11 @@ async function parseSessionFile(file: string, stat: fs.Stats): Promise<FileUsage
     mtimeMs: stat.mtimeMs,
     size: stat.size,
     input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, calls: 0,
-    byModel: [], byDay: [],
+    byModel: [], byDay: [], byModelDay: [],
   };
   const modelMap = new Map<string, UsageModel>();
   const dayMap = new Map<string, UsageDay>();
+  const modelDayMap = new Map<string, UsageModelDay>();
   let text = "";
   try {
     text = await fs.promises.readFile(file, "utf8");
@@ -237,20 +252,33 @@ async function parseSessionFile(file: string, stat: fs.Stats): Promise<FileUsage
       dd.cacheWrite += Number(u.cacheWrite) || 0;
       dd.cost += Number(u.cost?.total) || 0;
       dayMap.set(day, dd);
+
+      // Per-model-per-day: lets getUsage() compute recent-window per-model usage.
+      const mdk = `${day}|${mk}`;
+      const md = modelDayMap.get(mdk) ?? {
+        date: day, provider: lastProvider, model: lastModel,
+        input: 0, output: 0, cost: 0, calls: 0,
+      };
+      md.input += input; md.output += output;
+      md.cost += Number(u.cost?.total) || 0;
+      md.calls += 1;
+      modelDayMap.set(mdk, md);
     }
   }
   agg.byModel = [...modelMap.entries()].map(([, v]) => [`${v.provider}/${v.model}`, v]);
   agg.byDay = [...dayMap.entries()].map(([, v]) => [v.date, v]);
+  agg.byModelDay = [...modelDayMap.entries()].map(([k, v]) => [k, v]);
   return agg;
 }
 
 export async function getUsage(): Promise<UsageReport> {
   const report: UsageReport = {
     totalInput: 0, totalOutput: 0, totalCacheRead: 0, totalCacheWrite: 0,
-    totalCost: 0, totalSessions: 0, totalCalls: 0, byModel: [], byDay: [],
+    totalCost: 0, totalSessions: 0, totalCalls: 0, byModel: [], byDay: [], recentByModel: [],
   };
   const modelMap = new Map<string, UsageModel>();
   const dayMap = new Map<string, UsageDay>();
+  const modelDayMap = new Map<string, UsageModelDay>();
 
   let projectDirs: fs.Dirent[] = [];
   try {
@@ -317,10 +345,35 @@ export async function getUsage(): Promise<UsageReport> {
         cur.cost += dd.cost;
         dayMap.set(dk, cur);
       }
+      for (const [k, md] of agg.byModelDay ?? []) {
+        const cur = modelDayMap.get(k);
+        if (cur) {
+          cur.input += md.input; cur.output += md.output;
+          cur.cost += md.cost; cur.calls += md.calls;
+        } else {
+          modelDayMap.set(k, { ...md });
+        }
+      }
     }
   }
 
   report.byModel = [...modelMap.values()].sort((a, b) => b.cost - a.cost);
   report.byDay = [...dayMap.values()].sort((a, b) => a.date.localeCompare(b.date));
+
+  // Per-model usage over the last 30 days, from the model×day slices.
+  const cutoff = new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 10);
+  const recentModelMap = new Map<string, UsageModel>();
+  for (const md of modelDayMap.values()) {
+    if (md.date < cutoff) continue;
+    const mk = `${md.provider}/${md.model}`;
+    const cur = recentModelMap.get(mk) ?? {
+      model: md.model, provider: md.provider, input: 0, output: 0, cost: 0, calls: 0,
+    };
+    cur.input += md.input; cur.output += md.output; cur.cost += md.cost; cur.calls += md.calls;
+    recentModelMap.set(mk, cur);
+  }
+  report.recentByModel = [...recentModelMap.values()].sort(
+    (a, b) => (b.input + b.output) - (a.input + a.output),
+  );
   return report;
 }
