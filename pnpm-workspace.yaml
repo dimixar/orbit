@@ -10,3 +10,5 @@ minimumReleaseAgeExclude:
   - assistant-cloud@0.1.43
   - assistant-stream@0.3.41
   - safe-content-frame@0.0.29
+patchedDependencies:
+  '@assistant-ui/react-pi@0.0.20': patches/@assistant-ui__react-pi@0.0.20.patch

@@ -48,16 +48,22 @@ export const AgentMessageParts = memo(function AgentMessageParts({
           case "tool_call": {
             // When a matching result part follows, the output lives in the
             // ToolResultBlock — don't duplicate it inside the call row.
+            // Keyed with the index suffix: some models re-emit the same
+            // tool-call id across turns, and a bare `part.id` would collide.
             const next = parts[index + 1];
             const hasResult =
               next?.type === "tool_result" && next.toolCallId === part.id;
             return (
-              <ToolCallBlock key={part.id} {...part} showOutput={!hasResult} />
+              <ToolCallBlock
+                key={`${part.id}:${index}`}
+                {...part}
+                showOutput={!hasResult}
+              />
             );
           }
 
           case "tool_result":
-            return <ToolResultBlock key={part.toolCallId} {...part} />;
+            return <ToolResultBlock key={`${part.toolCallId}:${index}`} {...part} />;
 
           case "code":
             return <CodePart key={index} {...part} />;

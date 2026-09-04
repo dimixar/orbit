@@ -100,26 +100,40 @@ export type PiSettingsInfo = {
 };
 
 export type ChatPart =
-  | { type: 'text'; text: string }
-  | { type: 'thinking'; text: string; done?: boolean }
+  | { type: "text"; text: string }
+  | { type: "thinking"; text: string; done?: boolean }
   | {
-      type: 'tool'
-      toolName: string
-      toolCallId: string
-      input?: unknown
-      output?: unknown
-      isError?: boolean
-    }
+      type: "tool";
+      toolName: string;
+      toolCallId: string;
+      input?: unknown;
+      output?: unknown;
+      isError?: boolean;
+    };
 
-export type ChatMessage = { role: 'user' | 'assistant'; parts: ChatPart[] }
+export type ChatMessage = {
+  role: "user" | "assistant";
+  parts: ChatPart[];
+  /** When pi created the message (epoch ms → Date); undefined if unknown. */
+  createdAt?: Date;
+};
 
 export type PiAgentEvents = {
   ready: (msg: { sessionId: string; cwd?: string; protocol?: number }) => void;
   project: (msg: { cwd: string }) => void;
   delta: (msg: { text: string }) => void;
   thinking: (msg: { text: string }) => void;
-  tool_start: (msg: { toolCallId: string; toolName: string; args: unknown }) => void;
-  tool_end: (msg: { toolCallId: string; toolName: string; result: unknown; isError: boolean }) => void;
+  tool_start: (msg: {
+    toolCallId: string;
+    toolName: string;
+    args: unknown;
+  }) => void;
+  tool_end: (msg: {
+    toolCallId: string;
+    toolName: string;
+    result: unknown;
+    isError: boolean;
+  }) => void;
   agent_end: (msg: Record<string, never>) => void;
   state: (msg: {
     model?: string;
@@ -138,7 +152,9 @@ export type PiAgentEvents = {
   status: (connected: boolean) => void;
 };
 
-type Handler<K extends keyof PiAgentEvents> = (payload: Parameters<PiAgentEvents[K]>[0]) => void;
+type Handler<K extends keyof PiAgentEvents> = (
+  payload: Parameters<PiAgentEvents[K]>[0],
+) => void;
 
 const WS_URL = `ws://localhost:${import.meta.env.PI_AGENT_PORT ?? 8912}`;
 
@@ -156,13 +172,21 @@ export class PiAgentClient {
     return () => set.delete(handler as Handler<never>);
   }
 
-  private emit<K extends keyof PiAgentEvents>(event: K, payload: Parameters<PiAgentEvents[K]>[0]) {
+  private emit<K extends keyof PiAgentEvents>(
+    event: K,
+    payload: Parameters<PiAgentEvents[K]>[0],
+  ) {
     for (const h of this.handlers.get(event) ?? []) (h as Handler<K>)(payload);
   }
 
   connect() {
     // A socket is already connecting/open — nothing to do.
-    if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return;
+    if (
+      this.ws &&
+      (this.ws.readyState === WebSocket.OPEN ||
+        this.ws.readyState === WebSocket.CONNECTING)
+    )
+      return;
     // `disconnect()` latches `closed` to stop the reconnect loop after an
     // intentional close (e.g. StrictMode's first cleanup). A fresh `connect()`
     // — such as the re-mount — clears the latch and dials out again.
@@ -185,8 +209,17 @@ export class PiAgentClient {
       if (msg.type === "ready") {
         const cwd = msg.cwd as string | undefined;
         const protocol = msg.protocol as number | undefined;
-        this.state = { ...this.state, sessionId: msg.sessionId as string, cwd, daemonProtocol: protocol };
-        this.emit("ready", { sessionId: msg.sessionId as string, cwd, protocol });
+        this.state = {
+          ...this.state,
+          sessionId: msg.sessionId as string,
+          cwd,
+          daemonProtocol: protocol,
+        };
+        this.emit("ready", {
+          sessionId: msg.sessionId as string,
+          cwd,
+          protocol,
+        });
       } else if (msg.type === "project") {
         const cwd = msg.cwd as string;
         this.state = { ...this.state, cwd, isStreaming: false };
@@ -211,7 +244,8 @@ export class PiAgentClient {
         this.state = { ...this.state, availableModels: models };
         this.emit("models", { models });
       } else if (
-        msg.type in {
+        msg.type in
+        {
           delta: 1,
           thinking: 1,
           tool_start: 1,

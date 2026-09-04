@@ -1,0 +1,151 @@
+diff --git a/dist/node/ThreadSupervisor.js b/dist/node/ThreadSupervisor.js
+index af8594c5c49cd6936d393288f3d3f43da9c11ff3..11b4193628c1c68a2b3484dc0683400088949de9 100644
+--- a/dist/node/ThreadSupervisor.js
++++ b/dist/node/ThreadSupervisor.js
+@@ -3,7 +3,7 @@ import { errorText } from "../utils.js";
+ import { deriveReadiness, mapModelInfo, mapReadonlyMetadata, mapSessionEvent, mapSessionInfo, readinessFromSessionContext, toPiMessages } from "./mapping.js";
+ import { deriveContextUsage } from "./contextUsage.js";
+ import { createSupervisorUiBridge } from "./extensionUi.js";
+-import { ModelRuntime, SessionManager, createAgentSession } from "@earendil-works/pi-coding-agent";
++import { DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, createAgentSession, getAgentDir } from "@earendil-works/pi-coding-agent";
+ import { unlink } from "node:fs/promises";
+ //#region src/node/ThreadSupervisor.ts
+ /**
+@@ -232,10 +232,44 @@ var PiThreadSupervisor = class {
+ 	*  failure (e.g. the async availability refresh timing out) clears the cache so
+ 	*  the next call retries instead of rejecting forever. */
+ 	getModelRuntime() {
+-		if (!this.modelRuntimePromise) this.modelRuntimePromise = ModelRuntime.create(this.agentDir ? { authPath: `${this.agentDir}/auth.json` } : void 0).catch((error) => {
+-			this.modelRuntimePromise = void 0;
+-			throw error;
+-		});
++		if (!this.modelRuntimePromise)
++			this.modelRuntimePromise = ModelRuntime.create(this.agentDir ? { authPath: `${this.agentDir}/auth.json` } : void 0)
++				.then(async (runtime) => {
++					// Orbit patch: register extension providers (e.g. @aliou/pi-synthetic)
++					// into the supervisor-level runtime. Sessions load extensions via
++					// their resource loader, but getAvailableModels() reads THIS runtime,
++					// which without this only knows built-ins + models.json — so
++					// extension-provider models never appeared in the model picker.
++					// Mirrors createAgentSessionServices' provider registration.
++					try {
++						const agentDir = this.agentDir ?? getAgentDir();
++						const settingsManager = SettingsManager.create(this.workspacePath, agentDir);
++						const loader = new DefaultResourceLoader({
++							cwd: this.workspacePath,
++							agentDir,
++							settingsManager,
++						});
++						await loader.reload();
++						const registrations = loader.getExtensions().runtime;
++						for (const { name, config } of registrations.pendingProviderRegistrations) {
++							try {
++								runtime.registerProvider(name, config);
++							} catch {}
++						}
++						registrations.pendingProviderRegistrations.length = 0;
++						for (const { provider } of registrations.pendingNativeProviderRegistrations) {
++							try {
++								runtime.registerNativeProvider(provider);
++							} catch {}
++						}
++						registrations.pendingNativeProviderRegistrations.length = 0;
++					} catch {}
++					return runtime;
++				})
++				.catch((error) => {
++					this.modelRuntimePromise = void 0;
++					throw error;
++				});
+ 		return this.modelRuntimePromise;
+ 	}
+ 	async openSession(sessionManager, cwd, signal) {
+diff --git a/dist/runtime/messageProjection.js b/dist/runtime/messageProjection.js
+index 6455b1e3d078ece39f5b9248af0972e72e66b899..0095ceb68e25ede8f4d3997f21a3f0131b536d52 100644
+--- a/dist/runtime/messageProjection.js
++++ b/dist/runtime/messageProjection.js
+@@ -56,18 +56,23 @@ const dataPart = (name, data) => ({
+ 	name,
+ 	data
+ });
+-/** Build the toolCallId → result pairing map across the whole transcript so
+-* out-of-order parallel results pair correctly. */
++/** Build the toolCallId → results pairing map across the whole transcript so
++* out-of-order parallel results pair correctly. Results are collected per id in
++* transcript order; Orbit patch: duplicate tool-call ids (some models re-emit
++* ids across turns) pair occurrence-by-occurrence instead of last-wins. */
+ const buildToolResultMap = (messages) => {
+ 	const map = /* @__PURE__ */ new Map();
+ 	for (const message of messages) {
+ 		if (message.role !== "toolResult") continue;
+ 		const m = message;
+-		map.set(m.toolCallId, {
++		const list = map.get(m.toolCallId);
++		const entry = {
+ 			result: extractResultText({ content: m.content }),
+ 			isError: m.isError,
+ 			details: m.details
+-		});
++		};
++		if (list) list.push(entry);
++		else map.set(m.toolCallId, [entry]);
+ 	}
+ 	return map;
+ };
+@@ -94,14 +99,26 @@ const projectAssistantInto = (group, message, index, input, toolResults) => {
+ 			parentId
+ 		});
+ 	} else if (part.type === "toolCall") {
+-		const paired = toolResults.get(part.id);
++		// Orbit patch: some models re-emit the same tool-call id across turns
++		// (e.g. "edit:64" twice in one merged run). assistant-ui keys projected
++		// parts by toolCallId, so a repeat throws `Duplicate key` in useResources
++		// and crashes the chat. Suffix repeats ("edit:64#2") for display; result
++		// pairing and live-execution lookups below still use the original id.
++		const occurrence = (group.toolCallCounts.get(part.id) ?? 0) + 1;
++		group.toolCallCounts.set(part.id, occurrence);
++		// Results for an id are paired occurrence-by-occurrence — the 2nd call
++		// with a repeated id gets the 2nd toolResult for that id, falling back
++		// to the last known result when fewer results arrived.
++		const pairedList = toolResults.get(part.id);
++		const paired = pairedList ? pairedList[occurrence - 1] ?? pairedList[pairedList.length - 1] : void 0;
+ 		const live = input.toolExecutions[part.id];
+ 		const result = paired?.result ?? (live ? extractResultText(live.partialResult) : void 0);
+ 		const isError = paired?.isError ?? live?.status === "error";
+ 		const hostUi = input.hostUiRequests.find((r) => r.toolCallId === part.id);
++		const toolCallId = occurrence === 1 ? part.id : `${part.id}#${occurrence}`;
+ 		const toolCall = {
+ 			type: "tool-call",
+-			toolCallId: part.id,
++			toolCallId,
+ 			toolName: part.name,
+ 			args: part.arguments ?? {},
+ 			argsText: JSON.stringify(part.arguments ?? {}),
+@@ -188,14 +205,19 @@ const projectPiThreadMessages = (input) => {
+ 		const isLast = index === messages.length - 1;
+ 		switch (message.role) {
+ 			case "assistant":
+-				if (!group) group = {
+-					firstIndex: index,
+-					parts: [],
+-					steps: [],
+-					lastAssistant: message,
+-					hasPendingHostUi: false,
+-					hostUiReason: "tool-calls"
+-				};
++				if (!group)
++					group = {
++						firstIndex: index,
++						parts: [],
++						steps: [],
++						lastAssistant: message,
++						hasPendingHostUi: false,
++						hostUiReason: "tool-calls",
++						// Orbit patch: counts tool-call id occurrences within this
++						// merged run so duplicate ids get uniquified (see
++						// projectAssistantInto).
++						toolCallCounts: new Map(),
++					};
+ 				projectAssistantInto(group, message, index, input, toolResults);
+ 				if (isLast) flush(true);
+ 				break;

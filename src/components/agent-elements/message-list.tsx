@@ -15,10 +15,29 @@ import { Markdown } from "./markdown";
 import { ErrorMessage } from "./error-message";
 import type { CustomToolRendererProps } from "./types";
 import { ToolRowBase } from "./tools/tool-row-base";
-import { IconCopy, IconCheck, IconArrowDown } from "@tabler/icons-react";
+import {
+  IconCopy,
+  IconCheck,
+  IconArrowDown,
+  IconDots,
+  IconQuote,
+} from "@tabler/icons-react";
 import { ToolRenderer as DefaultToolRenderer } from "./tools/tool-renderer";
 import { normalizeAssistantToolParts } from "./utils/tool-part-normalizer";
 import { SpiralLoader } from "./spiral-loader";
+import {
+  fetchWorkspaceChanges,
+  openWorkspaceInApp,
+  type WorkspaceFileChange,
+} from "@/lib/pi-client";
+import { DocumentTextIcon } from "@heroicons/react/24/outline";
+import {
+  Menu,
+  MenuContent,
+  MenuItem,
+  MenuLabel,
+  MenuTrigger,
+} from "@/components/ui/menu";
 
 export type MessageListProps = {
   messages: UIMessage[];
@@ -33,6 +52,15 @@ export type MessageListProps = {
    *   or read-only transcripts where the user should read top-to-bottom.
    */
   initialScrollBehavior?: "bottom" | "top";
+  /**
+   * Insert a message into the composer as a blockquote — powers the
+   * “Quote in composer” action in each message's options menu.
+   */
+  onQuote?: (text: string) => void;
+  /** Active workspace folder — scopes the git changes card. */
+  workspacePath?: string;
+  /** Opens the in-app git changes panel (the card's Review action). */
+  onReviewChanges?: () => void;
   /**
    * When true (default) clicking an attached image in a user message opens
    * the fullscreen lightbox preview. Set to false to disable previews.
@@ -61,6 +89,11 @@ const timeFormatter = new Intl.DateTimeFormat("en-US", {
 const dateFormatter = new Intl.DateTimeFormat("en-US", {
   month: "short",
   day: "numeric",
+});
+/** Full precision for the tooltip: weekday, date, and seconds. */
+const fullStampFormatter = new Intl.DateTimeFormat("en-US", {
+  dateStyle: "full",
+  timeStyle: "medium",
 });
 type ToolPartBase = {
   type: string;
@@ -149,16 +182,175 @@ function getTextFromParts(parts: unknown[], joiner: string): string {
     .join(joiner);
 }
 
+/**
+ * Files the agent edited in a turn — extracted from Edit/Write tool calls so
+ * the changes card scopes to what the agent actually touched this turn.
+ */
+export function collectEditedPaths(messages: UIMessage[]): string[] {
+  const paths = new Set<string>();
+  for (const msg of messages) {
+    for (const part of msg.parts ?? []) {
+      const p = part as {
+        type?: string;
+        input?: { file_path?: string; path?: string };
+      };
+      if (
+        p.input &&
+        (p.type === "tool-Edit" ||
+          p.type === "tool-Write" ||
+          p.type === "tool-MultiEdit")
+      ) {
+        const fp = p.input.file_path ?? p.input.path;
+        if (typeof fp === "string" && fp) paths.add(fp);
+      }
+    }
+  }
+  return [...paths];
+}
+
+/**
+ * “Changed N files” card — git +/− for the files the agent touched this turn,
+ * with a Review action that opens the workspace in the last-used app (where
+ * the IDE's git tooling shows the diff). Hidden when nothing changed.
+ */
+function GitChangesCard({
+  workspacePath,
+  paths,
+  onReview,
+}: {
+  workspacePath: string;
+  paths: string[];
+  /** Opens the in-app git changes panel. */
+  onReview?: () => void;
+}) {
+  const [files, setFiles] = useState<WorkspaceFileChange[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetchWorkspaceChanges(workspacePath, paths).then((next) => {
+      if (!cancelled) setFiles(next);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspacePath, paths]);
+
+  if (!files || files.length === 0) return null;
+  const additions = files.reduce((sum, f) => sum + f.additions, 0);
+  const deletions = files.reduce((sum, f) => sum + f.deletions, 0);
+
+  const review = () => {
+    if (onReview) {
+      onReview();
+      return;
+    }
+    // Standalone usage (no panel host): fall back to the system IDE.
+    void openWorkspaceInApp(
+      workspacePath,
+      localStorage.getItem("orbit:open-in:last") ?? "vscode",
+    ).catch(() => {});
+  };
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-border bg-card">
+      <div className="flex items-center gap-2 px-3 py-2">
+        <span className="text-xs font-medium text-fg">
+          Changed {files.length === 1 ? "1 file" : `${files.length} files`}
+        </span>
+        <span className="text-xs tabular-nums text-success-subtle-fg">
+          +{additions}
+        </span>
+        <span className="text-xs tabular-nums text-danger-subtle-fg">
+          -{deletions}
+        </span>
+        <button
+          type="button"
+          onClick={review}
+          className="ml-auto flex cursor-pointer items-center gap-1.5 rounded-md border border-border bg-secondary px-2 py-0.5 text-xs text-fg outline-none transition-colors duration-100 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <DocumentTextIcon className="size-3.5 shrink-0" strokeWidth={1.6} />
+          Review
+        </button>
+      </div>
+      <div className="divide-y divide-border/60 border-t border-border/60">
+        {files.map((file) => {
+          const relative = file.path.startsWith(`${workspacePath}/`)
+            ? file.path.slice(workspacePath.length + 1)
+            : file.path;
+          return (
+            <div
+              key={file.path}
+              className="flex items-center justify-between gap-3 px-3 py-1.5"
+            >
+              <span
+                className="min-w-0 truncate font-mono text-[11px] text-muted-fg"
+                title={file.path}
+              >
+                {relative}
+              </span>
+              <span className="flex shrink-0 items-center gap-2 text-[11px] tabular-nums">
+                {file.additions > 0 && (
+                  <span className="text-success-subtle-fg">
+                    +{file.additions}
+                  </span>
+                )}
+                {file.deletions > 0 && (
+                  <span className="text-danger-subtle-fg">
+                    -{file.deletions}
+                  </span>
+                )}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** “⋯ Working for Xs” — live elapsed timer while the agent streams. */
+function WorkingIndicator() {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const start = Date.now();
+    const timer = setInterval(() => {
+      setSeconds(Math.floor((Date.now() - start) / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+  return (
+    <div
+      className="flex h-[28px] items-center gap-2 text-xs text-an-foreground-muted"
+      aria-live="polite"
+    >
+      <span className="flex items-center gap-0.5" aria-hidden="true">
+        {[0, 1, 2].map((i) => (
+          <span
+            key={i}
+            className="size-1 rounded-full bg-current motion-safe:animate-pulse"
+            style={{
+              animationDelay: `${i * 200}ms`,
+              animationDuration: "1.2s",
+            }}
+          />
+        ))}
+      </span>
+      Working for {seconds}s
+    </div>
+  );
+}
+
 function formatTimestamp(date: Date): string {
   const now = new Date();
   const isSameDay =
     date.getFullYear() === now.getFullYear() &&
     date.getMonth() === now.getMonth() &&
     date.getDate() === now.getDate();
+  // Time only for today; date AND time for anything older.
   if (isSameDay) {
     return timeFormatter.format(date);
   }
-  return dateFormatter.format(date);
+  return `${dateFormatter.format(date)}, ${timeFormatter.format(date)}`;
 }
 
 function CopyButton({
@@ -217,21 +409,32 @@ function CopyButton({
 
 function MessageToolbar({
   text,
-  timestamp,
+  createdAt,
+  showCopy = true,
   heightClass,
   hoverClass,
   isVisible,
   alignClass,
   onCopied,
+  onQuote,
 }: {
   text?: string;
-  timestamp?: string;
+  /** Message creation time — full date + time, precise tooltip. */
+  createdAt?: Date | string | null;
+  showCopy?: boolean;
   heightClass: string;
   hoverClass: string;
   isVisible: boolean;
   alignClass: string;
   onCopied?: () => void;
+  /** Inserts the message as a blockquote in the composer. */
+  onQuote?: (text: string) => void;
 }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const hasText = Boolean(text);
+  // Pi timestamps are epoch ms; 0 means "unknown" — don't render 1970.
+  const stampDate = createdAt ? new Date(createdAt) : undefined;
+  const stamp = stampDate && stampDate.getTime() > 0 ? stampDate : undefined;
   return (
     <div
       className={cn(
@@ -239,13 +442,43 @@ function MessageToolbar({
         heightClass,
         alignClass,
         hoverClass,
-        isVisible && "opacity-100 pointer-events-auto",
+        (isVisible || menuOpen) && "opacity-100 pointer-events-auto",
       )}
       onMouseDown={(event) => event.stopPropagation()}
       onPointerDown={(event) => event.stopPropagation()}
     >
-      {timestamp && <span>{timestamp}</span>}
-      {text && <CopyButton text={text} onCopied={onCopied} />}
+      {stamp && (
+        <time
+          dateTime={stamp.toISOString()}
+          title={fullStampFormatter.format(stamp)}
+          className="flex h-6 items-center tabular-nums"
+        >
+          {formatTimestamp(stamp)}
+        </time>
+      )}
+      {hasText && text && showCopy && (
+        <CopyButton text={text} onCopied={onCopied} />
+      )}
+      {hasText && text && onQuote && (
+        <Menu onOpenChange={setMenuOpen}>
+          <MenuTrigger
+            aria-label="Message options"
+            className={cn(
+              "size-6 flex items-center justify-center rounded-md outline-none active:scale-[0.97] transition-[background-color,opacity,transform] duration-150 ease-out",
+              "opacity-50 bg-transparent hover:opacity-100 hover:bg-an-foreground/10 focus-visible:opacity-100 focus-visible:ring-2 focus-visible:ring-ring",
+              menuOpen && "opacity-100 bg-an-foreground/10",
+            )}
+          >
+            <IconDots className="size-3.5 text-an-foreground-muted" />
+          </MenuTrigger>
+          <MenuContent placement="top">
+            <MenuItem onAction={() => onQuote(text)}>
+              <IconQuote />
+              <MenuLabel>Quote in composer</MenuLabel>
+            </MenuItem>
+          </MenuContent>
+        </Menu>
+      )}
     </div>
   );
 }
@@ -280,6 +513,9 @@ export const MessageList = memo(function MessageList({
   slots,
   classNames,
   toolRenderers,
+  onQuote,
+  workspacePath,
+  onReviewChanges,
 }: MessageListProps) {
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const contentWrapperRef = useRef<HTMLDivElement>(null);
@@ -291,7 +527,6 @@ export const MessageList = memo(function MessageList({
   );
   const assistantSpaceActiveRef = useRef(false);
   const [activeCopyId, setActiveCopyId] = useState<string | null>(null);
-  const [isMounted, setIsMounted] = useState(false);
   const [atBottom, setAtBottom] = useState(initialScrollBehavior !== "top");
 
   const CustomUserMessage = slots?.UserMessage || UserMessage;
@@ -299,10 +534,6 @@ export const MessageList = memo(function MessageList({
 
   const markCopied = useCallback((id: string) => {
     setActiveCopyId(id);
-  }, []);
-
-  useEffect(() => {
-    setIsMounted(true);
   }, []);
 
   useEffect(() => {
@@ -542,140 +773,157 @@ export const MessageList = memo(function MessageList({
           className,
         )}
       >
-      <div ref={contentWrapperRef} className="mx-auto px-4 py-6 max-w-an">
-        <div className="space-y-2">
-          {turns.map((turn, turnIndex) => {
-            const isLastTurn = turnIndex === turns.length - 1;
-            const turnKey = turn.userMsg?.id ?? `turn-${turnIndex}`;
+        <div ref={contentWrapperRef} className="mx-auto px-4 py-6 max-w-an">
+          <div className="space-y-2">
+            {turns.map((turn, turnIndex) => {
+              const isLastTurn = turnIndex === turns.length - 1;
+              const turnKey = turn.userMsg?.id ?? `turn-${turnIndex}`;
 
-            return (
-              <div key={turnKey} className="relative space-y-2">
-                {turn.userMsg &&
-                  (() => {
-                    const text = getTextFromParts(
-                      turn.userMsg!.parts ?? [],
-                      "",
-                    );
-                    const hasParts = (turn.userMsg!.parts ?? []).length > 0;
-                    if (!text && !hasParts) return null;
-                    const userCreatedAt = (
-                      turn.userMsg as { createdAt?: Date | string }
-                    )?.createdAt;
-                    const userCopyKey = `user-${turn.userMsg.id}`;
-                    const userCopyVisible = activeCopyId === userCopyKey;
-                    const userTimestamp =
-                      isMounted && userCreatedAt
-                        ? formatTimestamp(new Date(userCreatedAt))
-                        : undefined;
-                    // Only render the toolbar when it has content — copy
-                    // button (gated by showCopyToolbar) or a timestamp.
-                    // Otherwise a 28px-tall empty row inflates the gap to the
-                    // assistant reply.
-                    const showUserToolbar =
-                      (showCopyToolbar && Boolean(text)) ||
-                      Boolean(userTimestamp);
-                    return (
-                      <div className="group/user-message">
-                        <CustomUserMessage
-                          message={turn.userMsg}
-                          className={classNames?.userMessage}
-                          enableImagePreview={enableImagePreview}
-                        />
-                        {showUserToolbar && (
-                          <MessageToolbar
-                            text={showCopyToolbar ? text : ""}
-                            timestamp={userTimestamp}
-                            heightClass="h-[28px]"
-                            hoverClass="group-hover/user-message:opacity-100 group-hover/user-message:pointer-events-auto"
-                            isVisible={userCopyVisible}
-                            alignClass="justify-end"
-                            onCopied={() => markCopied(userCopyKey)}
+              return (
+                <div key={turnKey} className="relative space-y-2">
+                  {turn.userMsg &&
+                    (() => {
+                      const text = getTextFromParts(
+                        turn.userMsg!.parts ?? [],
+                        "",
+                      );
+                      const hasParts = (turn.userMsg!.parts ?? []).length > 0;
+                      if (!text && !hasParts) return null;
+                      const userCreatedAt = (
+                        turn.userMsg as { createdAt?: Date | string }
+                      )?.createdAt;
+                      const userCopyKey = `user-${turn.userMsg.id}`;
+                      const userCopyVisible = activeCopyId === userCopyKey;
+                      // Only render the toolbar when it has content — copy
+                      // button (gated by showCopyToolbar), timestamp, or the
+                      // options menu. Otherwise a 28px-tall empty row inflates
+                      // the gap to the assistant reply.
+                      const showUserToolbar =
+                        Boolean(userCreatedAt) ||
+                        (Boolean(text) &&
+                          (showCopyToolbar || Boolean(onQuote)));
+                      return (
+                        <div className="group/user-message">
+                          <CustomUserMessage
+                            message={turn.userMsg}
+                            className={classNames?.userMessage}
+                            enableImagePreview={enableImagePreview}
                           />
-                        )}
-                      </div>
-                    );
-                  })()}
-
-                {turn.assistantMsgs.length > 0 &&
-                  !(isLastTurn && showPlanning) &&
-                  (() => {
-                    const assistantText = getTextFromParts(
-                      turn.assistantMsgs.flatMap((msg) => msg.parts ?? []),
-                      "\n\n",
-                    );
-                    const isTurnStreaming = isStreaming && isLastTurn;
-                    // Only reserve toolbar height when there's actually
-                    // something to show in it. With showCopyToolbar=false the
-                    // toolbar would otherwise render as a 48px-tall empty box,
-                    // creating large gaps between assistant turns.
-                    const showToolbar =
-                      showCopyToolbar &&
-                      Boolean(assistantText.trim()) &&
-                      !isTurnStreaming;
-                    const copyKey = `assistant-${turnKey}-all`;
-                    const toolbarText = showCopyToolbar ? assistantText : "";
-
-                    return (
-                      <div className="group/assistant-turn">
-                        <div className="flex flex-col gap-3">
-                          {turn.assistantMsgs.map((msg, i) => {
-                            const isLastMsg =
-                              isLastTurn && i === turn.assistantMsgs.length - 1;
-                            return (
-                              <AssistantParts
-                                key={msg.id}
-                                msg={msg}
-                                isLast={isLastMsg}
-                                isStreaming={isStreaming}
-                                suppressQuestionTool={suppressQuestionTool}
-                                ToolRendererComponent={CustomToolRenderer}
-                                toolRenderers={toolRenderers}
-                              />
-                            );
-                          })}
+                          {showUserToolbar && (
+                            <MessageToolbar
+                              text={text}
+                              showCopy={showCopyToolbar}
+                              createdAt={userCreatedAt}
+                              heightClass="h-[28px]"
+                              hoverClass="group-hover/user-message:opacity-100 group-hover/user-message:pointer-events-auto"
+                              isVisible={userCopyVisible}
+                              alignClass="justify-end"
+                              onCopied={() => markCopied(userCopyKey)}
+                              onQuote={onQuote}
+                            />
+                          )}
                         </div>
-                        {showToolbar ? (
-                          <MessageToolbar
-                            text={toolbarText}
-                            heightClass="h-[48px] flex items-start w-full"
-                            hoverClass="group-hover/assistant-turn:opacity-100 group-hover/assistant-turn:pointer-events-auto"
-                            isVisible={activeCopyId === copyKey}
-                            alignClass="justify-start"
-                            onCopied={() => markCopied(copyKey)}
-                          />
-                        ) : activeCopyId === copyKey ? (
-                          <MessageToolbar
-                            text={toolbarText}
-                            heightClass="h-[48px] flex items-start w-full"
-                            hoverClass="group-hover/assistant-turn:opacity-100 group-hover/assistant-turn:pointer-events-auto"
-                            isVisible={true}
-                            alignClass="justify-start"
-                            onCopied={() => markCopied(copyKey)}
-                          />
-                        ) : null}
-                      </div>
-                    );
-                  })()}
+                      );
+                    })()}
 
-                {isLastTurn && showPlanning && (
-                  <ToolRowBase
-                    icon={<SpiralLoader size={12} />}
-                    shimmerLabel={planningLabel}
-                    completeLabel="Done"
-                    isAnimating={true}
-                  />
-                )}
-              </div>
-            );
-          })}
+                  {turn.assistantMsgs.length > 0 &&
+                    !(isLastTurn && showPlanning) &&
+                    (() => {
+                      const assistantText = getTextFromParts(
+                        turn.assistantMsgs.flatMap((msg) => msg.parts ?? []),
+                        "\n\n",
+                      );
+                      const isTurnStreaming = isStreaming && isLastTurn;
+                      // Only reserve toolbar height when there's actually
+                      // something to show in it. With showCopyToolbar=false the
+                      // toolbar would otherwise render as a 48px-tall empty box,
+                      // creating large gaps between assistant turns.
+                      const lastAssistantMsg = turn.assistantMsgs[
+                        turn.assistantMsgs.length - 1
+                      ] as { createdAt?: Date | string } | undefined;
+                      const assistantCreatedAt = lastAssistantMsg?.createdAt
+                        ? new Date(lastAssistantMsg.createdAt)
+                        : undefined;
+                      const showToolbar =
+                        Boolean(assistantText.trim()) &&
+                        !isTurnStreaming &&
+                        (showCopyToolbar || Boolean(onQuote));
+                      const copyKey = `assistant-${turnKey}-all`;
+                      const toolbarText = assistantText;
+                      // Files the agent edited this turn → git changes card.
+                      const editedPaths = collectEditedPaths(
+                        turn.assistantMsgs,
+                      );
+
+                      return (
+                        <div className="group/assistant-turn">
+                          <div className="flex flex-col gap-3">
+                            {turn.assistantMsgs.map((msg, i) => {
+                              const isLastMsg =
+                                isLastTurn &&
+                                i === turn.assistantMsgs.length - 1;
+                              return (
+                                <AssistantParts
+                                  key={msg.id}
+                                  msg={msg}
+                                  isLast={isLastMsg}
+                                  isStreaming={isStreaming}
+                                  suppressQuestionTool={suppressQuestionTool}
+                                  ToolRendererComponent={CustomToolRenderer}
+                                  toolRenderers={toolRenderers}
+                                />
+                              );
+                            })}
+                          </div>
+                          {isTurnStreaming ? (
+                            <WorkingIndicator />
+                          ) : (
+                            <>
+                              {editedPaths.length > 0 && workspacePath && (
+                                <GitChangesCard
+                                  workspacePath={workspacePath}
+                                  paths={editedPaths}
+                                  onReview={onReviewChanges}
+                                />
+                              )}
+                              {showToolbar || activeCopyId === copyKey ? (
+                                <MessageToolbar
+                                  text={toolbarText}
+                                  createdAt={assistantCreatedAt}
+                                  showCopy={showCopyToolbar}
+                                  heightClass="h-[48px] flex items-start w-full"
+                                  hoverClass="group-hover/assistant-turn:opacity-100 group-hover/assistant-turn:pointer-events-auto"
+                                  isVisible={activeCopyId === copyKey}
+                                  alignClass="justify-start"
+                                  onCopied={() => markCopied(copyKey)}
+                                  onQuote={onQuote}
+                                />
+                              ) : null}
+                            </>
+                          )}
+                        </div>
+                      );
+                    })()}
+
+                  {isLastTurn && showPlanning && (
+                    <ToolRowBase
+                      icon={<SpiralLoader size={12} />}
+                      shimmerLabel={planningLabel}
+                      completeLabel="Done"
+                      isAnimating={true}
+                    />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {showAssistantBreathingSpace && (
+            <div
+              aria-hidden="true"
+              className="min-h-[max(140px,24vh)] mx-auto max-w-an w-full"
+            />
+          )}
         </div>
-        {showAssistantBreathingSpace && (
-          <div
-            aria-hidden="true"
-            className="min-h-[max(140px,24vh)] mx-auto max-w-an w-full"
-          />
-        )}
-      </div>
       </div>
       {!atBottom && (
         <button

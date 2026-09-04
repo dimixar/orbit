@@ -23,6 +23,7 @@
   },
   "bundle": {
     "active": true,
+    "resources": ["bin/pi-sse.mjs"],
     "targets": "all",
     "icon": [
       "icons/32x32.png",

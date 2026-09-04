@@ -6,21 +6,20 @@ import { PluginsPage } from "@/components/workbench/plugins-page";
 import { SettingsPage } from "@/components/workbench/settings-page";
 import { SkillsPage } from "@/components/workbench/skills-page";
 import { UsagePage } from "@/components/workbench/usage-page";
-import { AgentChatDemo } from "@/components/chat/AgentChatDemo";
 import ChatPanel from "@/components/chat-panel";
 import { AssistantRuntimeProvider } from "@assistant-ui/react";
 import { usePiRuntime } from "@assistant-ui/react-pi";
 import { piClient } from "@/lib/pi-client";
 import { useTheme } from "@/hooks/use-theme";
 
-export type WorkbenchView = "chat" | "chat-demo" | "usage" | "skills" | "plugins" | "settings";
+export type WorkbenchView = "chat" | "usage" | "skills" | "plugins" | "settings";
 
 function App() {
   const { theme, setTheme, accent, setAccent } = useTheme();
   const [view, setView] = useState<WorkbenchView>(() => {
-    // Allow deep-linking to a view via the URL hash, e.g. #chat-demo.
+    // Allow deep-linking to a view via the URL hash, e.g. #usage.
     const hash = window.location.hash.replace("#", "") as WorkbenchView;
-    return ["chat", "chat-demo", "usage", "skills", "plugins", "settings"].includes(hash)
+    return ["chat", "usage", "skills", "plugins", "settings"].includes(hash)
       ? hash
       : "chat";
   });
@@ -39,7 +38,6 @@ function App() {
         />
         <SidebarInset className="min-h-0">
           {view === "chat" && <ChatPanel />}
-          {view === "chat-demo" && <AgentChatDemo />}
           {view === "usage" && <UsagePage />}
           {view === "skills" && <SkillsPage />}
           {view === "plugins" && <PluginsPage />}
