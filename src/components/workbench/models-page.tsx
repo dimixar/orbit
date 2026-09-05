@@ -20,14 +20,16 @@
  */
 
 import { ArrowPathIcon, CubeTransparentIcon } from '@heroicons/react/24/outline'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { PiModelInfo } from '@assistant-ui/react-pi'
+import { twMerge } from 'tailwind-merge'
 import { piClient } from '@/lib/pi-client'
 import { useScopedModels } from '@/lib/pi-sse'
 import { ProviderIcon } from '@/components/chat-panel'
 import { Button } from '@/components/ui/button'
 import { Checkbox, CheckboxField } from '@/components/ui/checkbox'
 import { Note } from '@/components/ui/note'
+import { Code, Text } from '@/components/ui/text'
 import { Skeleton, WorkbenchCard, WorkbenchPage, WorkbenchSection } from './page'
 
 /** Canonical "provider/modelId" key shared by the picker, settings, and scope. */
@@ -42,7 +44,9 @@ export function ModelsPage() {
   const load = useCallback(async () => {
     setModels(undefined)
     try {
-      setModels(await piClient.getAvailableModels())
+      const list = await piClient.getAvailableModels()
+      setModels(list)
+      window.dispatchEvent(new Event('orbit:models-updated'))
     } catch {
       setModels(null)
     }
@@ -51,8 +55,23 @@ export function ModelsPage() {
     void load()
   }, [load])
 
-  const { scopedIds, patterns, saving, saveState, toggleScoped, resetScope } =
+  const { loaded: scopeLoaded, scopedIds, patterns, saving, saveState, toggleScoped, resetScope } =
     useScopedModels()
+  const scrollerRef = useRef<HTMLDivElement>(null)
+  const pinnedScroll = useRef<number | null>(null)
+
+  const pinScroll = useCallback(() => {
+    pinnedScroll.current = scrollerRef.current?.scrollTop ?? 0
+  }, [])
+
+  // Restore the column after a toggle: status copy, footer text, and the
+  // patterns block used to remount and scroll the focused (then disabled)
+  // checkbox out of view.
+  useLayoutEffect(() => {
+    if (pinnedScroll.current == null) return
+    const el = scrollerRef.current
+    if (el) el.scrollTop = pinnedScroll.current
+  }, [scopedIds, patterns, saving, saveState])
 
   const safeModels = models ?? []
   // Provider grouping, recomputed when the catalog lands.
@@ -68,20 +87,34 @@ export function ModelsPage() {
 
   // Unscoped (null) means every available model is enabled.
   const everythingEnabled =
-    safeModels.length > 0 && safeModels.every((m) => scopedIds?.includes(modelKey(m)))
+    scopedIds === null ||
+    (safeModels.length > 0 && safeModels.every((m) => scopedIds.includes(modelKey(m))))
   const enabledCount = scopedIds === null ? safeModels.length : scopedIds.length
+
+  const statusLine =
+    saveState === 'error'
+      ? "Couldn't save the scope — the change was reverted. Is the pi agent running?"
+      : !scopeLoaded
+        ? 'Reading the current scope…'
+        : scopedIds === null
+          ? 'All available models are enabled.'
+          : `${enabledCount} of ${safeModels.length} enabled.`
 
   return (
     <WorkbenchPage
       title="Scoped models"
-      description="Choose which models pi treats as enabled — the subset quick-cycled with Ctrl+P in the CLI and used when picking a model for new sessions. Saved to ~/.pi/agent/settings.json, shared with pi /scoped-models."
+      description="The enabled subset pi cycles with Ctrl+P and uses for new sessions. Saved to ~/.pi/agent/settings.json, shared with /scoped-models."
+      scrollerRef={scrollerRef}
       actions={
         <>
           <Button
             intent="outline"
             size="sm"
-            isDisabled={saving || everythingEnabled}
-            onPress={resetScope}
+            isDisabled={!scopeLoaded || everythingEnabled}
+            onPress={() => {
+              pinScroll()
+              resetScope()
+            }}
           >
             Enable all
           </Button>
@@ -120,26 +153,13 @@ export function ModelsPage() {
       ) : (
         <>
           <Note
-            intent={saveState === 'error' ? 'danger' : scopedIds === null ? 'info' : 'default'}
-            className="mb-8"
+            intent={saveState === 'error' ? 'danger' : 'default'}
+            indicator={false}
+            role="status"
+            aria-live="polite"
+            className="mb-6 min-h-11 py-2.5"
           >
-            {saveState === 'error' ? (
-              <>
-                <strong>Couldn't save the scope</strong> — the change was reverted. Is the pi
-                agent server running?
-              </>
-            ) : scopedIds === null ? (
-              <>
-                <strong>No scope set</strong> — every available model is enabled. Uncheck models
-                below to restrict the set.
-              </>
-            ) : (
-              <>
-                <strong>{enabledCount}</strong> of {safeModels.length} available models enabled.
-                Unchecked models stay in the composer picker, but pi won't cycle to them or fall
-                back to them.
-              </>
-            )}
+            {statusLine}
           </Note>
 
           <WorkbenchSection title="Models">
@@ -170,13 +190,13 @@ export function ModelsPage() {
                           >
                             <CheckboxField
                               isSelected={checked}
-                              isDisabled={saving}
-                              onChange={() => toggleScoped(id, safeModels.map(modelKey))}
+                              isDisabled={!scopeLoaded}
+                              onChange={() => {
+                                pinScroll()
+                                toggleScoped(id, safeModels.map(modelKey))
+                              }}
                               className="w-full px-4 py-2.5"
                             >
-                              {/* Label content lives inside Checkbox: it renders
-                                  its own control-label cell, aligned beside the
-                                  indicator. A sibling Label would wrap below. */}
                               <Checkbox className="w-full">
                                 <span className="flex min-w-0 items-center gap-2.5">
                                   <ProviderIcon
@@ -199,45 +219,38 @@ export function ModelsPage() {
                   </section>
                 )
               })}
-              <div className="border-border flex items-center gap-2 border-t px-4 py-2.5 text-muted-fg text-xs">
-                <ArrowPathIcon className="size-3.5 shrink-0" />
+              <div className="border-border flex min-h-10 items-center gap-2 border-t px-4 py-2.5 text-muted-fg text-xs">
+                <ArrowPathIcon
+                  className={twMerge('size-3.5 shrink-0', saving && 'animate-spin')}
+                />
                 {saving
                   ? 'Saving…'
                   : saveState === 'saved'
-                    ? 'Saved to ~/.pi/agent/settings.json — new sessions pick it up immediately, open sessions live.'
-                    : 'Toggling a model saves the scope for new sessions and applies it to open ones.'}
+                    ? 'Saved to ~/.pi/agent/settings.json'
+                    : 'Changes apply to new sessions and open ones.'}
               </div>
             </WorkbenchCard>
           </WorkbenchSection>
 
-          {patterns !== null && (
-            <WorkbenchSection title={`Patterns in settings.json (${patterns.length})`}>
-              <WorkbenchCard className="p-4">
-                <p className="mb-2 text-muted-fg text-xs leading-5">
-                  The raw <code className="rounded bg-muted px-1 py-0.5 font-mono">enabledModels</code>{' '}
-                  value — patterns may be globs written from the CLI that match more than the
-                  resolved list above.
+          <WorkbenchSection title="Patterns in settings.json">
+            <WorkbenchCard className="p-4">
+              <Text className="mb-2 text-xs leading-5">
+                Raw <Code>enabledModels</Code> value. CLI globs can match more than the
+                checkboxes above.
+              </Text>
+              {patterns === null || patterns.length === 0 ? (
+                <p className="text-muted-fg text-xs leading-5">
+                  None written — the catalog is unscoped.
                 </p>
+              ) : (
                 <div className="flex flex-wrap gap-1.5">
                   {patterns.map((p) => (
-                    <code
-                      key={p}
-                      className="rounded bg-muted px-1.5 py-0.5 font-mono text-muted-fg text-xs"
-                    >
-                      {p}
-                    </code>
+                    <Code key={p}>{p}</Code>
                   ))}
                 </div>
-              </WorkbenchCard>
-            </WorkbenchSection>
-          )}
-
-          <p className="text-muted-fg text-xs leading-5">
-            Scope is shared with the pi CLI —{' '}
-            <code className="rounded bg-muted px-1 py-0.5 font-mono">/scoped-models</code> edits
-            the same patterns, including globs like{' '}
-            <code className="rounded bg-muted px-1 py-0.5 font-mono">anthropic/*:high</code>.
-          </p>
+              )}
+            </WorkbenchCard>
+          </WorkbenchSection>
         </>
       )}
     </WorkbenchPage>

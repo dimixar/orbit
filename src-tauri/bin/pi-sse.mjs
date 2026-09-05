@@ -175875,7 +175875,7 @@ import { existsSync as existsSync27 } from "node:fs";
 import { homedir as homedir13 } from "node:os";
 import { join as join43 } from "node:path";
 
-// node_modules/.pnpm/@assistant-ui+react-pi@0.0.20_patch_hash=9be40a64ced17f36cd8b75e86466c7f56fa5a620476186_82063445fef2df437b9786c2b78f19f7/node_modules/@assistant-ui/react-pi/dist/node/extensionUi.js
+// node_modules/.pnpm/@assistant-ui+react-pi@0.0.20_@assistant-ui+react@0.15.18_@types+react-dom@19.2.7_@type_4e5432ed1a9fb229cc9535026c9de726/node_modules/@assistant-ui/react-pi/dist/node/extensionUi.js
 var PiUnsupportedHostUiError = class extends Error {
   method;
   constructor(method) {
@@ -176026,13 +176026,13 @@ var createSupervisorUiBridge = (deps) => {
   };
 };
 
-// node_modules/.pnpm/@assistant-ui+react-pi@0.0.20_patch_hash=9be40a64ced17f36cd8b75e86466c7f56fa5a620476186_82063445fef2df437b9786c2b78f19f7/node_modules/@assistant-ui/react-pi/dist/queueIds.js
+// node_modules/.pnpm/@assistant-ui+react-pi@0.0.20_@assistant-ui+react@0.15.18_@types+react-dom@19.2.7_@type_4e5432ed1a9fb229cc9535026c9de726/node_modules/@assistant-ui/react-pi/dist/queueIds.js
 var piQueueItemId = (mode, index3) => `${mode}:${index3}`;
 
-// node_modules/.pnpm/@assistant-ui+react-pi@0.0.20_patch_hash=9be40a64ced17f36cd8b75e86466c7f56fa5a620476186_82063445fef2df437b9786c2b78f19f7/node_modules/@assistant-ui/react-pi/dist/utils.js
+// node_modules/.pnpm/@assistant-ui+react-pi@0.0.20_@assistant-ui+react@0.15.18_@types+react-dom@19.2.7_@type_4e5432ed1a9fb229cc9535026c9de726/node_modules/@assistant-ui/react-pi/dist/utils.js
 var errorText = (error) => error instanceof Error ? error.message : String(error);
 
-// node_modules/.pnpm/@assistant-ui+react-pi@0.0.20_patch_hash=9be40a64ced17f36cd8b75e86466c7f56fa5a620476186_82063445fef2df437b9786c2b78f19f7/node_modules/@assistant-ui/react-pi/dist/node/mapping.js
+// node_modules/.pnpm/@assistant-ui+react-pi@0.0.20_@assistant-ui+react@0.15.18_@types+react-dom@19.2.7_@type_4e5432ed1a9fb229cc9535026c9de726/node_modules/@assistant-ui/react-pi/dist/node/mapping.js
 var THINKING_LEVELS = [
   "off",
   "minimal",
@@ -218431,7 +218431,7 @@ var ExtensionRunner = class {
   createContext() {
     const runner = this;
     const getModel2 = this.getModel;
-    const getScopedModels = this.getScopedModels;
+    const getScopedModels2 = this.getScopedModels;
     return {
       get ui() {
         runner.assertActive();
@@ -218463,7 +218463,7 @@ var ExtensionRunner = class {
       },
       get scopedModels() {
         runner.assertActive();
-        return getScopedModels();
+        return getScopedModels2();
       },
       get thinkingLevel() {
         runner.assertActive();
@@ -257245,7 +257245,7 @@ var ThemeSelectorComponent = class extends Container {
   }
 };
 
-// node_modules/.pnpm/@assistant-ui+react-pi@0.0.20_patch_hash=9be40a64ced17f36cd8b75e86466c7f56fa5a620476186_82063445fef2df437b9786c2b78f19f7/node_modules/@assistant-ui/react-pi/dist/node/contextUsage.js
+// node_modules/.pnpm/@assistant-ui+react-pi@0.0.20_@assistant-ui+react@0.15.18_@types+react-dom@19.2.7_@type_4e5432ed1a9fb229cc9535026c9de726/node_modules/@assistant-ui/react-pi/dist/node/contextUsage.js
 var assistantUsage = (message) => {
   if (message.role === "assistant" && message.usage && message.stopReason !== "aborted" && message.stopReason !== "error") return message.usage;
 };
@@ -257293,7 +257293,7 @@ var deriveContextUsage = (contextWindow, branch, messages) => {
   };
 };
 
-// node_modules/.pnpm/@assistant-ui+react-pi@0.0.20_patch_hash=9be40a64ced17f36cd8b75e86466c7f56fa5a620476186_82063445fef2df437b9786c2b78f19f7/node_modules/@assistant-ui/react-pi/dist/node/ThreadSupervisor.js
+// node_modules/.pnpm/@assistant-ui+react-pi@0.0.20_@assistant-ui+react@0.15.18_@types+react-dom@19.2.7_@type_4e5432ed1a9fb229cc9535026c9de726/node_modules/@assistant-ui/react-pi/dist/node/ThreadSupervisor.js
 import { unlink as unlink2 } from "node:fs/promises";
 var PiThreadSupervisor = class {
   records = /* @__PURE__ */ new Map();
@@ -257371,37 +257371,6 @@ var PiThreadSupervisor = class {
     }
     const available = runtime.getAvailableSnapshot();
     return (available.length > 0 ? available : runtime.getModels()).map(mapModelInfo);
-  }
-  /** Orbit patch: pi's scoped models — the `enabledModels` setting (pi CLI:
-  * /scoped-models) resolved against the available catalog. `ids` is null when
-  * unscoped, meaning every available model is usable. */
-  async getScopedModels() {
-    const settings2 = SettingsManager.create(this.workspacePath, this.agentDir ?? getAgentDir());
-    const patterns = settings2.getEnabledModels();
-    if (!patterns || patterns.length === 0) return { patterns: null, ids: null };
-    const runtime = await this.getModelRuntime();
-    const scoped = (await resolveModelScopeWithDiagnostics(patterns, runtime)).scopedModels;
-    return { patterns, ids: scoped.map((s2) => `${s2.model.provider}/${s2.model.id}`) };
-  }
-  /** Orbit patch: persist the scoped-model set to the `enabledModels` setting
-  * and apply it to every live session; cold threads pick it up in openSession.
-  * An empty/null list clears the scope (all models usable). */
-  async setScopedModels(patterns) {
-    const settings2 = SettingsManager.create(this.workspacePath, this.agentDir ?? getAgentDir());
-    const effective = patterns && patterns.length > 0 ? [...patterns] : void 0;
-    settings2.setEnabledModels(effective);
-    let scopedModels = [];
-    if (effective) {
-      const runtime = await this.getModelRuntime();
-      scopedModels = (await resolveModelScopeWithDiagnostics(effective, runtime)).scopedModels;
-    }
-    for (const record of this.records.values()) {
-      try {
-        record.session.setScopedModels(scopedModels);
-      } catch {
-      }
-    }
-    return { patterns: effective ?? null, ids: effective ? scopedModels.map((s2) => `${s2.model.provider}/${s2.model.id}`) : null };
   }
   async setModel(threadId, input) {
     const record = await this.ensureOpen(threadId);
@@ -257537,56 +257506,20 @@ var PiThreadSupervisor = class {
   *  failure (e.g. the async availability refresh timing out) clears the cache so
   *  the next call retries instead of rejecting forever. */
   getModelRuntime() {
-    if (!this.modelRuntimePromise)
-      this.modelRuntimePromise = ModelRuntime.create(this.agentDir ? { authPath: `${this.agentDir}/auth.json` } : void 0).then(async (runtime) => {
-        try {
-          const agentDir = this.agentDir ?? getAgentDir();
-          const settingsManager = SettingsManager.create(this.workspacePath, agentDir);
-          const loader = new DefaultResourceLoader({
-            cwd: this.workspacePath,
-            agentDir,
-            settingsManager
-          });
-          await loader.reload();
-          const registrations = loader.getExtensions().runtime;
-          for (const { name, config } of registrations.pendingProviderRegistrations) {
-            try {
-              runtime.registerProvider(name, config);
-            } catch {
-            }
-          }
-          registrations.pendingProviderRegistrations.length = 0;
-          for (const { provider } of registrations.pendingNativeProviderRegistrations) {
-            try {
-              runtime.registerNativeProvider(provider);
-            } catch {
-            }
-          }
-          registrations.pendingNativeProviderRegistrations.length = 0;
-        } catch {
-        }
-        return runtime;
-      }).catch((error) => {
-        this.modelRuntimePromise = void 0;
-        throw error;
-      });
+    if (!this.modelRuntimePromise) this.modelRuntimePromise = ModelRuntime.create(this.agentDir ? { authPath: `${this.agentDir}/auth.json` } : void 0).catch((error) => {
+      this.modelRuntimePromise = void 0;
+      throw error;
+    });
     return this.modelRuntimePromise;
   }
   async openSession(sessionManager, cwd, signal) {
     const generation = this.generation;
     this.throwIfOpenCancelled(signal, generation);
-    let scopedModels;
-    try {
-      const patterns = SettingsManager.create(cwd, this.agentDir ?? getAgentDir()).getEnabledModels();
-      if (patterns && patterns.length > 0) scopedModels = (await resolveModelScopeWithDiagnostics(patterns, await this.getModelRuntime())).scopedModels;
-    } catch {
-    }
     const { session } = await createAgentSession({
       cwd,
       sessionManager,
       ...this.agentDir ? { agentDir: this.agentDir } : {},
-      ...this.model ? { model: this.model } : {},
-      ...scopedModels && scopedModels.length > 0 ? { scopedModels } : {}
+      ...this.model ? { model: this.model } : {}
     });
     if (this.openWasCancelled(signal, generation)) {
       session.dispose();
@@ -257891,14 +257824,14 @@ var PiThreadSupervisor = class {
   }
 };
 
-// node_modules/.pnpm/@assistant-ui+react-pi@0.0.20_patch_hash=9be40a64ced17f36cd8b75e86466c7f56fa5a620476186_82063445fef2df437b9786c2b78f19f7/node_modules/@assistant-ui/react-pi/dist/node/client.js
+// node_modules/.pnpm/@assistant-ui+react-pi@0.0.20_@assistant-ui+react@0.15.18_@types+react-dom@19.2.7_@type_4e5432ed1a9fb229cc9535026c9de726/node_modules/@assistant-ui/react-pi/dist/node/client.js
 var SUPERVISOR_KEY = "__assistantUiPiThreadSupervisor";
 var getPiThreadSupervisor = (options = {}) => {
   const holder = globalThis;
   return holder[SUPERVISOR_KEY] ??= new PiThreadSupervisor(options);
 };
 var createPiNodeClient = (options = {}) => {
-  const supervisor = getPiThreadSupervisor(options);
+  const supervisor2 = getPiThreadSupervisor(options);
   const withWorkspace = (input) => {
     const workspacePath = input?.workspacePath ?? options.workspacePath;
     return workspacePath ? {
@@ -257907,25 +257840,23 @@ var createPiNodeClient = (options = {}) => {
     } : input;
   };
   return {
-    listThreads: (input) => supervisor.listThreads(withWorkspace(input)),
-    createThread: (input) => supervisor.createThread(withWorkspace(input)),
-    getThread: (threadId) => supervisor.getThread(threadId),
-    sendMessage: (threadId, input) => supervisor.sendMessage(threadId, input),
-    cancelRun: (threadId) => supervisor.cancelRun(threadId),
-    clearQueue: (threadId) => supervisor.clearQueue(threadId),
+    listThreads: (input) => supervisor2.listThreads(withWorkspace(input)),
+    createThread: (input) => supervisor2.createThread(withWorkspace(input)),
+    getThread: (threadId) => supervisor2.getThread(threadId),
+    sendMessage: (threadId, input) => supervisor2.sendMessage(threadId, input),
+    cancelRun: (threadId) => supervisor2.cancelRun(threadId),
+    clearQueue: (threadId) => supervisor2.clearQueue(threadId),
     getAvailableModels: (input) => {
-      return supervisor.getAvailableModels();
+      return supervisor2.getAvailableModels();
     },
-    getScopedModels: () => supervisor.getScopedModels(),
-    setScopedModels: (patterns) => supervisor.setScopedModels(patterns),
-    setModel: (threadId, input) => supervisor.setModel(threadId, input),
-    setThinkingLevel: (threadId, level) => supervisor.setThinkingLevel(threadId, level),
-    renameThread: (threadId, title) => supervisor.renameThread(threadId, title),
-    archiveThread: (threadId) => supervisor.archiveThread(threadId),
-    unarchiveThread: (threadId) => supervisor.unarchiveThread(threadId),
-    deleteThread: (threadId) => supervisor.deleteThread(threadId),
-    respondToHostUiRequest: (threadId, response) => supervisor.respondToHostUiRequest(threadId, response),
-    subscribe: (threadId, listener, subscribeOptions) => supervisor.subscribe(threadId, listener, subscribeOptions)
+    setModel: (threadId, input) => supervisor2.setModel(threadId, input),
+    setThinkingLevel: (threadId, level) => supervisor2.setThinkingLevel(threadId, level),
+    renameThread: (threadId, title) => supervisor2.renameThread(threadId, title),
+    archiveThread: (threadId) => supervisor2.archiveThread(threadId),
+    unarchiveThread: (threadId) => supervisor2.unarchiveThread(threadId),
+    deleteThread: (threadId) => supervisor2.deleteThread(threadId),
+    respondToHostUiRequest: (threadId, response) => supervisor2.respondToHostUiRequest(threadId, response),
+    subscribe: (threadId, listener, subscribeOptions) => supervisor2.subscribe(threadId, listener, subscribeOptions)
   };
 };
 
@@ -258020,10 +257951,12 @@ async function parseSessionFile(file, stat5) {
     cost: 0,
     calls: 0,
     byModel: [],
-    byDay: []
+    byDay: [],
+    byModelDay: []
   };
   const modelMap = /* @__PURE__ */ new Map();
   const dayMap = /* @__PURE__ */ new Map();
+  const modelDayMap = /* @__PURE__ */ new Map();
   let text = "";
   try {
     text = await fs11.promises.readFile(file, "utf8");
@@ -258087,10 +258020,26 @@ async function parseSessionFile(file, stat5) {
       dd.cacheWrite += Number(u.cacheWrite) || 0;
       dd.cost += Number(u.cost?.total) || 0;
       dayMap.set(day, dd);
+      const mdk = `${day}|${mk}`;
+      const md = modelDayMap.get(mdk) ?? {
+        date: day,
+        provider: lastProvider,
+        model: lastModel,
+        input: 0,
+        output: 0,
+        cost: 0,
+        calls: 0
+      };
+      md.input += input;
+      md.output += output;
+      md.cost += Number(u.cost?.total) || 0;
+      md.calls += 1;
+      modelDayMap.set(mdk, md);
     }
   }
   agg.byModel = [...modelMap.entries()].map(([, v2]) => [`${v2.provider}/${v2.model}`, v2]);
   agg.byDay = [...dayMap.entries()].map(([, v2]) => [v2.date, v2]);
+  agg.byModelDay = [...modelDayMap.entries()].map(([k, v2]) => [k, v2]);
   return agg;
 }
 async function getUsage() {
@@ -258103,10 +258052,12 @@ async function getUsage() {
     totalSessions: 0,
     totalCalls: 0,
     byModel: [],
-    byDay: []
+    byDay: [],
+    recentByModel: []
   };
   const modelMap = /* @__PURE__ */ new Map();
   const dayMap = /* @__PURE__ */ new Map();
+  const modelDayMap = /* @__PURE__ */ new Map();
   let projectDirs = [];
   try {
     projectDirs = await fs11.promises.readdir(SESSIONS_DIR, { withFileTypes: true });
@@ -258178,10 +258129,43 @@ async function getUsage() {
         cur.cost += dd.cost;
         dayMap.set(dk, cur);
       }
+      for (const [k, md] of agg.byModelDay ?? []) {
+        const cur = modelDayMap.get(k);
+        if (cur) {
+          cur.input += md.input;
+          cur.output += md.output;
+          cur.cost += md.cost;
+          cur.calls += md.calls;
+        } else {
+          modelDayMap.set(k, { ...md });
+        }
+      }
     }
   }
   report.byModel = [...modelMap.values()].sort((a, b2) => b2.cost - a.cost);
   report.byDay = [...dayMap.values()].sort((a, b2) => a.date.localeCompare(b2.date));
+  const cutoff = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
+  const recentModelMap = /* @__PURE__ */ new Map();
+  for (const md of modelDayMap.values()) {
+    if (md.date < cutoff) continue;
+    const mk = `${md.provider}/${md.model}`;
+    const cur = recentModelMap.get(mk) ?? {
+      model: md.model,
+      provider: md.provider,
+      input: 0,
+      output: 0,
+      cost: 0,
+      calls: 0
+    };
+    cur.input += md.input;
+    cur.output += md.output;
+    cur.cost += md.cost;
+    cur.calls += md.calls;
+    recentModelMap.set(mk, cur);
+  }
+  report.recentByModel = [...recentModelMap.values()].sort(
+    (a, b2) => b2.input + b2.output - (a.input + a.output)
+  );
   return report;
 }
 
@@ -258189,11 +258173,28 @@ async function getUsage() {
 var execFileAsync = promisify2(execFile2);
 var PORT = Number(process.env.PI_SSE_PORT ?? 8913);
 var WORKSPACE_PATH = process.env.PI_WORKSPACE_PATH ?? process.cwd();
+var SERVER_ID = "orbit-pi-sse";
+var STARTED_AT = (/* @__PURE__ */ new Date()).toISOString();
 var client = createPiNodeClient({ workspacePath: WORKSPACE_PATH });
+var supervisor = getPiThreadSupervisor({
+  workspacePath: WORKSPACE_PATH
+});
+var THINKING_LEVELS2 = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh"
+];
 var CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization"
+};
+var NO_STORE_HEADERS = {
+  "Cache-Control": "no-store, max-age=0",
+  Pragma: "no-cache"
 };
 function readBody(req) {
   return new Promise((resolve16, reject) => {
@@ -258213,6 +258214,7 @@ function readBody(req) {
 function sendJson(res, status, body) {
   res.writeHead(status, {
     "Content-Type": "application/json",
+    ...NO_STORE_HEADERS,
     ...CORS_HEADERS
   });
   res.end(JSON.stringify(body));
@@ -258235,8 +258237,111 @@ function route(handler) {
     }
   };
 }
+function mapRuntimeModel(model) {
+  const availableThinkingLevels = model.thinkingLevelMap ? THINKING_LEVELS2.filter((level) => model.thinkingLevelMap?.[level] !== null) : void 0;
+  return {
+    provider: String(model.provider),
+    modelId: model.id,
+    ...model.name ? { name: model.name } : {},
+    supportsThinking: Boolean(model.reasoning),
+    ...availableThinkingLevels ? { availableThinkingLevels } : {}
+  };
+}
+async function refreshExtensionProviders(runtime, cwd = WORKSPACE_PATH) {
+  try {
+    const agentDir = getAgentDir();
+    const settingsManager = SettingsManager.create(cwd, agentDir);
+    const loader = new DefaultResourceLoader({
+      cwd,
+      agentDir,
+      settingsManager
+    });
+    await loader.reload();
+    const registrations = loader.getExtensions().runtime;
+    const nextProviderIds = /* @__PURE__ */ new Set();
+    for (const { name, config } of registrations.pendingProviderRegistrations) {
+      nextProviderIds.add(name);
+      try {
+        runtime.registerProvider(name, config);
+      } catch {
+      }
+    }
+    registrations.pendingProviderRegistrations.length = 0;
+    for (const { provider } of registrations.pendingNativeProviderRegistrations) {
+      nextProviderIds.add(provider.id);
+      try {
+        runtime.registerNativeProvider(provider);
+      } catch {
+      }
+    }
+    registrations.pendingNativeProviderRegistrations.length = 0;
+    for (const providerId of runtime.getRegisteredProviderIds()) {
+      if (nextProviderIds.has(providerId)) continue;
+      try {
+        runtime.unregisterProvider(providerId);
+      } catch {
+      }
+    }
+  } catch {
+  }
+}
+async function getFreshModelRuntime(cwd = WORKSPACE_PATH) {
+  if (!supervisor.getModelRuntime) {
+    throw new Error("Pi supervisor does not expose a model runtime");
+  }
+  const runtime = await supervisor.getModelRuntime();
+  await refreshExtensionProviders(runtime, cwd);
+  return runtime;
+}
+async function listAvailableModels(cwd = WORKSPACE_PATH) {
+  const runtime = await getFreshModelRuntime(cwd);
+  try {
+    await runtime.refresh();
+  } catch {
+  }
+  const available = runtime.getAvailableSnapshot();
+  const models = available.length > 0 ? available : runtime.getModels();
+  return models.map((model) => mapRuntimeModel(model));
+}
+async function resolveScopedModels(patterns, cwd = WORKSPACE_PATH) {
+  if (!patterns || patterns.length === 0) {
+    return { patterns: null, ids: null, scopedModels: [] };
+  }
+  const runtime = await getFreshModelRuntime(cwd);
+  const scoped = await resolveModelScopeWithDiagnostics(patterns, runtime);
+  return {
+    patterns,
+    ids: scoped.scopedModels.map(
+      (item) => `${item.model.provider}/${item.model.id}`
+    ),
+    scopedModels: scoped.scopedModels
+  };
+}
+function applyScopedModelsToLiveSessions(scopedModels) {
+  for (const record of supervisor.records?.values() ?? []) {
+    try {
+      record.session?.setScopedModels?.(scopedModels);
+    } catch {
+    }
+  }
+}
+async function getScopedModels() {
+  const settings2 = SettingsManager.create(WORKSPACE_PATH, getAgentDir());
+  const patterns = settings2.getEnabledModels();
+  const { scopedModels, ...state2 } = await resolveScopedModels(patterns ?? null);
+  applyScopedModelsToLiveSessions(scopedModels);
+  return state2;
+}
+async function setScopedModels(patterns) {
+  const effective = patterns && patterns.length > 0 ? [...patterns] : null;
+  const settings2 = SettingsManager.create(WORKSPACE_PATH, getAgentDir());
+  settings2.setEnabledModels(effective ?? void 0);
+  const { scopedModels, ...state2 } = await resolveScopedModels(effective);
+  applyScopedModelsToLiveSessions(scopedModels);
+  return state2;
+}
 function streamEvents(req, res, threadId) {
-  const includeSnapshot = new URL(req.url ?? "/", "http://localhost").searchParams.get("snapshot") !== "false";
+  const includeSnapshot = true;
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache, no-transform",
@@ -258636,6 +258741,15 @@ var server = createServer(async (req, res) => {
   const path18 = url.pathname;
   const method = req.method ?? "GET";
   const body = await readBody(req).catch(() => ({}));
+  if (method === "GET" && path18 === "/health") {
+    return sendJson(res, 200, {
+      id: SERVER_ID,
+      ok: true,
+      pid: process.pid,
+      workspacePath: WORKSPACE_PATH,
+      startedAt: STARTED_AT
+    });
+  }
   if (method === "GET" && path18 === "/threads") {
     return route(async (_req, res2) => {
       sendJson(res2, 200, await listThreadsResponse(url));
@@ -258646,6 +258760,7 @@ var server = createServer(async (req, res) => {
       const snapshot = await client.createThread(
         body2 ?? {}
       );
+      await getScopedModels();
       sendJson(res2, 200, snapshot);
     })(req, res, body);
   }
@@ -258746,15 +258861,15 @@ var server = createServer(async (req, res) => {
   }
   if (method === "GET" && path18 === "/models") {
     return route(async (_req, res2) => {
-      const models = await client.getAvailableModels({
-        workspacePath: url.searchParams.get("workspacePath") ?? void 0
-      });
+      const models = await listAvailableModels(
+        url.searchParams.get("workspacePath") ?? WORKSPACE_PATH
+      );
       sendJson(res2, 200, models);
     })(req, res, body);
   }
   if (method === "GET" && path18 === "/scoped-models") {
     return route(async (_req, res2) => {
-      sendJson(res2, 200, await client.getScopedModels());
+      sendJson(res2, 200, await getScopedModels());
     })(req, res, body);
   }
   if (method === "PUT" && path18 === "/scoped-models") {
@@ -258763,7 +258878,7 @@ var server = createServer(async (req, res) => {
       if (patterns !== null && patterns !== void 0 && !Array.isArray(patterns)) {
         throw new Error("PUT /scoped-models requires { patterns: string[] | null }");
       }
-      sendJson(res2, 200, await client.setScopedModels(patterns ?? null));
+      sendJson(res2, 200, await setScopedModels(patterns ?? null));
     })(req, res, body);
   }
   const match2 = path18.match(/^\/threads\/([^/]+)(?:\/([^/]+))?(?:\/([^/]+))?$/);
@@ -258820,6 +258935,7 @@ var server = createServer(async (req, res) => {
           const { provider, modelId } = body2 ?? {};
           if (!provider || !modelId)
             throw new Error("POST /model requires { provider, modelId }");
+          await getFreshModelRuntime();
           await client.setModel(threadId, { provider, modelId });
           sendNoContent(res2);
         })(req, res, body);

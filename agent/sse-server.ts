@@ -27,9 +27,18 @@ import { promisify } from "node:util";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { createPiNodeClient } from "@assistant-ui/react-pi/node";
 import {
+  createPiNodeClient,
+  getPiThreadSupervisor,
+} from "@assistant-ui/react-pi/node";
+import type { PiModelInfo, PiThinkingLevel } from "@assistant-ui/react-pi";
+import {
+  DefaultResourceLoader,
+  ModelRuntime,
   SessionManager,
+  SettingsManager,
+  getAgentDir,
+  resolveModelScopeWithDiagnostics,
   type SessionInfo,
 } from "@earendil-works/pi-coding-agent";
 import { getUsage, listPlugins, listSkills } from "./workbench.js";
@@ -38,8 +47,46 @@ const execFileAsync = promisify(execFile);
 
 const PORT = Number(process.env.PI_SSE_PORT ?? 8913);
 const WORKSPACE_PATH = process.env.PI_WORKSPACE_PATH ?? process.cwd();
+const SERVER_ID = "orbit-pi-sse";
+const STARTED_AT = new Date().toISOString();
 
 const client = createPiNodeClient({ workspacePath: WORKSPACE_PATH });
+const supervisor = getPiThreadSupervisor({
+  workspacePath: WORKSPACE_PATH,
+}) as PiSupervisorInternals;
+
+type RuntimeModel = {
+  provider: string;
+  id: string;
+  name?: string;
+  reasoning?: unknown;
+  thinkingLevelMap?: Partial<Record<PiThinkingLevel, unknown>>;
+};
+
+type LivePiRecord = {
+  session?: {
+    setScopedModels?: (models: unknown[]) => void;
+  };
+};
+
+type PiSupervisorInternals = {
+  getModelRuntime?: () => Promise<ModelRuntime>;
+  records?: Map<string, LivePiRecord>;
+};
+
+type ScopedModelState = {
+  patterns: string[] | null;
+  ids: string[] | null;
+};
+
+const THINKING_LEVELS: PiThinkingLevel[] = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -47,8 +94,13 @@ const client = createPiNodeClient({ workspacePath: WORKSPACE_PATH });
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PATCH, DELETE, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
+
+const NO_STORE_HEADERS = {
+  "Cache-Control": "no-store, max-age=0",
+  Pragma: "no-cache",
 };
 
 function readBody(req: IncomingMessage): Promise<unknown> {
@@ -70,6 +122,7 @@ function readBody(req: IncomingMessage): Promise<unknown> {
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.writeHead(status, {
     "Content-Type": "application/json",
+    ...NO_STORE_HEADERS,
     ...CORS_HEADERS,
   });
   res.end(JSON.stringify(body));
@@ -103,6 +156,171 @@ function route(
   };
 }
 
+function mapRuntimeModel(model: RuntimeModel): PiModelInfo {
+  const availableThinkingLevels = model.thinkingLevelMap
+    ? THINKING_LEVELS.filter((level) => model.thinkingLevelMap?.[level] !== null)
+    : undefined;
+  return {
+    provider: String(model.provider),
+    modelId: model.id,
+    ...(model.name ? { name: model.name } : {}),
+    supportsThinking: Boolean(model.reasoning),
+    ...(availableThinkingLevels ? { availableThinkingLevels } : {}),
+  };
+}
+
+async function refreshExtensionProviders(
+  runtime: ModelRuntime,
+  cwd = WORKSPACE_PATH,
+): Promise<void> {
+  try {
+    const agentDir = getAgentDir();
+    const settingsManager = SettingsManager.create(cwd, agentDir);
+    const loader = new DefaultResourceLoader({
+      cwd,
+      agentDir,
+      settingsManager,
+    });
+    await loader.reload();
+    const registrations = loader.getExtensions().runtime;
+    const nextProviderIds = new Set<string>();
+
+    for (const { name, config } of registrations.pendingProviderRegistrations) {
+      nextProviderIds.add(name);
+      try {
+        runtime.registerProvider(name, config);
+      } catch {
+        // Keep the previous catalog usable if one extension is broken.
+      }
+    }
+    registrations.pendingProviderRegistrations.length = 0;
+
+    for (const { provider } of registrations.pendingNativeProviderRegistrations) {
+      nextProviderIds.add(provider.id);
+      try {
+        runtime.registerNativeProvider(provider);
+      } catch {
+        // Keep the previous catalog usable if one extension is broken.
+      }
+    }
+    registrations.pendingNativeProviderRegistrations.length = 0;
+
+    for (const providerId of runtime.getRegisteredProviderIds()) {
+      if (nextProviderIds.has(providerId)) continue;
+      try {
+        runtime.unregisterProvider(providerId);
+      } catch {
+        // Best-effort cleanup; a later refresh will self-heal.
+      }
+    }
+  } catch {
+    // Model listing should still work with the installed runtime's base catalog.
+  }
+}
+
+async function getFreshModelRuntime(cwd = WORKSPACE_PATH): Promise<ModelRuntime> {
+  if (!supervisor.getModelRuntime) {
+    throw new Error("Pi supervisor does not expose a model runtime");
+  }
+  const runtime = await supervisor.getModelRuntime();
+  await refreshExtensionProviders(runtime, cwd);
+  return runtime;
+}
+
+async function listAvailableModels(cwd = WORKSPACE_PATH): Promise<PiModelInfo[]> {
+  const runtime = await getFreshModelRuntime(cwd);
+  try {
+    await runtime.refresh();
+  } catch {
+    // Fall back to the last known snapshot/static registry below.
+  }
+  const available = runtime.getAvailableSnapshot();
+  const models = available.length > 0 ? available : runtime.getModels();
+  return models.map((model) => mapRuntimeModel(model as RuntimeModel));
+}
+
+async function resolveScopedModels(
+  patterns: string[] | null,
+  cwd = WORKSPACE_PATH,
+): Promise<ScopedModelState & { scopedModels: unknown[] }> {
+  if (!patterns || patterns.length === 0) {
+    return { patterns: null, ids: null, scopedModels: [] };
+  }
+  const runtime = await getFreshModelRuntime(cwd);
+  try {
+    await runtime.refresh();
+  } catch {
+    // Same fallback as listAvailableModels — keep the last snapshot.
+  }
+  const scoped = await resolveModelScopeWithDiagnostics(patterns, runtime);
+
+  // Pi's pattern parser treats the last ':' as a thinking-level suffix
+  // (`provider/model:high`). Extension ids like `hf:moonshotai/Kimi-K3`
+  // therefore fail to resolve even when they are in the catalog. Re-add
+  // any pattern that is an exact `provider/modelId` from the same list
+  // the Scoped models page renders.
+  const catalog = new Map<string, RuntimeModel>();
+  const snapshot = runtime.getAvailableSnapshot();
+  const registered = runtime.getModels();
+  for (const model of [...registered, ...snapshot] as RuntimeModel[]) {
+    catalog.set(`${model.provider}/${model.id}`.toLowerCase(), model);
+  }
+
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  const scopedModels: unknown[] = [];
+  const add = (
+    model: { provider: string; id: string },
+    entry?: unknown,
+  ) => {
+    const key = `${model.provider}/${model.id}`;
+    const norm = key.toLowerCase();
+    if (seen.has(norm)) return;
+    seen.add(norm);
+    ids.push(key);
+    scopedModels.push(entry ?? { model, thinkingLevel: undefined });
+  };
+
+  for (const item of scoped.scopedModels) {
+    add(item.model, item);
+  }
+  for (const pattern of patterns) {
+    const model = catalog.get(pattern.toLowerCase());
+    if (model) add(model);
+  }
+
+  return { patterns, ids, scopedModels };
+}
+
+function applyScopedModelsToLiveSessions(scopedModels: unknown[]): void {
+  for (const record of supervisor.records?.values() ?? []) {
+    try {
+      record.session?.setScopedModels?.(scopedModels);
+    } catch {
+      // Best effort: cold sessions pick up settings when the SDK opens them.
+    }
+  }
+}
+
+async function getScopedModels(): Promise<ScopedModelState> {
+  const settings = SettingsManager.create(WORKSPACE_PATH, getAgentDir());
+  const patterns = settings.getEnabledModels();
+  const { scopedModels, ...state } = await resolveScopedModels(patterns ?? null);
+  applyScopedModelsToLiveSessions(scopedModels);
+  return state;
+}
+
+async function setScopedModels(
+  patterns: string[] | null,
+): Promise<ScopedModelState> {
+  const effective = patterns && patterns.length > 0 ? [...patterns] : null;
+  const settings = SettingsManager.create(WORKSPACE_PATH, getAgentDir());
+  settings.setEnabledModels(effective ?? undefined);
+  const { scopedModels, ...state } = await resolveScopedModels(effective);
+  applyScopedModelsToLiveSessions(scopedModels);
+  return state;
+}
+
 // ---------------------------------------------------------------------------
 // SSE stream
 // ---------------------------------------------------------------------------
@@ -112,9 +330,10 @@ function streamEvents(
   res: ServerResponse,
   threadId: string,
 ): void {
-  const includeSnapshot =
-    new URL(req.url ?? "/", "http://localhost").searchParams.get("snapshot") !==
-    "false";
+  // The published react-pi client opens the stream and immediately POSTs the
+  // user message. Snapshot-first SSE prevents missed early events if the POST
+  // reaches the server before the GET subscriber is attached.
+  const includeSnapshot = true;
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -702,6 +921,17 @@ const server = createServer(async (req, res) => {
   const method = req.method ?? "GET";
   const body = await readBody(req).catch(() => ({}));
 
+  // GET /health — identity check used by the Tauri launcher and diagnostics.
+  if (method === "GET" && path === "/health") {
+    return sendJson(res, 200, {
+      id: SERVER_ID,
+      ok: true,
+      pid: process.pid,
+      workspacePath: WORKSPACE_PATH,
+      startedAt: STARTED_AT,
+    });
+  }
+
   // GET /threads — no workspacePath param = all workspaces
   if (method === "GET" && path === "/threads") {
     return route(async (_req, res) => {
@@ -719,6 +949,7 @@ const server = createServer(async (req, res) => {
           initialMessage?: unknown;
         },
       );
+      await getScopedModels();
       sendJson(res, 200, snapshot);
     })(req, res, body);
   }
@@ -857,9 +1088,9 @@ const server = createServer(async (req, res) => {
   // GET /models
   if (method === "GET" && path === "/models") {
     return route(async (_req, res) => {
-      const models = await client.getAvailableModels({
-        workspacePath: url.searchParams.get("workspacePath") ?? undefined,
-      });
+      const models = await listAvailableModels(
+        url.searchParams.get("workspacePath") ?? WORKSPACE_PATH,
+      );
       sendJson(res, 200, models);
     })(req, res, body);
   }
@@ -868,7 +1099,7 @@ const server = createServer(async (req, res) => {
   // available catalog (`ids` is null when unscoped = every model usable).
   if (method === "GET" && path === "/scoped-models") {
     return route(async (_req, res) => {
-      sendJson(res, 200, await client.getScopedModels());
+      sendJson(res, 200, await getScopedModels());
     })(req, res, body);
   }
 
@@ -880,7 +1111,7 @@ const server = createServer(async (req, res) => {
       if (patterns !== null && patterns !== undefined && !Array.isArray(patterns)) {
         throw new Error("PUT /scoped-models requires { patterns: string[] | null }");
       }
-      sendJson(res, 200, await client.setScopedModels(patterns ?? null));
+      sendJson(res, 200, await setScopedModels(patterns ?? null));
     })(req, res, body);
   }
 
@@ -958,6 +1189,7 @@ const server = createServer(async (req, res) => {
           };
           if (!provider || !modelId)
             throw new Error("POST /model requires { provider, modelId }");
+          await getFreshModelRuntime();
           await client.setModel(threadId, { provider, modelId });
           sendNoContent(res);
         })(req, res, body);

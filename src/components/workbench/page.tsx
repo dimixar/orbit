@@ -1,3 +1,4 @@
+import type { Ref } from 'react'
 import { twMerge } from 'tailwind-merge'
 import { Heading } from '@/components/ui/heading'
 
@@ -13,15 +14,22 @@ export function WorkbenchPage({
   actions,
   children,
   className,
+  scrollerRef,
 }: {
   title: string
   description?: string
   actions?: React.ReactNode
   children: React.ReactNode
   className?: string
+  /** The overflow column — pin scrollTop here so in-page layout shifts
+   *  (status copy, appended sections) don't jump the viewport. */
+  scrollerRef?: Ref<HTMLDivElement>
 }) {
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+    <div
+      ref={scrollerRef}
+      className="flex min-h-0 flex-1 flex-col overflow-y-auto overflow-anchor-none"
+    >
       <div className={twMerge('mx-auto w-full max-w-3xl px-6 py-8 sm:px-10', className)}>
         <header className="mb-8 flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
           <div className="min-w-0">
@@ -43,14 +51,16 @@ export function WorkbenchSection({
   title,
   children,
   className,
+  level = 2,
 }: {
   title: string
   children: React.ReactNode
   className?: string
+  level?: 2 | 3 | 4
 }) {
   return (
     <section className={twMerge('mb-10', className)}>
-      <Heading level={3} className="mb-4 text-muted-fg text-sm font-medium uppercase tracking-wider">
+      <Heading level={level} className="mb-4 text-muted-fg text-sm font-medium uppercase tracking-wider">
         {title}
       </Heading>
       {children}

@@ -1,4 +1,5 @@
 use std::{
+    io::{Read, Write},
     net::{TcpStream, ToSocketAddrs},
     path::PathBuf,
     process::{Child, Command, Stdio},
@@ -21,6 +22,7 @@ fn greet(name: &str) -> String {
 // ---------------------------------------------------------------------------
 
 const SSE_PORT: u16 = 8913;
+const SSE_SERVER_ID: &str = "orbit-pi-sse";
 
 /// Handle to the spawned SSE server so we can kill it when the app exits.
 struct SseServerChild(Mutex<Option<Child>>);
@@ -33,7 +35,23 @@ fn sse_server_is_up() -> bool {
         },
         Err(_) => return false,
     };
-    TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
+    let mut stream = match TcpStream::connect_timeout(&addr, Duration::from_millis(300)) {
+        Ok(stream) => stream,
+        Err(_) => return false,
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(700)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(700)));
+    if stream
+        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    let mut response = String::new();
+    if stream.read_to_string(&mut response).is_err() {
+        return false;
+    }
+    response.starts_with("HTTP/1.1 200") && response.contains(SSE_SERVER_ID)
 }
 
 /// Poll until the SSE server accepts connections (or we give up).
@@ -48,29 +66,48 @@ fn wait_for_sse_server(timeout: Duration) -> bool {
     false
 }
 
-/// Spawns the SSE server, preferring the bundled production build
-/// (`src-tauri/bin/pi-sse.mjs`, created by `pnpm agent:sse:build`) and falling
-/// back to running the TypeScript source via tsx in the dev repo.
-fn spawn_sse_server(app: &AppHandle) -> Result<(Child, String), String> {
-    // 1. Bundled build (release).
+fn spawn_source_sse_server() -> Result<Option<(Child, String)>, String> {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let tsx_cli = repo.join("node_modules/tsx/dist/cli.mjs");
+    let server = repo.join("agent/sse-server.ts");
+    if tsx_cli.is_file() && server.is_file() {
+        let child = spawn_node(&[&tsx_cli, &server], Some(&repo))?;
+        return Ok(Some((child, "tsx agent/sse-server.ts".to_string())));
+    }
+    Ok(None)
+}
+
+fn spawn_bundled_sse_server(app: &AppHandle) -> Result<Option<(Child, String)>, String> {
     if let Ok(bundled) = app
         .path()
         .resolve("bin/pi-sse.mjs", BaseDirectory::Resource)
     {
         if bundled.is_file() {
             let child = spawn_node(&[&bundled], None)?;
-            return Ok((child, format!("bundled {}", bundled.display())));
+            return Ok(Some((child, format!("bundled {}", bundled.display()))));
         }
     }
+    Ok(None)
+}
 
-    // 2. Dev repo — check the repo first so we don't double-spawn when the
-    //    production resource is simply absent.
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-    let tsx_cli = repo.join("node_modules/tsx/dist/cli.mjs");
-    let server = repo.join("agent/sse-server.ts");
-    if tsx_cli.is_file() && server.is_file() {
-        let child = spawn_node(&[&tsx_cli, &server], Some(&repo))?;
-        return Ok((child, "tsx agent/sse-server.ts".to_string()));
+/// Spawns the SSE server. Dev prefers the TypeScript source so Pi can load
+/// extension packages exactly like `pnpm agent:sse`; release uses the bundled
+/// build created by `pnpm agent:sse:build`.
+fn spawn_sse_server(app: &AppHandle) -> Result<(Child, String), String> {
+    if cfg!(debug_assertions) {
+        if let Some(spawned) = spawn_source_sse_server()? {
+            return Ok(spawned);
+        }
+        if let Some(spawned) = spawn_bundled_sse_server(app)? {
+            return Ok(spawned);
+        }
+    } else {
+        if let Some(spawned) = spawn_bundled_sse_server(app)? {
+            return Ok(spawned);
+        }
+        if let Some(spawned) = spawn_source_sse_server()? {
+            return Ok(spawned);
+        }
     }
 
     Err("could not locate pi-sse.mjs resource or agent/sse-server.ts".to_string())

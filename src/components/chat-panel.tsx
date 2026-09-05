@@ -12,7 +12,15 @@
  * Start the SSE server first:  pnpm agent:sse
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent,
+} from "react";
 import {
   ArrowPathIcon,
   ArrowUpIcon,
@@ -21,7 +29,6 @@ import {
   CommandLineIcon,
   ComputerDesktopIcon,
   FolderIcon,
-  InformationCircleIcon,
   Squares2X2Icon,
   StopIcon,
 } from "@heroicons/react/24/outline";
@@ -39,7 +46,6 @@ import { GitDiffPanel } from "@/components/git-diff-panel";
 import {
   Menu,
   MenuContent,
-  MenuDescription,
   MenuItem,
   MenuLabel,
   MenuSection,
@@ -60,7 +66,7 @@ import { Input } from "@/components/ui/input";
 import { SearchField, SearchInput } from "@/components/ui/search-field";
 import { Autocomplete, useFilter } from "react-aria-components/Autocomplete";
 import { Menu as MenuPrimitive } from "react-aria-components/Menu";
-import { usePiSseChat, usePiModels } from "@/lib/pi-sse";
+import { usePiSseChat, usePiModels, useScopedModels } from "@/lib/pi-sse";
 import StackIcon, { type IconName } from "tech-stack-icons";
 import { SyntheticIcon } from "@/components/icons/synthetic-icon";
 import {
@@ -74,6 +80,7 @@ import {
   piClient,
   type OpenInApp,
 } from "@/lib/pi-client";
+import { TopBar } from "@/components/top-bar";
 import { isTauri, pathBasename, pickWorkspaceFolder } from "@/lib/pick-folder";
 import type { ChatPart } from "@/lib/pi-agent";
 
@@ -233,97 +240,6 @@ function IconButton({
     >
       {children}
     </button>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/* Header                                                              */
-/* ------------------------------------------------------------------ */
-
-/**
- * Live working-tree diff totals for the header (+adds −dels). Fetched from
- * the agent's SSE server on mount, every 20s, and whenever the git changes
- * panel closes (turns likely ended). Clicking opens the changes panel.
- */
-function GitStatsChip({
-  workspacePath,
-  onOpen,
-}: {
-  workspacePath: string;
-  onOpen?: () => void;
-}) {
-  const [totals, setTotals] = useState<{
-    additions: number;
-    deletions: number;
-  } | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    const refresh = () => {
-      void fetchWorkspaceStatus(workspacePath).then((files) => {
-        if (cancelled || !files) return;
-        setTotals({
-          additions: files.reduce((sum, f) => sum + f.additions, 0),
-          deletions: files.reduce((sum, f) => sum + f.deletions, 0),
-        });
-      });
-    };
-    refresh();
-    const timer = setInterval(refresh, 20_000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [workspacePath]);
-
-  return (
-    <button
-      type="button"
-      onClick={onOpen}
-      title="Open git changes panel"
-      aria-label={`Working tree changes: +${totals?.additions ?? 0} additions, -${totals?.deletions ?? 0} deletions — open panel`}
-      className="flex cursor-pointer items-center gap-2 rounded-md px-1 py-0.5 text-xs font-medium tabular-nums outline-none transition-colors duration-100 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
-    >
-      <span className="text-success-subtle-fg">+{totals?.additions ?? 0}</span>
-      <span className="text-danger-subtle-fg">-{totals?.deletions ?? 0}</span>
-    </button>
-  );
-}
-
-function ChatHeader({
-  title,
-  workspacePath,
-  onTogglePanel,
-}: {
-  title: string;
-  /** Absolute path of the active workspace — enables the “Open in” picker. */
-  workspacePath?: string;
-  /** Toggles the git changes panel. */
-  onTogglePanel?: () => void;
-}) {
-  return (
-    <header className="flex h-12 shrink-0 items-center justify-between pl-4 pr-3.5">
-      <h1 className="truncate text-[13px] font-medium tracking-[-0.01em] text-fg">
-        {title}
-      </h1>
-
-      <div className="flex shrink-0 items-center gap-4">
-        {workspacePath && <OpenInMenu workspacePath={workspacePath} />}
-        {workspacePath && (
-          <GitStatsChip workspacePath={workspacePath} onOpen={onTogglePanel} />
-        )}
-
-        <div className="flex items-center gap-2">
-          <IconButton label="Session info">
-            <InformationCircleIcon className="size-4" strokeWidth={1.6} />
-          </IconButton>
-
-          <IconButton label="Toggle panel" onPress={onTogglePanel}>
-            <RightPanelIcon className="size-4" />
-          </IconButton>
-        </div>
-      </div>
-    </header>
   );
 }
 
@@ -771,8 +687,6 @@ const THINKING_LEVEL_LABELS: Record<string, string> = {
 const chipTriggerClass =
   "flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-0.5 text-xs text-muted-fg transition-colors duration-100 hover:bg-muted hover:text-fg data-[pressed]:bg-muted disabled:opacity-50";
 
-const OPEN_IN_LAST_KEY = "orbit:open-in:last";
-
 /** Provider brand icons (tech-stack-icons); unknown providers fall back to
  *  the pi glyph. Keys are pi provider ids, matched case-insensitively.
  *  Providers the library doesn't ship map to custom mark components. */
@@ -808,6 +722,7 @@ const PROVIDER_ICONS: Record<string, ProviderIconDef> = {
   "opencode-zen": "opencode",
   cursor: "cursor",
   cline: "cline",
+  clinepass: "cline",
   fireworks: "fireworks",
   cerebras: "cerebras",
   huggingface: "huggingface",
@@ -836,6 +751,58 @@ export function ProviderIcon({
   const Custom = icon;
   return <Custom className={className} />;
 }
+
+/**
+ * Live working-tree diff totals for the header (+adds −dels). Fetched from
+ * the agent's SSE server on mount, every 20s, and whenever the git changes
+ * panel closes (turns likely ended). Clicking opens the changes panel.
+ */
+function GitStatsChip({
+  workspacePath,
+  onOpen,
+}: {
+  workspacePath: string;
+  onOpen?: () => void;
+}) {
+  const [totals, setTotals] = useState<{
+    additions: number;
+    deletions: number;
+  } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      void fetchWorkspaceStatus(workspacePath).then((files) => {
+        if (cancelled || !files) return;
+        setTotals({
+          additions: files.reduce((sum, f) => sum + f.additions, 0),
+          deletions: files.reduce((sum, f) => sum + f.deletions, 0),
+        });
+      });
+    };
+    refresh();
+    const timer = setInterval(refresh, 20_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [workspacePath]);
+
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      title="Open git changes panel"
+      aria-label={`Working tree changes: +${totals?.additions ?? 0} additions, -${totals?.deletions ?? 0} deletions — open panel`}
+      className="flex cursor-pointer items-center gap-2 rounded-md px-1 py-0.5 text-xs font-medium tabular-nums outline-none transition-colors duration-100 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      <span className="text-success-subtle-fg">+{totals?.additions ?? 0}</span>
+      <span className="text-danger-subtle-fg">-{totals?.deletions ?? 0}</span>
+    </button>
+  );
+}
+
+const OPEN_IN_LAST_KEY = "orbit:open-in:last";
 
 const OPEN_IN_KIND_ICONS: Record<
   OpenInApp["kind"],
@@ -1071,6 +1038,8 @@ function Composer({
   contextUsage,
   compacting,
   quoteRequest,
+  railVisible,
+  catalogCount,
 }: {
   modelLabel: string;
   models: {
@@ -1090,6 +1059,8 @@ function Composer({
   workspaceName?: string;
   /** Native picker availability — false outside the Tauri webview. */
   canPickFolder: boolean;
+  /** Turn rail occupies the left gutter — aligns the card with the transcript. */
+  railVisible?: boolean;
   /** Absolute path of the active workspace, when the session has one. */
   workspacePath?: string;
   /** Opens the native picker and starts a new session in the chosen folder. */
@@ -1104,6 +1075,9 @@ function Composer({
   onSelectThinkingLevel: (level: string) => void;
   /** Incoming “quote” from a message's options menu — appended to the draft. */
   quoteRequest?: { text: string; nonce: number } | null;
+  /** Full catalog size before scope filtering — distinguishes “no models”
+   *  (server down) from “none in the current scope”. */
+  catalogCount: number;
 }) {
   const [draft, setDraft] = useState("");
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -1162,9 +1136,10 @@ function Composer({
       : thinkingLevels;
 
   return (
-    <div className="shrink-0 px-4 pb-4">
+    <div className={twMerge("w-full shrink-0 pb-4", railVisible && "pl-[70px]")}>
+      <div className="mx-auto w-full max-w-[calc(var(--an-max-width)+3rem)] px-6">
       <form
-        className="mx-auto w-full max-w-[720px]"
+        className="w-full"
         onSubmit={(e) => {
           e.preventDefault();
           submit();
@@ -1228,13 +1203,21 @@ function Composer({
                       <div className="col-span-full grid min-h-20 place-content-center text-[11px] text-muted-fg">
                         <span>
                           {models.length === 0
-                            ? "No models — is the SSE server running?"
+                            ? catalogCount === 0
+                              ? "No models — is the SSE server running?"
+                              : "No scoped models — enable some in Scoped models"
                             : "No models match your search"}
                         </span>
                       </div>
                     )}
                   >
-                    <MenuSection label="Available models">
+                    <MenuSection
+                      label={
+                        catalogCount > models.length
+                          ? "Scoped models"
+                          : "Available models"
+                      }
+                    >
                       {models.map((m) => {
                         const id = `${m.provider}/${m.modelId}`;
                         const selected = id === currentModel;
@@ -1246,13 +1229,26 @@ function Composer({
                             onAction={() =>
                               onSelectModel(m.provider, m.modelId)
                             }
+                            className="sm:py-1"
                           >
-                            <ProviderIcon
-                              provider={m.provider}
-                              className="size-4 shrink-0"
-                            />
+                            {/* Avatar slot (not a bare svg): StackIcon renders
+                                <span><svg/></span>, which the kit's svg grid
+                                rules skip — the avatar slot restores the
+                                leading-icon column and its margin. */}
+                            <span
+                              data-slot="avatar"
+                              className="grid size-4 shrink-0 place-items-center"
+                            >
+                              <ProviderIcon
+                                provider={m.provider}
+                                className="size-4"
+                              />
+                            </span>
                             <MenuLabel className="min-w-0 truncate">
                               {m.name ?? m.modelId}
+                              <span className="ml-1.5 text-muted-fg text-xs">
+                                {m.provider}
+                              </span>
                             </MenuLabel>
                             {selected && (
                               <CheckIcon
@@ -1260,7 +1256,6 @@ function Composer({
                                 strokeWidth={2}
                               />
                             )}
-                            <MenuDescription>{m.provider}</MenuDescription>
                           </MenuItem>
                         );
                       })}
@@ -1282,30 +1277,32 @@ function Composer({
                   strokeWidth={1.8}
                 />
               </MenuTrigger>
-              <MenuContent placement="top start">
+              <MenuContent
+                placement="top start"
+                popover={{ className: "w-32 gap-y-0.5" }}
+              >
                 {visibleThinkingLevels.map((level) => (
                   <MenuItem
                     key={level}
                     id={level}
                     textValue={THINKING_LEVEL_LABELS[level] ?? level}
                     onAction={() => onSelectThinkingLevel(level)}
+                    className="sm:px-2 sm:py-1"
                   >
-                    {EFFORT_ICONS[level]?.("size-4") ?? (
-                      <EffortGlyph lit={3} className="size-4" />
+                    {EFFORT_ICONS[level]?.("size-3.5") ?? (
+                      <EffortGlyph lit={3} className="size-3.5" />
                     )}
-                    <MenuLabel>
+                    <MenuLabel className="text-xs/5">
                       {THINKING_LEVEL_LABELS[level] ?? level}
                     </MenuLabel>
-                    {/* Check sits between label and description so the kit's
-                        `[slot=label] + svg` rule pins it to the row edge —
-                        after the description it would fall out of the grid. */}
+                    {/* Check sits after the label so the kit's `[slot=label] + svg`
+                        rule pins it to the row edge. */}
                     {level === thinkingLevel && (
                       <CheckIcon
-                        className="size-3.5 shrink-0"
+                        className="size-3 shrink-0"
                         strokeWidth={2}
                       />
                     )}
-                    <MenuDescription>{level}</MenuDescription>
                   </MenuItem>
                 ))}
               </MenuContent>
@@ -1371,6 +1368,7 @@ function Composer({
           </span>
         </div>
       </form>
+      </div>
     </div>
   );
 }
@@ -1378,6 +1376,12 @@ function Composer({
 /* ------------------------------------------------------------------ */
 /* Empty state                                                         */
 /* ------------------------------------------------------------------ */
+
+type BlobBackgroundStyle = CSSProperties & {
+  "--blob-x": string;
+  "--blob-y": string;
+  "--blob-opacity": string;
+};
 
 function EmptyState({
   workspaceName,
@@ -1388,8 +1392,41 @@ function EmptyState({
   workspaceName?: string;
   /** Native picker availability — false outside the Tauri webview. */
   canPickFolder: boolean;
+  /** Turn rail occupies the left gutter — aligns the card with the transcript. */
+  railVisible?: boolean;
   onOpenFolder: () => void;
 }) {
+  const emptyStateRef = useRef<HTMLDivElement>(null);
+
+  const updateBlobTarget = useCallback((event: PointerEvent<HTMLDivElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = ((event.clientX - rect.left) / rect.width) * 100;
+    const y = ((event.clientY - rect.top) / rect.height) * 100;
+    event.currentTarget.style.setProperty(
+      "--blob-x",
+      `${Math.min(100, Math.max(0, x))}%`,
+    );
+    event.currentTarget.style.setProperty(
+      "--blob-y",
+      `${Math.min(100, Math.max(0, y))}%`,
+    );
+    event.currentTarget.style.setProperty("--blob-opacity", "0.95");
+  }, []);
+
+  const resetBlobTarget = useCallback(() => {
+    const el = emptyStateRef.current;
+    if (!el) return;
+    el.style.setProperty("--blob-x", "50%");
+    el.style.setProperty("--blob-y", "44%");
+    el.style.setProperty("--blob-opacity", "0.68");
+  }, []);
+
+  const blobStyle: BlobBackgroundStyle = {
+    "--blob-x": "50%",
+    "--blob-y": "44%",
+    "--blob-opacity": "0.68",
+  };
+
   const chip = (
     <span className="inline-flex translate-y-[3px] items-center gap-1.5 rounded-lg bg-secondary px-2.5 py-1 text-[20px] text-fg">
       <FolderIcon className="size-4 text-muted-fg" strokeWidth={1.7} />
@@ -1397,9 +1434,27 @@ function EmptyState({
     </span>
   );
   return (
-    <div className="relative flex flex-1 flex-col items-center justify-center overflow-hidden pb-12">
-      <Asterisk className="relative size-4 motion-safe:animate-rise" />
-      <h2 className="relative mt-6 font-display text-2xl font-semibold tracking-[-0.02em] text-balance text-fg motion-safe:animate-rise motion-safe:[animation-delay:120ms]">
+    <div
+      ref={emptyStateRef}
+      className="relative flex flex-1 flex-col items-center justify-center overflow-hidden pb-12"
+      style={blobStyle}
+      onPointerMove={updateBlobTarget}
+      onPointerLeave={resetBlobTarget}
+    >
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 overflow-hidden"
+      >
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_var(--blob-x)_var(--blob-y),color-mix(in_oklch,var(--primary)_34%,transparent),transparent_32rem)] opacity-[var(--blob-opacity)] transition-opacity duration-300 ease-out" />
+        <div className="absolute -top-24 left-[12%] size-80 rounded-full bg-primary/20 blur-3xl motion-safe:animate-drift" />
+        <div className="absolute top-[24%] right-[10%] size-72 rounded-full bg-info/15 blur-3xl motion-safe:animate-drift motion-safe:[animation-delay:-5s] motion-safe:[animation-duration:14s]" />
+        <div className="absolute bottom-[8%] left-[30%] size-96 rounded-full bg-warning/15 blur-3xl motion-safe:animate-drift motion-safe:[animation-delay:-9s] motion-safe:[animation-duration:17s]" />
+        <div className="absolute inset-x-16 bottom-0 h-px bg-gradient-to-r from-transparent via-primary/40 to-transparent" />
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,transparent_0%,var(--bg)_82%)]" />
+      </div>
+
+      <Asterisk className="relative z-10 size-4 motion-safe:animate-rise" />
+      <h2 className="relative z-10 mt-6 font-display text-2xl font-semibold tracking-[-0.02em] text-balance text-fg motion-safe:animate-rise motion-safe:[animation-delay:120ms]">
         What should we build in{" "}
         {canPickFolder ? (
           <button
@@ -1416,7 +1471,7 @@ function EmptyState({
         ?
       </h2>
       {canPickFolder && (
-        <p className="relative mt-3 text-xs text-muted-fg motion-safe:animate-rise motion-safe:[animation-delay:200ms]">
+        <p className="relative z-10 mt-3 text-xs text-muted-fg motion-safe:animate-rise motion-safe:[animation-delay:200ms]">
           Pick a project folder to start the agent there
         </p>
       )}
@@ -1428,7 +1483,18 @@ function EmptyState({
 /* Panel                                                               */
 /* ------------------------------------------------------------------ */
 
-export default function ChatPanel() {
+export default function ChatPanel({
+  canGoBack = false,
+  canGoForward = false,
+  onBack,
+  onForward,
+}: {
+  /** App-level view history (owned by App.tsx) for the top bar's back/forward. */
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+  onBack?: () => void;
+  onForward?: () => void;
+}) {
   const aui = useAui();
   const {
     messages,
@@ -1441,6 +1507,32 @@ export default function ChatPanel() {
     setThinkingLevel,
   } = usePiSseChat();
   const models = usePiModels();
+  const { loaded: scopeLoaded, scopedIds } = useScopedModels();
+  const currentModel =
+    model && provider ? `${provider}/${model}` : undefined;
+  // Composer picker shows the scoped subset (pi's enabledModels). Unscoped
+  // (null) means every catalog model is enabled. The session's current model
+  // stays visible even if it was later scoped out, so the chip still maps
+  // to a row. Until the scope lands, keep the list empty so the full
+  // catalog doesn't flash first.
+  const pickerModels = useMemo(() => {
+    if (!scopeLoaded) return [];
+    if (scopedIds === null) return models;
+    const scoped = new Set(scopedIds);
+    const visible = models.filter((m) =>
+      scoped.has(`${m.provider}/${m.modelId}`),
+    );
+    if (
+      currentModel &&
+      !visible.some((m) => `${m.provider}/${m.modelId}` === currentModel)
+    ) {
+      const active = models.find(
+        (m) => `${m.provider}/${m.modelId}` === currentModel,
+      );
+      if (active) return [active, ...visible];
+    }
+    return visible;
+  }, [models, scopeLoaded, scopedIds, currentModel]);
   // contextUsage arrives via the daemon's `context_usage` event (tokens used,
   // window size, percent); compaction is pi compacting the context when the
   // window nears its limit. Both feed the composer's bottom-right meter.
@@ -1559,6 +1651,9 @@ export default function ChatPanel() {
 
   // Git changes panel — opened from a turn's Review action or the header toggle.
   const [diffPanelOpen, setDiffPanelOpen] = useState(false);
+  // When the turn rail occupies the left gutter, the composer pads by the
+  // same amount so its card stays flush with the transcript column.
+  const [railVisible, setRailVisible] = useState(false);
   // Files the agent touched in the latest turn — the panel's "Last Turn" scope.
   const lastTurnPaths = useMemo(() => {
     const roles = uiMessages.map((m) => m.role);
@@ -1586,10 +1681,29 @@ export default function ChatPanel() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-bg">
-      <ChatHeader
+      <TopBar
         title={headerTitle}
-        workspacePath={activeWorkspace}
-        onTogglePanel={() => setDiffPanelOpen((v) => !v)}
+        canGoBack={canGoBack}
+        canGoForward={canGoForward}
+        onBack={onBack}
+        onForward={onForward}
+        trailing={
+          activeWorkspace ? (
+            <>
+              <GitStatsChip
+                workspacePath={activeWorkspace}
+                onOpen={() => setDiffPanelOpen(true)}
+              />
+              <OpenInMenu workspacePath={activeWorkspace} />
+              <IconButton
+                label="Toggle changes panel"
+                onPress={() => setDiffPanelOpen((v) => !v)}
+              >
+                <RightPanelIcon className="size-4" />
+              </IconButton>
+            </>
+          ) : null
+        }
       />
 
       <div className="flex min-h-0 flex-1">
@@ -1607,21 +1721,22 @@ export default function ChatPanel() {
               onQuote={handleQuote}
               workspacePath={activeWorkspace}
               onReviewChanges={() => setDiffPanelOpen(true)}
+              onRailVisibleChange={setRailVisible}
             />
           )}
 
           <Composer
             modelLabel={modelLabel}
-            models={models}
-            currentModel={
-              model && provider ? `${provider}/${model}` : undefined
-            }
+            models={pickerModels}
+            catalogCount={models.length}
+            currentModel={currentModel}
             thinkingLevel={thinkingLevel}
             thinkingLevels={thinkingLevels}
             connected={connected}
             isStreaming={isStreaming}
             workspaceName={workspaceName}
             quoteRequest={quoteRequest}
+            railVisible={railVisible}
             canPickFolder={canPickFolder}
             workspacePath={activeWorkspace}
             onOpenFolder={() => void handleOpenFolder()}

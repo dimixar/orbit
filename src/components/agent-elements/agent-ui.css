@@ -5,7 +5,7 @@
   --an-input-border-radius: var(--an-border-radius);
   --an-tool-border-radius: 8px;
   --an-message-radius-inner-offset: 4px;
-  --an-max-width: 720px;
+  --an-max-width: 900px;
 
   /* Colors — mapped onto Orbit's semantic tokens, so light/dark and every
      accent theme follow automatically (no separate .dark overrides needed). */
@@ -196,7 +196,7 @@
 .an-edit-diff,
 .an-edit-diff pre,
 .an-edit-diff code {
-  font-size: 12px;
+  font-size: var(--app-code-size, 12px);
 }
 
 .dark .an-edit-tool-card {
@@ -272,6 +272,33 @@
 
 .an-markdown [data-streamdown="code-block"] pre,
 .an-markdown [data-streamdown="code-block"] code {
-  font-size: 12px;
+  font-size: var(--app-code-size, 12px);
   background: transparent;
+}
+
+/* ─── Message scroller (MessageScroller primitive) ─────────────────────── */
+
+/* Hide the viewport until MessageScroller applies its opening scroll position
+   ("end"), so a restored long session doesn't paint the top of the transcript
+   for a frame before jumping to the bottom. */
+.an-message-list[data-pending-scroll] {
+  visibility: hidden;
+}
+
+/* Soft top fade while transcript content sits above the viewport — signals
+   unread history without a permanent scrollbar-only cue. */
+.an-chat-root::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 20px;
+  background: linear-gradient(to bottom, var(--bg), transparent);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 150ms ease;
+  z-index: 5;
+}
+
+.an-chat-root[data-scrollable~="start"]::before {
+  opacity: 1;
 }

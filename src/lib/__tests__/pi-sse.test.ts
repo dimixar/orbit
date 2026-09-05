@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { toChatMessages } from "@/lib/pi-sse";
+import { mergeExactScopePatterns, toChatMessages } from "@/lib/pi-sse";
 import type { PiAgentMessage } from "@assistant-ui/react-pi";
 
 const usage = {
@@ -111,5 +111,26 @@ describe("toChatMessages", () => {
     const tool = chat[0]!.parts.find((p) => p.type === "tool")!;
     expect(tool.isError).toBe(true);
     expect(tool.output).toBe("command not found");
+  });
+});
+
+describe("mergeExactScopePatterns", () => {
+  it("keeps exact provider/model patterns that the resolver dropped", () => {
+    const ids = mergeExactScopePatterns(
+      ["ollama/kimi-k3:cloud"],
+      [
+        "ollama/kimi-k3:cloud",
+        "synthetic/hf:moonshotai/Kimi-K3",
+        "anthropic/*:high",
+      ],
+    );
+    expect(ids).toEqual([
+      "ollama/kimi-k3:cloud",
+      "synthetic/hf:moonshotai/Kimi-K3",
+    ]);
+  });
+
+  it("leaves an unscoped catalog alone", () => {
+    expect(mergeExactScopePatterns(null, null)).toBeNull();
   });
 });

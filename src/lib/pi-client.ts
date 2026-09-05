@@ -12,7 +12,13 @@ import type {
 
 export const SSE_BASE_URL = "http://localhost:8913";
 
-export const piClient = createPiHttpClient({ baseUrl: SSE_BASE_URL });
+const noStoreFetch: typeof fetch = (input, init) =>
+  fetch(input, { cache: "no-store", ...init });
+
+export const piClient = createPiHttpClient({
+  baseUrl: SSE_BASE_URL,
+  fetchImpl: noStoreFetch,
+});
 
 /**
  * Workbench data (usage report, skills, plugins) from the SSE server's

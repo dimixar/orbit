@@ -90,19 +90,53 @@ export function usePiModels(): PiModelInfo[] {
   const [models, setModels] = useState<PiModelInfo[]>([]);
   useEffect(() => {
     let cancelled = false;
-    piClient
-      .getAvailableModels()
-      .then((list) => {
-        if (!cancelled) setModels(list);
-      })
-      .catch(() => {
-        // SSE server not running — leave the list empty.
-      });
+    const load = () => {
+      piClient
+        .getAvailableModels()
+        .then((list) => {
+          if (!cancelled) setModels(list);
+        })
+        .catch(() => {
+          // Keep the last good list if the SSE server restarts mid-session.
+        });
+    };
+    load();
+    const interval = window.setInterval(load, 30_000);
+    window.addEventListener("focus", load);
+    window.addEventListener("orbit:models-updated", load);
     return () => {
       cancelled = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", load);
+      window.removeEventListener("orbit:models-updated", load);
     };
   }, []);
   return models;
+}
+
+/**
+ * Pi's resolver can drop exact `provider/modelId` patterns whose ids contain
+ * ':' (e.g. `synthetic/hf:moonshotai/Kimi-K3` — the last colon is parsed as a
+ * thinking-level suffix). Keep those patterns in the checkbox set so the
+ * Scoped models page matches what settings.json actually stored.
+ */
+export function mergeExactScopePatterns(
+  ids: string[] | null,
+  patterns: string[] | null,
+): string[] | null {
+  if (ids === null && (patterns === null || patterns.length === 0)) return null;
+  const next = new Set(ids ?? []);
+  for (const pattern of patterns ?? []) {
+    if (
+      pattern.includes("/") &&
+      !pattern.includes("*") &&
+      !pattern.includes("?") &&
+      !pattern.includes("[")
+    ) {
+      next.add(pattern);
+    }
+  }
+  return [...next];
 }
 
 /** Scoped-models state: the resolved ids (null = unscoped, every model
@@ -110,6 +144,8 @@ export function usePiModels(): PiModelInfo[] {
  * the SSE server, and the last save outcome for status surfaces. `saving`
  * guards double-clicks on the checkboxes. */
 export function useScopedModels(): {
+  /** False until the first /scoped-models response lands. */
+  loaded: boolean;
   /** Scoped model ids as "provider/modelId", or null when unscoped. */
   scopedIds: string[] | null;
   /** Raw `enabledModels` patterns from settings.json — may be globs like
@@ -128,25 +164,44 @@ export function useScopedModels(): {
    * every available model goes back to being enabled. */
   resetScope: () => void;
 } {
+  const [loaded, setLoaded] = useState(false);
   const [scopedIds, setScopedIds] = useState<string[] | null>(null);
   const [patterns, setPatterns] = useState<string[] | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveState, setSaveState] = useState<"saved" | "error" | null>(null);
   const scopedIdsRef = useRef<string[] | null>(null);
+  const savingRef = useRef(false);
   useEffect(() => {
     scopedIdsRef.current = scopedIds;
   }, [scopedIds]);
+  useEffect(() => {
+    savingRef.current = saving;
+  }, [saving]);
 
   useEffect(() => {
     let cancelled = false;
-    fetchScopedModels().then((state) => {
-      if (!cancelled && state) {
-        setScopedIds(state.ids);
-        setPatterns(state.patterns);
-      }
-    });
+    const load = () => {
+      if (savingRef.current) return;
+      fetchScopedModels().then((state) => {
+        if (cancelled) return;
+        if (state) {
+          const ids = mergeExactScopePatterns(state.ids, state.patterns);
+          scopedIdsRef.current = ids;
+          setScopedIds(ids);
+          setPatterns(state.patterns);
+        }
+        setLoaded(true);
+      });
+    };
+    load();
+    const interval = window.setInterval(load, 30_000);
+    window.addEventListener("focus", load);
+    window.addEventListener("orbit:models-updated", load);
     return () => {
       cancelled = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", load);
+      window.removeEventListener("orbit:models-updated", load);
     };
   }, []);
 
@@ -169,10 +224,12 @@ export function useScopedModels(): {
     setSaving(true);
     saveScopedModels(persisted)
       .then((state) => {
-        scopedIdsRef.current = state.ids;
-        setScopedIds(state.ids);
+        const ids = mergeExactScopePatterns(state.ids, state.patterns);
+        scopedIdsRef.current = ids;
+        setScopedIds(ids);
         setPatterns(state.patterns);
         setSaveState("saved");
+        window.dispatchEvent(new Event("orbit:models-updated"));
       })
       .catch(() => {
         scopedIdsRef.current = current;
@@ -186,15 +243,25 @@ export function useScopedModels(): {
     setSaving(true);
     saveScopedModels(null)
       .then((state) => {
-        scopedIdsRef.current = state.ids;
-        setScopedIds(state.ids);
+        const ids = mergeExactScopePatterns(state.ids, state.patterns);
+        scopedIdsRef.current = ids;
+        setScopedIds(ids);
         setPatterns(state.patterns);
         setSaveState("saved");
+        window.dispatchEvent(new Event("orbit:models-updated"));
       })
       .catch(() => setSaveState("error"))
       .finally(() => setSaving(false));
   }, []);
-  return { scopedIds, patterns, saving, saveState, toggleScoped, resetScope };
+  return {
+    loaded,
+    scopedIds,
+    patterns,
+    saving,
+    saveState,
+    toggleScoped,
+    resetScope,
+  };
 }
 
 /**

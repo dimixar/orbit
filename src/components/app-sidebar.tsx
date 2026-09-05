@@ -168,6 +168,23 @@ function SessionRow({ id, item, meta, isActive, onSwitch, onChanged, onHide }: S
   const [draft, setDraft] = useState('')
   const cancelledRef = useRef(false)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
+  const rowRef = useRef<HTMLButtonElement>(null)
+
+  // Repin: when this row becomes active and is scrolled out of view in the
+  // sidebar, scroll the nearest scrollable parent so the active session is
+  // always visible — without jumping if it's already on-screen.
+  useEffect(() => {
+    if (!isActive) return
+    const el = rowRef.current
+    if (!el) return
+    const scroller = el.closest<HTMLElement>('[data-slot=sidebar-content]')
+    if (!scroller) return
+    const elRect = el.getBoundingClientRect()
+    const scRect = scroller.getBoundingClientRect()
+    if (elRect.top < scRect.top || elRect.bottom > scRect.bottom) {
+      el.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+    }
+  }, [isActive, id])
 
   // Escape dismisses the delete confirmation without touching the mouse.
   useEffect(() => {
@@ -257,6 +274,7 @@ function SessionRow({ id, item, meta, isActive, onSwitch, onChanged, onHide }: S
   return (
     <div className="group/row relative min-w-0">
       <button
+        ref={rowRef}
         type="button"
         onClick={onSwitch}
         title={title}
