@@ -39,6 +39,7 @@ import {
   LifebuoyIcon,
   MagnifyingGlassIcon,
   PencilSquareIcon,
+  ServerStackIcon,
   SparklesIcon,
   Square3Stack3DIcon,
   TrashIcon,
@@ -69,9 +70,17 @@ import { Input, InputGroup } from '@/components/ui/input'
 import { useAui, useAuiState } from '@assistant-ui/react'
 import { usePiRuntimeExtras } from '@assistant-ui/react-pi'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { piClient } from '@/lib/pi-client'
+import { piClient, reloadPiAgent } from '@/lib/pi-client'
+import { isSessionRunning } from '@/lib/session-running'
 
-export type WorkbenchView = 'chat' | 'usage' | 'skills' | 'plugins' | 'models' | 'settings'
+export type WorkbenchView =
+  | 'chat'
+  | 'usage'
+  | 'skills'
+  | 'plugins'
+  | 'models'
+  | 'providers'
+  | 'settings'
 
 interface AppSidebarProps extends React.ComponentProps<typeof Sidebar> {
   view?: WorkbenchView
@@ -147,6 +156,8 @@ interface SessionRowProps {
   item?: ThreadItemWithMeta
   meta?: ThreadMeta
   isActive: boolean
+  /** Live extras status for the open thread (`running` while tokens arrive). */
+  extrasStatus?: string
   onSwitch: () => void
   /** Called after a rename/archive/delete lands so the server meta refetches. */
   onChanged: () => void
@@ -158,11 +169,25 @@ interface SessionRowProps {
  * pulse, hover-revealed action menu (rename / archive / delete), inline
  * rename editor, and an inline delete confirmation.
  */
-function SessionRow({ id, item, meta, isActive, onSwitch, onChanged, onHide }: SessionRowProps) {
+function SessionRow({
+  id,
+  item,
+  meta,
+  isActive,
+  extrasStatus,
+  onSwitch,
+  onChanged,
+  onHide,
+}: SessionRowProps) {
   const aui = useAui()
   const { title, preview } = sessionLines(meta, item?.title)
   const stamp = meta?.updatedAt ? timeAgo(meta.updatedAt) : ''
-  const isRunning = meta?.status === 'running'
+  const isRunning = isSessionRunning({
+    metaStatus: meta?.status,
+    itemStatus: item?.custom?.status,
+    isActive,
+    extrasStatus,
+  })
 
   const [isRenaming, setIsRenaming] = useState(false)
   const [draft, setDraft] = useState('')
@@ -351,7 +376,7 @@ export default function AppSidebar({
   ...props
 }: AppSidebarProps) {
   const aui = useAui()
-  const { status, readiness } = usePiRuntimeExtras()
+  const { status } = usePiRuntimeExtras()
   //
   // SSE connectivity is tracked from the metadata fetch itself — NOT from
   // `usePiRuntimeExtras().readiness`, which only arrives with a thread
@@ -362,10 +387,8 @@ export default function AppSidebar({
   const [conn, setConn] = useState<'connecting' | 'connected' | 'offline'>(
     'connecting',
   )
+  const [reloading, setReloading] = useState(false)
   const connected = conn === 'connected'
-  const model = readiness?.state === 'ready'
-    ? `${readiness.selection.provider}/${readiness.selection.modelId}`
-    : (status ?? 'pi')
 
   // Pi thread list (sessions) over SSE.
   const threads = useAuiState((s) => s.threads)
@@ -392,13 +415,18 @@ export default function AppSidebar({
   const [threadMeta, setThreadMeta] = useState<ReadonlyMap<string, ThreadMeta>>(new Map())
   const [metaVersion, setMetaVersion] = useState(0)
   const [tick, setTick] = useState(0)
-  // Poll doubles as the connectivity probe: 3s while connecting/offline, then
-  // a relaxed 30s cadence (which also re-renders relative timestamps).
+  // Poll doubles as the connectivity probe: 3s while connecting/offline.
+  // While the open thread is running, poll every 2s so other rows pick up
+  // live status (and drop it) without waiting for the relaxed 30s cadence.
+  const catalogRunning = [...threadMeta.values()].some(
+    (meta) => meta.status === 'running',
+  )
   useEffect(() => {
-    const period = connected ? 30_000 : 3_000
+    const period =
+      status === 'running' || catalogRunning ? 2_000 : connected ? 30_000 : 3_000
     const timer = setInterval(() => setTick((v) => v + 1), period)
     return () => clearInterval(timer)
-  }, [connected])
+  }, [catalogRunning, connected, status])
   const refreshMeta = () => setMetaVersion((v) => v + 1)
 
   // The chat panel auto-titles new sessions (first-message snippet → pi
@@ -407,8 +435,27 @@ export default function AppSidebar({
   useEffect(() => {
     const onThreadsUpdated = () => setMetaVersion((v) => v + 1)
     window.addEventListener('orbit:threads-updated', onThreadsUpdated)
-    return () => window.removeEventListener('orbit:threads-updated', onThreadsUpdated)
+    window.addEventListener('orbit:agent-reloaded', onThreadsUpdated)
+    return () => {
+      window.removeEventListener('orbit:threads-updated', onThreadsUpdated)
+      window.removeEventListener('orbit:agent-reloaded', onThreadsUpdated)
+    }
   }, [])
+
+  const reloadAgent = async () => {
+    if (reloading) return
+    setReloading(true)
+    setConn('connecting')
+    try {
+      await reloadPiAgent()
+      refreshMeta()
+    } catch (error) {
+      console.error('[orbit] failed to reload the pi agent:', error)
+      setConn('offline')
+    } finally {
+      setReloading(false)
+    }
+  }
 
   const metaRefreshKey = `${status}:${tick}:${metaVersion}:${threadIds.join('\n')}`
   useEffect(() => {
@@ -505,6 +552,19 @@ export default function AppSidebar({
     const parts = path.replace(/\/+$/, '').split('/')
     return parts[parts.length - 1] || path
   }
+
+  // Footer lockup: static "Local" plus the active session's workspace folder
+  // (pi thread metadata) — the model name no longer lives here.
+  const activeWorkspace =
+    getMeta(mainThreadId)?.workspacePath ??
+    (mainThreadId
+      ? getThreadItem(mainThreadId, threadIds.indexOf(mainThreadId))?.custom
+          ?.workspacePath
+      : undefined)
+  const workspaceName =
+    activeWorkspace && activeWorkspace !== 'Other'
+      ? folderLabel(activeWorkspace)
+      : undefined
 
   // Switching sessions must also land the user on the chat page — otherwise
   // clicking a session from the sidebar while on Settings (or another page)
@@ -624,7 +684,10 @@ export default function AppSidebar({
                     No sessions match “{filter.trim()}”
                   </p>
                 ) : (
-                <div className="col-span-full space-y-px">
+                // Folders separate generously (space-y-3) while rows inside a
+                // folder stay tightly packed (space-y-px), so each workspace
+                // reads as one visual group in a long session list.
+                <div className="col-span-full space-y-3">
                 {folderOrder.map((folder) => {
                   const threadsInFolder = folderGroups.get(folder) ?? []
                   const isCollapsed = collapsedFolders.has(folder)
@@ -720,6 +783,7 @@ export default function AppSidebar({
                               item={item}
                               meta={meta}
                               isActive={id === mainThreadId}
+                              extrasStatus={status}
                               onSwitch={() => switchToThread(id)}
                               onChanged={refreshMeta}
                               onHide={hideRow}
@@ -779,8 +843,14 @@ export default function AppSidebar({
                 className="bg-primary text-primary-fg outline-hidden"
               />
               <div className="in-data-[collapsible=dock]:hidden text-sm">
-                <SidebarLabel className="max-w-40 truncate font-mono text-xs">
-                  {model}
+                <SidebarLabel className="max-w-40 truncate">
+                  Local
+                  {workspaceName && (
+                    <span className="font-normal text-muted-fg">
+                      {' · '}
+                      {workspaceName}
+                    </span>
+                  )}
                 </SidebarLabel>
                 <span className="-mt-0.5 block text-muted-fg">
                   {connected
@@ -799,7 +869,9 @@ export default function AppSidebar({
           >
             <MenuSection>
               <MenuHeader separator>
-                <span className="block font-mono text-xs">{model}</span>
+                <span className="block text-xs">
+                  Local{workspaceName ? ` \u00b7 ${workspaceName}` : ''}
+                </span>
                 <span className="font-normal text-muted-fg">
                   {connected
                     ? 'Connected to the pi agent'
@@ -809,6 +881,17 @@ export default function AppSidebar({
                 </span>
               </MenuHeader>
             </MenuSection>
+
+            <MenuItem
+              textValue="Reload agent"
+              isDisabled={reloading}
+              onAction={() => {
+                void reloadAgent()
+              }}
+            >
+              <ArrowPathIcon className={reloading ? 'animate-spin' : undefined} />
+              <MenuLabel>{reloading ? 'Reloading…' : 'Reload agent'}</MenuLabel>
+            </MenuItem>
 
             <MenuSeparator />
 
@@ -833,6 +916,11 @@ export default function AppSidebar({
                 <CubeTransparentIcon />
                 <MenuLabel>Scoped models</MenuLabel>
                 {view === 'models' && <CheckIcon />}
+              </MenuItem>
+              <MenuItem onAction={() => onNavigate?.('providers')}>
+                <ServerStackIcon />
+                <MenuLabel>Providers</MenuLabel>
+                {view === 'providers' && <CheckIcon />}
               </MenuItem>
               <MenuItem onAction={() => onNavigate?.('settings')}>
                 <Cog6ToothIcon />

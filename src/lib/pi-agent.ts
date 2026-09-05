@@ -85,6 +85,16 @@ export type PiSkillInfo = {
   triggers: string[];
 };
 
+/** Slash-invocable skill (`/skill:name`) or prompt template (`/name`). */
+export type PiComposerCommand = {
+  id: string;
+  kind: "skill" | "prompt";
+  name: string;
+  description: string;
+  argumentHint?: string;
+  scope?: "user" | "project" | "temporary";
+};
+
 export type PiPluginInfo = {
   packages: string[];
   enabledModels: string[];
@@ -101,8 +111,49 @@ export type PiSettingsInfo = {
   settingsPath: string;
 };
 
+/** One custom model provider entry from pi's models.json. */
+export type PiProviderInfo = {
+  id: string;
+  name?: string;
+  baseUrl: string;
+  api: string;
+  hasApiKey: boolean;
+  models: { id: string; name?: string; contextWindow?: number }[];
+  /** True when a pi built-in with the same id serves the models. */
+  matchesBuiltin?: boolean;
+};
+
+/** A provider currently serving models in the pi agent's live catalog. */
+export type PiCatalogProvider = {
+  provider: string;
+  modelCount: number;
+  isCustom: boolean;
+};
+
+/** A provider pi supports — the only list the add form offers. */
+export type PiSupportedProvider = {
+  id: string;
+  name: string;
+  baseUrl?: string;
+  api?: string;
+  modelCount: number;
+  models: { id: string; name?: string; contextWindow?: number }[];
+};
+
+export type PiProvidersReport = {
+  modelsJsonPath: string;
+  /** models.json exists but is broken — shown instead of silently hidden. */
+  parseError?: string;
+  custom: PiProviderInfo[];
+  catalog: PiCatalogProvider[];
+  catalogError?: string;
+  /** Every provider pi supports — the add form's only source. */
+  supported: PiSupportedProvider[];
+};
+
 export type ChatPart =
   | { type: "text"; text: string }
+  | { type: "image"; url: string; name?: string }
   | { type: "thinking"; text: string; done?: boolean }
   | {
       type: "tool";

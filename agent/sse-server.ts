@@ -24,9 +24,9 @@ import {
 } from "node:http";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { existsSync } from "node:fs";
+import { existsSync, promises as fs } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 import {
   createPiNodeClient,
   getPiThreadSupervisor,
@@ -42,6 +42,13 @@ import {
   type SessionInfo,
 } from "@earendil-works/pi-coding-agent";
 import { getUsage, listPlugins, listSkills } from "./workbench.js";
+import {
+  includeSnapshotFromUrl,
+  isRunSettledEvent,
+  liveStatusFromRecords,
+  shouldIncludeSnapshot,
+  writeSseEvent,
+} from "./sse-stream.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -49,9 +56,12 @@ const PORT = Number(process.env.PI_SSE_PORT ?? 8913);
 const WORKSPACE_PATH = process.env.PI_WORKSPACE_PATH ?? process.cwd();
 const SERVER_ID = "orbit-pi-sse";
 const STARTED_AT = new Date().toISOString();
+/** react-pi pins the supervisor on `globalThis` under this key. */
+const SUPERVISOR_KEY = "__assistantUiPiThreadSupervisor";
 
-const client = createPiNodeClient({ workspacePath: WORKSPACE_PATH });
-const supervisor = getPiThreadSupervisor({
+let reloadedAt: string | null = null;
+let client = createPiNodeClient({ workspacePath: WORKSPACE_PATH });
+let supervisor = getPiThreadSupervisor({
   workspacePath: WORKSPACE_PATH,
 }) as PiSupervisorInternals;
 
@@ -64,7 +74,13 @@ type RuntimeModel = {
 };
 
 type LivePiRecord = {
+  threadId?: string;
+  seq?: number;
   session?: {
+    sessionId?: string;
+    isStreaming?: boolean;
+    isCompacting?: boolean;
+    isRetrying?: boolean;
     setScopedModels?: (models: unknown[]) => void;
   };
 };
@@ -72,6 +88,7 @@ type LivePiRecord = {
 type PiSupervisorInternals = {
   getModelRuntime?: () => Promise<ModelRuntime>;
   records?: Map<string, LivePiRecord>;
+  dispose?: () => Promise<void>;
 };
 
 type ScopedModelState = {
@@ -135,8 +152,21 @@ function sendNoContent(res: ServerResponse): void {
 
 function sendError(res: ServerResponse, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
+  const status =
+    error instanceof RequestError && Number.isFinite(error.status)
+      ? error.status
+      : 500;
   console.error("[pi-sse] error:", message);
-  sendJson(res, 500, { error: message });
+  sendJson(res, status, { error: message });
+}
+
+/** An error carrying the HTTP status the client should see (4xx = their side). */
+class RequestError extends Error {
+  status: number;
+  constructor(message: string, status = 400) {
+    super(message);
+    this.status = status;
+  }
 }
 
 /** Wraps a route handler, catching errors into a 500. */
@@ -322,18 +352,366 @@ async function setScopedModels(
 }
 
 // ---------------------------------------------------------------------------
+// Providers — pi's models.json: the custom-provider layer shared with the CLI
+// ---------------------------------------------------------------------------
+
+const PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9._-]*$/i;
+
+/** API families pi's runtime knows how to speak (the models.json `api` field). */
+const PROVIDER_APIS = [
+  "openai-completions",
+  "openai-responses",
+  "anthropic-messages",
+  "google-generative-ai",
+  "amazon-bedrock",
+  "azure-openai-responses",
+] as const;
+
+type ProviderModelConfig = {
+  id?: unknown;
+  name?: unknown;
+  contextWindow?: unknown;
+  maxTokens?: unknown;
+};
+
+type ProviderFileEntry = Record<string, unknown>;
+
+type ProviderModelOut = {
+  id: string;
+  name?: string;
+  contextWindow?: number;
+};
+
+type ProviderOut = {
+  id: string;
+  name?: string;
+  baseUrl: string;
+  api: string;
+  hasApiKey: boolean;
+  models: ProviderModelOut[];
+  /** True when a pi built-in with the same id serves the models. */
+  matchesBuiltin?: boolean;
+};
+
+type SupportedProviderOut = {
+  id: string;
+  name: string;
+  baseUrl?: string;
+  api?: string;
+  modelCount: number;
+  /** First N catalog models, for prefilling the add form. */
+  models: ProviderModelOut[];
+};
+
+type ProvidersResponse = {
+  modelsJsonPath: string;
+  /** models.json exists but is broken — surfaced instead of silently hidden. */
+  parseError?: string;
+  custom: ProviderOut[];
+  catalog: { provider: string; modelCount: number; isCustom: boolean }[];
+  catalogError?: string;
+  /** Every provider pi supports — the only source the add form offers. */
+  supported: SupportedProviderOut[];
+};
+
+function modelsJsonPath(): string {
+  try {
+    // pi keeps models.json in the agent dir (~/.pi/agent/models.json).
+    return join(getAgentDir(), "models.json");
+  } catch {
+    return join(homedir(), ".pi", "agent", "models.json");
+  }
+}
+
+/** Read models.json, tolerating a missing file. Throws on malformed JSON —
+ *  a broken file must never be silently overwritten by a provider save. */
+async function readModelsJson(): Promise<Record<string, unknown>> {
+  try {
+    const raw = await fs.readFile(modelsJsonPath(), "utf8");
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new RequestError(
+        "models.json must contain a JSON object — fix or remove the file first",
+      );
+    }
+    return parsed as Record<string, unknown>;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw error;
+  }
+}
+
+async function writeModelsJson(config: Record<string, unknown>): Promise<void> {
+  await fs.writeFile(
+    modelsJsonPath(),
+    `${JSON.stringify(config, null, 2)}\n`,
+    "utf8",
+  );
+}
+
+function normalizeProviderEntry(id: string, entry: ProviderFileEntry): ProviderOut {
+  const models = Array.isArray(entry.models)
+    ? (entry.models as ProviderModelConfig[])
+        .filter((m) => m && typeof m.id === "string" && m.id.trim())
+        .map((m) => ({
+          id: String(m.id),
+          ...(typeof m.name === "string" ? { name: m.name } : {}),
+          ...(typeof m.contextWindow === "number"
+            ? { contextWindow: m.contextWindow }
+            : {}),
+        }))
+    : [];
+  return {
+    id,
+    ...(typeof entry.name === "string" ? { name: entry.name } : {}),
+    baseUrl: typeof entry.baseUrl === "string" ? entry.baseUrl : "",
+    api: typeof entry.api === "string" ? entry.api : "",
+    hasApiKey: typeof entry.apiKey === "string" && entry.apiKey.length > 0,
+    models,
+  };
+}
+
+/** Live catalog summary: which providers are serving models right now. */
+function summarizeCatalog(
+  runtime: ModelRuntime,
+  customIds: ReadonlySet<string>,
+): { provider: string; modelCount: number; isCustom: boolean }[] {
+  const snapshot = runtime.getAvailableSnapshot();
+  const models = (
+    snapshot.length > 0 ? snapshot : runtime.getModels()
+  ) as readonly RuntimeModel[];
+  const counts = new Map<string, number>();
+  for (const model of models) {
+    counts.set(model.provider, (counts.get(model.provider) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([provider, modelCount]) => ({
+      provider,
+      modelCount,
+      isCustom: customIds.has(provider),
+    }))
+    .sort((a, b) => a.provider.localeCompare(b.provider));
+}
+
+/**
+ * The providers pi itself supports — the only list the add form offers.
+ * Providers without models (the "radius" OAuth hub) are not addable entries.
+ */
+function getSupportedProviders(
+  runtime: ModelRuntime,
+): SupportedProviderOut[] {
+  const out: SupportedProviderOut[] = [];
+  for (const provider of runtime.getProviders()) {
+    const models = provider.getModels() as unknown as {
+      id: string;
+      name?: string;
+      api?: string;
+      contextWindow?: number;
+    }[];
+    if (models.length === 0) continue;
+    out.push({
+      id: provider.id,
+      name: provider.name || provider.id,
+      ...(provider.baseUrl ? { baseUrl: provider.baseUrl } : {}),
+      ...(models[0]?.api ? { api: String(models[0].api) } : {}),
+      modelCount: models.length,
+      models: models.slice(0, 30).map((m) => ({
+        id: m.id,
+        ...(m.name ? { name: m.name } : {}),
+        ...(typeof m.contextWindow === "number"
+          ? { contextWindow: m.contextWindow }
+          : {}),
+      })),
+    });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function listProviders(): Promise<ProvidersResponse> {
+  let config: Record<string, unknown>;
+  let parseError: string | undefined;
+  try {
+    config = await readModelsJson();
+  } catch (error) {
+    parseError = error instanceof Error ? error.message : String(error);
+    config = {};
+  }
+  const providers = (config.providers ?? {}) as Record<string, ProviderFileEntry>;
+  const custom = Object.entries(providers)
+    .map(([id, entry]) => normalizeProviderEntry(id, entry ?? {}))
+    .sort((a, b) => a.id.localeCompare(b.id));
+
+  let catalog: ProvidersResponse["catalog"] = [];
+  let catalogError: string | undefined;
+  let supported: SupportedProviderOut[] = [];
+  try {
+    const runtime = await getFreshModelRuntime();
+    try {
+      await runtime.refresh();
+    } catch {
+      // Same fallback as listAvailableModels — last snapshot is still truthy.
+    }
+    supported = getSupportedProviders(runtime);
+    const supportedIds = new Set(supported.map((p) => p.id));
+    for (const entry of custom) {
+      if (supportedIds.has(entry.id)) entry.matchesBuiltin = true;
+    }
+    catalog = summarizeCatalog(
+      runtime,
+      new Set(custom.map((p) => p.id)),
+    );
+  } catch (error) {
+    catalogError = error instanceof Error ? error.message : String(error);
+  }
+
+  return {
+    modelsJsonPath: modelsJsonPath(),
+    ...(parseError ? { parseError } : {}),
+    custom,
+    catalog,
+    ...(catalogError ? { catalogError } : {}),
+    supported,
+  };
+}
+
+type ProviderSaveInput = {
+  name?: string;
+  baseUrl: string;
+  api: string;
+  /** undefined = keep the stored key; empty string = remove it. */
+  apiKey?: string;
+  models: { id: string; name?: string; contextWindow?: number }[];
+};
+
+function validateProviderInput(
+  id: string,
+  body: unknown,
+  allowedApis: ReadonlySet<string>,
+  knownProviderIds: ReadonlySet<string>,
+): ProviderSaveInput {
+  const input = (body ?? {}) as Record<string, unknown>;
+  const baseUrl = typeof input.baseUrl === "string" ? input.baseUrl.trim() : "";
+  if (!/^https?:\/\//.test(baseUrl)) {
+    throw new RequestError("Base URL must start with http:// or https://");
+  }
+  const api = typeof input.api === "string" ? input.api : "";
+  if (!allowedApis.has(api)) {
+    throw new RequestError(
+      `Unknown API type "${api}" — pi supports: ${[...allowedApis].sort().join(", ")}`,
+    );
+  }
+  const rawModels = Array.isArray(input.models) ? input.models : [];
+  const models = rawModels
+    .map((m) => (m ?? {}) as Record<string, unknown>)
+    .filter((m) => typeof m.id === "string" && m.id.trim())
+    .map((m) => ({
+      id: (m.id as string).trim(),
+      ...(typeof m.name === "string" && m.name.trim()
+        ? { name: m.name.trim() }
+        : {}),
+      ...(typeof m.contextWindow === "number"
+          && Number.isFinite(m.contextWindow)
+          && m.contextWindow > 0
+        ? { contextWindow: Math.floor(m.contextWindow) }
+        : {}),
+    }));
+  // A provider pi already supports may carry just a key/base URL — its
+  // built-in catalog serves the models. Unknown providers need explicit models.
+  if (models.length === 0 && !knownProviderIds.has(id)) {
+    throw new RequestError(
+      `At least one model id is required — "${id}" is not a provider pi already supports`,
+    );
+  }
+  const seen = new Set<string>();
+  for (const model of models) {
+    const key = model.id.toLowerCase();
+    if (seen.has(key)) {
+      throw new RequestError(`Duplicate model id "${model.id}"`);
+    }
+    seen.add(key);
+  }
+  return {
+    ...(typeof input.name === "string" && input.name.trim()
+      ? { name: input.name.trim() }
+      : {}),
+    baseUrl,
+    api,
+    ...(typeof input.apiKey === "string" ? { apiKey: input.apiKey } : {}),
+    models,
+  };
+}
+
+/** New providers only reach sessions after a catalog refresh; best-effort so
+ *  the save still lands even if the runtime is mid-something. */
+async function refreshCatalog(): Promise<void> {
+  try {
+    const runtime = await getFreshModelRuntime();
+    await runtime.refresh();
+  } catch {
+    // A later refresh picks the change up; listProviders still reports truth.
+  }
+}
+
+/**
+ * Recreate the process-singleton supervisor so live sessions and ModelRuntime
+ * re-read models.json / settings.json / auth. The HTTP listener stays up.
+ */
+async function reloadPiRuntime(): Promise<void> {
+  try {
+    await supervisor.dispose?.();
+  } catch {
+    // A failed dispose must not keep the stale singleton around.
+  }
+  delete (globalThis as Record<string, unknown>)[SUPERVISOR_KEY];
+  client = createPiNodeClient({ workspacePath: WORKSPACE_PATH });
+  supervisor = getPiThreadSupervisor({
+    workspacePath: WORKSPACE_PATH,
+  }) as PiSupervisorInternals;
+  reloadedAt = new Date().toISOString();
+  await refreshCatalog();
+}
+
+// ---------------------------------------------------------------------------
 // SSE stream
 // ---------------------------------------------------------------------------
+
+async function writeSettledSnapshot(
+  res: ServerResponse,
+  threadId: string,
+): Promise<void> {
+  if (res.writableEnded) return;
+  try {
+    const snapshot = await client.getThread(threadId);
+    if (res.writableEnded) return;
+    // Stamp after the supervisor's last live seq so the HTTP client does not
+    // treat this as a reconnect reset (seq 0 < liveSnapshotSeq).
+    const liveSeq = supervisor.records?.get(threadId)?.seq;
+    writeSseEvent(res, {
+      type: "snapshot",
+      snapshot,
+      threadId,
+      seq: (typeof liveSeq === "number" ? liveSeq : 0) + 1,
+    });
+  } catch {
+    // The live event stream already delivered what it could.
+  }
+}
 
 function streamEvents(
   req: IncomingMessage,
   res: ServerResponse,
   threadId: string,
+  url: URL,
 ): void {
-  // The published react-pi client opens the stream and immediately POSTs the
-  // user message. Snapshot-first SSE prevents missed early events if the POST
-  // reaches the server before the GET subscriber is attached.
-  const includeSnapshot = true;
+  // Official SDK: subscribe first, then prompt. react-pi often opens with
+  // `?snapshot=false` because it already called getThread / sendMessage.
+  // Honor that while a run is live so a reconnect snapshot does not wipe
+  // the streaming pointer. Still snapshot idle/unknown threads so a late
+  // subscriber receives session.messages (the documented source of truth).
+  const includeSnapshot = shouldIncludeSnapshot(
+    includeSnapshotFromUrl(url),
+    liveStatusFromRecords(threadId, supervisor.records),
+  );
 
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -342,12 +720,21 @@ function streamEvents(
     "X-Accel-Buffering": "no",
     ...CORS_HEADERS,
   });
+  res.socket?.setNoDelay(true);
+  res.flushHeaders?.();
   res.write(": connected\n\n");
 
+  let settled = false;
   const unsubscribe = client.subscribe(
     threadId,
     (event) => {
-      res.write(`data: ${JSON.stringify(event)}\n\n`);
+      writeSseEvent(res, event);
+      // react-pi drops SDK `agent_end.messages`. Re-emit session.messages
+      // as a snapshot so the UI settles instead of staying on "working…".
+      if (!settled && isRunSettledEvent(event)) {
+        settled = true;
+        void writeSettledSnapshot(res, threadId);
+      }
     },
     { includeSnapshot },
   );
@@ -437,7 +824,11 @@ async function listThreadsResponse(url: URL) {
     const known = new Set(threads.map((thread) => thread.id));
     const extras = infos
       .filter((info) => !known.has(info.id))
-      .map(synthesizeThread)
+      .map((info) => {
+        const thread = synthesizeThread(info);
+        const live = liveStatusFromRecords(info.id, supervisor.records);
+        return live ? { ...thread, status: live } : thread;
+      })
       .filter(
         (thread) =>
           includeArchived || !archivedSessionFiles.has(thread.sessionFile),
@@ -448,10 +839,13 @@ async function listThreadsResponse(url: URL) {
     );
 
     return merged.map((thread) => {
+      const live = liveStatusFromRecords(thread.id, supervisor.records);
+      const withLive =
+        live && thread.status !== live ? { ...thread, status: live } : thread;
       const info = byId.get(thread.id);
-      if (!info) return thread;
+      if (!info) return withLive;
       return {
-        ...thread,
+        ...withLive,
         ...(info.firstMessage
           ? { firstMessage: oneLine(info.firstMessage) }
           : {}),
@@ -565,6 +959,133 @@ async function gitCreateBranch(
   name: string,
 ): Promise<void> {
   await runGit(workspacePath, ["checkout", "-b", name], 15_000);
+}
+
+// ---------------------------------------------------------------------------
+// Composer `/` commands and `@` files
+// ---------------------------------------------------------------------------
+
+const FILE_LIST_CAP = 5000;
+const SKIP_FILE_DIRS = new Set([
+  ".git",
+  "node_modules",
+  "dist",
+  "build",
+  ".next",
+  "target",
+  "coverage",
+  "vendor",
+  ".turbo",
+  ".cache",
+  "out",
+  ".output",
+  "Pods",
+  "__pycache__",
+]);
+
+function assertAbsolutePath(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${label} is required`);
+  }
+  const trimmed = value.trim();
+  if (!isAbsolute(trimmed)) {
+    throw new Error(`${label} must be an absolute path`);
+  }
+  return trimmed;
+}
+
+/** Walk a folder when git isn't available; skips build/vendor trees. */
+async function walkWorkspaceFiles(root: string, cap: number): Promise<string[]> {
+  const out: string[] = [];
+  const visit = async (dir: string) => {
+    if (out.length >= cap) return;
+    let entries: Awaited<ReturnType<typeof fs.readdir>>;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (out.length >= cap) return;
+      const hidden = entry.name.startsWith(".");
+      const keepHiddenDir =
+        entry.name === ".agents" ||
+        entry.name === ".pi" ||
+        entry.name === ".github";
+      if (entry.isDirectory()) {
+        if (SKIP_FILE_DIRS.has(entry.name) || (hidden && !keepHiddenDir)) continue;
+        await visit(join(dir, entry.name));
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      out.push(relative(root, join(dir, entry.name)).split(sep).join("/"));
+    }
+  };
+  await visit(root);
+  return out;
+}
+
+/**
+ * Project files for `@` mentions. Prefers `git ls-files` (tracked + untracked,
+ * gitignored excluded) so the list matches what the agent can see.
+ */
+async function listWorkspaceFiles(workspacePath: string): Promise<string[]> {
+  if (!existsSync(workspacePath)) return [];
+  try {
+    const stdout = await runGit(
+      workspacePath,
+      ["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+      10_000,
+    );
+    return stdout.split("\0").filter(Boolean).slice(0, FILE_LIST_CAP);
+  } catch {
+    return walkWorkspaceFiles(workspacePath, FILE_LIST_CAP);
+  }
+}
+
+type ComposerCommand = {
+  id: string;
+  kind: "skill" | "prompt";
+  name: string;
+  description: string;
+  argumentHint?: string;
+  scope?: "user" | "project" | "temporary";
+};
+
+/**
+ * Slash commands the composer can insert: prompt templates as `/name` and
+ * skills as `/skill:name` — the same names pi expands when the prompt is sent.
+ */
+async function listComposerCommands(cwd: string): Promise<ComposerCommand[]> {
+  const agentDir = getAgentDir();
+  const settingsManager = SettingsManager.create(cwd, agentDir);
+  const loader = new DefaultResourceLoader({
+    cwd,
+    agentDir,
+    settingsManager,
+  });
+  await loader.reload();
+  const commands: ComposerCommand[] = [];
+  for (const prompt of loader.getPrompts().prompts) {
+    commands.push({
+      id: `prompt:${prompt.name}`,
+      kind: "prompt",
+      name: prompt.name,
+      description: prompt.description,
+      ...(prompt.argumentHint ? { argumentHint: prompt.argumentHint } : {}),
+      scope: prompt.sourceInfo.scope,
+    });
+  }
+  for (const skill of loader.getSkills().skills) {
+    commands.push({
+      id: `skill:${skill.name}`,
+      kind: "skill",
+      name: `skill:${skill.name}`,
+      description: skill.description,
+      scope: skill.sourceInfo.scope,
+    });
+  }
+  return commands;
 }
 
 // ---------------------------------------------------------------------------
@@ -929,7 +1450,22 @@ const server = createServer(async (req, res) => {
       pid: process.pid,
       workspacePath: WORKSPACE_PATH,
       startedAt: STARTED_AT,
+      ...(reloadedAt ? { reloadedAt } : {}),
     });
+  }
+
+  // POST /reload — recreate the in-process supervisor so models/settings/auth
+  // are re-read without taking the HTTP listener down.
+  if (method === "POST" && path === "/reload") {
+    return route(async (_req, res) => {
+      await reloadPiRuntime();
+      sendJson(res, 200, {
+        id: SERVER_ID,
+        ok: true,
+        pid: process.pid,
+        reloadedAt,
+      });
+    })(req, res, body);
   }
 
   // GET /threads — no workspacePath param = all workspaces
@@ -1078,6 +1614,26 @@ const server = createServer(async (req, res) => {
     })(req, res, body);
   }
 
+  // GET /workbench/commands — slash-invocable skills + prompt templates
+  if (method === "GET" && path === "/workbench/commands") {
+    return route(async (_req, res) => {
+      const raw = url.searchParams.get("workspacePath");
+      const cwd = raw ? assertAbsolutePath(raw, "workspacePath") : WORKSPACE_PATH;
+      sendJson(res, 200, await listComposerCommands(cwd));
+    })(req, res, body);
+  }
+
+  // GET /workspace/files?workspacePath= — project files for @ mentions
+  if (method === "GET" && path === "/workspace/files") {
+    return route(async (_req, res) => {
+      const workspacePath = assertAbsolutePath(
+        url.searchParams.get("workspacePath"),
+        "workspacePath",
+      );
+      sendJson(res, 200, { files: await listWorkspaceFiles(workspacePath) });
+    })(req, res, body);
+  }
+
   // GET /workbench/plugins — packages + local extensions from settings.json
   if (method === "GET" && path === "/workbench/plugins") {
     return route(async (_req, res) => {
@@ -1112,6 +1668,106 @@ const server = createServer(async (req, res) => {
         throw new Error("PUT /scoped-models requires { patterns: string[] | null }");
       }
       sendJson(res, 200, await setScopedModels(patterns ?? null));
+    })(req, res, body);
+  }
+
+  // GET /providers — custom providers (models.json) + live catalog summary
+  if (method === "GET" && path === "/providers") {
+    return route(async (_req, res) => {
+      sendJson(res, 200, await listProviders());
+    })(req, res, body);
+  }
+
+  // PUT /providers/:id — create or replace a custom provider entry
+  if (method === "PUT" && /^\/providers\/([^/]+)$/.test(path)) {
+    return route(async (_req, res, body) => {
+      const id = decodeURIComponent(path.slice("/providers/".length));
+      if (!PROVIDER_ID_PATTERN.test(id)) {
+        throw new RequestError(
+          "Provider id may only contain letters, numbers, dots, dashes and underscores",
+        );
+      }
+      // pi's own provider list decides what's addable and which api types
+      // exist — a static list would drift out of the runtime's truth.
+      let allowedApis = new Set<string>(PROVIDER_APIS);
+      let knownProviderIds = new Set<string>();
+      try {
+        const runtime = await getFreshModelRuntime();
+        allowedApis = new Set([
+          ...allowedApis,
+          ...runtime
+            .getProviders()
+            .flatMap((p) => {
+              const model = p.getModels()[0] as { api?: string } | undefined;
+              return model?.api ? [String(model.api)] : [];
+            }),
+        ]);
+        knownProviderIds = new Set(
+          runtime
+            .getProviders()
+            .filter((p) => p.getModels().length > 0)
+            .map((p) => p.id),
+        );
+      } catch {
+        // Offline runtime: the static families + empty known-set still guard
+        // the write; a saved entry is re-validated by pi on load.
+      }
+      const input = validateProviderInput(
+        id,
+        body,
+        allowedApis,
+        knownProviderIds,
+      );
+      const config = await readModelsJson();
+      const providers = (config.providers ?? {}) as Record<string, ProviderFileEntry>;
+      const existing = providers[id];
+      const entry: ProviderFileEntry = {
+        // Preserve unknown keys (comments are lost — JSON.stringify cannot
+        // keep them; pi strips them on read anyway).
+        ...(existing ?? {}),
+        ...(input.name ? { name: input.name } : {}),
+        baseUrl: input.baseUrl,
+        api: input.api,
+        // undefined = keep the stored key; empty string = remove it.
+        ...(input.apiKey === undefined
+          ? {}
+          : input.apiKey
+            ? { apiKey: input.apiKey }
+            : {}),
+        ...(input.models.length > 0 ? { models: input.models } : {}),
+      };
+      if (!input.apiKey && input.apiKey !== undefined) {
+        // Explicit empty apiKey clears a stored one.
+        delete entry.apiKey;
+      }
+      if (input.models.length === 0) {
+        // Built-in-catalog entry: no models key, pi's own models serve it.
+        delete entry.models;
+      }
+      config.providers = { ...providers, [id]: entry };
+      await writeModelsJson(config);
+      await reloadPiRuntime();
+      sendJson(res, 200, await listProviders());
+    })(req, res, body);
+  }
+
+  // DELETE /providers/:id — remove a custom provider from models.json
+  if (method === "DELETE" && /^\/providers\/([^/]+)$/.test(path)) {
+    return route(async (_req, res) => {
+      const id = decodeURIComponent(path.slice("/providers/".length));
+      const config = await readModelsJson();
+      const providers = (config.providers ?? {}) as Record<string, ProviderFileEntry>;
+      if (!(id in providers)) {
+        throw new RequestError(
+          `Provider "${id}" is not in models.json — built-in providers are managed by pi, not this file`,
+          404,
+        );
+      }
+      const { [id]: _removed, ...rest } = providers;
+      config.providers = rest;
+      await writeModelsJson(config);
+      await reloadPiRuntime();
+      sendJson(res, 200, await listProviders());
     })(req, res, body);
   }
 
@@ -1151,7 +1807,7 @@ const server = createServer(async (req, res) => {
     if (action) {
       // GET /threads/:id/events  (SSE)
       if (method === "GET" && action === "events") {
-        return streamEvents(req, res, threadId);
+        return streamEvents(req, res, threadId, url);
       }
 
       // POST /threads/:id/messages

@@ -278,6 +278,13 @@
 
 /* ─── Message scroller (MessageScroller primitive) ─────────────────────── */
 
+/* This is the only chat scrollport. Disable overflow-anchor so a snapshot
+   remount (model / thinking change) cannot pin a mid-list node and "correct"
+   scrollTop toward the center while the spacer/layout settles. */
+.an-message-list {
+  overflow-anchor: none;
+}
+
 /* Hide the viewport until MessageScroller applies its opening scroll position
    ("end"), so a restored long session doesn't paint the top of the transcript
    for a frame before jumping to the bottom. */

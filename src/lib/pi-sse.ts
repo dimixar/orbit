@@ -20,37 +20,60 @@ import {
 } from "./pi-client";
 import type { PiAgentMessage } from "@assistant-ui/react-pi";
 import type { ChatMessage, ChatPart } from "@/lib/pi-agent";
+import { imageDataUrl } from "@/lib/composer-attach";
 
 /** Converts a Pi message into the legacy ChatMessage shape. */
-function toChatMessage(message: PiAgentMessage): ChatMessage {
+function toChatMessage(
+  message: PiAgentMessage,
+  options?: { streaming?: boolean },
+): ChatMessage {
   const parts: ChatPart[] = [];
   const content =
     message.role === "user" || message.role === "assistant"
       ? (
           message as {
-            content?: {
-              type: string;
-              text?: string;
-              thinking?: string;
-              name?: string;
-              id?: string;
-              arguments?: unknown;
-            }[];
+            content?:
+              | string
+              | {
+                  type: string;
+                  text?: string;
+                  thinking?: string;
+                  name?: string;
+                  id?: string;
+                  arguments?: unknown;
+                  data?: string;
+                  mimeType?: string;
+                }[];
           }
         ).content
       : undefined;
-  for (const item of content ?? []) {
-    if (item.type === "text" && typeof item.text === "string") {
-      parts.push({ type: "text", text: item.text });
-    } else if (item.type === "thinking" && typeof item.thinking === "string") {
-      parts.push({ type: "thinking", text: item.thinking, done: true });
-    } else if (item.type === "toolCall" && typeof item.name === "string") {
-      parts.push({
-        type: "tool",
-        toolName: item.name,
-        toolCallId: item.id ?? "",
-        input: item.arguments,
-      });
+  if (typeof content === "string") {
+    if (content) parts.push({ type: "text", text: content });
+  } else {
+    for (const item of content ?? []) {
+      if (item.type === "text" && typeof item.text === "string") {
+        parts.push({ type: "text", text: item.text });
+      } else if (item.type === "image" && typeof item.data === "string") {
+        parts.push({
+          type: "image",
+          url: imageDataUrl(item.data, item.mimeType),
+        });
+      } else if (item.type === "thinking" && typeof item.thinking === "string") {
+        parts.push({
+          type: "thinking",
+          text: item.thinking,
+          // SDK thinking_delta is incremental; only mark done once the
+          // assistant message is no longer the live streaming tail.
+          done: options?.streaming !== true,
+        });
+      } else if (item.type === "toolCall" && typeof item.name === "string") {
+        parts.push({
+          type: "tool",
+          toolName: item.name,
+          toolCallId: item.id ?? "",
+          input: item.arguments,
+        });
+      }
     }
   }
   return {
@@ -274,11 +297,16 @@ export function useScopedModels(): {
  */
 export function toChatMessages(
   messages: readonly PiAgentMessage[],
+  options?: { streamingMessageIndex?: number },
 ): ChatMessage[] {
   const list: ChatMessage[] = [];
   for (const message of messages) {
     if (message.role === "user" || message.role === "assistant") {
-      list.push(toChatMessage(message));
+      list.push(
+        toChatMessage(message, {
+          streaming: options?.streamingMessageIndex === list.length,
+        }),
+      );
     } else if (
       message.role === "toolResult" &&
       "toolCallId" in message &&
@@ -313,12 +341,26 @@ export function toChatMessages(
 export function usePiSseChat() {
   const messages = usePiThreadState((s) => s.messages);
   const streamingIndex = usePiThreadState((s) => s.streamingMessageIndex);
-  const { status, readiness, cancel, setModel, setThinkingLevel } =
-    usePiRuntimeExtras();
+  const extras = usePiRuntimeExtras();
+  const { status, readiness, cancel, setModel, setThinkingLevel } = extras;
+  const threadId = extras.metadata?.id;
+  const controller = (
+    extras as { controller?: { connect?: () => () => void } }
+  ).controller;
+
+  // Official SDK: subscribe, then prompt. react-pi only auto-connects while
+  // `status === "running"`; `controller.connect()` is the documented always-live
+  // subscribe so idle sidebar clicks and the first send see message_start /
+  // text_delta / agent_end instead of staying on the "working" placeholder.
+  useEffect(() => {
+    if (!threadId || !controller?.connect) return;
+    return controller.connect();
+  }, [controller, threadId]);
 
   const chatMessages = useMemo<ChatMessage[]>(
-    () => toChatMessages(messages),
-    [messages],
+    () =>
+      toChatMessages(messages, { streamingMessageIndex: streamingIndex }),
+    [messages, streamingIndex],
   );
 
   const isStreaming = streamingIndex !== undefined || status === "running";
