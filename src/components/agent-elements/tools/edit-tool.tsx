@@ -1,5 +1,5 @@
 import React, { memo } from "react";
-import { MultiFileDiff, type FileContents } from "@pierre/diffs/react";
+import { MultiFileDiff, PatchDiff, type FileContents } from "@pierre/diffs/react";
 import { TextShimmer } from "../text-shimmer";
 import type { TimelineStep, StepState } from "../types/timeline";
 import { useToolComplete } from "../hooks/use-tool-complete";
@@ -60,6 +60,16 @@ export function EditToolDiffCard({
   React.useEffect(() => {
     setIsExpanded(!isCollapsible);
   }, [isCollapsible]);
+
+  /** pi returns the settled diff as a unified patch string — render it
+   *  directly with PatchDiff so hunk structure and line numbers stay true
+   *  instead of fabricating file contents for MultiFileDiff. */
+  const patchText = React.useMemo(() => {
+    const details = output?.details as { patch?: unknown } | undefined;
+    return typeof details?.patch === "string" && details.patch
+      ? details.patch
+      : undefined;
+  }, [output]);
 
   const diffFiles = React.useMemo(() => {
     const fileLabel = fileName || "file";
@@ -147,7 +157,7 @@ export function EditToolDiffCard({
           // contrast in dark mode — the wrapper forces `dark:bg-black` for the
           // diff body, which would otherwise bleed into the header.
           "flex items-center justify-between px-2.5 py-0 h-7 bg-an-tool-background " +
-          (isPending && !diffFiles
+          (isPending && !diffFiles && !patchText
             ? ""
             : "border-b border-an-tool-border-color")
         }
@@ -156,7 +166,7 @@ export function EditToolDiffCard({
           {hasFileName && (
             <FileExtIcon filename={fileName} className="w-3 h-3 shrink-0" />
           )}
-          {isPending && !diffFiles ? (
+          {isPending && !hasFileName ? (
             <TextShimmer as="span" duration={1.2} className="text-xs">
               Generating...
             </TextShimmer>
@@ -165,7 +175,10 @@ export function EditToolDiffCard({
               {isWrite ? "Creating" : "Editing"} {fileName}
             </TextShimmer>
           ) : (
-            <span className="text-xs text-an-tool-color-muted truncate">
+            <span
+              className="text-xs text-an-tool-color-muted truncate"
+              title={step.filePath || undefined}
+            >
               {isWrite ? "Created" : "Edited"} {fileName}
             </span>
           )}
@@ -189,7 +202,7 @@ export function EditToolDiffCard({
           </span>
         )}
       </div>
-      {diffFiles ? (
+      {patchText || diffFiles ? (
         <div className={`${diffClassName} text-[12px]`} style={diffCssVars}>
           <div
             className={isCollapsible ? "group/edit-diff relative" : "relative"}
@@ -201,20 +214,35 @@ export function EditToolDiffCard({
                   : undefined
               }
             >
-              <MultiFileDiff
-                key={themeType}
-                oldFile={diffFiles.oldFile}
-                newFile={diffFiles.newFile}
-                className={diffClassName}
-                style={diffCssVars}
-                options={{
-                  theme: { dark: "github-dark", light: "github-light" },
-                  themeType,
-                  unsafeCSS: diffUnsafeCss,
-                  diffStyle: "unified",
-                  disableFileHeader: true,
-                }}
-              />
+              {patchText ? (
+                <PatchDiff
+                  key={themeType}
+                  patch={patchText}
+                  className={diffClassName}
+                  style={diffCssVars}
+                  options={{
+                    theme: { dark: "github-dark", light: "github-light" },
+                    themeType,
+                    unsafeCSS: diffUnsafeCss,
+                    disableFileHeader: true,
+                  }}
+                />
+              ) : (
+                <MultiFileDiff
+                  key={themeType}
+                  oldFile={diffFiles!.oldFile}
+                  newFile={diffFiles!.newFile}
+                  className={diffClassName}
+                  style={diffCssVars}
+                  options={{
+                    theme: { dark: "github-dark", light: "github-light" },
+                    themeType,
+                    unsafeCSS: diffUnsafeCss,
+                    diffStyle: "unified",
+                    disableFileHeader: true,
+                  }}
+                />
+              )}
             </div>
             {isCollapsible && (
               <>

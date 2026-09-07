@@ -24,11 +24,19 @@ import {
 import {
   ArrowPathIcon,
   ArrowUpIcon,
+  AtSymbolIcon,
+  BoltIcon,
+  BoltSlashIcon,
   ChevronDownIcon,
   CodeBracketIcon,
   CommandLineIcon,
   ComputerDesktopIcon,
   FolderIcon,
+  LightBulbIcon,
+  MinusIcon,
+  PaperClipIcon,
+  RocketLaunchIcon,
+  SparklesIcon,
   Squares2X2Icon,
   StopIcon,
 } from "@heroicons/react/24/outline";
@@ -83,6 +91,15 @@ import {
 import { TopBar } from "@/components/top-bar";
 import { isTauri, pathBasename, pickWorkspaceFolder } from "@/lib/pick-folder";
 import type { ChatPart } from "@/lib/pi-agent";
+import {
+  ComposerAttachChips,
+  ComposerAttachNotice,
+  ComposerDropOverlay,
+} from "@/components/chat/ComposerAttach";
+import { ComposerMentionMenu } from "@/components/chat/ComposerMentionMenu";
+import { useComposerAttach } from "@/components/chat/use-composer-attach";
+import { useComposerMentions } from "@/components/chat/use-composer-mentions";
+import type { ComposerImage } from "@/lib/composer-attach";
 
 /** toolName → tool-card part type: bash → tool-Bash, web_fetch → tool-WebFetch. */
 function pascalToolName(name: string): string {
@@ -93,6 +110,15 @@ function pascalToolName(name: string): string {
 function toUIPart(part: ChatPart, key: string): UIMessage["parts"] {
   if (part.type === "text") {
     return part.text ? [{ type: "text", text: part.text }] : [];
+  }
+  if (part.type === "image") {
+    return [
+      {
+        type: "image",
+        image: part.url,
+        ...(part.name ? { filename: part.name } : {}),
+      },
+    ] as unknown as UIMessage["parts"];
   }
   if (part.type === "thinking") {
     const done = part.done === true;
@@ -687,6 +713,10 @@ const THINKING_LEVEL_LABELS: Record<string, string> = {
 const chipTriggerClass =
   "flex shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-0.5 text-xs text-muted-fg transition-colors duration-100 hover:bg-muted hover:text-fg data-[pressed]:bg-muted disabled:opacity-50";
 
+/** Square icon controls in the composer toolbar — same 26px hit as Send. */
+const composerIconBtnClass =
+  "grid size-6.5 shrink-0 cursor-pointer place-items-center rounded-lg text-muted-fg outline-hidden transition-colors duration-100 hover:bg-muted hover:text-fg focus-visible:ring-2 focus-visible:ring-ring";
+
 /** Provider brand icons (tech-stack-icons); unknown providers fall back to
  *  the pi glyph. Keys are pi provider ids, matched case-insensitively.
  *  Providers the library doesn't ship map to custom mark components. */
@@ -966,57 +996,17 @@ function OpenInMenu({ workspacePath }: { workspacePath: string }) {
   );
 }
 
-/** Signal bars used for thinking-effort levels; `lit` of 4 bars filled. */
-function EffortGlyph({
-  lit,
-  className,
-}: {
-  lit: 0 | 1 | 2 | 3 | 4;
-  className?: string;
-}) {
-  const heights = [4, 6.5, 9, 11.5];
-  return (
-    <svg viewBox="0 0 14 14" aria-hidden="true" className={className}>
-      {heights.map((h, i) => (
-        <rect
-          key={i}
-          x={1.4 + i * 3.3}
-          y={12.6 - h}
-          width={2.1}
-          height={h}
-          rx={0.8}
-          className={i < lit ? "fill-current" : "fill-current opacity-25"}
-        />
-      ))}
-    </svg>
-  );
-}
-
-/** Dot-in-circle used for the "off" effort level. */
-function EffortOffGlyph({ className }: { className?: string }) {
-  return (
-    <svg
-      viewBox="0 0 14 14"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.4}
-      aria-hidden="true"
-      className={className}
-    >
-      <circle cx="7" cy="7" r="4.6" />
-      <path d="M3.9 3.9l6.2 6.2" />
-    </svg>
-  );
-}
-
-const EFFORT_ICONS: Record<string, (className: string) => React.ReactNode> = {
-  off: (c) => <EffortOffGlyph className={c} />,
-  minimal: (c) => <EffortGlyph lit={1} className={c} />,
-  low: (c) => <EffortGlyph lit={2} className={c} />,
-  medium: (c) => <EffortGlyph lit={3} className={c} />,
-  high: (c) => <EffortGlyph lit={4} className={c} />,
-  xhigh: (c) => <EffortGlyph lit={4} className={c} />,
-  max: (c) => <EffortGlyph lit={4} className={c} />,
+const EFFORT_ICONS: Record<
+  string,
+  (className: string) => React.ReactNode
+> = {
+  off: (c) => <BoltSlashIcon className={c} strokeWidth={1.8} />,
+  minimal: (c) => <MinusIcon className={c} strokeWidth={1.8} />,
+  low: (c) => <LightBulbIcon className={c} strokeWidth={1.8} />,
+  medium: (c) => <BoltIcon className={c} strokeWidth={1.8} />,
+  high: (c) => <BoltIcon className={c} strokeWidth={1.8} />,
+  xhigh: (c) => <RocketLaunchIcon className={c} strokeWidth={1.8} />,
+  max: (c) => <RocketLaunchIcon className={c} strokeWidth={1.8} />,
 };
 
 function Composer({
@@ -1069,7 +1059,7 @@ function Composer({
   contextUsage?: PiContextUsage;
   /** True while pi is compacting the session's context. */
   compacting: boolean;
-  onSend: (text: string) => void;
+  onSend: (text: string, images: ComposerImage[]) => void;
   onAbort: () => void;
   onSelectModel: (provider: string, modelId: string) => void;
   onSelectThinkingLevel: (level: string) => void;
@@ -1081,9 +1071,21 @@ function Composer({
 }) {
   const [draft, setDraft] = useState("");
   const taRef = useRef<HTMLTextAreaElement>(null);
-  const canSend = draft.trim().length > 0;
+  const cardRef = useRef<HTMLDivElement>(null);
   // Git state of the active workspace — drives the branch chip + picker.
   const git = useWorkspaceGit(workspacePath);
+  const mentions = useComposerMentions({
+    draft,
+    setDraft,
+    textareaRef: taRef,
+    workspacePath,
+  });
+  const attach = useComposerAttach({
+    workspacePath,
+    insertFileMentions: mentions.insertFileMentions,
+    onDragStart: mentions.dismiss,
+  });
+  const canSend = draft.trim().length > 0 || attach.images.length > 0;
 
   useEffect(() => {
     const el = taRef.current;
@@ -1110,10 +1112,12 @@ function Composer({
       return;
     }
     const text = draft.trim();
-    if (!text) return;
+    if (!text && attach.images.length === 0) return;
+    const images = attach.images;
     setDraft("");
+    attach.clearImages();
     if (taRef.current) taRef.current.style.height = "auto";
-    onSend(text);
+    onSend(text, images);
   };
 
   const { contains } = useFilter({ sensitivity: "base" });
@@ -1145,22 +1149,73 @@ function Composer({
           submit();
         }}
       >
-        <div className="rounded-[10px] border border-border bg-card px-4 pt-3.5 pb-2.5 shadow-[0_8px_24px_rgba(0,0,0,0.35)]">
+        <div
+          ref={cardRef}
+          onDragEnter={attach.onDragEnter}
+          onDragOver={attach.onDragOver}
+          onDragLeave={attach.onDragLeave}
+          onDrop={attach.onDrop}
+          className={twMerge(
+            "relative rounded-[10px] border bg-card px-4 pt-3.5 pb-2.5 shadow-[0_8px_24px_rgba(0,0,0,0.35)] transition-colors duration-150",
+            attach.dragActive
+              ? "border-fg/40"
+              : "border-border focus-within:border-ring/70",
+          )}
+        >
+          <ComposerDropOverlay active={attach.dragActive} />
+          <ComposerAttachChips
+            images={attach.images}
+            onRemove={attach.removeImage}
+          />
           <textarea
             ref={taRef}
             rows={1}
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) =>
+              mentions.onDraftChange(e.target.value, e.target.selectionStart)
+            }
+            onClick={mentions.syncCaret}
+            onKeyUp={mentions.syncCaret}
+            onSelect={mentions.syncCaret}
+            onPaste={attach.onPaste}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
+              if (mentions.onKeyDown(e)) return;
+              if (
+                e.key === "Enter" &&
+                !e.shiftKey &&
+                !e.nativeEvent.isComposing
+              ) {
                 e.preventDefault();
                 submit();
               }
             }}
             placeholder="Do anything…"
             aria-label="Prompt"
+            aria-autocomplete="list"
+            aria-expanded={mentions.open}
+            aria-controls={mentions.open ? mentions.listboxId : undefined}
+            aria-activedescendant={mentions.activeOptionId}
+            aria-haspopup="listbox"
             spellCheck={false}
             className="block w-full resize-none bg-transparent text-[13px] leading-[18px] text-fg outline-none placeholder:text-muted-fg"
+          />
+          <ComposerAttachNotice notice={attach.notice} />
+
+          <ComposerMentionMenu
+            open={mentions.open}
+            triggerRef={cardRef}
+            kind={mentions.mention?.kind ?? "slash"}
+            items={mentions.items}
+            highlightedIndex={mentions.highlightedIndex}
+            loading={mentions.loading}
+            error={mentions.error}
+            emptyMessage={mentions.emptyMessage}
+            listboxId={mentions.listboxId}
+            onHighlight={mentions.setHighlighted}
+            onSelect={mentions.select}
+            onOpenChange={(next) => {
+              if (!next) mentions.dismiss();
+            }}
           />
 
           <div className="mt-3 flex items-center gap-x-2">
@@ -1271,6 +1326,9 @@ function Composer({
                 isDisabled={!connected}
                 className={chipTriggerClass}
               >
+                {EFFORT_ICONS[thinkingLevel]?.("size-3.5") ?? (
+                  <BoltIcon className="size-3.5" strokeWidth={1.8} />
+                )}
                 {THINKING_LEVEL_LABELS[thinkingLevel] ?? thinkingLevel}
                 <ChevronDownIcon
                   className="size-3 shrink-0 text-muted-fg"
@@ -1290,7 +1348,7 @@ function Composer({
                     className="sm:px-2 sm:py-1"
                   >
                     {EFFORT_ICONS[level]?.("size-3.5") ?? (
-                      <EffortGlyph lit={3} className="size-3.5" />
+                      <BoltIcon className="size-3.5" strokeWidth={1.8} />
                     )}
                     <MenuLabel className="text-xs/5">
                       {THINKING_LEVEL_LABELS[level] ?? level}
@@ -1308,24 +1366,58 @@ function Composer({
               </MenuContent>
             </Menu>
 
-            <button
-              type="submit"
-              aria-label={isStreaming ? "Stop" : "Send"}
-              className={twMerge(
-                "ml-auto flex size-6.5 shrink-0 cursor-pointer items-center justify-center rounded-full transition-colors duration-150",
-                isStreaming
-                  ? "bg-secondary text-fg hover:bg-muted"
-                  : canSend
-                    ? "bg-fg text-bg hover:bg-fg/80"
-                    : "cursor-default bg-secondary text-muted-fg/60",
-              )}
-            >
-              {isStreaming ? (
-                <StopIcon className="size-2.5 fill-current" />
-              ) : (
-                <ArrowUpIcon className="size-3.5" strokeWidth={2} />
-              )}
-            </button>
+            <div className="ml-auto flex items-center gap-1">
+              <button
+                type="button"
+                aria-label="Attach files"
+                title="Attach files"
+                onClick={() => void attach.pickFiles()}
+                className={twMerge(
+                  composerIconBtnClass,
+                  attach.images.length > 0
+                    ? "bg-muted text-fg"
+                    : "bg-secondary",
+                )}
+              >
+                <PaperClipIcon className="size-3.5" strokeWidth={1.8} />
+              </button>
+              <button
+                type="button"
+                aria-label="Insert a skill or prompt"
+                title="Skills and prompts"
+                onClick={() => mentions.insertTrigger("/")}
+                className={twMerge(composerIconBtnClass, "bg-secondary")}
+              >
+                <SparklesIcon className="size-3.5" strokeWidth={1.8} />
+              </button>
+              <button
+                type="button"
+                aria-label="Mention a file"
+                title="Mention a file"
+                onClick={() => mentions.insertTrigger("@")}
+                className={twMerge(composerIconBtnClass, "bg-secondary")}
+              >
+                <AtSymbolIcon className="size-3.5" strokeWidth={1.8} />
+              </button>
+              <button
+                type="submit"
+                aria-label={isStreaming ? "Stop" : "Send"}
+                className={twMerge(
+                  "flex size-6.5 shrink-0 cursor-pointer items-center justify-center rounded-full transition-colors duration-150",
+                  isStreaming
+                    ? "bg-secondary text-fg hover:bg-muted"
+                    : canSend
+                      ? "bg-fg text-bg hover:bg-fg/80"
+                      : "cursor-default bg-secondary text-muted-fg/60",
+                )}
+              >
+                {isStreaming ? (
+                  <StopIcon className="size-2.5 fill-current" />
+                ) : (
+                  <ArrowUpIcon className="size-3.5" strokeWidth={2} />
+                )}
+              </button>
+            </div>
           </div>
         </div>
 
@@ -1436,7 +1528,7 @@ function EmptyState({
   return (
     <div
       ref={emptyStateRef}
-      className="relative flex flex-1 flex-col items-center justify-center overflow-hidden pb-12"
+      className="relative flex min-h-0 flex-1 flex-col items-center justify-center overflow-hidden pb-12"
       style={blobStyle}
       onPointerMove={updateBlobTarget}
       onPointerLeave={resetBlobTarget}
@@ -1663,9 +1755,23 @@ export default function ChatPanel({
     );
   }, [uiMessages]);
 
-  const handleSend = (text: string) => {
-    aui.composer.setText(text);
-    aui.composer.send();
+  const handleSend = (text: string, images: ComposerImage[]) => {
+    void (async () => {
+      try {
+        aui.composer.setText(text);
+        for (const image of images) {
+          await aui.composer.addAttachment({
+            name: image.name,
+            contentType: image.mimeType,
+            type: "image",
+            content: [{ type: "image", image: image.dataUrl }],
+          });
+        }
+        aui.composer.send();
+      } catch (error) {
+        console.error("[orbit] failed to send attachments:", error);
+      }
+    })();
   };
 
   /** Insert a message into the composer as a markdown blockquote. */
@@ -1680,7 +1786,7 @@ export default function ChatPanel({
   };
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col bg-bg">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-bg">
       <TopBar
         title={headerTitle}
         canGoBack={canGoBack}
@@ -1706,8 +1812,8 @@ export default function ChatPanel({
         }
       />
 
-      <div className="flex min-h-0 flex-1">
-        <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           {messages.length === 0 ? (
             <EmptyState
               workspaceName={workspaceName}

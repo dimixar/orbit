@@ -43,6 +43,33 @@ function getDiffLinesFromPatch(
   return result;
 }
 
+/** Parse a unified diff string (pi's `details.patch`) into typed lines.
+ *  Only lines after the first `@@` hunk header are considered, so file
+ *  headers (---/+++/===) never leak into the diff body. */
+function parseUnifiedPatchLines(
+  patch: string,
+): { type: "add" | "remove" | "context"; content: string }[] {
+  const result: { type: "add" | "remove" | "context"; content: string }[] = [];
+  let inHunk = false;
+
+  for (const line of patch.split("\n")) {
+    if (!inHunk) {
+      if (line.startsWith("@@")) inHunk = true;
+      continue;
+    }
+    if (line.startsWith("+")) {
+      result.push({ type: "add", content: line.slice(1) });
+    } else if (line.startsWith("-")) {
+      result.push({ type: "remove", content: line.slice(1) });
+    } else if (line.startsWith(" ")) {
+      result.push({ type: "context", content: line.slice(1) });
+    }
+    // "\\ No newline at end of file" markers carry no displayable line.
+  }
+
+  return result;
+}
+
 export function mapToolStateToStepState(
   aiState: "partial-call" | "call" | "result",
 ): StepState {
@@ -76,8 +103,9 @@ function extractToolDetail(
     case "Edit":
     case "Write":
     case "Read":
-      return args?.file_path
-        ? (String(args.file_path).split("/").pop() ?? "")
+      // pi sends `path`; keep `file_path` for non-pi runtimes.
+      return args?.path ?? args?.file_path
+        ? (String(args.path ?? args.file_path).split("/").pop() ?? "")
         : "";
     case "Grep":
       return args?.pattern ? String(args.pattern) : "";
@@ -148,7 +176,9 @@ export function mapToolInvocationToStep(
   }
 
   if (toolName === "Edit" || toolName === "Write" || toolName === "Read") {
-    step.filePath = args?.file_path ? String(args.file_path) : undefined;
+    // pi sends `path`; `file_path` covers non-pi runtimes.
+    const rawPath = args?.path ?? args?.file_path;
+    step.filePath = rawPath ? String(rawPath) : undefined;
   }
 
   if (toolName === "Write") {
@@ -169,9 +199,22 @@ export function mapToolInvocationToStep(
     }
   }
 
-  if (toolName === "Edit" && Array.isArray(result?.structuredPatch)) {
-    step.diffStats = calculateDiffStatsFromPatch(result.structuredPatch);
-    step.diffLines = getDiffLinesFromPatch(result.structuredPatch);
+  if (toolName === "Edit") {
+    if (typeof result?.details?.patch === "string" && result.details.patch) {
+      // pi returns a unified diff string — parse it for the card body and
+      // the +N/-N header stats.
+      step.diffLines = parseUnifiedPatchLines(result.details.patch);
+      const added = step.diffLines.filter((l) => l.type === "add").length;
+      const removed = step.diffLines.filter((l) => l.type === "remove").length;
+      if (added > 0 || removed > 0) {
+        step.diffStats = [added > 0 ? `+${added}` : "", removed > 0 ? `-${removed}` : ""]
+          .filter(Boolean)
+          .join(" ");
+      }
+    } else if (Array.isArray(result?.structuredPatch)) {
+      step.diffStats = calculateDiffStatsFromPatch(result.structuredPatch);
+      step.diffLines = getDiffLinesFromPatch(result.structuredPatch);
+    }
   }
 
   if (

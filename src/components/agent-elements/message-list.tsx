@@ -2,7 +2,6 @@ import React, {
   memo,
   useRef,
   useEffect,
-  useLayoutEffect,
   useCallback,
   useState,
   useMemo,
@@ -28,6 +27,7 @@ import {
 } from "@tabler/icons-react";
 import { ToolRenderer as DefaultToolRenderer } from "./tools/tool-renderer";
 import { normalizeAssistantToolParts } from "./utils/tool-part-normalizer";
+import { useStickToLatest } from "./use-stick-to-latest";
 import { ThinkingSteps } from "./thinking-steps";
 import {
   fetchWorkspaceChanges,
@@ -273,7 +273,9 @@ function GitChangesCard({
   };
 
   return (
-    <div className="overflow-hidden rounded-lg border border-border bg-card">
+    // mt-4 lifts the card clear of the message prose above it (which sits at
+    // a 12px internal rhythm), so the turn's outcome reads as its own group.
+    <div className="mt-4 overflow-hidden rounded-lg border border-border bg-card">
       <div className="flex items-center gap-2 px-3 py-2">
         <span className="text-xs font-medium text-fg">
           Changed {files.length === 1 ? "1 file" : `${files.length} files`}
@@ -525,14 +527,21 @@ function groupMessagesIntoTurns(messages: UIMessage[]): Turn[] {
 }
 
 /**
- * Chat transcript scroller. Scroll behavior (follow-streaming, release on
- * user scroll, jump-to-latest, opening position) is owned by the shadcn
- * MessageScroller primitive; this component owns transcript rendering.
+ * Chat transcript scroller. Opening position and the jump-to-latest chip
+ * stay on MessageScroller. Stick-to-bottom while a reply streams is owned
+ * by `useStickToLatest` — the primitive otherwise pins a new turn to the
+ * *start* of the viewport, which hides the latest tokens as they arrive.
+ *
+ * `autoScroll` stays off. A Pi snapshot refresh (model / thinking-level
+ * change) remounts the same turns; MessageScroller then treats that as a
+ * content change, zeros its end-spacer, and align-starts the last item —
+ * which looks like the chat jumped to the middle. We already follow the
+ * live edge ourselves.
  */
 export const MessageList = memo(function MessageList(props: MessageListProps) {
   return (
     <MessageScroller.Provider
-      autoScroll
+      autoScroll={false}
       defaultScrollPosition={
         props.initialScrollBehavior === "top" ? "start" : "end"
       }
@@ -560,6 +569,7 @@ const MessageListInner = memo(function MessageListInner({
   const { scrollToEnd } = useMessageScroller();
   const [activeCopyId, setActiveCopyId] = useState<string | null>(null);
   const viewportElRef = useRef<HTMLDivElement | null>(null);
+  const contentElRef = useRef<HTMLDivElement | null>(null);
   // The rail replaces the scrollbar while visible: pad the transcript away
   // from the rail and hide the native scrollbar (beUI PreviewRail behavior).
   const [railVisible, setRailVisible] = useState(false);
@@ -600,26 +610,24 @@ const MessageListInner = memo(function MessageListInner({
     return null;
   }, [normalizedMessages]);
 
-  const lastUserMessageIdRef = useRef(lastUserMessageId);
-  const lastUserFingerprintRef = useRef(lastUserFingerprint);
-  useLayoutEffect(() => {
-    const isRebuild =
-      lastUserFingerprint !== null &&
-      lastUserFingerprint === lastUserFingerprintRef.current;
-    lastUserFingerprintRef.current = lastUserFingerprint;
-    if (
-      lastUserMessageId &&
-      lastUserMessageId !== lastUserMessageIdRef.current
-    ) {
-      // A new id with an unchanged fingerprint is the pi runtime re-projecting
-      // the transcript (model / thinking-level change, agent_end refresh) —
-      // not a send. Never move the viewport for those. A genuine send jumps
-      // to the new turn so the user sees their message echoed; the scroller
-      // then keeps following the streaming reply (autoScroll re-engages).
-      if (!isRebuild) scrollToEnd({ behavior: "auto" });
-      lastUserMessageIdRef.current = lastUserMessageId;
-    }
-  }, [lastUserMessageId, lastUserFingerprint, scrollToEnd]);
+  const followKey = useMemo(() => {
+    const last = normalizedMessages[normalizedMessages.length - 1];
+    return [
+      normalizedMessages.length,
+      last?.id ?? "",
+      last ? getTextFromParts(last.parts ?? [], "").length : 0,
+      last?.parts?.length ?? 0,
+    ].join(":");
+  }, [normalizedMessages]);
+
+  const { onViewportScroll, pinLatest } = useStickToLatest({
+    viewportRef: viewportElRef,
+    contentRef: contentElRef,
+    scrollToEnd,
+    lastUserMessageId,
+    lastUserFingerprint,
+    followKey,
+  });
 
   const planningLabel = "Processing...";
   const turns = useMemo(
@@ -636,11 +644,12 @@ const MessageListInner = memo(function MessageListInner({
   }, [isStreaming, normalizedMessages, turns]);
 
   return (
-    <MessageScroller.Root className="an-chat-root relative flex min-h-0 flex-1">
+    <MessageScroller.Root className="an-chat-root relative flex min-h-0 flex-1 flex-col overflow-hidden">
       <MessageScroller.Viewport
         ref={viewportElRef}
+        onScroll={onViewportScroll}
         className={cn(
-          "an-message-list min-h-0 flex-1 overflow-y-auto",
+          "an-message-list min-h-0 flex-1 overflow-y-auto overflow-anchor-none overscroll-y-contain",
           // While the rail is up it replaces the scrollbar entirely and the
           // transcript pads away from the ticks (25px rail + 25px gap + 20px
           // clearance).
@@ -649,7 +658,10 @@ const MessageListInner = memo(function MessageListInner({
           className,
         )}
       >
-        <MessageScroller.Content className="mx-auto w-full max-w-[calc(var(--an-max-width)+3rem)] space-y-2 px-6 py-6">
+        <MessageScroller.Content
+          ref={contentElRef}
+          className="mx-auto w-full max-w-[calc(var(--an-max-width)+3rem)] space-y-2 px-6 py-6"
+        >
           {turns.map((turn, turnIndex) => {
             const isLastTurn = turnIndex === turns.length - 1;
             const turnKey = turn.userMsg?.id ?? `turn-${turnIndex}`;
@@ -658,7 +670,7 @@ const MessageListInner = memo(function MessageListInner({
               <MessageScroller.Item
                 key={turnKey}
                 messageId={turnKey}
-                scrollAnchor={Boolean(turn.userMsg)}
+                scrollAnchor={false}
                 className="relative space-y-2"
               >
                 {turn.userMsg &&
@@ -794,7 +806,7 @@ const MessageListInner = memo(function MessageListInner({
           })}
         </MessageScroller.Content>
       </MessageScroller.Viewport>
-      <JumpToLatestButton />
+      <JumpToLatestButton onJump={pinLatest} />
       <MessageRail
         turns={turns}
         viewportElRef={viewportElRef}
@@ -1070,10 +1082,14 @@ function MessageRail({
   );
 }
 
-function JumpToLatestButton() {
+function JumpToLatestButton({ onJump }: { onJump: () => void }) {
   return (
     <MessageScroller.Button
       direction="end"
+      onClick={(event) => {
+        event.preventDefault();
+        onJump();
+      }}
       aria-label="Go to latest message"
       title="Go to latest message"
       className="absolute bottom-3 left-1/2 z-10 flex size-7 -translate-x-1/2 cursor-pointer items-center justify-center rounded-full border border-border bg-card text-muted-fg shadow-[0_8px_24px_rgba(0,0,0,0.18),0_1px_2px_rgba(0,0,0,0.08)] transition-[opacity,background-color,color] duration-150 hover:text-fg inert:pointer-events-none inert:opacity-0"

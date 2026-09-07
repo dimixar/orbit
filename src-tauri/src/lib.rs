@@ -16,6 +16,12 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
+/// Read a user-picked or dropped file for the composer (images → data URLs).
+#[tauri::command]
+fn read_local_file(path: String) -> Result<Vec<u8>, String> {
+    std::fs::read(&path).map_err(|e| format!("couldn't read {path}: {e}"))
+}
+
 // ---------------------------------------------------------------------------
 // Pi SSE server (agent/sse-server.ts) — the frontend talks to it over
 // HTTP/SSE on localhost:8913. Auto-start it with the app if it isn't running.
@@ -27,31 +33,112 @@ const SSE_SERVER_ID: &str = "orbit-pi-sse";
 /// Handle to the spawned SSE server so we can kill it when the app exits.
 struct SseServerChild(Mutex<Option<Child>>);
 
-fn sse_server_is_up() -> bool {
-    let addr = match format!("127.0.0.1:{SSE_PORT}").to_socket_addrs() {
-        Ok(mut addrs) => match addrs.next() {
-            Some(addr) => addr,
-            None => return false,
-        },
-        Err(_) => return false,
-    };
-    let mut stream = match TcpStream::connect_timeout(&addr, Duration::from_millis(300)) {
-        Ok(stream) => stream,
-        Err(_) => return false,
-    };
+fn parse_health_pid(body: &str) -> Option<u32> {
+    let key = "\"pid\"";
+    let start = body.find(key)?;
+    let rest = body[start + key.len()..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+fn sse_health_response() -> Option<String> {
+    let addr = format!("127.0.0.1:{SSE_PORT}").to_socket_addrs().ok()?.next()?;
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(300)).ok()?;
     let _ = stream.set_read_timeout(Some(Duration::from_millis(700)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(700)));
-    if stream
+    stream
         .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-        .is_err()
-    {
-        return false;
-    }
+        .ok()?;
     let mut response = String::new();
-    if stream.read_to_string(&mut response).is_err() {
-        return false;
+    stream.read_to_string(&mut response).ok()?;
+    if response.starts_with("HTTP/1.1 200") && response.contains(SSE_SERVER_ID) {
+        Some(response)
+    } else {
+        None
     }
-    response.starts_with("HTTP/1.1 200") && response.contains(SSE_SERVER_ID)
+}
+
+fn sse_server_is_up() -> bool {
+    sse_health_response().is_some()
+}
+
+fn kill_process(pid: u32) {
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .status();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
+    }
+}
+
+fn take_stored_sse_child(app: &AppHandle) -> Option<Child> {
+    let state = app.try_state::<SseServerChild>()?;
+    let mut guard = state.0.lock().ok()?;
+    guard.take()
+}
+
+fn store_sse_child(app: &AppHandle, child: Child) {
+    if let Some(state) = app.try_state::<SseServerChild>() {
+        if let Ok(mut guard) = state.0.lock() {
+            *guard = Some(child);
+            return;
+        }
+    }
+    app.manage(SseServerChild(Mutex::new(Some(child))));
+}
+
+fn wait_for_sse_server_down(timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if !sse_server_is_up() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(150));
+    }
+    false
+}
+
+fn stop_sse_server(app: &AppHandle) {
+    let health_pid = sse_health_response().as_deref().and_then(parse_health_pid);
+    if let Some(mut child) = take_stored_sse_child(app) {
+        eprintln!("[orbit] stopping SSE server (pid {})", child.id());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    if let Some(pid) = health_pid {
+        if sse_server_is_up() {
+            eprintln!("[orbit] stopping SSE server (pid {pid})");
+            kill_process(pid);
+        }
+    }
+}
+
+fn start_sse_server(app: &AppHandle) -> Result<(), String> {
+    let (child, how) = spawn_sse_server(app)?;
+    eprintln!("[orbit] starting SSE server via {how} (pid {})", child.id());
+    store_sse_child(app, child);
+    if wait_for_sse_server(Duration::from_secs(15)) {
+        eprintln!("[orbit] SSE server is up on port {SSE_PORT}");
+        Ok(())
+    } else {
+        Err("SSE server did not come up within 15s".to_string())
+    }
+}
+
+#[tauri::command]
+fn restart_sse_server(app: AppHandle) -> Result<(), String> {
+    stop_sse_server(&app);
+    if !wait_for_sse_server_down(Duration::from_secs(8)) {
+        return Err("could not stop the pi agent".to_string());
+    }
+    start_sse_server(&app)
 }
 
 /// Poll until the SSE server accepts connections (or we give up).
@@ -136,19 +223,8 @@ fn ensure_sse_server(app: &AppHandle) {
         return;
     }
 
-    match spawn_sse_server(app) {
-        Ok((child, how)) => {
-            eprintln!("[orbit] starting SSE server via {how} (pid {})", child.id());
-            app.manage(SseServerChild(Mutex::new(Some(child))));
-            if wait_for_sse_server(Duration::from_secs(15)) {
-                eprintln!("[orbit] SSE server is up on port {SSE_PORT}");
-            } else {
-                eprintln!("[orbit] warning: SSE server did not come up within 15s");
-            }
-        }
-        Err(err) => {
-            eprintln!("[orbit] failed to start SSE server: {err}");
-        }
+    if let Err(err) = start_sse_server(app) {
+        eprintln!("[orbit] failed to start SSE server: {err}");
     }
 }
 
@@ -161,22 +237,34 @@ pub fn run() {
             ensure_sse_server(app.handle());
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![greet])
+        .invoke_handler(tauri::generate_handler![
+            greet,
+            read_local_file,
+            restart_sse_server
+        ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
     app.run(|app_handle, event| {
         if let tauri::RunEvent::Exit = event {
             // Kill the SSE server we spawned so it doesn't outlive the app.
-            if let Some(state) = app_handle.try_state::<SseServerChild>() {
-                if let Ok(mut guard) = state.0.lock() {
-                    if let Some(mut child) = guard.take() {
-                        eprintln!("[orbit] stopping SSE server (pid {})", child.id());
-                        let _ = child.kill();
-                        let _ = child.wait();
-                    }
-                }
-            }
+            stop_sse_server(app_handle);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_health_pid;
+
+    #[test]
+    fn parse_health_pid_reads_json_field() {
+        assert_eq!(
+            parse_health_pid(
+                "HTTP/1.1 200 OK\r\n\r\n{\"id\":\"orbit-pi-sse\",\"ok\":true,\"pid\":4321}"
+            ),
+            Some(4321)
+        );
+        assert_eq!(parse_health_pid("no pid here"), None);
+    }
 }

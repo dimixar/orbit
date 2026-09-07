@@ -99,6 +99,26 @@ describe("toChatMessages", () => {
     expect(secondTools[0]!.output).toBe("second output");
   });
 
+  it("keeps string user prompts and image attachments", () => {
+    const chat = toChatMessages([
+      { role: "user", content: "list files", timestamp: 0 },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "look" },
+          { type: "image", data: "AAAA", mimeType: "image/png" },
+        ],
+        timestamp: 1,
+      },
+    ]);
+
+    expect(chat[0]!.parts).toEqual([{ type: "text", text: "list files" }]);
+    expect(chat[1]!.parts).toEqual([
+      { type: "text", text: "look" },
+      { type: "image", url: "data:image/png;base64,AAAA" },
+    ]);
+  });
+
   it("marks error results on the merged part", () => {
     const messages: PiAgentMessage[] = [
       assistantMessage([
@@ -111,6 +131,34 @@ describe("toChatMessages", () => {
     const tool = chat[0]!.parts.find((p) => p.type === "tool")!;
     expect(tool.isError).toBe(true);
     expect(tool.output).toBe("command not found");
+  });
+
+  it("keeps thinking open on the streaming assistant message", () => {
+    const messages: PiAgentMessage[] = [
+      { role: "user", content: "think", timestamp: 0 },
+      {
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "hmm" }],
+        api: "openai-completions",
+        provider: "synthetic",
+        model: "test-model",
+        usage,
+        stopReason: "stop",
+        timestamp: 1,
+      },
+    ];
+
+    const streaming = toChatMessages(messages, { streamingMessageIndex: 1 });
+    const settled = toChatMessages(messages);
+
+    const streamingThinking = streaming[1]!.parts.find(
+      (part) => part.type === "thinking",
+    );
+    const settledThinking = settled[1]!.parts.find(
+      (part) => part.type === "thinking",
+    );
+    expect(streamingThinking).toMatchObject({ text: "hmm", done: false });
+    expect(settledThinking).toMatchObject({ text: "hmm", done: true });
   });
 });
 

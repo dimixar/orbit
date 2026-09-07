@@ -5,6 +5,7 @@ import AppSidebar from "@/components/app-sidebar";
 import { TopBar } from "@/components/top-bar";
 import { PluginsPage } from "@/components/workbench/plugins-page";
 import { ModelsPage } from "@/components/workbench/models-page";
+import { ProvidersPage } from "@/components/workbench/providers-page";
 import { SettingsPage } from "@/components/workbench/settings-page";
 import { SkillsPage } from "@/components/workbench/skills-page";
 import { UsagePage } from "@/components/workbench/usage-page";
@@ -20,6 +21,7 @@ export type WorkbenchView =
   | "skills"
   | "plugins"
   | "models"
+  | "providers"
   | "settings";
 
 const VIEWS: WorkbenchView[] = [
@@ -28,6 +30,7 @@ const VIEWS: WorkbenchView[] = [
   "skills",
   "plugins",
   "models",
+  "providers",
   "settings",
 ];
 
@@ -115,13 +118,13 @@ function App() {
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <SidebarProvider className="h-svh">
+      <SidebarProvider className="h-svh min-h-0 overflow-hidden">
         <AppSidebar
           view={view}
           onNavigate={navigate}
           onNewChat={() => navigate("chat")}
         />
-        <SidebarInset className="min-h-0">
+        <SidebarInset className="min-h-0 overflow-hidden">
           {view !== "chat" && (
             <TopBar
               canGoBack={nav.back.length > 0}
@@ -142,6 +145,7 @@ function App() {
           {view === "skills" && <SkillsPage />}
           {view === "plugins" && <PluginsPage />}
           {view === "models" && <ModelsPage />}
+          {view === "providers" && <ProvidersPage />}
           {view === "settings" && (
             <SettingsPage
               theme={theme}
