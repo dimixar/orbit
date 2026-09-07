@@ -1,6 +1,7 @@
 import { ArrowLeftIcon, ArrowRightIcon } from "@heroicons/react/24/outline";
 import { twMerge } from "tailwind-merge";
-import { SidebarTrigger } from "@/components/ui/sidebar";
+import { SidebarTrigger, useSidebar } from "@/components/ui/sidebar";
+import { isMac } from "@/lib/platform";
 
 /** ⌘ on Apple platforms, Ctrl elsewhere — shown in back/forward tooltips. */
 const modKey = /Mac|iPhone|iPad/.test(navigator.userAgent) ? "⌘" : "Ctrl";
@@ -56,10 +57,19 @@ export function TopBar({
   trailing?: React.ReactNode;
   className?: string;
 }) {
+  const { state } = useSidebar();
   return (
+    // data-tauri-drag-region makes the bar a window drag handle (blank areas
+    // only — buttons and menus keep working). On macOS the bar matches the
+    // native traffic-lights strip height so its content centers on the same
+    // line as the lights and the sidebar lockup; when the sidebar is collapsed
+    // to the dock the lights spill ~16px into the bar, so pad past them.
     <header
+      data-tauri-drag-region
       className={twMerge(
         "flex h-12 shrink-0 items-center gap-0.5 pr-3.5 pl-3",
+        isMac && "h-8",
+        isMac && state === "collapsed" && "pl-6",
         className,
       )}
     >
@@ -84,7 +94,10 @@ export function TopBar({
       </div>
 
       {title && (
-        <h1 className="ml-1.5 min-w-0 truncate text-[13px] font-medium tracking-[-0.01em] text-fg">
+        <h1
+          data-tauri-drag-region
+          className="ml-1.5 min-w-0 truncate text-[13px] font-medium tracking-[-0.01em] text-fg"
+        >
           {title}
         </h1>
       )}

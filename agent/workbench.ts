@@ -59,6 +59,10 @@ export type UsageReport = {
   byDay: UsageDay[];
   /** Per-model totals restricted to the last 30 days (by entry timestamp). */
   recentByModel: UsageModel[];
+  /** Per-model totals for today (UTC date, matching the byDay buckets). */
+  todayByModel: UsageModel[];
+  /** Per-model-per-day slices for the last 30 days, newest day first. */
+  byDayByModel: UsageModelDay[];
 };
 
 export type SkillInfo = {
@@ -274,7 +278,8 @@ async function parseSessionFile(file: string, stat: fs.Stats): Promise<FileUsage
 export async function getUsage(): Promise<UsageReport> {
   const report: UsageReport = {
     totalInput: 0, totalOutput: 0, totalCacheRead: 0, totalCacheWrite: 0,
-    totalCost: 0, totalSessions: 0, totalCalls: 0, byModel: [], byDay: [], recentByModel: [],
+    totalCost: 0, totalSessions: 0, totalCalls: 0, byModel: [], byDay: [],
+    recentByModel: [], todayByModel: [], byDayByModel: [],
   };
   const modelMap = new Map<string, UsageModel>();
   const dayMap = new Map<string, UsageDay>();
@@ -375,5 +380,27 @@ export async function getUsage(): Promise<UsageReport> {
   report.recentByModel = [...recentModelMap.values()].sort(
     (a, b) => (b.input + b.output) - (a.input + a.output),
   );
+
+  // Per-model usage for today (UTC — same date key the byDay buckets use).
+  const today = new Date().toISOString().slice(0, 10);
+  const todayModelMap = new Map<string, UsageModel>();
+  for (const md of modelDayMap.values()) {
+    if (md.date !== today) continue;
+    const mk = `${md.provider}/${md.model}`;
+    const cur = todayModelMap.get(mk) ?? {
+      model: md.model, provider: md.provider, input: 0, output: 0, cost: 0, calls: 0,
+    };
+    cur.input += md.input; cur.output += md.output; cur.cost += md.cost; cur.calls += md.calls;
+    todayModelMap.set(mk, cur);
+  }
+  report.todayByModel = [...todayModelMap.values()].sort(
+    (a, b) => (b.input + b.output) - (a.input + a.output),
+  );
+
+  // Per-model-per-day slices for the last 30 days — powers the day-wise breakdown.
+  report.byDayByModel = [...modelDayMap.values()]
+    .filter((md) => md.date >= cutoff)
+    .map((md) => ({ ...md }))
+    .sort((a, b) => b.date.localeCompare(a.date) || (b.input + b.output) - (a.input + a.output));
   return report;
 }

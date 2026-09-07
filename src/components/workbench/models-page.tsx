@@ -102,6 +102,7 @@ export function ModelsPage() {
 
   return (
     <WorkbenchPage
+      className="max-w-none"
       title="Scoped models"
       description="The enabled subset pi cycles with Ctrl+P and uses for new sessions. Saved to ~/.pi/agent/settings.json, shared with /scoped-models."
       scrollerRef={scrollerRef}

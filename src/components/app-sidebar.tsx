@@ -43,6 +43,7 @@ import {
   Square3Stack3DIcon,
   TrashIcon,
 } from '@heroicons/react/24/outline'
+import { twMerge } from 'tailwind-merge'
 import { Avatar } from '@/components/ui/avatar'
 import {
   Menu,
@@ -69,6 +70,7 @@ import { Input, InputGroup } from '@/components/ui/input'
 import { useAui, useAuiState } from '@assistant-ui/react'
 import { usePiRuntimeExtras } from '@assistant-ui/react-pi'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { isMac } from '@/lib/platform'
 import { piClient } from '@/lib/pi-client'
 
 export type WorkbenchView = 'chat' | 'usage' | 'skills' | 'plugins' | 'models' | 'settings'
@@ -542,8 +544,25 @@ export default function AppSidebar({
 
   return (
     <Sidebar {...props}>
-      <SidebarHeader>
-        <div className="flex w-full items-center gap-x-2">
+      <SidebarHeader
+        data-tauri-drag-region
+        className={
+          isMac
+            ? // Top strip: no top padding so the lockup row centers on the
+              // traffic lights' band (lights center ≈ y14, row center y16).
+              'p-0 pb-1.5 group-data-[state=collapsed]:p-2.5 group-data-[state=collapsed]:pt-7'
+            : undefined
+        }
+      >
+        {/* On macOS the native traffic lights overlay this header — pad right
+            of them when expanded; drop below them when collapsed to the dock. */}
+        <div
+          data-tauri-drag-region
+          className={twMerge(
+            'flex h-8 w-full items-center gap-x-2',
+            isMac && 'ps-[76px] group-data-[state=collapsed]:ps-0',
+          )}
+        >
           <Avatar
             isSquare
             size="sm"

@@ -33,6 +33,7 @@ export function PluginsPage() {
 
   return (
     <WorkbenchPage
+      className="max-w-none"
       title="Plugins"
       description="Pi packages and local extensions installed on this machine. Packages are loaded from settings.json and run inside the agent."
     >

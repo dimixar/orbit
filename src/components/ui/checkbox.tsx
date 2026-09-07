@@ -50,7 +50,7 @@ export function CheckboxField({ className, ...props }: CheckboxFieldProps) {
 export function Checkbox({ className, ...props }: CheckboxButtonProps) {
   return (
     <CheckboxButton
-      className={cx('group gap-x-3 inline-flex col-span-full focus:outline-hidden', className)}
+      className={cx('group gap-x-3 inline-flex relative col-span-full focus:outline-hidden', className)}
       {...props}
     >
       {composeRenderProps(

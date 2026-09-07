@@ -31,6 +31,17 @@ export function NumberStepper({
 }) {
   return (
     <div className="flex items-center gap-2">
+      {value !== defaultValue && (
+        <button
+          type="button"
+          aria-label={`Reset ${ariaLabel} to default`}
+          title="Reset to default"
+          onClick={() => onChange(defaultValue)}
+          className="flex size-7 cursor-pointer items-center justify-center rounded-lg text-muted-fg outline-none transition-colors duration-100 hover:bg-muted hover:text-fg focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <ArrowPathIcon className="size-3.5" />
+        </button>
+      )}
       <div
         role="group"
         aria-label={ariaLabel}
@@ -62,17 +73,6 @@ export function NumberStepper({
         </button>
       </div>
       {unit && <span className="text-muted-fg text-xs">{unit}</span>}
-      {value !== defaultValue && (
-        <button
-          type="button"
-          aria-label={`Reset ${ariaLabel} to default`}
-          title="Reset to default"
-          onClick={() => onChange(defaultValue)}
-          className="flex size-7 cursor-pointer items-center justify-center rounded-lg text-muted-fg outline-none transition-colors duration-100 hover:bg-muted hover:text-fg focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          <ArrowPathIcon className="size-3.5" />
-        </button>
-      )}
     </div>
   )
 }

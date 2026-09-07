@@ -42,6 +42,7 @@ export function SkillsPage() {
 
   return (
     <WorkbenchPage
+      className="max-w-none"
       title="Skills"
       description="Capability packages pi loads on demand — instructions and tools that extend what the agent can do. Read from ~/.pi/agent/skills."
       actions={

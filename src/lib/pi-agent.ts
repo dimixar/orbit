@@ -63,6 +63,16 @@ export type PiUsageModel = {
   calls: number;
 };
 
+export type PiUsageModelDay = {
+  date: string;
+  provider: string;
+  model: string;
+  input: number;
+  output: number;
+  cost: number;
+  calls: number;
+};
+
 export type PiUsageReport = {
   totalInput: number;
   totalOutput: number;
@@ -75,6 +85,10 @@ export type PiUsageReport = {
   byDay: PiUsageDay[];
   /** Per-model totals restricted to the last 30 days. */
   recentByModel: PiUsageModel[];
+  /** Per-model totals for today (UTC date, matching the byDay buckets). */
+  todayByModel: PiUsageModel[];
+  /** Per-model-per-day slices for the last 30 days, newest day first. */
+  byDayByModel: PiUsageModelDay[];
 };
 
 export type PiSkillInfo = {

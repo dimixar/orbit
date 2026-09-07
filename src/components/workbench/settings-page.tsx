@@ -52,6 +52,7 @@ export function SettingsPage({
 }) {
   return (
     <WorkbenchPage
+      className="max-w-none"
       title="Settings"
       description="Appearance for the Orbit desktop app. The chat runs on the pi agent over SSE (agent/sse-server.ts)."
     >
