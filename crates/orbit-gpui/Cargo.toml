@@ -1,0 +1,17 @@
+[package]
+name = "orbit-gpui"
+version = "0.1.0"
+description = "Phase 0 spike: GPUI chat-list rendering proof of concept for Orbit"
+edition = "2021"
+
+[dependencies]
+# runtime_shaders compiles the Metal shaders on demand via Apple's GPU
+# driver, avoiding a dependency on the (usually absent) `metal` CLI from the
+# Xcode MetalToolchain component. For release builds, precompiling shaders
+# (dropping this feature + installing the Metal toolchain) is preferable.
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+
+# Faster debug builds at the expense of runtime performance — fine for a
+# rendering spike. Drop this when measuring real-world perf.
+[profile.dev]
+opt-level = 1

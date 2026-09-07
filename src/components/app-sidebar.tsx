@@ -607,20 +607,25 @@ export default function AppSidebar({
       <SidebarHeader
         data-tauri-drag-region
         className={
-          isMac
-            ? // Top strip: no top padding so the lockup row centers on the
-              // traffic lights' band (lights center ≈ y14, row center y16).
-              'p-0 pb-1.5 group-data-[state=collapsed]:p-2.5 group-data-[state=collapsed]:pt-7'
-            : undefined
+          // Top strip: no top padding, so the lockup row's center lands on the
+          // bar's content line — the traffic lights' line on macOS (Rust
+          // centers the lights at y=20 in the 40px row), the TopBar's center
+          // (y=24 in its 48px row) elsewhere.
+          'p-0 pb-2'
         }
       >
-        {/* On macOS the native traffic lights overlay this header — pad right
-            of them when expanded; drop below them when collapsed to the dock. */}
+        {/* The row's height always matches the TopBar's so the avatar shares
+            one horizontal line with the bar's icons. On macOS the native
+            traffic lights overlay this header — pad right of them (they end
+            ≈x60; 16px clearance, same as the collapsed TopBar's pl-[76px]).
+            pe-3 keeps the status label off the sidebar's right border. */}
         <div
           data-tauri-drag-region
           className={twMerge(
-            'flex h-8 w-full items-center gap-x-2',
-            isMac && 'ps-[76px] group-data-[state=collapsed]:ps-0',
+            'flex w-full items-center gap-x-2 pe-3',
+            isMac
+              ? 'h-10 ps-[76px] group-data-[state=collapsed]:ps-0'
+              : 'h-12 ps-3',
           )}
         >
           <Avatar
@@ -630,7 +635,10 @@ export default function AppSidebar({
             alt="Orbit"
             className="bg-primary text-primary-fg outline-hidden"
           />
-          <SidebarLabel className="font-medium">
+          {/* pe-0: the shared label reserves 24px for hover controls; the
+              lockup has none, and dropping it keeps "Orbit Pi" untruncated
+              now that the row reserves pe-3 for the status label. */}
+          <SidebarLabel className="font-medium pe-0">
             Orbit <span className="text-muted-fg">Pi</span>
           </SidebarLabel>
           <span className="ms-auto flex items-center gap-x-1.5 text-muted-fg text-xs">

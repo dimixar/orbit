@@ -215,6 +215,69 @@ fn spawn_node(args: &[&PathBuf], cwd: Option<&PathBuf>) -> Result<Child, String>
         .map_err(|e| format!("failed to spawn `node` ({args:?}): {e}"))
 }
 
+// ---------------------------------------------------------------------------
+// macOS window chrome — traffic lights centered in the custom top strip
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "macos")]
+mod macos_window {
+    use objc2::rc::Retained;
+    use objc2_app_kit::{NSButton, NSWindow, NSWindowButton};
+
+    /// Height of the app's custom top strip (TopBar `h-10`) in logical points.
+    /// Keep in sync with the `isMac && "h-10"` in `src/components/top-bar.tsx`
+    /// and the sidebar header row height in `app-sidebar.tsx`.
+    pub const TOP_STRIP_HEIGHT: f64 = 40.0;
+    /// Left inset of the close button in logical points (Apple default ≈ 8).
+    const LEFT_INSET: f64 = 8.0;
+    /// macOS centers the lights in the stock 28pt titlebar (center ≈ y14);
+    /// all shifts below are relative to that native default.
+    const DEFAULT_CENTER_Y: f64 = 14.0;
+
+    /// Moves the native traffic lights to the vertical center of the app's
+    /// custom top strip, so the taller TopBar and the lights share one center
+    /// line (same trick VS Code uses). Reads the native button frames and
+    /// shifts them relatively — no hardcoded Apple metrics.
+    pub fn center_traffic_lights(ns_window_ptr: *mut std::ffi::c_void) -> Result<(), String> {
+        if ns_window_ptr.is_null() {
+            return Err("NSWindow pointer is null".into());
+        }
+        // SAFETY: Tauri hands us a valid NSWindow pointer on macOS; we only
+        // read frames and reposition the three standard window buttons.
+        let ns_window = unsafe { &*(ns_window_ptr as *const NSWindow) };
+        {
+            let close = ns_window
+                .standardWindowButton(NSWindowButton::CloseButton)
+                .ok_or_else(|| "close button unavailable".to_string())?;
+            let miniaturize = ns_window
+                .standardWindowButton(NSWindowButton::MiniaturizeButton)
+                .ok_or_else(|| "miniaturize button unavailable".to_string())?;
+            let zoom = ns_window.standardWindowButton(NSWindowButton::ZoomButton);
+
+            // Horizontal: normalize the left inset, keeping Apple's spacing.
+            let dx = LEFT_INSET - close.frame().origin.x;
+            // Vertical: shift down (superview coords are bottom-up, hence -=).
+            let dy = TOP_STRIP_HEIGHT / 2.0 - DEFAULT_CENTER_Y;
+
+            let mut buttons: Vec<Retained<NSButton>> = vec![close, miniaturize];
+            if let Some(zoom) = zoom {
+                buttons.push(zoom);
+            }
+            for (i, button) in buttons.iter().enumerate() {
+                let mut origin = button.frame().origin;
+                if i == 0 {
+                    origin.x = LEFT_INSET;
+                } else {
+                    origin.x += dx;
+                }
+                origin.y -= dy;
+                button.setFrameOrigin(origin);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Called from the Tauri setup hook: starts the SSE server if it isn't
 /// already listening on localhost:8913.
 fn ensure_sse_server(app: &AppHandle) {
@@ -235,6 +298,17 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             ensure_sse_server(app.handle());
+            #[cfg(target_os = "macos")]
+            if let Some(window) = app.get_webview_window("main") {
+                match window.ns_window() {
+                    Ok(ptr) => {
+                        if let Err(err) = macos_window::center_traffic_lights(ptr) {
+                            eprintln!("[orbit] failed to center traffic lights: {err}");
+                        }
+                    }
+                    Err(err) => eprintln!("[orbit] failed to get NSWindow: {err}"),
+                }
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

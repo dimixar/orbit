@@ -61,15 +61,18 @@ export function TopBar({
   return (
     // data-tauri-drag-region makes the bar a window drag handle (blank areas
     // only — buttons and menus keep working). On macOS the bar matches the
-    // native traffic-lights strip height so its content centers on the same
-    // line as the lights and the sidebar lockup; when the sidebar is collapsed
-    // to the dock the lights spill ~16px into the bar, so pad past them.
+    // traffic-lights strip (Rust centers the lights in this bar's height).
     <header
       data-tauri-drag-region
       className={twMerge(
         "flex h-12 shrink-0 items-center gap-0.5 pr-3.5 pl-3",
-        isMac && "h-8",
-        isMac && state === "collapsed" && "pl-6",
+        // macOS: 40px strip — the native traffic lights are moved (Rust) to
+        // center at y=20, same line as this bar's content.
+        isMac && "h-10",
+        // macOS, sidebar hidden: the sidebar slides fully off-canvas, so the
+        // native traffic lights (x ≈ 8–60) sit on this bar. Pad past them with
+        // the same 16px clearance the expanded sidebar lockup uses (ps-[76px]).
+        isMac && state === "collapsed" && "pl-[76px]",
         className,
       )}
     >
