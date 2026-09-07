@@ -1,0 +1,17 @@
+[package]
+name = "orbit-pi"
+version = "0.1.0"
+description = "Phase 0 spike: GPUI chat-list rendering proof of concept for Orbit"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+orbit-rpc = { path = "../orbit-rpc" }
+serde_json = { workspace = true }
+unicode-segmentation = "1"
+include_dir = "0.7"
+anyhow = { workspace = true }
+# filetype glyphs + theme colors for file/folder icons (rendered with the
+# embedded Symbols Nerd Font — see src/file_icons.rs)
+devicons = "0.6"
