@@ -37,7 +37,7 @@ use crate::theme::{self, Theme};
 use crate::transcript::{changed_files, ChatMessage, Step, ToolCall};
 
 /// Waku `CONTENT_MAX_WIDTH` (the `max-w-[760px]` transcript column).
-const CONTENT_MAX_WIDTH: f32 = 760.0;
+const CONTENT_MAX_WIDTH: f32 = 960.0;
 /// Extra space before a follow-up user message (Waku `pt-8`).
 const FOLLOWUP_TURN_TOP_GAP: f32 = 32.0;
 /// Waku user-bubble `max-w-[540px]`.
@@ -56,7 +56,7 @@ const NAVIGATION_RAIL_EMPHASIS_SCALE: [f32; 4] = [1.0, 0.68, 0.44, 0.25];
 /// Waku caps the rail at 80% of the viewport and hides it below an 872px
 /// transcript container.
 const NAVIGATION_RAIL_MAX_HEIGHT: f32 = 0.8;
-const NAVIGATION_RAIL_MIN_MAIN_WIDTH: f32 = 872.0;
+const NAVIGATION_RAIL_MIN_MAIN_WIDTH: f32 = 1040.0;
 const CHANGED_FILES_PREVIEW_LIMIT: usize = 3;
 const CONTENT_GAP: f32 = 10.0;
 const NAVIGATION_RAIL_CONTENT_GAP: f32 = 12.0;
@@ -270,10 +270,16 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
                         .on_click({
                             let files = files.clone();
                             let copied = copied.clone();
+                            let workspace = workspace.clone();
                             move |_, _, cx| {
                                 let text = files
                                     .iter()
-                                    .map(|(path, _, _)| path.as_str())
+                                    .map(|(path, _, _)| {
+                                        workspace_relative_path(
+                                            path,
+                                            workspace.as_deref(),
+                                        )
+                                    })
                                     .collect::<Vec<_>>()
                                     .join("\n");
                                 cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -1061,13 +1067,13 @@ fn render_thinking_body(thinking: &str, live: bool, theme: Theme) -> impl IntoEl
                 .child(
                     div()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.tool_name)
+                        .text_color(theme.accent)
                         .child(title),
                 ),
         )
         .child(
             div()
-                .font_family("Menlo")
+                .font_family(theme::code_font_family())
                 .text_size(theme.code_px(10.5))
                 .line_height(theme.code_px(15.))
                 .text_color(theme.tool_meta)
@@ -1128,7 +1134,7 @@ fn render_activity_card(
                     div()
                         .flex_none()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.tool_name)
+                        .text_color(theme.accent)
                         .child(action),
                 )
                 .when(!detail.is_empty(), |row| {
@@ -1306,7 +1312,7 @@ fn render_detail_section(
             div()
                 .w_full()
                 .min_w_0()
-                .font_family("Menlo")
+                .font_family(theme::code_font_family())
                 .text_size(theme.code_px(10.5))
                 .line_height(theme.code_px(15.))
                 .text_color(theme.tool_meta)
@@ -1416,9 +1422,9 @@ fn glyph(path: &'static str, size: f32, color: Hsla) -> impl IntoElement {
 fn pulse_dot(theme: Theme, elapsed_ms: u128) -> impl IntoElement {
     let on = elapsed_ms.is_multiple_of(400);
     div().size(px(5.)).rounded_full().bg(if on {
-        theme.accent_bar
+        theme.accent
     } else {
-        theme.accent_bar.opacity(0.35)
+        theme.accent.opacity(0.35)
     })
 }
 
@@ -1529,7 +1535,7 @@ fn working_wave_dots(theme: Theme, elapsed_ms: u128) -> impl IntoElement {
             div()
                 .size(px(4.))
                 .rounded_full()
-                .bg(if on { theme.accent_bar } else { theme.border })
+                .bg(if on { theme.accent } else { theme.border })
         }))
 }
 
@@ -1770,7 +1776,7 @@ fn inline_runs(
         let len = body.len() - start;
         let mut font = ui_font();
         if span.code {
-            font.family = "Menlo".into();
+            font.family = theme::code_font_family();
             font.weight = FontWeight::NORMAL;
             font.style = FontStyle::Normal;
         } else {
@@ -1789,7 +1795,7 @@ fn inline_runs(
             len,
             font,
             color: if span.code {
-                theme.inline_code_text
+                theme.accent
             } else {
                 base_color
             },
@@ -1811,10 +1817,11 @@ fn inline_runs(
     (body.into(), runs, links)
 }
 
-/// The window's default UI face, explicit for [`TextRun`] construction.
+/// The window's default UI face (Zed's IBM Plex Sans), explicit for
+/// [`TextRun`] construction.
 fn ui_font() -> Font {
     Font {
-        family: ".SystemUIFont".into(),
+        family: theme::ui_font_family(),
         features: FontFeatures::default(),
         fallbacks: None,
         weight: FontWeight::NORMAL,
@@ -2297,7 +2304,7 @@ fn render_code_block(
                 .px(px(16.))
                 .py(px(12.))
                 .overflow_hidden()
-                .font_family("Menlo")
+                .font_family(theme::code_font_family())
                 .text_size(theme.code_px(13.))
                 .line_height(theme.code_px(24.))
                 .text_color(theme.code_text)
@@ -2431,6 +2438,23 @@ fn changed_files_title(count: usize) -> String {
     }
 }
 
+/// Show a changed-file path relative to the session workspace when possible.
+fn workspace_relative_path(path: &str, workspace: Option<&Path>) -> String {
+    let path = Path::new(path);
+    if let Some(root) = workspace {
+        if path.is_absolute() {
+            if let Ok(rel) = path.strip_prefix(root) {
+                let rel = rel.to_string_lossy();
+                let rel = rel.trim_start_matches(['/', '\\']);
+                if !rel.is_empty() {
+                    return rel.replace('\\', "/");
+                }
+            }
+        }
+    }
+    path.to_string_lossy().replace('\\', "/")
+}
+
 /// Waku `ChangedFilesCard`: raised tile, "Changed N files" with a ±delta
 /// underneath, a Review affordance, and roomy file rows with right-aligned
 /// line counts. Shows 3 rows; expanded shows up to 12 with a clip note.
@@ -2462,6 +2486,7 @@ fn render_changed_files(
         .border_t_1()
         .border_color(theme.tool_border);
     for (path, added, removed) in files.iter().take(visible) {
+        let label = workspace_relative_path(path, workspace);
         rows = rows.child(
             div()
                 .h(px(31.))
@@ -2477,7 +2502,7 @@ fn render_changed_files(
                         .text_size(theme.ui_px(11.5))
                         .line_height(theme.ui_px(16.))
                         .text_color(theme.text_2)
-                        .child(path.clone()),
+                        .child(label),
                 )
                 .child(
                     div()
@@ -2669,7 +2694,7 @@ fn open_review_diff(workspace: &Path, files: &[(String, u64, u64)]) {
         .arg("HEAD")
         .arg("--");
     for (path, _, _) in files {
-        command.arg(path);
+        command.arg(workspace_relative_path(path, Some(workspace)));
     }
     let text = match command.output().ok().filter(|out| out.status.success()) {
         Some(out) if !String::from_utf8_lossy(&out.stdout).trim().is_empty() => {
@@ -2678,6 +2703,7 @@ fn open_review_diff(workspace: &Path, files: &[(String, u64, u64)]) {
         _ => {
             let mut fallback = String::from("Changes in this task (no uncommitted git diff):\n\n");
             for (path, added, removed) in files {
+                let path = workspace_relative_path(path, Some(workspace));
                 fallback.push_str(&format!("{path}  +{added} -{removed}\n"));
             }
             fallback
@@ -2819,6 +2845,19 @@ mod tests {
     fn changed_files_title_uses_screenshot_copy() {
         assert_eq!(changed_files_title(1), "Changed 1 file");
         assert_eq!(changed_files_title(2), "Changed 2 files");
+    }
+
+    #[test]
+    fn workspace_relative_path_strips_workspace_prefix() {
+        let root = Path::new("/Users/dev/orbit");
+        assert_eq!(
+            workspace_relative_path("/Users/dev/orbit/src/main.rs", Some(root)),
+            "src/main.rs"
+        );
+        assert_eq!(
+            workspace_relative_path("src/main.rs", Some(root)),
+            "src/main.rs"
+        );
     }
 
     #[test]

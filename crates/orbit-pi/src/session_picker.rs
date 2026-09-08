@@ -11,7 +11,7 @@
 //!   win at the same dispatch depth)
 //! - two-line rows: session title, then `workspace · age`
 //! - keyboard navigation; Enter opens the highlighted session
-//! - the active session carries a leading accent dot
+//! - the active session's icon and title are emphasized
 
 use std::path::PathBuf;
 
@@ -45,7 +45,7 @@ const MAX_ROWS: usize = 50;
 /// callbacks it was built with.
 pub struct SessionPicker {
     sessions: Vec<SessionInfo>,
-    /// The open session's path, so its row can carry the accent mark.
+    /// The open session's path, so its row can be emphasized.
     active_path: Option<PathBuf>,
     filter: Entity<ComposerInput>,
     list_scroll: ScrollHandle,
@@ -218,6 +218,7 @@ impl Render for SessionPicker {
 
         div()
             .w(px(POPOVER_W))
+            .font_family(theme::ui_font_family())
             .pt(px(6.))
             .pb(px(6.))
             .rounded(px(10.))
@@ -309,30 +310,28 @@ fn render_session_row(
             }
         })
         .when(highlighted, |row| row.bg(theme.overlay))
-        // Line 1 — title (+ accent dot when it's the open session).
+        // Line 1 — leading conversation icon, then title; the icon tints on
+        // the open row so the current conversation reads at a glance.
         .child(
             div()
                 .flex()
                 .items_center()
                 .gap(px(6.))
+                .child(icon(
+                    "icons/chat.svg",
+                    13.,
+                    if active { theme.accent } else { theme.text_3 },
+                ))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .truncate()
                         .text_size(theme.ui_px(12.5))
+                        .font_weight(gpui::FontWeight::MEDIUM)
                         .text_color(if active { theme.text } else { theme.text_2 })
                         .child(session.title.clone()),
-                )
-                .when(active, |row| {
-                    row.child(
-                        div()
-                            .size(px(6.))
-                            .flex_none()
-                            .rounded_full()
-                            .bg(theme.accent_bar),
-                    )
-                }),
+                ),
         )
         // Line 2 — workspace · age.
         .child(

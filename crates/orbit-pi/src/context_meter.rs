@@ -117,7 +117,7 @@ pub fn usage_slices(
             color: if conversation == 0 {
                 fill_color(usage.fraction(), theme)
             } else {
-                theme.slice_other
+                theme.accent.opacity(0.55)
             },
         });
     }
@@ -125,7 +125,7 @@ pub fn usage_slices(
         out.push(ContextSlice {
             label: "Conversation".into(),
             tokens: conversation,
-            color: theme.slice_convo,
+            color: theme.accent,
         });
     }
     out

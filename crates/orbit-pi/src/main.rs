@@ -6,11 +6,15 @@
 mod app;
 mod app_icon;
 mod assets;
+mod branch_picker;
 mod composer;
+mod git;
+mod platform;
 mod context_meter;
 mod mentions;
 mod message_scroller;
 mod model_selector;
+mod model_selector_match;
 mod session_picker;
 mod sessions;
 mod theme;
@@ -118,6 +122,9 @@ fn main() {
         .run(|cx: &mut App| {
             bind_keys(cx);
             theme::init(cx);
+            // Bundle Zed's UI/mono faces so `.ZedSans`/`.ZedMono` resolve to
+            // real fonts (IBM Plex Sans / Lilex) without OS dependencies.
+            assets::register_zed_fonts(cx).expect("failed to register Zed fonts");
             app_icon::set_dock_icon();
 
             // Open maximized: full width of the screen, filling the visible
@@ -137,6 +144,9 @@ fn main() {
                 .open_window(
                     WindowOptions {
                         window_bounds: Some(WindowBounds::Maximized(restore_bounds)),
+                        // Keep the window usable when shrunk: sidebar (min
+                        // 200px) + a readable transcript + the composer.
+                        window_min_size: Some(size(px(960.), px(640.))),
                         titlebar: Some(TitlebarOptions {
                             title: Some(SharedString::from("Orbit Pi")),
                             // Transparent titlebar: the sidebar extends to the top
@@ -167,6 +177,10 @@ fn main() {
                                     .ok();
                             })
                             .detach();
+
+                        // Detect installed editors/terminals for the header
+                        // "open in" control (off-thread; icons load once).
+                        app.update(cx, |app, cx| app.detect_open_in_apps(cx));
 
                         app
                     },

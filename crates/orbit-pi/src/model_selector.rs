@@ -1,43 +1,42 @@
-//! Model selector popup — a small, Zed-style picker popover anchored above
-//! the composer.
+//! Model selector popup — a searchable picker popover anchored above the
+//! composer chips.
 //!
-//! Anatomy follows Zed's popover conventions (`popup_menu` + `picker` from
-//! Zed's `crates/ui`, rebuilt here on bare gpui 0.2.2 primitives):
+//! Follows the same GPUI conventions as the settings selects and the
+//! autocomplete menu:
 //!
-//! - small fixed width, opaque raised surface, 1px strong border, layered
-//!   drop shadow (paints above the composer via `deferred` + `anchored`)
-//! - a search field on top that filters the section live
-//! - a plain scrollable list (`max_h` + `overflow_y_scroll`, the same shape
-//!   Zed's `ContextMenu` uses — not `uniform_list`, whose measured layout
-//!   can collapse inside a deferred popover)
-//! - a leading check on the current selection, provider as dimmed trailing
-//!   text on model rows
+//! - compact raised surface (`menu_bg`, strong border, layered shadow)
+//! - inset search field with icon, then a scrollable list with even row gaps
+//! - two-line model rows (name + provider) with a provider chip; two-line
+//!   thinking rows (label + hint) with a level icon chip
+//! - keyboard highlight uses `active`; hover uses `overlay`; the
+//!   current choice gets an accent check
 //! - keyboard navigation: `up`/`down`/`enter`/`escape` are bound to the
-//!   `Picker` key context, which rides on the popup's filter input. The
-//!   bindings are registered *after* the composer bindings in `main.rs`, so
-//!   at the same dispatch depth they win the tie (gpui breaks depth ties by
-//!   registration order) — Enter confirms instead of submitting the prompt.
+//!   `Picker` key context on the filter input
 
 use gpui::{
     div, point, prelude::*, px, App, Context, ElementId, Entity, FocusHandle, Focusable,
-    IntoElement, MouseDownEvent, ParentElement, Render, ScrollHandle, SharedString, Styled, Window,
+    FontWeight, IntoElement, MouseDownEvent, ParentElement, Render, ScrollHandle, SharedString,
+    Styled, Window,
 };
+use std::time::{Duration, Instant};
 
 use crate::app::{icon, icon_dyn, ModelEntry};
 use crate::composer::ComposerInput;
+use crate::model_selector_match::is_model_selected;
 use crate::theme::{self, Theme};
 
-/// Popup width — still compact, with room for icon + name + provider + check
-/// after the row padding.
-const POPOVER_W: f32 = 256.;
-/// Uniform row height for every row in the list.
-const ROW_H: f32 = 32.;
+/// Popup width — room for a provider chip, two-line model label, and check.
+const POPOVER_W: f32 = 360.;
+/// Uniform row height (two-line model rows; thinking levels center in it).
+const ROW_H: f32 = 44.;
 /// Air between option rows (not folded into ROW_H so hit targets stay even).
 const ROW_GAP: f32 = 2.;
+/// Tight gap between the primary label and secondary hint inside a row.
+const LABEL_GAP: f32 = 1.;
 /// Vertical stride used for keyboard scroll math.
 const ROW_STRIDE: f32 = ROW_H + ROW_GAP;
-/// Largest list height before it scrolls (≈ 8 visible rows).
-const LIST_MAX_H: f32 = 8. * ROW_STRIDE;
+/// Largest list height before it scrolls (≈ 6 visible rows).
+const LIST_MAX_H: f32 = 6. * ROW_STRIDE;
 
 /// Which single-section dropdown a picker popup shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,12 +65,21 @@ pub struct ModelSelector {
     models: Vec<ModelEntry>,
     levels: Vec<String>,
     current_model: String,
+    current_model_id: String,
+    current_model_provider: String,
     current_level: String,
     filter: Entity<ComposerInput>,
     /// Scroll position of the popup's list (keyboard navigation keeps the
     /// highlighted row in view via this handle).
     list_scroll: ScrollHandle,
     highlighted: usize,
+    /// Catalog index of the active model (stable match key).
+    selected_catalog_ix: Option<usize>,
+    /// Ignore hover-driven highlight briefly so opening under the cursor
+    /// doesn't snap back to row 0.
+    suppress_hover_until: Option<Instant>,
+    /// Deferred popovers need a follow-up scroll after layout settles.
+    needs_scroll: bool,
     last_filter: String,
     on_select_model: Box<dyn Fn(&str, &str, &mut Window, &mut App)>,
     on_select_level: Box<dyn Fn(&str, &mut Window, &mut App)>,
@@ -87,34 +95,121 @@ impl ModelSelector {
         models: Vec<ModelEntry>,
         levels: Vec<String>,
         current_model: String,
+        current_model_id: String,
+        current_model_provider: String,
         current_level: String,
         on_select_model: Box<dyn Fn(&str, &str, &mut Window, &mut App)>,
         on_select_level: Box<dyn Fn(&str, &mut Window, &mut App)>,
         on_dismiss: Box<dyn Fn(bool, &mut Window, &mut App)>,
+        initial_highlight: usize,
         cx: &mut Context<Self>,
     ) -> Self {
         // The filter input carries both the `Composer` context (so backspace,
         // paste, etc. keep working) and the `Picker` flag (so the picker's
         // enter/escape/arrows take precedence at the same dispatch depth).
+        let placeholder = match kind {
+            PickerKind::Model => "Search models…",
+            PickerKind::Thinking => "Search levels…",
+        };
         let filter = cx.new(|cx| {
             ComposerInput::new(cx)
-                .with_placeholder("Filter models…")
+                .with_placeholder(placeholder)
                 .with_key_context("Composer Picker")
         });
+        let selected_catalog_ix = Self::resolve_selected_catalog_ix(
+            kind,
+            &models,
+            &levels,
+            &current_model,
+            &current_model_id,
+            &current_model_provider,
+            &current_level,
+        );
+        let mut list_scroll = ScrollHandle::new();
+        if let Some(ix) = selected_catalog_ix {
+            let row_count = match kind {
+                PickerKind::Model => models.len(),
+                PickerKind::Thinking => levels.len(),
+            };
+            if row_count > 0 {
+                Self::apply_scroll_to_row(&mut list_scroll, ix, row_count);
+            }
+        }
         Self {
             kind,
             models,
             levels,
             current_model,
+            current_model_id,
+            current_model_provider,
             current_level,
             filter,
-            list_scroll: ScrollHandle::new(),
-            highlighted: 0,
+            list_scroll,
+            highlighted: initial_highlight,
+            selected_catalog_ix,
+            suppress_hover_until: Some(Instant::now() + Duration::from_millis(400)),
+            needs_scroll: true,
             last_filter: String::new(),
             on_select_model,
             on_select_level,
             on_dismiss,
         }
+    }
+
+    fn resolve_selected_catalog_ix(
+        kind: PickerKind,
+        models: &[ModelEntry],
+        levels: &[String],
+        current_model: &str,
+        current_model_id: &str,
+        current_model_provider: &str,
+        current_level: &str,
+    ) -> Option<usize> {
+        match kind {
+            PickerKind::Model => models.iter().position(|model| {
+                is_model_selected(
+                    model,
+                    current_model,
+                    current_model_id,
+                    current_model_provider,
+                )
+            }),
+            PickerKind::Thinking => levels
+                .iter()
+                .position(|level| level.eq_ignore_ascii_case(current_level)),
+        }
+    }
+
+    fn refresh_selected_catalog_ix(&mut self) {
+        self.selected_catalog_ix = Self::resolve_selected_catalog_ix(
+            self.kind,
+            &self.models,
+            &self.levels,
+            &self.current_model,
+            &self.current_model_id,
+            &self.current_model_provider,
+            &self.current_level,
+        );
+    }
+
+    fn apply_scroll_to_row(list_scroll: &mut ScrollHandle, ix: usize, row_count: usize) {
+        let n = row_count as f32;
+        let content_h = (n * ROW_H + (n - 1.).max(0.) * ROW_GAP).max(0.);
+        let viewport_h = content_h.min(LIST_MAX_H);
+        let row_top = ix as f32 * ROW_STRIDE;
+        let max_offset = (content_h - viewport_h).max(0.);
+        let centered = row_top - (viewport_h - ROW_H) / 2.0;
+        let offset = centered.clamp(0., max_offset);
+        list_scroll.set_offset(point(px(0.), px(-offset)));
+    }
+
+    fn hover_highlight_blocked(&self) -> bool {
+        self.suppress_hover_until
+            .is_some_and(|until| Instant::now() < until)
+    }
+
+    fn block_hover_highlight(&mut self) {
+        self.suppress_hover_until = Some(Instant::now() + Duration::from_millis(400));
     }
 
     /// Live catalog refresh while the popup is open (pi re-reports these
@@ -124,13 +219,29 @@ impl ModelSelector {
         models: Vec<ModelEntry>,
         levels: Vec<String>,
         current_model: String,
+        current_model_id: String,
+        current_model_provider: String,
         current_level: String,
         cx: &mut Context<Self>,
     ) {
         self.models = models;
         self.levels = levels;
         self.current_model = current_model;
+        self.current_model_id = current_model_id;
+        self.current_model_provider = current_model_provider;
         self.current_level = current_level;
+        self.refresh_selected_catalog_ix();
+        if let Some(ix) = self.selected_catalog_ix {
+            let row_count = match self.kind {
+                PickerKind::Model => self.models.len(),
+                PickerKind::Thinking => self.levels.len(),
+            };
+            if row_count > 0 {
+                Self::apply_scroll_to_row(&mut self.list_scroll, ix, row_count);
+            }
+        }
+        self.block_hover_highlight();
+        self.needs_scroll = true;
         cx.notify();
     }
 
@@ -173,8 +284,12 @@ impl ModelSelector {
         let mut rows = Vec::new();
 
         if self.kind == PickerKind::Thinking {
-            for level in self.levels.iter().filter(|level| matches(level)) {
-                let selected = *level == self.current_level;
+            for level in self.levels.iter().filter(|level| {
+                matches(level)
+                    || matches(&thinking_display(level))
+                    || matches(thinking_hint(level))
+            }) {
+                let selected = level.eq_ignore_ascii_case(&self.current_level);
                 rows.push(Row::Level {
                     level: level.clone(),
                     selected,
@@ -185,7 +300,7 @@ impl ModelSelector {
 
         for (ix, model) in self.models.iter().enumerate() {
             if matches(&model.name) || matches(&model.id) || matches(&model.provider) {
-                let selected = model.name == self.current_model;
+                let selected = self.selected_catalog_ix == Some(ix);
                 rows.push(Row::Model {
                     model_ix: ix,
                     selected,
@@ -193,6 +308,31 @@ impl ModelSelector {
             }
         }
         rows
+    }
+
+    fn selected_row_index(rows: &[Row]) -> Option<usize> {
+        rows.iter().position(|row| match row {
+            Row::Model { selected, .. } | Row::Level { selected, .. } => *selected,
+        })
+    }
+
+    fn defer_scroll(&self, ix: usize, row_count: usize, cx: &mut Context<Self>) {
+        for delay in [16_u64, 50, 120, 250] {
+            let this = cx.weak_entity();
+            cx.spawn(async move |_, cx| {
+                gpui::Timer::after(Duration::from_millis(delay)).await;
+                this.update(cx, |selector, cx| {
+                    selector.scroll_to_row(ix, row_count);
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    fn scroll_to_row(&mut self, ix: usize, row_count: usize) {
+        Self::apply_scroll_to_row(&mut self.list_scroll, ix, row_count);
     }
 
     fn step(&mut self, dir: isize, cx: &mut Context<Self>) {
@@ -208,21 +348,7 @@ impl ModelSelector {
             pos.saturating_sub(1)
         };
         self.highlighted = next;
-        // Keep the highlighted row fully visible (plain top-down scrolling).
-        let n = rows.len() as f32;
-        let content_h = (n * ROW_H + (n - 1.).max(0.) * ROW_GAP).max(0.);
-        let viewport_h = content_h.min(LIST_MAX_H);
-        let row_top = next as f32 * ROW_STRIDE;
-        let current: f32 = self.list_scroll.offset().y.into();
-        let mut offset = current;
-        if row_top < current {
-            offset = row_top;
-        } else if row_top + ROW_H > current + viewport_h {
-            offset = row_top + ROW_H - viewport_h;
-        }
-        let max_offset = (content_h - viewport_h).max(0.);
-        let offset = offset.clamp(0., max_offset);
-        self.list_scroll.set_offset(point(px(0.), px(offset)));
+        self.scroll_to_row(next, count);
         cx.notify();
     }
 
@@ -253,14 +379,31 @@ impl Focusable for ModelSelector {
 impl Render for ModelSelector {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let needle = self.filter.read(cx).text().to_lowercase();
+        let rows = self.rows(&needle);
         if needle != self.last_filter {
             self.last_filter = needle.clone();
-            self.highlighted = 0;
-            // A new filter invalidates the scroll position.
+            if needle.is_empty() {
+                self.block_hover_highlight();
+                self.needs_scroll = true;
+            } else {
+                self.highlighted = 0;
+            }
             self.list_scroll.set_offset(point(px(0.), px(0.)));
         }
-        let rows = self.rows(&needle);
-        if !rows.is_empty() {
+
+        // Pin focus to the active model on open and after async catalog refresh.
+        if self.hover_highlight_blocked() || self.needs_scroll {
+            if let Some(ix) = Self::selected_row_index(&rows) {
+                self.highlighted = ix;
+                self.scroll_to_row(ix, rows.len());
+                if self.needs_scroll {
+                    self.defer_scroll(ix, rows.len(), cx);
+                    self.needs_scroll = false;
+                }
+            } else if self.needs_scroll {
+                self.needs_scroll = false;
+            }
+        } else if !rows.is_empty() {
             self.highlighted = self.highlighted.min(rows.len() - 1);
         }
 
@@ -295,6 +438,7 @@ impl Render for ModelSelector {
 
         div()
             .w(px(POPOVER_W))
+            .font_family(theme::ui_font_family())
             .pt(px(6.))
             .pb(px(6.))
             .rounded(px(10.))
@@ -305,7 +449,6 @@ impl Render for ModelSelector {
             .flex()
             .flex_col()
             .overflow_hidden()
-            // block mouse interaction with the content underneath the popup
             .occlude()
             // any mouse-down outside the popup dismisses it
             .on_mouse_down_out(cx.listener(Self::on_outside_down))
@@ -313,7 +456,7 @@ impl Render for ModelSelector {
             .on_action(cx.listener(Self::on_confirm))
             .on_action(cx.listener(Self::on_next))
             .on_action(cx.listener(Self::on_prev))
-            // search field — grouped tightly; the list sits after a real gap
+            // search field — grouped above the list with a divider
             .child(
                 div()
                     .h(px(34.))
@@ -335,22 +478,20 @@ impl Render for ModelSelector {
     }
 }
 
-/// Icon + tint for a pi thinking level (HugeIcons stroke set, embedded in
-/// `assets/icons/`). Mapping follows the recommended ladder: zap for
-/// fast/lightweight reasoning, bulb for analysis, brain for deeper
-/// reasoning, sparkle cluster for max/deep, AI-marked brain for auto, and a
-/// slash-circle when thinking is off. Unknown levels fall back to the plain
-/// spark.
+/// Icon + tint for a pi thinking level (HugeIcons stroke set in
+/// `assets/icons/`). Mapping: slash-circle (off), dot (minimal), zap (low),
+/// bulb (medium), brain (high), sparkles (xhigh/max), AI-marked brain
+/// (auto). Unknown levels fall back to the plain spark.
 pub(crate) fn thinking_icon(level: &str, theme: &Theme) -> (&'static str, gpui::Hsla) {
     match level.to_ascii_lowercase().as_str() {
         "off" => ("icons/thinking-off.svg", theme.text_3),
-        "minimal" => ("icons/thinking-minimal.svg", theme.spark_orange),
-        "low" => ("icons/thinking-low.svg", theme.spark_orange),
-        "medium" => ("icons/thinking-medium.svg", theme.spark_orange),
-        "high" => ("icons/thinking-high.svg", theme.spark_orange),
-        "xhigh" | "max" | "ultra" => ("icons/thinking-xhigh.svg", theme.spark_orange),
-        "auto" => ("icons/thinking-auto.svg", theme.spark_orange),
-        _ => ("icons/spark.svg", theme.spark_orange),
+        "minimal" => ("icons/thinking-minimal.svg", theme.accent),
+        "low" => ("icons/thinking-low.svg", theme.accent),
+        "medium" => ("icons/thinking-medium.svg", theme.accent),
+        "high" => ("icons/thinking-high.svg", theme.accent),
+        "xhigh" | "max" | "ultra" => ("icons/thinking-xhigh.svg", theme.accent),
+        "auto" => ("icons/thinking-auto.svg", theme.accent),
+        _ => ("icons/spark.svg", theme.accent),
     }
 }
 
@@ -419,32 +560,125 @@ pub(crate) fn thinking_display(level: &str) -> String {
     }
 }
 
+/// Short hint shown under the thinking level label in the picker.
+fn thinking_hint(level: &str) -> &'static str {
+    match level.to_ascii_lowercase().as_str() {
+        "off" => "No extended reasoning",
+        "minimal" => "Lightweight reasoning",
+        "low" => "Quick reasoning pass",
+        "medium" => "Balanced depth",
+        "high" => "Deeper analysis",
+        "xhigh" | "max" | "ultra" => "Maximum reasoning",
+        "auto" => "Model chooses depth",
+        _ => "Custom reasoning level",
+    }
+}
+
+/// Icon chip in the thinking picker rows — sized like sidebar session chips
+/// so HugeIcons glyphs read clearly (some levels use small artwork in the
+/// 24×24 viewBox, e.g. minimal’s dot).
+const THINKING_CHIP: f32 = 28.;
+const THINKING_ICON: f32 = 15.;
+
 fn trailing_check(selected: bool, theme: Theme) -> impl IntoElement + use<> {
     div()
-        .w(px(12.))
+        .w(px(14.))
         .flex()
         .items_center()
         .justify_center()
         .child(if selected {
-            icon("icons/check.svg", 11., theme.text).into_any_element()
+            icon("icons/check.svg", 11., theme.accent).into_any_element()
         } else {
             div().into_any_element()
         })
 }
 
-fn empty_row(kind: PickerKind, theme: Theme) -> impl IntoElement + use<> {
+fn provider_chip(provider: &str, theme: Theme) -> impl IntoElement + use<> {
     div()
-        .px(px(12.))
-        .pt(px(8.))
-        .pb(px(6.))
+        .size(px(22.))
+        .flex_none()
+        .rounded(px(6.))
+        .bg(theme.bg_raised)
+        .border_1()
+        .border_color(theme.border)
         .flex()
         .items_center()
-        .text_size(theme.ui_px(12.5))
+        .justify_center()
+        .child(icon_dyn(provider_icon(provider), 12., theme.text_2))
+}
+
+fn thinking_chip(level: &str, selected: bool, theme: Theme) -> impl IntoElement + use<> {
+    let (path, color) = thinking_icon(level, &theme);
+    let is_off = level.eq_ignore_ascii_case("off");
+    div()
+        .size(px(THINKING_CHIP))
+        .flex_none()
+        .rounded(px(7.))
+        .bg(if selected && !is_off {
+            theme.accent.opacity(0.14)
+        } else {
+            theme.bg_raised
+        })
+        .border_1()
+        .border_color(if selected && !is_off {
+            theme.accent.opacity(0.35)
+        } else {
+            theme.border
+        })
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(icon(path, THINKING_ICON, color))
+}
+
+fn empty_row(kind: PickerKind, theme: Theme) -> impl IntoElement + use<> {
+    div()
+        .h(px(64.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(theme.ui_px(12.))
         .text_color(theme.text_3)
         .child(match kind {
             PickerKind::Model => "No matching models",
             PickerKind::Thinking => "No matching levels",
         })
+}
+
+fn label_column<P: IntoElement, S: IntoElement>(
+    primary: P,
+    secondary: S,
+    selected: bool,
+    theme: Theme,
+) -> impl IntoElement + use<P, S> {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .justify_center()
+        .gap(px(LABEL_GAP))
+        .child(
+            div()
+                .w_full()
+                .truncate()
+                .text_size(theme.ui_px(12.5))
+                .font_weight(if selected {
+                    FontWeight::MEDIUM
+                } else {
+                    FontWeight::NORMAL
+                })
+                .text_color(if selected { theme.active_fg } else { theme.text_2 })
+                .child(primary),
+        )
+        .child(
+            div()
+                .w_full()
+                .truncate()
+                .text_size(theme.ui_px(11.))
+                .text_color(theme.text_3)
+                .child(secondary),
+        )
 }
 
 fn render_row(
@@ -456,86 +690,106 @@ fn render_row(
     theme: Theme,
 ) -> impl IntoElement + use<> {
     let row = &rows[ix];
-    let base = div()
-        .id(ElementId::NamedInteger("picker-row".into(), ix as u64))
-        .h(px(ROW_H))
-        .px(px(8.))
-        .rounded(px(6.))
-        .flex()
-        .items_center()
-        .gap(px(8.))
-        .cursor_pointer()
-        // Hover moves the keyboard highlight; click activates the row.
-        .on_hover({
-            let this = this.clone();
-            move |hovering, _, cx| {
-                if *hovering {
+    let selected = match row {
+        Row::Level { selected, .. } | Row::Model { selected, .. } => *selected,
+    };
+    let focused = selected || highlighted;
+    let this = this.clone();
+
+    let row_shell = |content: gpui::Div| {
+        content
+            .id(ElementId::NamedInteger("picker-row".into(), ix as u64))
+            .h(px(ROW_H))
+            .px(px(10.))
+            .rounded(px(6.))
+            .cursor_pointer()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .on_hover({
+                let this = this.clone();
+                move |hovering, _, cx| {
+                    if *hovering {
+                        this.update(cx, |selector, cx| {
+                            if selector.hover_highlight_blocked() {
+                                return;
+                            }
+                            if selector.highlighted != ix {
+                                selector.highlighted = ix;
+                                cx.notify();
+                            }
+                        });
+                    }
+                }
+            })
+            .on_click({
+                let this = this.clone();
+                move |_, window, cx| {
                     this.update(cx, |selector, cx| {
-                        if selector.highlighted != ix {
-                            selector.highlighted = ix;
-                            cx.notify();
-                        }
+                        let rows = selector.rows(&selector.last_filter);
+                        selector.activate(ix, &rows, window, cx);
                     });
                 }
-            }
-        })
-        .on_click({
-            let this = this.clone();
-            move |_, window, cx| {
-                this.update(cx, |selector, cx| {
-                    let rows = selector.rows(&selector.last_filter);
-                    selector.activate(ix, &rows, window, cx);
-                });
-            }
-        })
-        .when(highlighted, |row| row.bg(theme.overlay));
+            })
+            .when(focused, |row| row.bg(theme.active))
+            .when(!focused, |row| row.hover(|style| style.bg(theme.overlay)))
+    };
 
     match row {
-        Row::Level { level, selected } => base
-            .text_size(theme.ui_px(12.5))
-            .text_color(if *selected { theme.text } else { theme.text_2 })
-            .child({
-                let (path, color) = thinking_icon(level, &theme);
-                icon(path, 12., color)
-            })
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(thinking_display(level)),
-            )
-            .child(trailing_check(*selected, theme)),
-        Row::Model { model_ix, selected } => {
+        Row::Level { level, .. } => row_shell(div())
+            .child(thinking_chip(level, selected, theme))
+            .child(label_column(
+                thinking_display(level),
+                thinking_hint(level),
+                selected,
+                theme,
+            ))
+            .child(trailing_check(selected, theme)),
+        Row::Model { model_ix, .. } => {
             let model = &models[*model_ix];
-            base.text_size(theme.ui_px(12.5))
-                .text_color(if *selected { theme.text } else { theme.text_2 })
-                .child(icon_dyn(provider_icon(&model.provider), 12., theme.text_2))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .truncate()
-                                .child(model.name.clone()),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_shrink_0()
-                                .truncate()
-                                .text_size(theme.ui_px(11.))
-                                .text_color(theme.text_3)
-                                .child(model.provider.clone()),
-                        ),
-                )
-                .child(trailing_check(*selected, theme))
+            row_shell(div())
+                .child(provider_chip(&model.provider, theme))
+                .child(label_column(
+                    model.name.clone(),
+                    model.provider.clone(),
+                    selected,
+                    theme,
+                ))
+                .child(trailing_check(selected, theme))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn offset_for(ix: usize, row_count: usize) -> f32 {
+        let mut scroll = ScrollHandle::new();
+        ModelSelector::apply_scroll_to_row(&mut scroll, ix, row_count);
+        scroll.offset().y.into()
+    }
+
+    #[test]
+    fn scroll_offset_is_negative_when_scrolled_down() {
+        // gpui's `set_offset` is a negative value for a scrolled-down list
+        // (clamped to [-max, 0]); a positive value would be clamped to 0.
+        assert!(offset_for(20, 30) < 0.);
+    }
+
+    #[test]
+    fn scroll_offset_zero_at_top() {
+        assert_eq!(offset_for(0, 30), 0.);
+    }
+
+    #[test]
+    fn scroll_offset_centers_selected_row() {
+        let offset = offset_for(20, 30);
+        // Row 20's top sits at 20 * ROW_STRIDE; the list is 6 rows tall and
+        // centered, so the scrolled offset places the row within the viewport.
+        let row_top = 20. * ROW_STRIDE;
+        let viewport_h = LIST_MAX_H;
+        assert!(row_top + offset >= 0.);
+        assert!(row_top + offset <= viewport_h - ROW_H + 0.5);
     }
 }

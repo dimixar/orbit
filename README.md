@@ -69,6 +69,21 @@ cargo run -p orbit-pi
 cargo test --workspace          # unit tests + live pi integration tests
 ```
 
+### Live-reload dev loop
+
+Rust can't hot-swap code into a running process — changes need a rebuild and
+relaunch. `bacon` automates it: the app is killed, the crate recompiles, and a
+fresh window opens on every save.
+
+```bash
+cargo install bacon   # once
+bacon run             # watch crates/, restart the app on save
+```
+
+`bacon.toml` holds the jobs (`run`, `check`) and the watched paths. Without
+bacon: `cargo watch -w crates -x "run -p orbit-pi"` (needs
+`cargo install cargo-watch`).
+
 ## Project Layout
 
 ```

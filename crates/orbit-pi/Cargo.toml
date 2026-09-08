@@ -30,3 +30,25 @@ devicons = "0.6"
 # Match gpui 0.2.2 so we can set the Dock icon from the embedded PNG
 # when running without a bundled .app (cargo run).
 cocoa = "=0.26.0"
+# Detect installed editors/terminals and open workspace folders in them.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSBitmapImageRep",
+    "NSImage",
+    "NSImageRep",
+    "NSWorkspace",
+    "block2",
+    "objc2-core-graphics",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSDictionary",
+    "NSString",
+    "NSURL",
+] }
+url = "2.5"
+
+[dev-dependencies]
+gpui = { version = "0.2.2", features = ["runtime_shaders", "test-support"] }

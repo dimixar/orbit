@@ -770,7 +770,7 @@ impl Element for TextElement {
                             map(x0, y),
                             point(map(x1, y).x, map(x1, y).y + line_height),
                         ),
-                        theme.spark_orange.opacity(0.25),
+                        theme.accent.opacity(0.25),
                     ));
                 }
             }
@@ -803,7 +803,7 @@ impl Element for TextElement {
                     point(origin.x, origin.y + px(2.)),
                     size(px(2.), line_height - px(4.)),
                 ),
-                theme.spark_orange,
+                theme.accent,
             )
         });
 
