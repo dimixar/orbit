@@ -20,11 +20,10 @@ use std::{
 };
 
 use gpui::{
-    div, linear_color_stop, linear_gradient, list, point, prelude::*, px, relative, svg,
-    AnyElement,
-    ClipboardItem, ElementId, Font, FontFeatures, FontStyle, FontWeight, Hsla,
-    InteractiveText, Pixels, ScrollHandle, SharedString, StrikethroughStyle, StyledText, TextRun,
-    UnderlineStyle,
+    div, img, linear_color_stop, linear_gradient, list, point, prelude::*, px, relative, svg,
+    AnyElement, ClipboardItem, ElementId, Font, FontFeatures, FontStyle, FontWeight, Hsla,
+    ImageSource, InteractiveText, ObjectFit, Pixels, ScrollHandle, SharedString,
+    StrikethroughStyle, StyledText, TextRun, UnderlineStyle,
 };
 
 use std::ops::Range;
@@ -91,8 +90,6 @@ pub(crate) struct TranscriptView {
     pub hovered_turn: Rc<Cell<Option<usize>>>,
     /// Transcript row currently hovered (reveals the ghost footer).
     pub hovered_row: Rc<Cell<Option<usize>>>,
-    /// Messages whose thinking disclosure is expanded, keyed by message ix.
-    pub expanded_thinking: Rc<RefCell<HashSet<usize>>>,
     /// Workspace of the open session — roots the Review git diff.
     pub workspace: Option<PathBuf>,
     /// Viewport height (caps the rail at 80%, like Waku).
@@ -102,6 +99,12 @@ pub(crate) struct TranscriptView {
     /// Rail scroll position + last auto-scrolled turn.
     pub rail_scroll: ScrollHandle,
     pub rail_autoscroll: Rc<Cell<Option<usize>>>,
+    /// End-of-task changed-files summary — `Some` renders one extra row
+    /// after the last message (the list's tail slot).
+    pub summary_files: Option<Vec<(String, u64, u64)>>,
+    /// When the settled run finished (last message's timestamp) — shown in
+    /// the summary card's footer next to the copy affordance.
+    pub summary_finished_at: Option<i64>,
 }
 
 struct RowPaint {
@@ -115,8 +118,10 @@ struct RowPaint {
     files_open: bool,
     copied: bool,
     expanded_turns: Rc<RefCell<HashSet<usize>>>,
-    expanded_thinking: Rc<RefCell<HashSet<usize>>>,
     expanded_files: Rc<RefCell<HashSet<usize>>>,
+    /// End-of-task summary row is shown — the last message's own
+    /// changed-files card is then subsumed by it.
+    tail_summary: bool,
     expanded_activities: ExpandedActivities,
     copied_at: Rc<RefCell<HashMap<usize, Instant>>>,
     hovered_row: Rc<Cell<Option<usize>>>,
@@ -139,11 +144,12 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
     let copied_sections = view.copied_sections.clone();
     let hovered_turn = view.hovered_turn.clone();
     let hovered_row = view.hovered_row.clone();
-    let expanded_thinking = view.expanded_thinking.clone();
     let workspace = view.workspace.clone();
     let rail_scroll = view.rail_scroll.clone();
     let rail_autoscroll = view.rail_autoscroll.clone();
     let scroller = view.scroller.clone();
+    let summary_files = view.summary_files.clone();
+    let summary_finished_at = view.summary_finished_at;
 
     let (user_turns, active_turn) = {
         let messages = messages.borrow();
@@ -153,7 +159,16 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
             .filter(|(_, message)| message.user)
             .map(|(ix, _)| ix)
             .collect();
-        let active_turn = active_user_index(&messages, streaming.get());
+        // While the reader sits at the live edge the indicator tracks the
+        // streaming/latest turn; once they scroll away it follows the
+        // viewport instead (fixes the tick staying pinned to the newest
+        // turn while reading earlier ones).
+        let viewport_hint = if scroller.is_following_tail() {
+            None
+        } else {
+            Some(scroller.first_visible_index())
+        };
+        let active_turn = active_user_index(&messages, streaming.get(), viewport_hint);
         (user_turns, active_turn)
     };
     let show_rail = user_turns.len() >= 2
@@ -194,6 +209,99 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
             .get(&ix)
             .is_some_and(|at| at.elapsed() < COPY_FEEDBACK);
         let row_count = messages.borrow().len();
+        // The list's tail slot (ix == row_count) is the end-of-task
+        // changed-files summary — pinned after the last message, in the
+        // same centered column as every other row.
+        if ix >= row_count {
+            let Some(files) = summary_files.as_ref() else {
+                return div().into_any_element();
+            };
+            let card = render_changed_files(
+                files,
+                *theme::get(cx),
+                ix,
+                workspace.as_deref(),
+                expanded_files.borrow().contains(&ix),
+                expanded_files.clone(),
+                scroller.clone(),
+            );
+            // Waku-style footer under the summary card: copy affordance
+            // (duplicates the changed-file list) + settled timestamp.
+            let copied_now = copied
+                .borrow()
+                .get(&ix)
+                .is_some_and(|at| at.elapsed() < COPY_FEEDBACK);
+            let stamp = summary_finished_at
+                .map(|millis| {
+                    div()
+                        .text_size(theme.ui_px(11.5))
+                        .text_color(theme.text_3)
+                        .child(summary_time_label(millis))
+                })
+                .unwrap_or_else(|| div());
+            let footer = div()
+                .mt(px(10.))
+                .px(px(4.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .child(
+                    div()
+                        .id(ElementId::NamedInteger(
+                            "copy-changed-files".into(),
+                            ix as u64,
+                        ))
+                        .flex()
+                        .items_center()
+                        .cursor_pointer()
+                        .child(glyph(
+                            if copied_now {
+                                "icons/check.svg"
+                            } else {
+                                "icons/copy.svg"
+                            },
+                            13.,
+                            if copied_now {
+                                theme.ok_green
+                            } else {
+                                theme.text_3
+                            },
+                        ))
+                        .on_click({
+                            let files = files.clone();
+                            let copied = copied.clone();
+                            move |_, _, cx| {
+                                let text = files
+                                    .iter()
+                                    .map(|(path, _, _)| path.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                copied.borrow_mut().insert(ix, Instant::now());
+                                cx.refresh_windows();
+                            }
+                        }),
+                )
+                .child(stamp);
+            return div()
+                .id(ElementId::NamedInteger("transcript-row".into(), ix as u64))
+                .w_full()
+                .flex()
+                .justify_center()
+                .px(px(20.))
+                .pb(px(22.))
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(CONTENT_MAX_WIDTH))
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(card)
+                        .child(footer),
+                )
+                .into_any_element();
+        }
         render_row(RowPaint {
             messages: messages.clone(),
             ix,
@@ -205,8 +313,8 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
             files_open,
             copied: copied_now,
             expanded_turns: expanded_turns.clone(),
-            expanded_thinking: expanded_thinking.clone(),
             expanded_files: expanded_files.clone(),
+            tail_summary: summary_files.is_some(),
             expanded_activities: expanded_activities.clone(),
             copied_at: copied.clone(),
             hovered_row: hovered_row.clone(),
@@ -269,8 +377,8 @@ fn render_navigation_rail(
     let scroll_offset = rail_scroll.offset().y;
 
     // Waku scrolls the active tick into view whenever it changes.
-    let active_pos = active_turn
-        .and_then(|ix| user_turns.iter().position(|candidate| *candidate == ix));
+    let active_pos =
+        active_turn.and_then(|ix| user_turns.iter().position(|candidate| *candidate == ix));
     if scrollable {
         if let Some(pos) = active_pos {
             let top = px(pos as f32 * NAVIGATION_RAIL_TURN_HEIGHT);
@@ -278,7 +386,8 @@ fn render_navigation_rail(
             if rail_autoscroll.get() != Some(pos)
                 && (top < scroll_offset || top + pitch > visible_bottom)
             {
-                let target = (top + pitch / 2. - rail_height / 2.).clamp(px(0.), content_height - rail_height);
+                let target = (top + pitch / 2. - rail_height / 2.)
+                    .clamp(px(0.), content_height - rail_height);
                 rail_scroll.set_offset(point(px(0.), target));
             }
             rail_autoscroll.set(Some(pos));
@@ -286,16 +395,15 @@ fn render_navigation_rail(
     }
     let scroll_offset = rail_scroll.offset().y;
     let at_top = !scrollable || scroll_offset <= px(0.5);
-    let at_bottom =
-        !scrollable || scroll_offset >= content_height - rail_height - px(0.5);
+    let at_bottom = !scrollable || scroll_offset >= content_height - rail_height - px(0.5);
 
     // The emphasized (hovered) turn anchors the width fan-out; with nothing
     // hovered every tick rests at the 0.25 scale, like Waku's idle rail.
     let emphasized_turn = hovered.get();
     let emphasized_pos =
         emphasized_turn.and_then(|ix| user_turns.iter().position(|candidate| *candidate == ix));
-    let hover_info = emphasized_pos
-        .map(|pos| (pos, snippets[pos].0.clone(), snippets[pos].1.clone()));
+    let hover_info =
+        emphasized_pos.map(|pos| (pos, snippets[pos].0.clone(), snippets[pos].1.clone()));
 
     let ticks: Vec<(usize, String, f32, Hsla)> = user_turns
         .iter()
@@ -308,8 +416,7 @@ fn render_navigation_rail(
                 .and_then(|d| NAVIGATION_RAIL_EMPHASIS_SCALE.get(d))
                 .copied()
                 .unwrap_or(0.25);
-            let prominent =
-                emphasized_turn == Some(user_ix) || active_turn == Some(user_ix);
+            let prominent = emphasized_turn == Some(user_ix) || active_turn == Some(user_ix);
             let width = NAVIGATION_RAIL_TICK_WIDTH * scale;
             let color = if prominent {
                 theme.text
@@ -326,18 +433,21 @@ fn render_navigation_rail(
         .w(px(NAVIGATION_RAIL_WIDTH))
         .h(rail_height)
         .child(
-                    div()
-                        .id(ElementId::Name("rail-ticks".into()))
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .right_0()
-                        .bottom_0()
-                        .overflow_y_scroll()
-                        .track_scroll(&rail_scroll)
-                        .flex()
-                        .flex_col()
-                        .children(ticks.into_iter().map(move |(user_ix, _prompt, width, color)| {
+            div()
+                .id(ElementId::Name("rail-ticks".into()))
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .overflow_y_scroll()
+                .track_scroll(&rail_scroll)
+                .flex()
+                .flex_col()
+                .children(
+                    ticks
+                        .into_iter()
+                        .map(move |(user_ix, _prompt, width, color)| {
                             let scroller = scroller.clone();
                             let hover_state = hovered.clone();
                             div()
@@ -383,14 +493,13 @@ fn render_navigation_rail(
                                         .bg(color)
                                         .hover(|style| style.bg(theme.text)),
                                 )
-                        })),
-                )
-                .when(!at_top, |rail| {
-                    rail.child(render_rail_fade(true, theme))
-                })
-                .when(!at_bottom, |rail| {
-                    rail.child(render_rail_fade(false, theme))
-                });
+                        }),
+                ),
+        )
+        .when(!at_top, |rail| rail.child(render_rail_fade(true, theme)))
+        .when(!at_bottom, |rail| {
+            rail.child(render_rail_fade(false, theme))
+        });
 
     // Hover preview, clamped inside the rail body's vertical span (Waku
     // clamps `previewTop` against the rail bounds).
@@ -483,8 +592,8 @@ fn render_rail_preview(
             div()
                 .w_full()
                 .truncate()
-                .text_size(px(14.))
-                .line_height(px(20.))
+                .text_size(theme.ui_px(14.))
+                .line_height(theme.ui_px(20.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.text)
                 .child(prompt.to_string()),
@@ -496,8 +605,8 @@ fn render_rail_preview(
                     .max_h(px(60.))
                     .overflow_hidden()
                     .whitespace_normal()
-                    .text_size(px(13.))
-                    .line_height(px(20.))
+                    .text_size(theme.ui_px(13.))
+                    .line_height(theme.ui_px(20.))
                     .text_color(theme.text_3)
                     .child(response.to_string()),
             )
@@ -565,10 +674,12 @@ fn render_row(paint: RowPaint) -> AnyElement {
 }
 
 /// End-aligned user row: Waku's neutral raised bubble, ghost footer below.
+/// Attached images render as a tile grid above the text bubble.
 fn render_user_bubble(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement {
     let theme = paint.theme;
     let ix = paint.ix;
     let revealed = paint.hovered_row.get() == Some(ix);
+    let text = message.text();
     div()
         .w_full()
         .min_w_0()
@@ -576,26 +687,54 @@ fn render_user_bubble(message: &ChatMessage, paint: &RowPaint) -> impl IntoEleme
         .flex_col()
         .items_end()
         .gap(px(4.))
-        .child(
-            div()
-                .max_w(px(USER_BUBBLE_MAX_WIDTH))
-                .rounded(px(12.))
-                .bg(theme.bg_raised)
-                .text_color(theme.text)
-                .px(px(12.))
-                .py(px(8.))
-                .text_size(px(14.))
-                .whitespace_normal()
-                .child(render_prose(
-                    &message.text(),
-                    ix,
-                    0,
-                    theme,
-                    paint.copied_sections.clone(),
-                )),
-        )
+        // Attachment tiles (images queued with the prompt). Cover-cropped
+        // squares, Waku-style; wrap when a message carries several.
+        .when(!message.images.is_empty(), |column| {
+            column.child(
+                div()
+                    .max_w(px(USER_BUBBLE_MAX_WIDTH))
+                    .flex()
+                    .flex_wrap()
+                    .justify_end()
+                    .gap(px(6.))
+                    .children(message.images.iter().map(|image| {
+                        div()
+                            .size(px(112.))
+                            .rounded(px(10.))
+                            .border_1()
+                            .border_color(theme.border)
+                            .overflow_hidden()
+                            .bg(theme.bg_raised)
+                            .child(
+                                img(ImageSource::Image(image.clone()))
+                                    .size_full()
+                                    .object_fit(ObjectFit::Cover),
+                            )
+                    })),
+            )
+        })
+        .when(!text.is_empty(), |column| {
+            column.child(
+                div()
+                    .max_w(px(USER_BUBBLE_MAX_WIDTH))
+                    .rounded(px(12.))
+                    .bg(theme.bg_raised)
+                    .text_color(theme.text)
+                    .px(px(12.))
+                    .py(px(8.))
+                    .text_size(theme.ui_px(14.))
+                    .whitespace_normal()
+                    .child(render_prose(
+                        &text,
+                        ix,
+                        0,
+                        theme,
+                        paint.copied_sections.clone(),
+                    )),
+            )
+        })
         .child(render_message_footer(
-            message.text(),
+            text,
             ix,
             message.finished_at,
             revealed,
@@ -672,24 +811,21 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
         }
 
         if !step.text.is_empty() {
-            content = content.child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .pt(px(4.))
-                    .child(render_prose(
-                        &step.text,
-                        ix,
-                        (step_ix as u64 + 1) * 4096,
-                        theme,
-                        paint.copied_sections.clone(),
-                    )),
-            );
+            content = content.child(div().w_full().min_w_0().pt(px(4.)).child(render_prose(
+                &step.text,
+                ix,
+                (step_ix as u64 + 1) * 4096,
+                theme,
+                paint.copied_sections.clone(),
+            )));
         }
     }
 
     let files = changed_files(message);
-    if !files.is_empty() {
+    // The end-of-task summary card (shown after the last row) aggregates
+    // every turn's files — the final turn's own card would just duplicate it.
+    let tail_covers = paint.tail_summary && ix + 1 == paint.row_count;
+    if !files.is_empty() && !tail_covers {
         content = content.child(
             div()
                 .w_full()
@@ -749,8 +885,7 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
 /// "Ran 7 commands · 4 thoughts", "Ran 1 file read · 1 thought".
 fn step_activity_title(step: &Step, live: bool) -> String {
     let mut parts: Vec<String> = Vec::new();
-    let (mut commands, mut reads, mut edits, mut other) =
-        (0usize, 0usize, 0usize, 0usize);
+    let (mut commands, mut reads, mut edits, mut other) = (0usize, 0usize, 0usize, 0usize);
     for tool in &step.tools {
         match tool.name.as_str() {
             "bash" | "shell" => commands += 1,
@@ -759,9 +894,7 @@ fn step_activity_title(step: &Step, live: bool) -> String {
             _ => other += 1,
         }
     }
-    let units = |n: usize, word: &str| {
-        format!("{} {}{}", n, word, if n == 1 { "" } else { "s" })
-    };
+    let units = |n: usize, word: &str| format!("{} {}{}", n, word, if n == 1 { "" } else { "s" });
     if commands > 0 {
         parts.push(format!("Ran {}", units(commands, "command")));
     }
@@ -782,7 +915,11 @@ fn step_activity_title(step: &Step, live: bool) -> String {
         });
     }
     if parts.is_empty() {
-        return if live { "Working".into() } else { "Worked".into() };
+        return if live {
+            "Working".into()
+        } else {
+            "Worked".into()
+        };
     }
     parts.join(" \u{b} ")
 }
@@ -824,8 +961,8 @@ fn render_step_group(
                 .items_center()
                 .gap(px(6.))
                 .cursor_pointer()
-                .text_size(px(12.5))
-                .line_height(px(16.))
+                .text_size(theme.ui_px(12.5))
+                .line_height(theme.ui_px(16.))
                 .hover(|style| style.text_color(theme.text))
                 .child(
                     div()
@@ -918,8 +1055,8 @@ fn render_thinking_body(thinking: &str, live: bool, theme: Theme) -> impl IntoEl
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .text_size(px(12.5))
-                .line_height(px(16.))
+                .text_size(theme.ui_px(12.5))
+                .line_height(theme.ui_px(16.))
                 .child(glyph("icons/spark.svg", 12., theme.text_3))
                 .child(
                     div()
@@ -931,8 +1068,8 @@ fn render_thinking_body(thinking: &str, live: bool, theme: Theme) -> impl IntoEl
         .child(
             div()
                 .font_family("Menlo")
-                .text_size(px(10.5))
-                .line_height(px(15.))
+                .text_size(theme.code_px(10.5))
+                .line_height(theme.code_px(15.))
                 .text_color(theme.tool_meta)
                 .whitespace_normal()
                 .child(detail),
@@ -982,8 +1119,8 @@ fn render_activity_card(
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .text_size(px(12.5))
-                .line_height(px(16.))
+                .text_size(theme.ui_px(12.5))
+                .line_height(theme.ui_px(16.))
                 .when(has_detail, |row| row.cursor_pointer())
                 .hover(|style| style.bg(theme.overlay_strong))
                 .child(glyph(activity_icon(&tool.name), 12., theme.text_3))
@@ -1014,8 +1151,8 @@ fn render_activity_card(
                     row.child(
                         div()
                             .flex_none()
-                            .text_size(px(11.))
-                            .line_height(px(16.))
+                            .text_size(theme.ui_px(11.))
+                            .line_height(theme.ui_px(16.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.del_red)
                             .child("✕"),
@@ -1081,20 +1218,24 @@ fn render_tool_detail(
         .flex()
         .flex_col()
         .gap(px(6.))
-        .children(sections.into_iter().filter_map(|(section, label, content)| {
-            let content = content?;
-            if content.trim().is_empty() {
-                return None;
-            }
-            Some(render_detail_section(
-                key,
-                section,
-                label,
-                content,
-                copied_sections.clone(),
-                theme,
-            ))
-        }))
+        .children(
+            sections
+                .into_iter()
+                .filter_map(|(section, label, content)| {
+                    let content = content?;
+                    if content.trim().is_empty() {
+                        return None;
+                    }
+                    Some(render_detail_section(
+                        key,
+                        section,
+                        label,
+                        content,
+                        copied_sections.clone(),
+                        theme,
+                    ))
+                }),
+        )
 }
 
 fn render_detail_section(
@@ -1125,8 +1266,8 @@ fn render_detail_section(
                 .child(
                     div()
                         .font_weight(FontWeight::MEDIUM)
-                        .text_size(px(10.5))
-                        .line_height(px(14.))
+                        .text_size(theme.ui_px(10.5))
+                        .line_height(theme.ui_px(14.))
                         .text_color(theme.text_2)
                         .child(label.to_string()),
                 )
@@ -1150,16 +1291,10 @@ fn render_detail_section(
                                 "icons/copy.svg"
                             },
                             10.,
-                            if copied {
-                                theme.ok_green
-                            } else {
-                                theme.text_3
-                            },
+                            if copied { theme.ok_green } else { theme.text_3 },
                         ))
                         .on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(
-                                copy_content.clone(),
-                            ));
+                            cx.write_to_clipboard(ClipboardItem::new_string(copy_content.clone()));
                             copied_sections
                                 .borrow_mut()
                                 .insert((key.0, key.1, section), Instant::now());
@@ -1172,8 +1307,8 @@ fn render_detail_section(
                 .w_full()
                 .min_w_0()
                 .font_family("Menlo")
-                .text_size(px(10.5))
-                .line_height(px(15.))
+                .text_size(theme.code_px(10.5))
+                .line_height(theme.code_px(15.))
                 .text_color(theme.tool_meta)
                 .whitespace_normal()
                 .child(content),
@@ -1184,8 +1319,7 @@ fn render_detail_section(
 fn display_value(value: &Value) -> String {
     let text = match value {
         Value::String(text) => text.clone(),
-        other => serde_json::to_string_pretty(other)
-            .unwrap_or_else(|_| other.to_string()),
+        other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
     };
     cap_chars(&text, DETAIL_TEXT_CAP)
 }
@@ -1223,7 +1357,11 @@ fn render_message_footer(
         .cursor_pointer()
         .hover(|style| style.bg(theme.overlay_strong))
         .child(glyph(
-            if copied { "icons/check.svg" } else { "icons/copy.svg" },
+            if copied {
+                "icons/check.svg"
+            } else {
+                "icons/copy.svg"
+            },
             14.,
             if copied { theme.ok_green } else { theme.text_3 },
         ))
@@ -1238,8 +1376,8 @@ fn render_message_footer(
             .px(px(4.))
             .flex()
             .items_center()
-            .text_size(px(11.5))
-            .line_height(px(16.))
+            .text_size(theme.ui_px(11.5))
+            .line_height(theme.ui_px(16.))
             .text_color(theme.text_3)
             .child(time)
     });
@@ -1302,7 +1440,12 @@ fn format_duration(duration: Duration) -> String {
         let remaining = secs % 60;
         let first = format!("{} {}", minutes, plural_unit("minute", minutes));
         return if remaining > 0 {
-            format!("{} {} {}", first, remaining, plural_unit("second", remaining))
+            format!(
+                "{} {} {}",
+                first,
+                remaining,
+                plural_unit("second", remaining)
+            )
         } else {
             first
         };
@@ -1351,8 +1494,8 @@ fn render_turn_fold(
                 .items_center()
                 .gap(px(5.))
                 .cursor_pointer()
-                .text_size(px(13.5))
-                .line_height(px(18.))
+                .text_size(theme.ui_px(13.5))
+                .line_height(theme.ui_px(18.))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.text_3)
                 .hover(|style| style.text_color(theme.text_2))
@@ -1399,8 +1542,8 @@ fn render_working_indicator(elapsed: Duration, theme: Theme) -> impl IntoElement
         .child(working_wave_dots(theme, elapsed.as_millis()))
         .child(
             div()
-                .text_size(px(13.5))
-                .line_height(px(18.))
+                .text_size(theme.ui_px(13.5))
+                .line_height(theme.ui_px(18.))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.text_3)
                 .child(format!("Working for {}", format_working_elapsed(elapsed))),
@@ -1450,8 +1593,8 @@ fn render_line_delta(added: u64, removed: u64, theme: Theme, size: f32) -> impl 
         .flex_none()
         .items_center()
         .gap(px(6.))
-        .text_size(px(size))
-        .line_height(px(size + 3.))
+        .text_size(theme.ui_px(size))
+        .line_height(theme.ui_px(size + 3.))
         .child(
             div()
                 .flex_none()
@@ -1529,10 +1672,9 @@ fn parse_inline(text: &str) -> Vec<InlineSpan> {
                 current.bold = !current.bold;
                 i += 2;
             }
-            '_'
-                if i + 1 < chars.len()
-                    && chars[i + 1] == '_'
-                    && (i == 0 || !chars[i - 1].is_alphanumeric()) =>
+            '_' if i + 1 < chars.len()
+                && chars[i + 1] == '_'
+                && (i == 0 || !chars[i - 1].is_alphanumeric()) =>
             {
                 flush_span(&mut spans, &mut current);
                 current.bold = !current.bold;
@@ -1696,8 +1838,8 @@ fn paragraph_text(
     div()
         .w_full()
         .min_w_0()
-        .text_size(px(size))
-        .line_height(px(line_height))
+        .text_size(theme.ui_px(size))
+        .line_height(theme.ui_px(line_height))
         .text_color(color)
         .child(
             InteractiveText::new(key, StyledText::new(body).with_runs(runs)).on_click(
@@ -1714,10 +1856,7 @@ fn paragraph_text(
 fn md_id(ix: usize, salt: u64, block_ix: usize, sub: usize) -> ElementId {
     ElementId::NamedInteger(
         "md".into(),
-        ((ix as u64) << 40)
-            | ((salt & 0xffff) << 24)
-            | ((block_ix as u64) << 8)
-            | sub as u64,
+        ((ix as u64) << 40) | ((salt & 0xffff) << 24) | ((block_ix as u64) << 8) | sub as u64,
     )
 }
 
@@ -1776,23 +1915,22 @@ fn is_rule(trimmed: &str) -> bool {
 fn list_item_line(line: &str) -> Option<(usize, bool, u64, String)> {
     let indent = line.len() - line.trim_start().len();
     let t = line.trim_start();
-    let (ordered, number, body) =
-        if let Some(rest) = t
-            .strip_prefix("- ")
-            .or_else(|| t.strip_prefix("* "))
-            .or_else(|| t.strip_prefix("+ "))
-        {
-            (false, 0u64, rest)
-        } else {
-            let digits = t.chars().take_while(|c| c.is_ascii_digit()).count();
-            if digits == 0 {
-                return None;
-            }
-            let after = t[digits..]
-                .strip_prefix(". ")
-                .or_else(|| t[digits..].strip_prefix(") "))?;
-            (true, t[..digits].parse().ok()?, after)
-        };
+    let (ordered, number, body) = if let Some(rest) = t
+        .strip_prefix("- ")
+        .or_else(|| t.strip_prefix("* "))
+        .or_else(|| t.strip_prefix("+ "))
+    {
+        (false, 0u64, rest)
+    } else {
+        let digits = t.chars().take_while(|c| c.is_ascii_digit()).count();
+        if digits == 0 {
+            return None;
+        }
+        let after = t[digits..]
+            .strip_prefix(". ")
+            .or_else(|| t[digits..].strip_prefix(") "))?;
+        (true, t[..digits].parse().ok()?, after)
+    };
     Some((indent.div_ceil(2).min(2), ordered, number, body.to_string()))
 }
 
@@ -1806,9 +1944,7 @@ fn split_table_row(line: &str) -> Vec<String> {
 fn is_table_separator(trimmed: &str) -> bool {
     trimmed.contains('-')
         && trimmed.contains('|')
-        && trimmed
-            .chars()
-            .all(|c| matches!(c, '|' | '-' | ':' | ' '))
+        && trimmed.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
 }
 
 fn parse_blocks(text: &str) -> Vec<Block> {
@@ -1855,10 +1991,7 @@ fn parse_blocks(text: &str) -> Vec<Block> {
             continue;
         }
 
-        if trimmed.contains('|')
-            && i + 1 < lines.len()
-            && is_table_separator(lines[i + 1].trim())
-        {
+        if trimmed.contains('|') && i + 1 < lines.len() && is_table_separator(lines[i + 1].trim()) {
             flush_paragraph(&mut paragraph, &mut blocks);
             let header = split_table_row(trimmed);
             i += 2;
@@ -2013,14 +2146,9 @@ fn render_block(
             )
             .into_any_element()
         }
-        Block::Code(lines) => render_code_block(
-            &lines,
-            ix,
-            block_ix,
-            theme,
-            copied_sections,
-        )
-        .into_any_element(),
+        Block::Code(lines) => {
+            render_code_block(&lines, ix, block_ix, theme, copied_sections).into_any_element()
+        }
         Block::Rule => div().w_full().h(px(1.)).bg(theme.border).into_any_element(),
         Block::Quote(lines) => div()
             .w_full()
@@ -2053,21 +2181,11 @@ fn render_block(
                 items
                     .into_iter()
                     .enumerate()
-                    .map(move |(sub, item)| {
-                        render_list_item(item, ix, salt, block_ix, sub, theme)
-                    }),
+                    .map(move |(sub, item)| render_list_item(item, ix, salt, block_ix, sub, theme)),
             )
             .into_any_element(),
         Block::Table { header, rows } => {
-            render_table(
-                &header,
-                &rows,
-                ix,
-                salt,
-                block_ix,
-                theme,
-            )
-            .into_any_element()
+            render_table(&header, &rows, ix, salt, block_ix, theme).into_any_element()
         }
     }
 }
@@ -2096,8 +2214,8 @@ fn render_list_item(
             div()
                 .flex_none()
                 .w(px(20.))
-                .text_size(px(14.))
-                .line_height(px(22.))
+                .text_size(theme.ui_px(14.))
+                .line_height(theme.ui_px(22.))
                 .text_color(if item.ordered {
                     theme.text
                 } else {
@@ -2105,17 +2223,15 @@ fn render_list_item(
                 })
                 .child(marker),
         )
-        .child(
-            div().min_w_0().flex_1().child(paragraph_text(
-                &item.text,
-                14.,
-                22.,
-                FontWeight::NORMAL,
-                theme.assistant_text,
-                md_id(ix, salt, block_ix, sub),
-                theme,
-            )),
-        )
+        .child(div().min_w_0().flex_1().child(paragraph_text(
+            &item.text,
+            14.,
+            22.,
+            FontWeight::NORMAL,
+            theme.assistant_text,
+            md_id(ix, salt, block_ix, sub),
+            theme,
+        )))
         .into_any_element()
 }
 
@@ -2182,8 +2298,8 @@ fn render_code_block(
                 .py(px(12.))
                 .overflow_hidden()
                 .font_family("Menlo")
-                .text_size(px(13.))
-                .line_height(px(24.))
+                .text_size(theme.code_px(13.))
+                .line_height(theme.code_px(24.))
                 .text_color(theme.code_text)
                 .children(lines.iter().enumerate().map(|(line_ix, line)| {
                     // Clear the top-right copy button on the first line only.
@@ -2226,32 +2342,28 @@ fn render_table(
         *weight = longest.clamp(1, 60);
     }
     let total = weights.iter().sum::<usize>().max(1) as f32;
-    let make_cell = |text: &str,
-                     weight: usize,
-                     strong: bool,
-                     sub: usize,
-                     salt: u64,
-                     theme: Theme| {
-        div()
-            .flex_basis(relative(weight as f32 / total))
-            .flex_grow()
-            .min_w_0()
-            .px(px(12.))
-            .py(px(8.))
-            .child(paragraph_text(
-                text,
-                13.,
-                20.,
-                if strong {
-                    FontWeight::SEMIBOLD
-                } else {
-                    FontWeight::NORMAL
-                },
-                theme.assistant_text,
-                md_id(ix, salt, block_ix, sub),
-                theme,
-            ))
-    };
+    let make_cell =
+        |text: &str, weight: usize, strong: bool, sub: usize, salt: u64, theme: Theme| {
+            div()
+                .flex_basis(relative(weight as f32 / total))
+                .flex_grow()
+                .min_w_0()
+                .px(px(12.))
+                .py(px(8.))
+                .child(paragraph_text(
+                    text,
+                    13.,
+                    20.,
+                    if strong {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        FontWeight::NORMAL
+                    },
+                    theme.assistant_text,
+                    md_id(ix, salt, block_ix, sub),
+                    theme,
+                ))
+        };
     let mut table = div()
         .w_full()
         .min_w_0()
@@ -2260,14 +2372,12 @@ fn render_table(
         .border_1()
         .border_color(theme.border);
     table = table.child(
-        div()
-            .w_full()
-            .min_w_0()
-            .flex()
-            .bg(theme.overlay)
-            .children(header.iter().enumerate().map(|(col, text)| {
-                make_cell(text, weights[col], true, col, salt, theme)
-            })),
+        div().w_full().min_w_0().flex().bg(theme.overlay).children(
+            header
+                .iter()
+                .enumerate()
+                .map(|(col, text)| make_cell(text, weights[col], true, col, salt, theme)),
+        ),
     );
     for (row_ix, row) in rows.iter().enumerate() {
         let weights = weights.clone();
@@ -2292,6 +2402,27 @@ fn render_table(
     }
     table.into_any_element()
 }
+/// Waku-style footer stamp for the changed-files summary: `Today 1:15 PM`,
+/// `Yesterday 6:07 PM`, then a short date (`Sep 6`) once past yesterday.
+fn summary_time_label(millis: i64) -> String {
+    summary_time_label_at(millis, chrono::Local::now())
+}
+
+fn summary_time_label_at(millis: i64, now: chrono::DateTime<chrono::Local>) -> String {
+    use chrono::{DateTime, Local, TimeZone};
+    let Some(utc) = DateTime::from_timestamp_millis(millis) else {
+        return String::new();
+    };
+    let dt: DateTime<Local> = Local.from_utc_datetime(&utc.naive_local());
+    let days = (now.date_naive() - dt.date_naive()).num_days();
+    let clock = dt.format("%-I:%M %p");
+    match days {
+        0 => format!("Today {clock}"),
+        1 => format!("Yesterday {clock}"),
+        _ => dt.format("%b %-d").to_string(),
+    }
+}
+
 fn changed_files_title(count: usize) -> String {
     if count == 1 {
         "Changed 1 file".to_string()
@@ -2343,22 +2474,22 @@ fn render_changed_files(
                         .min_w_0()
                         .flex_1()
                         .truncate()
-                        .text_size(px(11.5))
-                        .line_height(px(16.))
+                        .text_size(theme.ui_px(11.5))
+                        .line_height(theme.ui_px(16.))
                         .text_color(theme.text_2)
                         .child(path.clone()),
                 )
                 .child(
                     div()
                         .flex_none()
-                        .text_size(px(10.5))
+                        .text_size(theme.ui_px(10.5))
                         .text_color(theme.add_green)
                         .child(format!("+{added}")),
                 )
                 .child(
                     div()
                         .flex_none()
-                        .text_size(px(10.5))
+                        .text_size(theme.ui_px(10.5))
                         .text_color(theme.del_red)
                         .child(format!("-{removed}")),
                 ),
@@ -2385,7 +2516,7 @@ fn render_changed_files(
             .items_center()
             .gap(px(4.))
             .cursor_pointer()
-            .text_size(px(11.5))
+            .text_size(theme.ui_px(11.5))
             .font_weight(FontWeight::MEDIUM)
             .text_color(theme.text_2)
             .hover(|style| style.bg(theme.bg_raised))
@@ -2421,8 +2552,8 @@ fn render_changed_files(
                 .child(
                     div()
                         .truncate()
-                        .text_size(px(12.5))
-                        .line_height(px(16.))
+                        .text_size(theme.ui_px(12.5))
+                        .line_height(theme.ui_px(16.))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text)
                         .child(title),
@@ -2432,8 +2563,8 @@ fn render_changed_files(
                         .mt(px(2.))
                         .flex()
                         .gap(px(6.))
-                        .text_size(px(11.))
-                        .line_height(px(14.))
+                        .text_size(theme.ui_px(11.))
+                        .line_height(theme.ui_px(14.))
                         .child(
                             div()
                                 .text_color(theme.add_green)
@@ -2484,7 +2615,7 @@ fn render_changed_files(
             .items_center()
             .gap(px(6.))
             .cursor_pointer()
-            .text_size(px(11.5))
+            .text_size(theme.ui_px(11.5))
             .font_weight(FontWeight::MEDIUM)
             .text_color(theme.text_2)
             .hover(|style| style.bg(theme.overlay_strong).text_color(theme.text))
@@ -2496,7 +2627,7 @@ fn render_changed_files(
                     .flex_1()
                     .truncate()
                     .font_weight(FontWeight::NORMAL)
-                    .text_size(px(11.5))
+                    .text_size(theme.ui_px(11.5))
                     .text_color(theme.text_3)
                     .child(format!(
                         "Showing first {EXPANDED_PREVIEW_LIMIT} of {}",
@@ -2532,7 +2663,11 @@ fn render_changed_files(
 /// get the per-file change list the transcript tracked.
 fn open_review_diff(workspace: &Path, files: &[(String, u64, u64)]) {
     let mut command = std::process::Command::new("git");
-    command.current_dir(workspace).arg("diff").arg("HEAD").arg("--");
+    command
+        .current_dir(workspace)
+        .arg("diff")
+        .arg("HEAD")
+        .arg("--");
     for (path, _, _) in files {
         command.arg(path);
     }
@@ -2541,8 +2676,7 @@ fn open_review_diff(workspace: &Path, files: &[(String, u64, u64)]) {
             String::from_utf8_lossy(&out.stdout).into_owned()
         }
         _ => {
-            let mut fallback =
-                String::from("Changes in this task (no uncommitted git diff):\n\n");
+            let mut fallback = String::from("Changes in this task (no uncommitted git diff):\n\n");
             for (path, added, removed) in files {
                 fallback.push_str(&format!("{path}  +{added} -{removed}\n"));
             }
@@ -2551,7 +2685,10 @@ fn open_review_diff(workspace: &Path, files: &[(String, u64, u64)]) {
     };
     let path = std::env::temp_dir().join("orbit-review.diff");
     if std::fs::write(&path, text).is_ok() {
-        let _ = std::process::Command::new("open").arg("-t").arg(&path).spawn();
+        let _ = std::process::Command::new("open")
+            .arg("-t")
+            .arg(&path)
+            .spawn();
     }
 }
 
@@ -2598,9 +2735,27 @@ fn activity_action_label(name: &str) -> String {
 pub(crate) fn active_user_index(
     messages: &[ChatMessage],
     streaming: Option<usize>,
+    viewport_hint: Option<usize>,
 ) -> Option<usize> {
     if messages.is_empty() {
         return None;
+    }
+    // The reader scrolled away from the live edge: the active tick is the
+    // turn the viewport is reading — the newest user turn at or above the
+    // first visible row — not the latest turn in the transcript.
+    if streaming.is_none() {
+        if let Some(first_visible) = viewport_hint {
+            let clamped = first_visible.min(messages.len() - 1);
+            if let Some(ix) = messages[..clamped + 1]
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, message)| message.user)
+                .map(|(ix, _)| ix)
+            {
+                return Some(ix);
+            }
+        }
     }
     let end = streaming
         .unwrap_or(messages.len() - 1)
@@ -2635,10 +2790,19 @@ mod tests {
         assert_eq!(format_duration(Duration::from_secs(1)), "1 second");
         assert_eq!(format_duration(Duration::from_secs(12)), "12 seconds");
         assert_eq!(format_duration(Duration::from_secs(60)), "1 minute");
-        assert_eq!(format_duration(Duration::from_secs(100)), "1 minute 40 seconds");
-        assert_eq!(format_duration(Duration::from_secs(341)), "5 minutes 41 seconds");
+        assert_eq!(
+            format_duration(Duration::from_secs(100)),
+            "1 minute 40 seconds"
+        );
+        assert_eq!(
+            format_duration(Duration::from_secs(341)),
+            "5 minutes 41 seconds"
+        );
         assert_eq!(format_duration(Duration::from_secs(3_600)), "1 hour");
-        assert_eq!(format_duration(Duration::from_secs(3_721)), "1 hour 2 minutes");
+        assert_eq!(
+            format_duration(Duration::from_secs(3_721)),
+            "1 hour 2 minutes"
+        );
     }
 
     #[test]
@@ -2655,6 +2819,40 @@ mod tests {
     fn changed_files_title_uses_screenshot_copy() {
         assert_eq!(changed_files_title(1), "Changed 1 file");
         assert_eq!(changed_files_title(2), "Changed 2 files");
+    }
+
+    #[test]
+    fn summary_time_label_matches_screenshot_copy() {
+        use chrono::{Duration, TimeZone, Timelike, Utc};
+        let at = |y: i32, m: u32, d: u32, h: u32, min: u32| {
+            Utc.with_ymd_and_hms(y, m, d, h, min, 0)
+                .single()
+                .unwrap()
+                .with_timezone(&chrono::Local)
+        };
+        // Bucket boundaries are relative to `now`, so the test is
+        // timezone-independent.
+        let now = at(2026, 9, 8, 16, 0);
+        let millis = |dt: chrono::DateTime<chrono::Local>| dt.timestamp_millis();
+        // 18:07 local yesterday — the screenshot's "Yesterday 6:07 PM".
+        let yesterday = (now - Duration::days(1))
+            .with_hour(18)
+            .unwrap()
+            .with_minute(7)
+            .unwrap();
+        assert_eq!(
+            summary_time_label_at(millis(yesterday), now),
+            "Yesterday 6:07 PM"
+        );
+        // Same day → Today + 12-hour clock, no leading zero on the hour.
+        let today = now.with_hour(13).unwrap().with_minute(5).unwrap();
+        assert_eq!(summary_time_label_at(millis(today), now), "Today 1:05 PM");
+        // Older than yesterday falls back to a short date.
+        let older = now - Duration::days(3);
+        assert_eq!(
+            summary_time_label_at(millis(older), now),
+            older.format("%b %-d").to_string()
+        );
     }
 
     #[test]
@@ -2677,40 +2875,104 @@ mod tests {
         let messages = vec![
             ChatMessage {
                 user: true,
-                text: "a".into(),
-                thinking: String::new(),
-                tools: Vec::new(),
+                steps: vec![Step {
+                    text: "a".into(),
+                    ..Step::default()
+                }],
                 elapsed: None,
+                images: Vec::new(),
                 finished_at: None,
             },
             ChatMessage {
                 user: false,
-                text: "b".into(),
-                thinking: String::new(),
-                tools: Vec::new(),
+                steps: vec![Step {
+                    text: "b".into(),
+                    ..Step::default()
+                }],
                 elapsed: None,
+                images: Vec::new(),
                 finished_at: None,
             },
             ChatMessage {
                 user: true,
-                text: "c".into(),
-                thinking: String::new(),
-                tools: Vec::new(),
+                steps: vec![Step {
+                    text: "c".into(),
+                    ..Step::default()
+                }],
                 elapsed: None,
+                images: Vec::new(),
                 finished_at: None,
             },
             ChatMessage {
                 user: false,
-                text: "d".into(),
-                thinking: String::new(),
-                tools: Vec::new(),
+                steps: vec![Step {
+                    text: "d".into(),
+                    ..Step::default()
+                }],
                 elapsed: None,
+                images: Vec::new(),
                 finished_at: None,
             },
         ];
-        assert_eq!(active_user_index(&messages, Some(1)), Some(0));
-        assert_eq!(active_user_index(&messages, Some(3)), Some(2));
-        assert_eq!(active_user_index(&messages, None), Some(2));
+        assert_eq!(active_user_index(&messages, Some(1), None), Some(0));
+        assert_eq!(active_user_index(&messages, Some(3), None), Some(2));
+        assert_eq!(active_user_index(&messages, None, None), Some(2));
+    }
+
+    #[test]
+    fn active_user_index_follows_viewport_when_scrolled() {
+        let messages = vec![
+            ChatMessage {
+                user: true,
+                steps: vec![Step {
+                    text: "a".into(),
+                    ..Step::default()
+                }],
+                elapsed: None,
+                images: Vec::new(),
+                finished_at: None,
+            },
+            ChatMessage {
+                user: false,
+                steps: vec![Step {
+                    text: "b".into(),
+                    ..Step::default()
+                }],
+                elapsed: None,
+                images: Vec::new(),
+                finished_at: None,
+            },
+            ChatMessage {
+                user: true,
+                steps: vec![Step {
+                    text: "c".into(),
+                    ..Step::default()
+                }],
+                elapsed: None,
+                images: Vec::new(),
+                finished_at: None,
+            },
+            ChatMessage {
+                user: false,
+                steps: vec![Step {
+                    text: "d".into(),
+                    ..Step::default()
+                }],
+                elapsed: None,
+                images: Vec::new(),
+                finished_at: None,
+            },
+        ];
+        // Reader scrolled back to the first turn: the tick for turn 0 is
+        // active even though the newest turn is turn 2.
+        assert_eq!(active_user_index(&messages, None, Some(0)), Some(0));
+        // Still reading within the first turn's run (row 1).
+        assert_eq!(active_user_index(&messages, None, Some(1)), Some(0));
+        // Reached the second user turn: its tick takes over.
+        assert_eq!(active_user_index(&messages, None, Some(2)), Some(2));
+        assert_eq!(active_user_index(&messages, None, Some(3)), Some(2));
+        // Out-of-range hint clamps to the last row.
+        assert_eq!(active_user_index(&messages, None, Some(99)), Some(2));
     }
 
     #[test]
@@ -2771,9 +3033,8 @@ mod tests {
 
     #[test]
     fn parse_blocks_handles_rules_quotes_and_tables() {
-        let blocks = parse_blocks(
-            "---\n\n> quoted\n> lines\n\n| a | b |\n| --- | --- |\n| 1 | 2 |",
-        );
+        let blocks =
+            parse_blocks("---\n\n> quoted\n> lines\n\n| a | b |\n| --- | --- |\n| 1 | 2 |");
         assert!(matches!(blocks[0], Block::Rule));
         assert!(matches!(&blocks[1], Block::Quote(lines) if lines.len() == 2));
         let Block::Table { header, rows } = &blocks[2] else {
@@ -2801,26 +3062,32 @@ mod tests {
         let messages = vec![
             ChatMessage {
                 user: true,
-                text: "a".into(),
-                thinking: String::new(),
-                tools: Vec::new(),
+                steps: vec![Step {
+                    text: "a".into(),
+                    ..Step::default()
+                }],
                 elapsed: None,
+                images: Vec::new(),
                 finished_at: None,
             },
             ChatMessage {
                 user: false,
-                text: "b".into(),
-                thinking: String::new(),
-                tools: Vec::new(),
+                steps: vec![Step {
+                    text: "b".into(),
+                    ..Step::default()
+                }],
                 elapsed: None,
+                images: Vec::new(),
                 finished_at: None,
             },
             ChatMessage {
                 user: true,
-                text: "c".into(),
-                thinking: String::new(),
-                tools: Vec::new(),
+                steps: vec![Step {
+                    text: "c".into(),
+                    ..Step::default()
+                }],
                 elapsed: None,
+                images: Vec::new(),
                 finished_at: None,
             },
         ];

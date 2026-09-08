@@ -251,14 +251,14 @@ pub fn compact_card(usage: Option<&ContextUsage>, theme: Theme) -> impl IntoElem
         .gap(px(2.))
         .child(
             div()
-                .text_size(px(13.))
+                .text_size(theme.ui_px(13.))
                 .text_color(theme.text)
                 .whitespace_nowrap()
                 .child(title),
         )
         .child(
             div()
-                .text_size(px(12.))
+                .text_size(theme.ui_px(12.))
                 .text_color(theme.text_3)
                 .whitespace_nowrap()
                 .child(subtitle),
@@ -306,7 +306,7 @@ pub fn details_card(
                 .child(
                     div()
                         .flex_1()
-                        .text_size(px(13.))
+                        .text_size(theme.ui_px(13.))
                         .text_color(theme.text_2)
                         .child("Context Usage"),
                 )
@@ -321,7 +321,12 @@ pub fn details_card(
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.overlay))
                         .on_click(on_close)
-                        .child(div().text_size(px(14.)).text_color(theme.text_3).child("×")),
+                        .child(
+                            div()
+                                .text_size(theme.ui_px(14.))
+                                .text_color(theme.text_3)
+                                .child("×"),
+                        ),
                 ),
         )
         .child(
@@ -331,7 +336,7 @@ pub fn details_card(
                 .child(
                     div()
                         .flex_1()
-                        .text_size(px(13.))
+                        .text_size(theme.ui_px(13.))
                         .text_color(theme.text)
                         .child(
                             percent
@@ -341,7 +346,7 @@ pub fn details_card(
                 )
                 .children(totals.map(|label| {
                     div()
-                        .text_size(px(12.))
+                        .text_size(theme.ui_px(12.))
                         .text_color(theme.text_3)
                         .child(label)
                 })),
@@ -374,7 +379,7 @@ fn segmented_bar(slices: &[ContextSlice], window: u64, theme: Theme) -> impl Int
 fn legend(slices: &[ContextSlice], theme: Theme) -> impl IntoElement + use<> {
     if slices.is_empty() {
         return div()
-            .text_size(px(12.))
+            .text_size(theme.ui_px(12.))
             .text_color(theme.text_3)
             .child("No usage reported for this session yet.")
             .into_any_element();
@@ -392,13 +397,13 @@ fn legend(slices: &[ContextSlice], theme: Theme) -> impl IntoElement + use<> {
                 .child(
                     div()
                         .flex_1()
-                        .text_size(px(12.5))
+                        .text_size(theme.ui_px(12.5))
                         .text_color(theme.text_2)
                         .child(slice.label.clone()),
                 )
                 .child(
                     div()
-                        .text_size(px(12.5))
+                        .text_size(theme.ui_px(12.5))
                         .text_color(theme.text)
                         .child(format_tokens(slice.tokens)),
                 )
@@ -491,7 +496,7 @@ pub fn context_control<V: 'static>(
         })
         .children(percent.map(|label| {
             div()
-                .text_size(px(12.))
+                .text_size(theme.ui_px(12.))
                 .text_color(fill)
                 .whitespace_nowrap()
                 .child(label)

@@ -32,8 +32,8 @@ fn probe_switch_session_mid_run() {
         return;
     }
 
-    let client =
-        PiClient::spawn(&repo_root(), Some(Path::new("/tmp/orbit-switch-probe"))).expect("spawn pi");
+    let client = PiClient::spawn(&repo_root(), Some(Path::new("/tmp/orbit-switch-probe")))
+        .expect("spawn pi");
 
     // Start a turn that takes a few seconds.
     client
@@ -107,7 +107,5 @@ fn probe_switch_session_mid_run() {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    eprintln!(
-        "\nRESULT: deltas_after_switch={deltas_after_switch} settled={settled_after_switch}"
-    );
+    eprintln!("\nRESULT: deltas_after_switch={deltas_after_switch} settled={settled_after_switch}");
 }

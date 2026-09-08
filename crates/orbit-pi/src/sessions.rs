@@ -41,12 +41,12 @@ fn dirs_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// Load every session in pi's store, newest-*created* first.
+/// Load every session in pi's store, newest-*activity* first.
 ///
-/// Ordering is deliberately keyed on the session file's creation timestamp
-/// (embedded in pi's filename), NOT on last-activity time: a session that
-/// receives new messages must keep its exact position in the sidebar
-/// instead of jumping to the top of its group.
+/// Ordering is keyed on the session file's last-modified time, so the
+/// session (and workspace) with the latest activity always sits at the
+/// top of the sidebar and older ones follow — matching the age label
+/// each row displays.
 pub fn load_sessions() -> Vec<SessionInfo> {
     let mut out = Vec::new();
     let Ok(groups) = fs::read_dir(sessions_dir()) else {
@@ -65,27 +65,13 @@ pub fn load_sessions() -> Vec<SessionInfo> {
             }
         }
     }
-    // Newest-created first, with the path as a deterministic tiebreak.
+    // Newest activity first, with the path as a deterministic tiebreak.
     out.sort_by(|a, b| {
-        creation_key(&b.path)
-            .cmp(&creation_key(&a.path))
+        b.modified
+            .cmp(&a.modified)
             .then_with(|| b.path.cmp(&a.path))
     });
     out
-}
-
-/// Stable sort key: the creation timestamp prefix of pi's session filename
-/// (`<timestamp>_<uuid>.jsonl`, e.g. `2026-08-25T07-50-59-952Z_…`).
-/// The fixed-width UTC format sorts correctly as a plain string. Files that
-/// don't follow the convention sort last; `modified` is never used here so
-/// that new activity cannot reorder the list.
-fn creation_key(path: &Path) -> String {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .and_then(|n| n.split_once('_'))
-        .map(|(stamp, _)| stamp.to_string())
-        .filter(|stamp| stamp.len() >= 10 && stamp.as_bytes()[0].is_ascii_digit())
-        .unwrap_or_default()
 }
 
 fn read_session(path: &Path) -> Option<SessionInfo> {
@@ -224,25 +210,53 @@ mod tests {
     fn load_sessions_returns_real_sessions() {
         let sessions = load_sessions();
         assert!(!sessions.is_empty(), "expected sessions in pi store");
-        // Newest-created first, stable across activity: creation keys
-        // descend, and only new sessions may join the front.
-        assert!(sessions
-            .windows(2)
-            .all(|w| creation_key(&w[0].path) >= creation_key(&w[1].path)));
+        // Newest-activity first, stable across reloads: modified times
+        // descend, and only a session with newer activity may join the front.
+        assert!(sessions.windows(2).all(|w| w[0].modified >= w[1].modified));
         assert!(sessions[0].id.len() > 10);
     }
 
     #[test]
-    fn creation_key_uses_filename_timestamp_not_modified() {
-        let dir = std::env::temp_dir().join("orbit-creation-key-test");
+    fn load_sessions_orders_by_modified_not_creation() {
+        // Two sessions whose creation stamps and modified times disagree:
+        // the older-created but recently-touched one must come first.
+        let dir = std::env::temp_dir().join("orbit-modified-order-test");
         fs::create_dir_all(&dir).unwrap();
-        let older = dir.join("2026-08-25T07-50-59-952Z_aaa.jsonl");
-        let newer = dir.join("2026-09-01T10-00-00-000Z_bbb.jsonl");
-        fs::write(&older, b"").unwrap();
-        fs::write(&newer, b"").unwrap();
+        let older_created = dir.join("2026-01-01T00-00-00-000Z_aaa.jsonl");
+        let newer_created = dir.join("2026-02-01T00-00-00-000Z_bbb.jsonl");
+        for (path, id) in [(&older_created, "aaa"), (&newer_created, "bbb")] {
+            fs::write(
+                path,
+                format!("{{\"type\":\"session\",\"id\":\"{id}\",\"cwd\":\"/tmp/ws\"}}\n"),
+            )
+            .unwrap();
+        }
+        // Touch the older-created file so its mtime is now the newest.
+        let new_time = std::time::SystemTime::now() + std::time::Duration::from_secs(10);
+        fs::File::options()
+            .write(true)
+            .open(&older_created)
+            .unwrap()
+            .set_modified(new_time)
+            .unwrap();
 
-        assert!(creation_key(&newer) > creation_key(&older));
-        assert_eq!(creation_key(&dir.join("irregular-name.jsonl")), "");
+        // Scan just this directory with the same logic load_sessions uses.
+        let mut rows: Vec<SessionInfo> = Vec::new();
+        for file in fs::read_dir(&dir).unwrap().flatten() {
+            let path = file.path();
+            if path.extension().is_some_and(|e| e == "jsonl") {
+                if let Some(info) = read_session(&path) {
+                    rows.push(info);
+                }
+            }
+        }
+        rows.sort_by(|a, b| {
+            b.modified
+                .cmp(&a.modified)
+                .then_with(|| b.path.cmp(&a.path))
+        });
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].path, older_created);
         let _ = fs::remove_dir_all(&dir);
     }
 }

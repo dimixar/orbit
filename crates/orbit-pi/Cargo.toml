@@ -13,6 +13,8 @@ osx_minimum_system_version = "13.0"
 
 [dependencies]
 gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+# Native open/folder dialogs (NSOpenPanel on macOS) for folder selection
+rfd = "0.15"
 orbit-rpc = { path = "../orbit-rpc" }
 serde_json = { workspace = true }
 unicode-segmentation = "1"
@@ -20,6 +22,9 @@ include_dir = "0.7"
 anyhow = { workspace = true }
 # Local-time formatting for response-footer timestamps
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# base64 payloads for prompt image attachments
+base64 = "0.22"
+devicons = "0.6"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Match gpui 0.2.2 so we can set the Dock icon from the embedded PNG

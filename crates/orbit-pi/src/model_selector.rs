@@ -323,7 +323,7 @@ impl Render for ModelSelector {
                     .gap(px(8.))
                     .border_b_1()
                     .border_color(theme.border)
-                    .text_size(px(12.5))
+                    .text_size(theme.ui_px(12.5))
                     .child(icon("icons/search.svg", 13., theme.text_3))
                     .child(self.filter.clone()),
             )
@@ -439,7 +439,7 @@ fn empty_row(kind: PickerKind, theme: Theme) -> impl IntoElement + use<> {
         .pb(px(6.))
         .flex()
         .items_center()
-        .text_size(px(12.5))
+        .text_size(theme.ui_px(12.5))
         .text_color(theme.text_3)
         .child(match kind {
             PickerKind::Model => "No matching models",
@@ -492,7 +492,7 @@ fn render_row(
 
     match row {
         Row::Level { level, selected } => base
-            .text_size(px(12.5))
+            .text_size(theme.ui_px(12.5))
             .text_color(if *selected { theme.text } else { theme.text_2 })
             .child({
                 let (path, color) = thinking_icon(level, &theme);
@@ -508,7 +508,7 @@ fn render_row(
             .child(trailing_check(*selected, theme)),
         Row::Model { model_ix, selected } => {
             let model = &models[*model_ix];
-            base.text_size(px(12.5))
+            base.text_size(theme.ui_px(12.5))
                 .text_color(if *selected { theme.text } else { theme.text_2 })
                 .child(icon_dyn(provider_icon(&model.provider), 12., theme.text_2))
                 .child(
@@ -530,7 +530,7 @@ fn render_row(
                                 .min_w_0()
                                 .flex_shrink_0()
                                 .truncate()
-                                .text_size(px(11.))
+                                .text_size(theme.ui_px(11.))
                                 .text_color(theme.text_3)
                                 .child(model.provider.clone()),
                         ),

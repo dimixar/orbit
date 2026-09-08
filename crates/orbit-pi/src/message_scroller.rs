@@ -25,6 +25,9 @@ const LIST_OVERDRAW: f32 = 400.0;
 pub struct MessageScrollerState {
     list: ListState,
     following_tail: Rc<Cell<bool>>,
+    /// First row currently visible in the viewport — the "reader is here"
+    /// hint that drives the navigation rail's active tick.
+    visible_start: Rc<Cell<usize>>,
 }
 
 impl MessageScrollerState {
@@ -32,18 +35,27 @@ impl MessageScrollerState {
     pub fn new(item_count: usize) -> Self {
         let list = ListState::new(item_count, ListAlignment::Bottom, px(LIST_OVERDRAW));
         let following_tail = Rc::new(Cell::new(true));
+        let visible_start = Rc::new(Cell::new(0));
         {
             let following_tail = following_tail.clone();
+            let visible_start = visible_start.clone();
             list.set_scroll_handler(move |event: &ListScrollEvent, _, cx| {
                 // Bottom alignment: `is_scrolled` means the reader left the tail.
                 following_tail.set(!event.is_scrolled);
+                visible_start.set(event.visible_range.start);
                 cx.refresh_windows();
             });
         }
         Self {
             list,
             following_tail,
+            visible_start,
         }
+    }
+
+    /// First row currently in view (viewport-top hint for the rail).
+    pub fn first_visible_index(&self) -> usize {
+        self.visible_start.get()
     }
 
     pub fn list_state(&self) -> ListState {

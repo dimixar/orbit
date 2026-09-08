@@ -8,8 +8,10 @@ mod app_icon;
 mod assets;
 mod composer;
 mod context_meter;
+mod mentions;
 mod message_scroller;
 mod model_selector;
+mod session_picker;
 mod sessions;
 mod theme;
 mod transcript;
@@ -31,6 +33,9 @@ actions!(
         Delete,
         Left,
         Right,
+        Up,
+        Down,
+        Newline,
         SelectLeft,
         SelectRight,
         SelectAll,
@@ -87,6 +92,9 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-c", Copy, Some("Composer")),
         KeyBinding::new("cmd-x", Cut, Some("Composer")),
         KeyBinding::new("enter", Submit, Some("Composer")),
+        KeyBinding::new("shift-enter", Newline, Some("Composer")),
+        KeyBinding::new("up", Up, Some("Composer")),
+        KeyBinding::new("down", Down, Some("Composer")),
         KeyBinding::new("cmd-n", NewSession, None),
         KeyBinding::new("cmd-r", RefreshSessions, None),
         KeyBinding::new("cmd-,", OpenSettings, None),

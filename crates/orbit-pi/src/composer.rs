@@ -1,24 +1,30 @@
-//! Single-line composer input, adapted from gpui 0.2.2's `input` example.
+//! Multi-line composer input (Waku-style): text wraps, the editor grows to
+//! `MAX_LINES` and then scrolls internally, `Enter` submits, `Shift+Enter`
+//! inserts a newline, and ↑/↓ move the caret between visual rows.
 //!
-//! Enter-to-submit is an action (`Submit`) bound in the `Composer` key
-//! context; the app view handles it (actions bubble up from the focused
-//! input). IME/marked-text is stubbed for now — flag for P2 polish.
+//! Built on gpui's `shape_text`/`WrappedLine` (the 0.2.2 text system caches
+//! shaped layouts, so re-shaping on keystrokes is cheap). IME is still
+//! approximated as plain replaces — flag for P2 polish.
 
 use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
 use gpui::{
-    div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem, Context,
-    CursorStyle, Element, ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable,
-    GlobalElementId, InspectorElementId, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, ShapedLine, SharedString, Style, TextRun, UTF16Selection,
-    Window,
+    div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardEntry, ClipboardItem,
+    ContentMask, Context, CursorStyle, Element, ElementInputHandler, Entity, EntityInputHandler,
+    FocusHandle, Focusable, GlobalElementId, Image, InspectorElementId, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, ScrollWheelEvent,
+    SharedString, Style, TextAlign, TextRun, UTF16Selection, Window, WrappedLine,
 };
 
 use crate::{
-    theme, Backspace, Copy, Cut, Delete, End, Home, Left, Paste, Right, SelectAll, SelectLeft,
-    SelectRight,
+    mentions::{detect_trigger, SharedAutocomplete, Trigger},
+    theme, Backspace, Copy, Cut, Delete, Down, End, Home, Left, Newline, Paste, Right, SelectAll,
+    SelectLeft, SelectRight, Up,
 };
+
+/// Visual rows the editor grows to before it scrolls internally.
+const MAX_LINES: usize = 8;
 
 pub struct ComposerInput {
     focus_handle: FocusHandle,
@@ -31,9 +37,29 @@ pub struct ComposerInput {
     key_context: SharedString,
     selected_range: Range<usize>,
     selection_reversed: bool,
-    last_layout: Option<ShapedLine>,
-    last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    /// Layout snapshot from the last prepaint, for hit-testing and IME
+    /// bounds outside the paint pass.
+    last_lines: Vec<WrappedLine>,
+    /// Byte offset of each logical line's first byte (`WrappedLine::len`
+    /// excludes the newline that `shape_text` split off, hence +1 steps).
+    last_line_starts: Vec<usize>,
+    last_line_height: Pixels,
+    last_bounds: Option<Bounds<Pixels>>,
+    last_wrap_width: Option<Pixels>,
+    /// Visual rows across all logical lines at the last wrap width.
+    last_total_rows: usize,
+    /// Vertical scroll in content pixels (0 until the editor exceeds
+    /// `max_lines` rows).
+    scroll_offset: Pixels,
+    max_lines: usize,
+    /// Shared `/`-command and `@`-mention menu state. When the menu is
+    /// open, ↑/↓ move the highlight instead of the caret (Enter/Escape are
+    /// intercepted by the app, which owns those actions).
+    autocomplete: Option<SharedAutocomplete>,
+    /// Images pasted (or attached) since the app last drained them — the
+    /// app turns these into message attachments.
+    pub pasted_images: Vec<Image>,
 }
 
 impl ComposerInput {
@@ -45,9 +71,17 @@ impl ComposerInput {
             key_context: "Composer".into(),
             selected_range: 0..0,
             selection_reversed: false,
-            last_layout: None,
-            last_bounds: None,
             is_selecting: false,
+            last_lines: Vec::new(),
+            last_line_starts: Vec::new(),
+            last_line_height: px(18.),
+            last_bounds: None,
+            last_wrap_width: None,
+            last_total_rows: 1,
+            scroll_offset: px(0.),
+            max_lines: MAX_LINES,
+            autocomplete: None,
+            pasted_images: Vec::new(),
         }
     }
 
@@ -63,19 +97,53 @@ impl ComposerInput {
         self
     }
 
+    /// Share the `/`+`@` autocomplete state (see `mentions::AutocompleteState`).
+    pub fn with_autocomplete(mut self, state: SharedAutocomplete) -> Self {
+        self.autocomplete = Some(state);
+        self
+    }
+
     pub fn text(&self) -> String {
         self.content.clone()
     }
 
+    /// The active `/`-command or `@`-file trigger at the caret, if any.
+    pub fn active_trigger(&self) -> Option<Trigger> {
+        detect_trigger(&self.content, self.cursor_offset())
+    }
+
+    /// Whether any pasted images are waiting to be drained by the app.
+    pub fn has_pasted_images(&self) -> bool {
+        !self.pasted_images.is_empty()
+    }
+
+    /// Replace `range` with `text` (used by autocomplete commits).
+    pub fn replace_range(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
+        let start = range.start.min(self.content.len());
+        let end = range.end.min(self.content.len()).max(start);
+        self.content = self.content[0..start].to_owned() + text + &self.content[end..];
+        self.selected_range = start + text.len()..start + text.len();
+        cx.notify();
+    }
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.content.clear();
         self.selected_range = 0..0;
+        self.scroll_offset = px(0.);
         cx.notify();
+    }
+
+    /// Insert `text` at the caret (files dropped on the composer reference
+    /// non-image attachments by path here).
+    pub fn insert_at_caret(&mut self, text: &str, cx: &mut Context<Self>) {
+        let at = self.cursor_offset();
+        self.replace_range(at..at, text, cx);
     }
 
     pub fn focus(&self, window: &mut Window) {
         window.focus(&self.focus_handle);
     }
+
+    // ── movement ───────────────────────────────────────────────────────
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
@@ -91,6 +159,54 @@ impl ComposerInput {
         } else {
             self.move_to(self.selected_range.end, cx)
         }
+    }
+
+    fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        // While the autocomplete menu is open the arrows navigate it, not
+        // the caret (Waku parity).
+        if self.autocomplete_navigate(-1, cx) {
+            return;
+        }
+        self.move_vertically(-1., cx);
+    }
+
+    fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        if self.autocomplete_navigate(1, cx) {
+            return;
+        }
+        self.move_vertically(1., cx);
+    }
+
+    /// Move the autocomplete highlight when the menu is open. Returns true
+    /// when the keystroke was consumed by the menu.
+    fn autocomplete_navigate(&mut self, delta: i32, cx: &mut Context<Self>) -> bool {
+        let Some(state) = &self.autocomplete else {
+            return false;
+        };
+        let mut state = state.borrow_mut();
+        if !state.open || state.count == 0 {
+            return false;
+        }
+        state.move_highlight(delta);
+        drop(state);
+        cx.notify();
+        true
+    }
+
+    /// Move the caret one visual row up/down, preserving the horizontal
+    /// position when possible.
+    fn move_vertically(&mut self, rows: f32, cx: &mut Context<Self>) {
+        if self.last_lines.is_empty() {
+            return;
+        }
+        let line_height = self.last_line_height;
+        let caret = self.position_for_offset(self.cursor_offset());
+        let target_y = caret.y + line_height * rows;
+        if target_y < px(0.) {
+            self.move_to(0, cx);
+            return;
+        }
+        self.move_to(self.index_at_content_position(point(caret.x, target_y)), cx);
     }
 
     fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
@@ -113,6 +229,12 @@ impl ComposerInput {
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(self.content.len(), cx);
     }
+
+    fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
+        self.replace_text_in_range(None, "\n", window, cx);
+    }
+
+    // ── editing ────────────────────────────────────────────────────────
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
@@ -152,9 +274,42 @@ impl ComposerInput {
         }
     }
 
+    fn on_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rows = self.last_total_rows.max(1);
+        let visible = rows.min(self.max_lines);
+        let max_scroll = ((rows - visible) as f32 * self.last_line_height).max(px(0.));
+        let dy = event.delta.pixel_delta(self.last_line_height).y;
+        self.scroll_offset = (self.scroll_offset - dy).clamp(px(0.), max_scroll);
+        cx.notify();
+    }
+
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.replace_text_in_range(None, &text.replace("\n", " "), window, cx)
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
+        // Pasted images become message attachments (Waku: "Show pasted
+        // images as attachments") — the app drains `pasted_images` and
+        // renders chips above the composer.
+        let images: Vec<Image> = item
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                ClipboardEntry::Image(image) => Some(image.clone()),
+                ClipboardEntry::String(_) => None,
+            })
+            .collect();
+        if !images.is_empty() {
+            self.pasted_images.extend(images);
+            cx.notify();
+            return;
+        }
+        if let Some(text) = item.text() {
+            self.replace_text_in_range(None, &text, window, cx)
         }
     }
 
@@ -175,6 +330,8 @@ impl ComposerInput {
         }
     }
 
+    // ── geometry ───────────────────────────────────────────────────────
+
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
         cx.notify()
@@ -188,21 +345,63 @@ impl ComposerInput {
         }
     }
 
-    fn index_for_mouse_position(&self, position: gpui::Point<Pixels>) -> usize {
-        if self.content.is_empty() {
-            return 0;
-        }
-        let (Some(bounds), Some(line)) = (self.last_bounds.as_ref(), self.last_layout.as_ref())
-        else {
-            return 0;
+    /// Window position → position in content coordinates (scroll applied).
+    fn content_position(&self, position: gpui::Point<Pixels>) -> gpui::Point<Pixels> {
+        let Some(bounds) = self.last_bounds else {
+            return point(px(0.), px(0.));
         };
-        if position.y < bounds.top() {
+        point(
+            position.x - bounds.origin.x,
+            position.y - bounds.origin.y + self.scroll_offset,
+        )
+    }
+
+    /// The byte index under a point in *content* coordinates.
+    fn index_at_content_position(&self, pos: gpui::Point<Pixels>) -> usize {
+        if self.content.is_empty() || self.last_lines.is_empty() {
             return 0;
         }
-        if position.y > bounds.bottom() {
-            return self.content.len();
+        let line_height = self.last_line_height;
+        let mut y_acc = px(0.);
+        for (i, line) in self.last_lines.iter().enumerate() {
+            let height = line.size(line_height).height;
+            let is_last = i == self.last_lines.len() - 1;
+            if pos.y <= y_acc + height || is_last {
+                let local_x = pos.x.clamp(px(0.), line.width());
+                let local_y = pos.y.clamp(y_acc, y_acc + height - px(0.5)) - y_acc;
+                return line
+                    .closest_index_for_position(point(local_x, local_y), line_height)
+                    .unwrap_or_else(|ix| ix);
+            }
+            y_acc += height;
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        self.content.len()
+    }
+
+    fn index_for_mouse_position(&self, position: gpui::Point<Pixels>) -> usize {
+        self.index_at_content_position(self.content_position(position))
+    }
+
+    /// The (x, y) of a byte offset in content coordinates — y is the top of
+    /// the visual row the offset sits on.
+    fn position_for_offset(&self, offset: usize) -> gpui::Point<Pixels> {
+        let line_height = self.last_line_height;
+        for (i, line) in self.last_lines.iter().enumerate() {
+            let start = self.last_line_starts[i];
+            let line_end = start + line.len();
+            if offset < line_end || i == self.last_lines.len() - 1 {
+                let local = (offset - start).min(line.len());
+                return line
+                    .position_for_index(local, line_height)
+                    .unwrap_or_else(|| {
+                        point(
+                            line.width(),
+                            line.wrap_boundaries().len() as f32 * line_height,
+                        )
+                    });
+            }
+        }
+        point(px(0.), px(0.))
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -360,16 +559,18 @@ impl EntityInputHandler for ComposerInput {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let last_layout = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
+        let start = self.position_for_offset(range.start);
+        let end = self.position_for_offset(range.end);
+        let origin = point(
+            bounds.origin.x + start.x,
+            bounds.origin.y + start.y - self.scroll_offset,
+        );
         Some(Bounds::from_corners(
-            gpui::point(
-                bounds.left() + last_layout.x_for_index(range.start),
-                bounds.top(),
-            ),
-            gpui::point(
-                bounds.left() + last_layout.x_for_index(range.end),
-                bounds.bottom(),
+            origin,
+            point(
+                origin.x + (end.x - start.x).abs(),
+                origin.y + self.last_line_height,
             ),
         ))
     }
@@ -380,14 +581,11 @@ impl EntityInputHandler for ComposerInput {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
-        let line = self.last_layout.as_ref()?;
-        let bounds = self.last_bounds?;
-        let line_point = bounds.localize(&point)?;
-        line.index_for_x(point.x - line_point.x)
+        Some(self.index_for_mouse_position(point))
     }
 }
 
-/// The painted text element for the input (ported from the gpui example).
+/// The painted text element for the input.
 struct TextElement {
     input: Entity<ComposerInput>,
 }
@@ -400,9 +598,14 @@ impl IntoElement for TextElement {
 }
 
 struct PrepaintState {
-    line: Option<ShapedLine>,
-    cursor: Option<PaintQuad>,
-    selection: Option<PaintQuad>,
+    lines: Vec<WrappedLine>,
+    /// y offset of each logical line in content coordinates.
+    line_y: Vec<Pixels>,
+    scroll_offset: Pixels,
+    /// Selection wash quads, painted under the text.
+    selection: Vec<PaintQuad>,
+    /// Caret quad, painted over the text (focused only).
+    caret: Option<PaintQuad>,
 }
 
 impl Element for TextElement {
@@ -424,9 +627,14 @@ impl Element for TextElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
+        let line_height = window.line_height();
+        let input = self.input.read(cx);
+        // Auto-grow: one line up to `max_lines`, then the height pins and
+        // the content scrolls internally.
+        let visible_rows = input.last_total_rows.max(1).min(input.max_lines);
         let mut style = Style::default();
         style.size.width = relative(1.).into();
-        style.size.height = window.line_height().into();
+        style.size.height = (visible_rows as f32 * line_height).into();
         (window.request_layout(style, [], cx), ())
     }
 
@@ -439,17 +647,23 @@ impl Element for TextElement {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
-        let input = self.input.read(cx);
-        let content = input.content.clone();
-        let selected_range = input.selected_range.clone();
-        let cursor = input.cursor_offset();
+        let line_height = window.line_height();
+        let (content, selected_range, cursor, max_lines) = {
+            let input = self.input.read(cx);
+            (
+                input.content.clone(),
+                input.selected_range.clone(),
+                input.cursor_offset(),
+                input.max_lines,
+            )
+        };
         let style = window.text_style();
         let theme = theme::get(cx);
 
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), theme.text_3)
+            (self.input.read(cx).placeholder.clone(), theme.text_3)
         } else {
-            (SharedString::from(content), style.color)
+            (SharedString::from(content.clone()), style.color)
         };
 
         let run = TextRun {
@@ -461,52 +675,162 @@ impl Element for TextElement {
             strikethrough: None,
         };
         let font_size = style.font_size.to_pixels(window.rem_size());
-        let line = window
+        let wrap_width = (bounds.size.width > px(0.)).then_some(bounds.size.width);
+        let lines: Vec<WrappedLine> = window
             .text_system()
-            .shape_line(display_text, font_size, &[run], None);
+            .shape_text(display_text, font_size, &[run], wrap_width, None)
+            .map(|shaped| shaped.to_vec())
+            .unwrap_or_default();
 
-        // The app's focus accent (Waku `--ring`) carries the insertion point
-        // and the selection wash.
-        let cursor_pos = line.x_for_index(cursor);
-        let (selection, cursor_quad) = if selected_range.is_empty() {
-            (
-                None,
-                Some(fill(
-                    Bounds::new(
-                        point(bounds.left() + cursor_pos, bounds.top() + px(2.)),
-                        size(px(2.), bounds.bottom() - bounds.top() - px(4.)),
-                    ),
-                    theme.spark_orange,
-                )),
-            )
-        } else {
-            (
-                Some(fill(
-                    Bounds::from_corners(
-                        point(
-                            bounds.left() + line.x_for_index(selected_range.start),
-                            bounds.top(),
-                        ),
-                        point(
-                            bounds.left() + line.x_for_index(selected_range.end),
-                            bounds.bottom(),
-                        ),
-                    ),
-                    theme.spark_orange.opacity(0.25),
-                )),
-                None,
+        // Byte offset and y of each logical line (`WrappedLine::len`
+        // excludes the newline that `shape_text` split off).
+        let mut line_starts = Vec::with_capacity(lines.len());
+        let mut line_y = Vec::with_capacity(lines.len());
+        let mut byte_acc = 0usize;
+        let mut y_acc = px(0.);
+        for line in &lines {
+            line_starts.push(byte_acc);
+            line_y.push(y_acc);
+            byte_acc += line.len() + 1;
+            y_acc += line.size(line_height).height;
+        }
+        let total_rows: usize = lines
+            .iter()
+            .map(|line| line.wrap_boundaries().len() + 1)
+            .sum::<usize>()
+            .max(1);
+        let visible_rows = total_rows.min(max_lines);
+        let content_height = total_rows as f32 * line_height;
+        let visible_height = visible_rows as f32 * line_height;
+
+        // Clamp the scroll so the caret stays on screen after edits.
+        let mut scroll_offset = self.input.read(cx).scroll_offset;
+        let max_scroll = (content_height - visible_height).max(px(0.));
+        scroll_offset = scroll_offset.min(max_scroll).max(px(0.));
+        if !lines.is_empty() {
+            for (i, line) in lines.iter().enumerate() {
+                let start = line_starts[i];
+                let line_end = start + line.len();
+                if cursor < line_end || i == lines.len() - 1 {
+                    let local = (cursor - start).min(line.len());
+                    if let Some(pos) = line.position_for_index(local, line_height) {
+                        let caret_y = line_y[i] + pos.y;
+                        scroll_offset = scroll_offset.max(caret_y + line_height - visible_height);
+                        scroll_offset = scroll_offset.min(caret_y).min(max_scroll).max(px(0.));
+                    }
+                    break;
+                }
+            }
+        }
+
+        // Window-coordinate mapping of a content point.
+        let map = |x: Pixels, y: Pixels| -> gpui::Point<Pixels> {
+            point(bounds.origin.x + x, bounds.origin.y + y - scroll_offset)
+        };
+        let caret_fallback = |line: &WrappedLine| -> gpui::Point<Pixels> {
+            point(
+                line.width(),
+                line.wrap_boundaries().len() as f32 * line_height,
             )
         };
 
-        self.input.update(cx, |input, _cx| {
-            input.last_layout = Some(line.clone());
-            input.last_bounds = Some(bounds);
+        // Selection wash per logical line: one rect per visual row.
+        let mut selection: Vec<PaintQuad> = Vec::new();
+        let sel = selected_range.start..selected_range.end;
+        if !sel.is_empty() {
+            for (i, line) in lines.iter().enumerate() {
+                let line_start = line_starts[i];
+                let line_end = line_start + line.len();
+                let overlap_start = sel.start.max(line_start);
+                let overlap_end = sel.end.min(line_end);
+                if overlap_start >= overlap_end {
+                    continue;
+                }
+                let start_pos = line
+                    .position_for_index(overlap_start - line_start, line_height)
+                    .unwrap_or_else(|| point(px(0.), px(0.)));
+                let end_pos = line
+                    .position_for_index(overlap_end - line_start, line_height)
+                    .unwrap_or_else(|| caret_fallback(line));
+                let row_start = (start_pos.y / line_height).floor() as i32;
+                let row_end = (end_pos.y / line_height).floor() as i32;
+                for row in row_start..=row_end {
+                    let (x0, x1) = if row == row_start && row == row_end {
+                        (start_pos.x, end_pos.x)
+                    } else if row == row_start {
+                        (start_pos.x, line.width())
+                    } else if row == row_end {
+                        (px(0.), end_pos.x)
+                    } else {
+                        (px(0.), line.width())
+                    };
+                    let y = line_y[i] + row as f32 * line_height;
+                    selection.push(fill(
+                        Bounds::from_corners(
+                            map(x0, y),
+                            point(map(x1, y).x, map(x1, y).y + line_height),
+                        ),
+                        theme.spark_orange.opacity(0.25),
+                    ));
+                }
+            }
+        }
+
+        // Caret: 2px accent bar spanning the visual row.
+        let mut caret_pos: Option<gpui::Point<Pixels>> = None;
+        if !lines.is_empty() {
+            if content.is_empty() {
+                caret_pos = Some(point(px(0.), px(0.)));
+            } else {
+                for (i, line) in lines.iter().enumerate() {
+                    let start = line_starts[i];
+                    let line_end = start + line.len();
+                    if cursor < line_end || i == lines.len() - 1 {
+                        let local = (cursor - start).min(line.len());
+                        let raw = line
+                            .position_for_index(local, line_height)
+                            .unwrap_or_else(|| caret_fallback(line));
+                        caret_pos = Some(point(raw.x, line_y[i] + raw.y));
+                        break;
+                    }
+                }
+            }
+        }
+        let caret = caret_pos.map(|caret| {
+            let origin = map(caret.x, caret.y);
+            fill(
+                Bounds::new(
+                    point(origin.x, origin.y + px(2.)),
+                    size(px(2.), line_height - px(4.)),
+                ),
+                theme.spark_orange,
+            )
         });
 
+        let width_changed = self.input.read(cx).last_wrap_width != wrap_width;
+        let rows_changed = self.input.read(cx).last_total_rows != total_rows;
+        let snapshot = (lines.clone(), line_starts.clone(), scroll_offset);
+        self.input.update(cx, |input, _| {
+            input.last_lines = snapshot.0;
+            input.last_line_starts = snapshot.1;
+            input.scroll_offset = snapshot.2;
+            input.last_line_height = line_height;
+            input.last_bounds = Some(bounds);
+            input.last_wrap_width = wrap_width;
+            input.last_total_rows = total_rows;
+        });
+        // A resize changed the wrap width *and* the row count — the height
+        // used at request_layout was one frame stale; re-layout.
+        if width_changed && rows_changed {
+            window.refresh();
+        }
+
         PrepaintState {
-            line: Some(line),
-            cursor: cursor_quad,
+            lines,
+            line_y,
+            scroll_offset,
             selection,
+            caret,
         }
     }
 
@@ -527,30 +851,49 @@ impl Element for TextElement {
             cx,
         );
 
-        // Selection under the text, caret over it — gpui `input` example
-        // paint order.
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection);
-        }
-        let line = prepaint.line.take().unwrap();
-        line.paint(bounds.origin, window.line_height(), window, cx)
-            .unwrap();
+        let focused = focus_handle.is_focused(window);
+        let scroll = prepaint.scroll_offset;
+        let line_height = window.line_height();
 
-        if focus_handle.is_focused(window) {
-            if let Some(cursor) = prepaint.cursor.take() {
-                window.paint_quad(cursor);
+        // Clip everything to the element: wrapping keeps text inside, the
+        // mask handles the scrolled state past `max_lines`.
+        window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            // Selection wash under the text.
+            for quad in prepaint.selection.drain(..) {
+                window.paint_quad(quad);
             }
-        }
+            for (i, line) in prepaint.lines.iter().enumerate() {
+                line.paint(
+                    point(
+                        bounds.origin.x,
+                        bounds.origin.y + prepaint.line_y[i] - scroll,
+                    ),
+                    line_height,
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                )
+                .unwrap();
+            }
+            // Caret over the text.
+            if focused {
+                if let Some(caret) = prepaint.caret.take() {
+                    window.paint_quad(caret);
+                }
+            }
+        });
     }
 }
 
 impl Render for ComposerInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Transparent: the floating composer box in app.rs provides the
-        // background/border; this is just the editable line.
+        // background/border; this is just the editable (auto-growing) area.
         div()
             .id("composer-input")
             .flex_1()
+            .min_w_0()
             .key_context(self.key_context.as_ref())
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
@@ -558,6 +901,9 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::up))
+            .on_action(cx.listener(Self::down))
+            .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
             .on_action(cx.listener(Self::select_all))
@@ -570,6 +916,7 @@ impl Render for ComposerInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .child(TextElement { input: cx.entity() })
     }
 }

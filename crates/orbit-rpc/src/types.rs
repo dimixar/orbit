@@ -371,7 +371,10 @@ impl Event {
             Event::AgentStart => "agent_start".into(),
             Event::AgentEnd { will_retry } => format!("agent_end (retry={will_retry})"),
             Event::SessionInfoChanged { name } => {
-                format!("session rename → {}", name.as_deref().unwrap_or("(cleared)"))
+                format!(
+                    "session rename → {}",
+                    name.as_deref().unwrap_or("(cleared)")
+                )
             }
             Event::AgentSettled => "agent_settled ✓".into(),
             Event::ExtensionUiRequest { method, .. } => format!("ui request: {method}"),
@@ -538,9 +541,12 @@ mod tests {
 
     #[test]
     fn steer_serializes_with_message() {
-        let wire = Command::new("st1", CommandBody::Steer {
-            message: "use tokio instead".into(),
-        })
+        let wire = Command::new(
+            "st1",
+            CommandBody::Steer {
+                message: "use tokio instead".into(),
+            },
+        )
         .to_wire()
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&wire).unwrap();
@@ -550,9 +556,12 @@ mod tests {
 
     #[test]
     fn fork_family_serializes_like_pi_expects() {
-        let fork = Command::new("f1", CommandBody::Fork {
-            entry_id: "turn-2".into(),
-        })
+        let fork = Command::new(
+            "f1",
+            CommandBody::Fork {
+                entry_id: "turn-2".into(),
+            },
+        )
         .to_wire()
         .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&fork).unwrap();

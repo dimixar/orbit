@@ -11,10 +11,12 @@ use std::{
     collections::{HashMap, HashSet},
     path::Path,
     rc::Rc,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
-use gpui::{point, px, prelude::*, Pixels, ScrollHandle};
+use base64::Engine as _;
+use gpui::{point, prelude::*, px, Image, Pixels, ScrollHandle};
 
 use crate::message_scroller::MessageScrollerState;
 use crate::transcript_view::{self, TranscriptView};
@@ -34,6 +36,8 @@ pub struct ChatMessage {
     pub user: bool,
     /// A turn's steps in sequence — thinking/tools/text per step.
     pub steps: Vec<Step>,
+    /// Images attached to a user message (live prompt or session reload).
+    pub images: Vec<Arc<Image>>,
     /// Wall time of this assistant turn, recorded when the stream ends.
     pub elapsed: Option<Duration>,
     /// When this message was completed (epoch millis). Snapshot messages
@@ -52,23 +56,9 @@ impl ChatMessage {
             .join("\n\n")
     }
 
-    /// Concatenated reasoning across steps.
-    pub fn thinking(&self) -> String {
-        self.steps
-            .iter()
-            .map(|step| step.thinking.as_str())
-            .filter(|text| !text.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
     /// Every tool call of the turn, in order.
     pub fn tools(&self) -> impl Iterator<Item = &ToolCall> {
         self.steps.iter().flat_map(|step| step.tools.iter())
-    }
-
-    pub fn tool_count(&self) -> usize {
-        self.steps.iter().map(|step| step.tools.len()).sum()
     }
 
     pub fn has_hidden_work(&self) -> bool {
@@ -111,7 +101,11 @@ impl ToolCall {
             added,
             removed,
             id: None,
-            args: if args.is_null() { None } else { Some(args.clone()) },
+            args: if args.is_null() {
+                None
+            } else {
+                Some(args.clone())
+            },
             output: None,
             failed: false,
         }
@@ -123,6 +117,7 @@ impl ChatMessage {
         Self {
             user: false,
             steps: vec![Step::default()],
+            images: Vec::new(),
             elapsed: None,
             finished_at: None,
         }
@@ -138,6 +133,7 @@ impl ChatMessage {
         let mut message = ChatMessage {
             user,
             steps: vec![Step::default()],
+            images: Vec::new(),
             elapsed: None,
             finished_at: parse_timestamp(value.get("timestamp")),
         };
@@ -162,9 +158,13 @@ impl ChatMessage {
                                 step.thinking.push_str(text);
                             }
                         }
+                        "image" => {
+                            if let Some(image) = image_from_block(block) {
+                                message.images.push(image);
+                            }
+                        }
                         "toolCall" | "tool_call" => {
-                            let name =
-                                block.get("name").and_then(Value::as_str).unwrap_or("tool");
+                            let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
                             let mut tool = ToolCall::from_value(name, block.get("arguments"));
                             tool.id = block
                                 .get("id")
@@ -193,6 +193,34 @@ impl ChatMessage {
     }
 }
 
+/// Decode an image content block — `{"type":"image","data":<base64>,
+/// "mimeType":"image/png"}`, the shape this app prompts with — into a
+/// renderable image. Covers pi echoes and session reloads from disk.
+fn image_from_block(block: &Value) -> Option<Arc<Image>> {
+    let mime = block
+        .get("mimeType")
+        .or_else(|| block.get("mime_type"))
+        .and_then(Value::as_str)?;
+    let format = match mime {
+        "image/png" => gpui::ImageFormat::Png,
+        "image/jpeg" | "image/jpg" => gpui::ImageFormat::Jpeg,
+        "image/webp" => gpui::ImageFormat::Webp,
+        "image/gif" => gpui::ImageFormat::Gif,
+        "image/bmp" => gpui::ImageFormat::Bmp,
+        _ => return None,
+    };
+    let data = block.get("data").and_then(Value::as_str)?;
+    // Tolerate data URLs ("data:image/png;base64,…" → raw base64).
+    let data = match data.split_once(',') {
+        Some((prefix, rest)) if prefix.starts_with("data:") => rest,
+        _ => data,
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .ok()?;
+    Some(Arc::new(Image::from_bytes(format, bytes)))
+}
+
 /// Extract a tool result message: `(toolCallId, output, isError)`. pi sends
 /// `role: "toolResult"` messages — not chat rows; their output belongs on
 /// the matching tool call (Waku renders it inside the activity detail).
@@ -203,7 +231,10 @@ fn tool_result_parts(value: &Value) -> Option<(String, Option<Value>, bool)> {
     }
     let id = value.get("toolCallId").and_then(Value::as_str)?.to_string();
     let output = tool_result_output(value);
-    let failed = value.get("isError").and_then(Value::as_bool).unwrap_or(false);
+    let failed = value
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     Some((id, output, failed))
 }
 
@@ -231,12 +262,7 @@ fn tool_result_output(value: &Value) -> Option<Value> {
 
 /// Attach a tool result to the newest tool call carrying `id` (snapshot
 /// path — the live path routes through `attach_tool_result` positions).
-fn attach_tool_output(
-    messages: &mut [ChatMessage],
-    id: &str,
-    output: Option<Value>,
-    failed: bool,
-) {
+fn attach_tool_output(messages: &mut [ChatMessage], id: &str, output: Option<Value>, failed: bool) {
     for message in messages.iter_mut().rev() {
         let Some(tool) = message
             .steps
@@ -442,14 +468,16 @@ pub struct Transcript {
     hovered_turn: Rc<Cell<Option<usize>>>,
     /// Transcript row currently hovered (reveals the ghost footer).
     hovered_row: Rc<Cell<Option<usize>>>,
-    /// Messages whose thinking disclosure is expanded, keyed by message ix.
-    expanded_thinking: Rc<RefCell<HashSet<usize>>>,
     /// Scroll position of the conversation-turn rail (Waku's scrollable rail).
     rail_scroll: ScrollHandle,
     /// Last turn the rail auto-scrolled to — re-fires only when it changes.
     rail_autoscroll: Rc<Cell<Option<usize>>>,
     /// Where the streaming step began in its (merged) message.
     step_mark: Rc<Cell<Option<StepMark>>>,
+    /// Whether the list currently carries the end-of-task summary row (an
+    /// extra slot after the last message). Spliced in when a run settles
+    /// with file edits; removed when a new turn begins.
+    tail_summary: Rc<Cell<bool>>,
 }
 
 impl Transcript {
@@ -469,10 +497,10 @@ impl Transcript {
             tool_positions: Rc::new(RefCell::new(HashMap::new())),
             hovered_turn: Rc::new(Cell::new(None)),
             hovered_row: Rc::new(Cell::new(None)),
-            expanded_thinking: Rc::new(RefCell::new(HashSet::new())),
             rail_scroll: ScrollHandle::new(),
             rail_autoscroll: Rc::new(Cell::new(None)),
             step_mark: Rc::new(Cell::new(None)),
+            tail_summary: Rc::new(Cell::new(false)),
         }
     }
 
@@ -490,11 +518,12 @@ impl Transcript {
                 if let Some(parsed_message) = ChatMessage::from_value(message) {
                     // Consecutive assistant messages are one logical turn
                     // (Waku): one row, one fold, one footer — not a stack of
-                    // "Worked" dividers per streaming step.
-                    let continues_run = parsed
-                        .last()
-                        .map(|last| !last.user)
-                        .unwrap_or(false);
+                    // "Worked" dividers per streaming step. A user message
+                    // always begins a new turn — never merged into the run
+                    // before it (the whole trail used to collapse into one
+                    // assistant blob when prompts followed a tool-heavy run).
+                    let continues_run = !parsed_message.user
+                        && parsed.last().map(|last| !last.user).unwrap_or(false);
                     if continues_run {
                         merge_step(parsed.last_mut().expect("checked"), parsed_message);
                     } else {
@@ -517,10 +546,14 @@ impl Transcript {
         self.tool_positions.borrow_mut().clear();
         self.hovered_turn.set(None);
         self.hovered_row.set(None);
-        self.expanded_thinking.borrow_mut().clear();
         self.rail_scroll.set_offset(point(px(0.), px(0.)));
         self.rail_autoscroll.set(None);
         self.step_mark.set(None);
+        // Rebuild resets the list to the message count; re-add the summary
+        // row when the loaded session touched files.
+        self.tail_summary.set(false);
+        let touched_files = !self.changed_files_summary().is_empty();
+        self.set_tail_row(touched_files);
     }
 
     /// Clear for a fresh session.
@@ -538,10 +571,10 @@ impl Transcript {
         self.tool_positions.borrow_mut().clear();
         self.hovered_turn.set(None);
         self.hovered_row.set(None);
-        self.expanded_thinking.borrow_mut().clear();
         self.rail_scroll.set_offset(point(px(0.), px(0.)));
         self.rail_autoscroll.set(None);
         self.step_mark.set(None);
+        self.tail_summary.set(false);
     }
 
     /// Apply one protocol event; returns `true` if the transcript changed.
@@ -557,9 +590,12 @@ impl Transcript {
                 self.end_live_run();
                 false
             }
+            // `agent_end` fires between loop iterations while queued
+            // steering/follow-ups keep the run going — clear the live
+            // stream state but leave the summary card until the settle.
             Event::AgentEnd { will_retry } => {
                 if !*will_retry {
-                    self.end_live_run();
+                    self.clear_live_state();
                 }
                 false
             }
@@ -580,6 +616,11 @@ impl Transcript {
         let Some(message) = ChatMessage::from_value(value) else {
             return false;
         };
+        if message.user {
+            // A new turn begins: the previous run's end-of-task summary row
+            // steps aside before the prompt row lands.
+            self.set_tail_row(false);
+        }
         let mut messages = self.messages.borrow_mut();
         if message.user {
             // pi echoes the user's own message; show it (dedupe if identical).
@@ -637,13 +678,7 @@ impl Transcript {
                 self.with_streaming(|m| m.steps.last_mut().expect("step").text.push_str(delta))
             }
             Am::ThinkingDelta { delta } => {
-                self.with_streaming(|m| {
-                    m.steps
-                        .last_mut()
-                        .expect("step")
-                        .thinking
-                        .push_str(delta)
-                })
+                self.with_streaming(|m| m.steps.last_mut().expect("step").thinking.push_str(delta))
             }
             Am::ToolcallStart { value } => {
                 let name = value
@@ -657,21 +692,14 @@ impl Transcript {
                 let (changed, created) = self.with_streaming(|m| {
                     let mut tool = ToolCall::from_value(name, value.get("arguments"));
                     tool.id = id.clone();
-                    m.steps
-                        .last_mut()
-                        .expect("step")
-                        .tools
-                        .push(tool);
+                    m.steps.last_mut().expect("step").tools.push(tool);
                 });
                 if changed {
                     let id = id.as_deref().map(str::to_string);
                     if let (Some(mix), Some(id)) = (self.streaming.get(), id) {
                         let messages = self.messages.borrow();
                         let step_ix = messages[mix].steps.len().saturating_sub(1);
-                        let tool_ix = messages[mix].steps[step_ix]
-                            .tools
-                            .len()
-                            .saturating_sub(1);
+                        let tool_ix = messages[mix].steps[step_ix].tools.len().saturating_sub(1);
                         self.tool_positions
                             .borrow_mut()
                             .insert(id, (mix, step_ix, tool_ix));
@@ -778,6 +806,11 @@ impl Transcript {
         let Some(mut final_message) = ChatMessage::from_value(value) else {
             return false;
         };
+        if final_message.user {
+            // A new turn arriving as a settled message (no live boundary):
+            // the previous run's summary row steps aside first.
+            self.set_tail_row(false);
+        }
         if !final_message.user {
             // The step's wall clock runs from the start of its turn; the
             // settled step replaces only its own slice of the merged row.
@@ -818,6 +851,9 @@ impl Transcript {
                             .collect()
                     })
                     .unwrap_or_default();
+                // The settled step carries the run's wall clock — keep it
+                // on the row (merge_step does this for non-stream paths).
+                let step_elapsed = final_message.elapsed.take();
                 let mut settled_step = final_message.into_step();
                 // Re-attach results pi captured live (its settled blocks omit
                 // them).
@@ -838,6 +874,9 @@ impl Transcript {
                 match slot.steps.get_mut(mark.step) {
                     Some(step) => *step = settled_step,
                     None => slot.steps.push(settled_step),
+                }
+                if let Some(elapsed) = step_elapsed {
+                    slot.elapsed = Some(elapsed);
                 }
                 if slot.finished_at.is_none() {
                     slot.finished_at = Some(now_millis());
@@ -1099,10 +1138,45 @@ impl Transcript {
 
     /// Recover if stream updates previously inserted extra list slots.
     fn resync_list(&self) {
-        let count = self.messages.borrow().len();
+        let count = self.messages.borrow().len() + self.tail_summary.get() as usize;
         if self.scroller.item_count() != count {
             self.scroller.reset(count);
         }
+    }
+
+    /// Every file the task changed, across all turns, merged by path with
+    /// summed +/− line counts — the end-of-task summary card's data.
+    pub fn changed_files_summary(&self) -> Vec<(String, u64, u64)> {
+        let messages = self.messages.borrow();
+        let mut files: Vec<(String, u64, u64)> = Vec::new();
+        for message in messages.iter() {
+            for (path, added, removed) in changed_files(message) {
+                match files.iter_mut().find(|(existing, _, _)| *existing == path) {
+                    Some(entry) => {
+                        entry.1 += added;
+                        entry.2 += removed;
+                    }
+                    None => files.push((path, added, removed)),
+                }
+            }
+        }
+        files
+    }
+
+    /// Add or remove the end-of-task summary row (the extra list slot after
+    /// the last message row). Shown once a run settles with file edits;
+    /// removed when a new turn begins or the transcript rebuilds.
+    fn set_tail_row(&self, present: bool) {
+        if present == self.tail_summary.get() {
+            return;
+        }
+        if present {
+            self.scroller.append(1);
+        } else {
+            let count = self.scroller.item_count();
+            self.scroller.splice(count.saturating_sub(1)..count, 0);
+        }
+        self.tail_summary.set(present);
     }
 
     /// True when no messages are loaded (drives the empty state).
@@ -1111,12 +1185,15 @@ impl Transcript {
     }
 
     /// Show the just-sent prompt immediately — pi does not echo user
-    /// messages in RPC mode. A later identical echo is deduped.
-    pub fn append_user_message(&mut self, text: &str) -> bool {
+    /// messages in RPC mode. A later identical echo is deduped. `images`
+    /// are the attachments that rode along with the prompt.
+    pub fn append_user_message(&mut self, text: &str, images: Vec<Arc<Image>>) -> bool {
         let trimmed = text.trim();
         if trimmed.is_empty() {
             return false;
         }
+        // A new task begins: the previous run's summary row steps aside.
+        self.set_tail_row(false);
         let mut messages = self.messages.borrow_mut();
         if messages.last().map(|m| m.user && m.text() == trimmed) == Some(true) {
             return false;
@@ -1127,6 +1204,7 @@ impl Transcript {
                 text: trimmed.to_string(),
                 ..Step::default()
             }],
+            images,
             elapsed: None,
             finished_at: None,
         });
@@ -1135,12 +1213,21 @@ impl Transcript {
         true
     }
 
-    /// Turn end (or abort): drop live streaming state so the working
-    /// indicator and stop affordances clear even if a message end was missed.
-    fn end_live_run(&mut self) {
+    /// Drop live streaming state so the working indicator and stop
+    /// affordances clear even if a message end was missed.
+    fn clear_live_state(&mut self) {
         self.streaming.set(None);
         self.step_mark.set(None);
         self.stream_started.set(None);
+    }
+
+    /// Turn end (or abort): drop live streaming state, then — once the run
+    /// has settled — pin the whole-task changed-files summary at the end of
+    /// the transcript (when the task touched files).
+    fn end_live_run(&mut self) {
+        self.clear_live_state();
+        let touched_files = !self.changed_files_summary().is_empty();
+        self.set_tail_row(touched_files);
     }
 
     /// True while an assistant message is still streaming.
@@ -1200,6 +1287,18 @@ impl Transcript {
         cx: &gpui::App,
     ) -> impl IntoElement + use<> {
         self.resync_list();
+        // The tail slot exists only when a settled run left changed files.
+        let summary_files = if self.tail_summary.get() {
+            Some(self.changed_files_summary())
+        } else {
+            None
+        };
+        // Footer stamp: when the settled run's last message finished.
+        let summary_finished_at = if summary_files.is_some() {
+            self.messages.borrow().last().and_then(|m| m.finished_at)
+        } else {
+            None
+        };
         transcript_view::render_transcript(
             TranscriptView {
                 messages: self.messages.clone(),
@@ -1214,12 +1313,13 @@ impl Transcript {
                 copied_sections: self.copied_sections.clone(),
                 hovered_turn: self.hovered_turn.clone(),
                 hovered_row: self.hovered_row.clone(),
-                expanded_thinking: self.expanded_thinking.clone(),
                 workspace: workspace.map(Path::to_path_buf),
                 viewport_height,
                 main_width,
                 rail_scroll: self.rail_scroll.clone(),
                 rail_autoscroll: self.rail_autoscroll.clone(),
+                summary_files,
+                summary_finished_at,
             },
             cx,
         )
@@ -1247,9 +1347,7 @@ mod tests {
                 std::env::var("HOME").unwrap_or_default()
             );
             let mut files: Vec<std::path::PathBuf> = glob_files(&pattern);
-            files.sort_by_key(|path| {
-                std::fs::metadata(path).and_then(|m| m.modified()).ok()
-            });
+            files.sort_by_key(|path| std::fs::metadata(path).and_then(|m| m.modified()).ok());
             for path in files.into_iter().rev() {
                 let Ok(content) = std::fs::read_to_string(path) else {
                     continue;
@@ -1260,18 +1358,15 @@ mod tests {
                     .filter_map(|entry: Value| {
                         let message = entry.get("message").cloned();
                         message.filter(|m| {
-                            m.get("role").and_then(Value::as_str)
+                            m.get("role")
+                                .and_then(Value::as_str)
                                 .is_some_and(|role| role == "user" || role == "assistant")
                         })
                     })
                     .collect();
-                if messages
-                    .iter()
-                    .any(|m| {
-                        serde_json::to_string(m)
-                            .is_ok_and(|s| s.contains("\"name\":\"edit\""))
-                    })
-                {
+                if messages.iter().any(|m| {
+                    serde_json::to_string(m).is_ok_and(|s| s.contains("\"name\":\"edit\""))
+                }) {
                     return serde_json::json!({ "messages": messages });
                 }
             }
@@ -1357,7 +1452,9 @@ mod tests {
         let tool = messages[1].tools().next().unwrap();
         assert!(tool.failed);
         assert_eq!(
-            tool.output.as_ref().and_then(|v: &serde_json::Value| v.as_str()),
+            tool.output
+                .as_ref()
+                .and_then(|v: &serde_json::Value| v.as_str()),
             Some("src/app.tsx(1,1): error TS1005: ')' expected.")
         );
     }
@@ -1403,7 +1500,7 @@ mod tests {
     #[test]
     fn nested_user_echo_dedupes_optimistic_message() {
         let mut t = Transcript::new();
-        assert!(t.append_user_message("fix it"));
+        assert!(t.append_user_message("fix it", Vec::new()));
         // pi's echo (nested) must not duplicate the optimistic row.
         t.apply_event(&Event::MessageStart {
             value: json!({"type": "message_start", "message": {
@@ -1430,7 +1527,9 @@ mod tests {
         });
         t.apply_event(&Event::MessageUpdate {
             usage: None,
-            assistant: Some(AssistantMessageEvent::TextDelta { delta: "step one".into() }),
+            assistant: Some(AssistantMessageEvent::TextDelta {
+                delta: "step one".into(),
+            }),
         });
         t.apply_event(&Event::MessageUpdate {
             usage: None,
@@ -1459,7 +1558,9 @@ mod tests {
         });
         t.apply_event(&Event::MessageUpdate {
             usage: None,
-            assistant: Some(AssistantMessageEvent::TextDelta { delta: "step two".into() }),
+            assistant: Some(AssistantMessageEvent::TextDelta {
+                delta: "step two".into(),
+            }),
         });
         t.apply_event(&Event::MessageEnd {
             value: json!({"role": "assistant", "content": "step two"}),
@@ -1493,7 +1594,9 @@ mod tests {
         });
         t.apply_event(&Event::MessageUpdate {
             usage: None,
-            assistant: Some(AssistantMessageEvent::TextDelta { delta: "second".into() }),
+            assistant: Some(AssistantMessageEvent::TextDelta {
+                delta: "second".into(),
+            }),
         });
         let messages = t.messages.borrow();
         assert_eq!(messages.len(), 3);
@@ -1521,7 +1624,7 @@ mod tests {
         let messages = t.messages.borrow();
         assert_eq!(messages.len(), 2, "user + merged assistant turn");
         assert_eq!(messages[1].text(), "first part\n\nsecond part");
-        assert_eq!(messages[1].thinking, "hmm");
+        assert_eq!(messages[1].steps[0].thinking, "hmm");
         assert_eq!(messages[1].tools().count(), 1);
         assert_eq!(
             messages[1]
@@ -1544,14 +1647,16 @@ mod tests {
         });
         transcript.apply_event(&Event::MessageUpdate {
             usage: None,
-            assistant: Some(AssistantMessageEvent::TextDelta { delta: "working".into() }),
+            assistant: Some(AssistantMessageEvent::TextDelta {
+                delta: "working".into(),
+            }),
         });
         transcript.apply_event(&Event::ToolExecutionStart {
             value: json!({
                 "toolCallId": "call_9",
                 "toolName": "bash",
                 "args": {"command": "ls"}
-            })
+            }),
         });
         // pi settles a tool call with a `toolResult` message — it must not
         // replace the streaming assistant message with tool output.
@@ -1562,14 +1667,14 @@ mod tests {
                 "toolName": "bash",
                 "isError": false,
                 "content": [{"type": "text", "text": "file-a\nfile-b"}]
-            })
+            }),
         });
         assert!(transcript.is_streaming());
         {
             let messages = transcript.messages.borrow();
             assert_eq!(messages.len(), 1);
             assert_eq!(messages[0].text(), "working");
-            assert_eq!(messages[0].tools.len(), 1);
+            assert_eq!(messages[0].tools().count(), 1);
         }
         assert!(transcript.apply_event(&Event::MessageEnd {
             value: json!({
@@ -1601,10 +1706,10 @@ mod tests {
     #[test]
     fn hidden_work_is_thinking_or_tools() {
         let empty = ChatMessage::empty_assistant();
-        assert!(!has_hidden_work(&empty));
+        assert!(!empty.has_hidden_work());
         let mut thinking = ChatMessage::empty_assistant();
-        thinking.thinking = "hmm".into();
-        assert!(has_hidden_work(&thinking));
+        thinking.steps[0].thinking = "hmm".into();
+        assert!(thinking.has_hidden_work());
     }
 
     #[test]
@@ -1725,10 +1830,132 @@ mod tests {
                 ..ToolCall::from_value("read", None)
             },
         ];
+        let message = ChatMessage {
+            user: false,
+            steps: vec![Step {
+                tools,
+                ..Step::default()
+            }],
+            images: Vec::new(),
+            elapsed: None,
+            finished_at: None,
+        };
         assert_eq!(
-            changed_files(&tools),
+            changed_files(&message),
             vec![("a.rs".into(), 5, 1), ("b.rs".into(), 4, 0)]
         );
+    }
+
+    #[test]
+    fn settled_run_pins_changed_files_summary() {
+        let edit_args = json!({
+            "path": "a.rs",
+            "edits": [{ "oldText": "x", "newText": "y\nz" }]
+        });
+        let mut t = Transcript::new();
+        t.apply_event(&Event::MessageStart {
+            value: json!({"role": "user", "content": "build it"}),
+        });
+        t.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": ""}),
+        });
+        t.apply_event(&Event::MessageUpdate {
+            usage: None,
+            assistant: Some(AssistantMessageEvent::ToolcallStart {
+                value: json!({
+                    "toolCallId": "c1",
+                    "toolName": "edit",
+                    "arguments": edit_args
+                }),
+            }),
+        });
+        // Mid-run: no summary row yet.
+        assert_eq!(t.scroller.item_count(), 2);
+        assert!(!t.tail_summary.get());
+        t.apply_event(&Event::MessageEnd {
+            value: json!({
+                "role": "assistant",
+                "content": [
+                    {"type": "toolCall", "id": "c1", "name": "edit", "arguments": edit_args}
+                ]
+            }),
+        });
+        assert_eq!(t.scroller.item_count(), 2);
+        // Settle: the whole-task summary pins itself after the last message.
+        t.apply_event(&Event::AgentSettled);
+        assert!(t.tail_summary.get());
+        assert_eq!(t.scroller.item_count(), 3);
+        assert_eq!(t.changed_files_summary(), vec![("a.rs".into(), 2, 1)]);
+        // A new turn removes the summary slot again (prompt takes its place).
+        t.apply_event(&Event::MessageStart {
+            value: json!({"role": "user", "content": "more"}),
+        });
+        assert!(!t.tail_summary.get());
+        assert_eq!(t.scroller.item_count(), 3);
+        // Settling again re-pins the summary — it aggregates the whole
+        // task, which still includes the first turn's edit.
+        t.apply_event(&Event::AgentSettled);
+        assert!(t.tail_summary.get());
+        assert_eq!(t.scroller.item_count(), 4);
+    }
+
+    /// Screenshot regression: `agent_end` fires between loop iterations
+    /// while the run continues (steering/follow-up queued) — the changed-files
+    /// card must stay hidden until the run truly settles.
+    #[test]
+    fn agent_end_mid_run_does_not_pin_summary() {
+        let edit_args = json!({
+            "path": "a.rs",
+            "edits": [{ "oldText": "x", "newText": "y\nz" }]
+        });
+        let mut t = Transcript::new();
+        t.apply_event(&Event::MessageStart {
+            value: json!({"role": "user", "content": "build it"}),
+        });
+        t.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": ""}),
+        });
+        t.apply_event(&Event::MessageEnd {
+            value: json!({
+                "role": "assistant",
+                "content": [
+                    {"type": "toolCall", "id": "c1", "name": "edit", "arguments": edit_args}
+                ]
+            }),
+        });
+        // First loop iteration ends, but the run keeps working (steering
+        // queued) — edits exist yet no summary card may appear.
+        t.apply_event(&Event::AgentEnd { will_retry: false });
+        assert!(!t.tail_summary.get());
+        assert_eq!(t.scroller.item_count(), 2);
+        // Run continues: a follow-up assistant message streams in.
+        t.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": "continuing"}),
+        });
+        assert!(t.is_streaming());
+        // Only the real settle pins the summary.
+        t.apply_event(&Event::AgentSettled);
+        assert!(t.tail_summary.get());
+        assert_eq!(t.scroller.item_count(), 3);
+        assert_eq!(t.changed_files_summary(), vec![("a.rs".into(), 2, 1)]);
+    }
+
+    #[test]
+    fn loaded_session_shows_changed_files_summary() {
+        let payload = json!({
+            "messages": [
+                {"role": "user", "content": "do it"},
+                {"role": "assistant", "content": [
+                    {"type": "toolCall", "id": "c1", "name": "write",
+                     "arguments": {"path": "n.rs", "content": "a\nb\nc"}}
+                ]}
+            ]
+        });
+        let mut t = Transcript::new();
+        t.load_from(&payload);
+        assert!(t.tail_summary.get());
+        assert_eq!(t.scroller.item_count(), 3, "2 messages + summary row");
+        assert_eq!(t.changed_files_summary(), vec![("n.rs".into(), 3, 0)]);
     }
 
     #[test]
@@ -1744,7 +1971,10 @@ mod tests {
         let message = ChatMessage::from_value(&value).unwrap();
         assert_eq!(message.tools().count(), 1);
         assert_eq!(message.tools().next().unwrap().added, 3);
-        assert_eq!(message.tools().next().unwrap().path.as_deref(), Some("n.rs"));
+        assert_eq!(
+            message.tools().next().unwrap().path.as_deref(),
+            Some("n.rs")
+        );
     }
 
     #[test]
@@ -1761,7 +1991,7 @@ mod tests {
             }));
         }
         assert_eq!(transcript.scroller.item_count(), 1);
-        assert_eq!(transcript.messages.borrow()[0].text, "xxxxxxxx");
+        assert_eq!(transcript.messages.borrow()[0].text(), "xxxxxxxx");
         assert!(transcript.apply_event(&Event::MessageEnd {
             value: json!({"role": "assistant", "content": "xxxxxxxx"}),
         }));
@@ -1793,7 +2023,10 @@ mod tests {
         assert_eq!(tool.name, "read");
         assert_eq!(tool.path.as_deref(), Some("lib.rs"));
         assert_eq!(
-            tool.output.as_ref().and_then(|v| v.get("content")).and_then(Value::as_str),
+            tool.output
+                .as_ref()
+                .and_then(|v| v.get("content"))
+                .and_then(Value::as_str),
             Some("contents")
         );
         assert!(!tool.failed);
@@ -1873,5 +2106,53 @@ mod tests {
         *transcript.messages.borrow_mut() = vec![ChatMessage::empty_assistant()];
         transcript.resync_list();
         assert_eq!(transcript.scroller.item_count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use super::*;
+    use serde_json::Value;
+
+    #[test]
+    #[ignore] // manual: cargo test -p orbit-pi debug_load -- --ignored --nocapture
+    fn debug_load() {
+        let raw = std::fs::read_to_string("/tmp/get_messages_payload.json").unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let mut transcript = Transcript::new();
+        transcript.load_from(&value["data"]);
+        let messages = transcript.messages.borrow();
+        let mut user_turns = 0;
+        let mut tool_calls = 0;
+        let mut text_chars = 0usize;
+        for m in messages.iter() {
+            if m.user {
+                user_turns += 1;
+            }
+            for step in &m.steps {
+                tool_calls += step.tools.len();
+                text_chars += step.text.chars().count();
+            }
+        }
+        println!(
+            "raw=197 parsed turns={} user_turns={} tool_calls={} text_chars={}",
+            messages.len(),
+            user_turns,
+            tool_calls,
+            text_chars
+        );
+        for (ix, m) in messages.iter().enumerate().take(6) {
+            let text: String = m.text().chars().take(50).collect();
+            println!(
+                "  [{ix}] user={} '{}' tools={}",
+                m.user,
+                text.replace('\n', " "),
+                m.steps.iter().map(|s| s.tools.len()).sum::<usize>()
+            );
+        }
+        assert!(
+            messages.len() > 1,
+            "load_from collapsed the trail to one message!"
+        );
     }
 }
