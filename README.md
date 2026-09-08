@@ -11,7 +11,7 @@ Same product philosophy as [Waku](https://github.com/egoist/waku): the UI layer 
 - **Sessions grouped by project** — persistent sessions organized per working directory, with reopen support; cross-workspace sessions included
 - **Model catalog** — model selection from the pi runtime's own list (`get_available_models`), backed by providers on disk
 - **Thinking effort** — level selection derived from each model's supported levels (`get_available_thinking_levels`)
-- **Tool activity** — bash, edit, todo, plan, search, mcp, thinking, and question rows plus approval dialogs, all rendered natively
+- **Tool activity** — bash, edit, todo, plan, search, mcp, thinking, and question rows plus approval dialogs, all rendered natively; tool rows expand into Arguments/Output detail cards with per-section copy
 - **Git diff panel** — review what the agent changed without leaving the app
 - **Workbench pages** — usage, skills, plugins, models, providers, and settings views backed by pi's on-disk data
 - **Markdown rendering** — GFM and syntax-highlighted code; highlighting is paint-only so streaming code blocks never reflow
@@ -74,7 +74,7 @@ cargo test --workspace          # unit tests + live pi integration tests
 ```
 crates/orbit-pi/   The GPUI app (Rust, renders to the GPU)
 crates/orbit-rpc/    pi CLI RPC client (process lifecycle + JSONL protocol)
-assets/icons/        App icons (for future .app packaging)
+assets/icons/        App icon (1024 PNG source, icon.icns, icon.png)
 assets/…
 PRODUCT.md           Product definition, capabilities, constraints
 INTENT.md            Architecture decisions + phase plan

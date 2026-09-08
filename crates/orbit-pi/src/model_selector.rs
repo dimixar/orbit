@@ -19,23 +19,25 @@
 //!   registration order) — Enter confirms instead of submitting the prompt.
 
 use gpui::{
-    div, hsla, point, prelude::*, px, rgb, App, BoxShadow, Context, ElementId, Entity, FocusHandle,
-    Focusable, IntoElement, MouseDownEvent, ParentElement, Render, ScrollHandle, SharedString,
-    Styled, Window,
+    div, point, prelude::*, px, App, Context, ElementId, Entity, FocusHandle, Focusable,
+    IntoElement, MouseDownEvent, ParentElement, Render, ScrollHandle, SharedString, Styled, Window,
 };
 
-use crate::app::{
-    border_strong, icon, icon_dyn, overlay, ModelEntry, BORDER, MENU_BG, SPARK_ORANGE, TEXT,
-    TEXT_2, TEXT_3,
-};
+use crate::app::{icon, icon_dyn, ModelEntry};
 use crate::composer::ComposerInput;
+use crate::theme::{self, Theme};
 
-/// Popup width — deliberately small, like Zed's menu popovers.
-const POPOVER_W: f32 = 240.;
+/// Popup width — still compact, with room for icon + name + provider + check
+/// after the row padding.
+const POPOVER_W: f32 = 256.;
 /// Uniform row height for every row in the list.
-const ROW_H: f32 = 28.;
-/// Largest list height before it scrolls (≈ 9 visible rows).
-const LIST_MAX_H: f32 = 9. * ROW_H;
+const ROW_H: f32 = 32.;
+/// Air between option rows (not folded into ROW_H so hit targets stay even).
+const ROW_GAP: f32 = 2.;
+/// Vertical stride used for keyboard scroll math.
+const ROW_STRIDE: f32 = ROW_H + ROW_GAP;
+/// Largest list height before it scrolls (≈ 8 visible rows).
+const LIST_MAX_H: f32 = 8. * ROW_STRIDE;
 
 /// Which single-section dropdown a picker popup shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,9 +209,10 @@ impl ModelSelector {
         };
         self.highlighted = next;
         // Keep the highlighted row fully visible (plain top-down scrolling).
-        let content_h = rows.len() as f32 * ROW_H;
+        let n = rows.len() as f32;
+        let content_h = (n * ROW_H + (n - 1.).max(0.) * ROW_GAP).max(0.);
         let viewport_h = content_h.min(LIST_MAX_H);
-        let row_top = next as f32 * ROW_H;
+        let row_top = next as f32 * ROW_STRIDE;
         let current: f32 = self.list_scroll.offset().y.into();
         let mut offset = current;
         if row_top < current {
@@ -262,6 +265,7 @@ impl Render for ModelSelector {
         }
 
         let this = cx.entity();
+        let theme = *theme::get(cx);
 
         // Plain scrollable list — the same shape Zed's `ContextMenu` uses for
         // menu bodies. Rows are ordinary children, so nothing depends on
@@ -272,8 +276,12 @@ impl Render for ModelSelector {
             .max_h(px(LIST_MAX_H))
             .overflow_y_scroll()
             .track_scroll(&self.list_scroll)
+            .px(px(4.))
+            .pt(px(8.))
+            .pb(px(2.))
             .flex()
-            .flex_col();
+            .flex_col()
+            .gap(px(ROW_GAP));
         for ix in 0..rows.len() {
             list = list.child(render_row(
                 &rows,
@@ -281,17 +289,19 @@ impl Render for ModelSelector {
                 ix,
                 ix == self.highlighted,
                 &this,
+                theme,
             ));
         }
 
         div()
             .w(px(POPOVER_W))
-            .py(px(4.))
+            .pt(px(6.))
+            .pb(px(6.))
             .rounded(px(10.))
             .border_1()
-            .border_color(border_strong())
-            .bg(rgb(MENU_BG))
-            .shadow(popover_shadow())
+            .border_color(theme.border_strong)
+            .bg(theme.menu_bg)
+            .shadow(theme.popover_shadow())
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -303,24 +313,22 @@ impl Render for ModelSelector {
             .on_action(cx.listener(Self::on_confirm))
             .on_action(cx.listener(Self::on_next))
             .on_action(cx.listener(Self::on_prev))
-            // search field
+            // search field — grouped tightly; the list sits after a real gap
             .child(
                 div()
-                    .h(px(30.))
-                    .mx(px(4.))
-                    .mb(px(4.))
-                    .px(px(6.))
+                    .h(px(34.))
+                    .px(px(12.))
                     .flex()
                     .items_center()
-                    .gap_1p5()
+                    .gap(px(8.))
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(theme.border)
                     .text_size(px(12.5))
-                    .child(icon("icons/search.svg", 12., TEXT_3))
+                    .child(icon("icons/search.svg", 13., theme.text_3))
                     .child(self.filter.clone()),
             )
             .child(if rows.is_empty() {
-                empty_row(self.kind).into_any_element()
+                empty_row(self.kind, theme).into_any_element()
             } else {
                 list.into_any_element()
             })
@@ -333,24 +341,24 @@ impl Render for ModelSelector {
 /// reasoning, sparkle cluster for max/deep, AI-marked brain for auto, and a
 /// slash-circle when thinking is off. Unknown levels fall back to the plain
 /// spark.
-pub(crate) fn thinking_icon(level: &str) -> (&'static str, u32) {
+pub(crate) fn thinking_icon(level: &str, theme: &Theme) -> (&'static str, gpui::Hsla) {
     match level.to_ascii_lowercase().as_str() {
-        "off" => ("icons/thinking-off.svg", TEXT_3),
-        "minimal" => ("icons/thinking-minimal.svg", SPARK_ORANGE),
-        "low" => ("icons/thinking-low.svg", SPARK_ORANGE),
-        "medium" => ("icons/thinking-medium.svg", SPARK_ORANGE),
-        "high" => ("icons/thinking-high.svg", SPARK_ORANGE),
-        "xhigh" | "max" | "ultra" => ("icons/thinking-xhigh.svg", SPARK_ORANGE),
-        "auto" => ("icons/thinking-auto.svg", SPARK_ORANGE),
-        _ => ("icons/spark.svg", SPARK_ORANGE),
+        "off" => ("icons/thinking-off.svg", theme.text_3),
+        "minimal" => ("icons/thinking-minimal.svg", theme.spark_orange),
+        "low" => ("icons/thinking-low.svg", theme.spark_orange),
+        "medium" => ("icons/thinking-medium.svg", theme.spark_orange),
+        "high" => ("icons/thinking-high.svg", theme.spark_orange),
+        "xhigh" | "max" | "ultra" => ("icons/thinking-xhigh.svg", theme.spark_orange),
+        "auto" => ("icons/thinking-auto.svg", theme.spark_orange),
+        _ => ("icons/spark.svg", theme.spark_orange),
     }
 }
 
 /// Brand glyph for a pi provider — mono SVGs from [theSVG.org]
 /// (https://thesvg.org), embedded under `assets/icons/providers/` and named
 /// by provider id. Every pi built-in provider has a mark; unknown or
-/// user-defined providers (`ollama`, custom `models.json` entries) fall back
-/// to a neutral cloud glyph.
+/// user-defined providers (custom `models.json` entries) fall back to a
+/// neutral cloud glyph.
 pub(crate) fn provider_icon(provider: &str) -> SharedString {
     const KNOWN: &[&str] = &[
         "amazon-bedrock",
@@ -375,6 +383,7 @@ pub(crate) fn provider_icon(provider: &str) -> SharedString {
         "moonshotai",
         "moonshotai-cn",
         "nvidia",
+        "ollama",
         "openai",
         "openai-codex",
         "opencode",
@@ -410,44 +419,28 @@ pub(crate) fn thinking_display(level: &str) -> String {
     }
 }
 
-/// Layered drop shadow (tight contact shadow + wide ambient shadow), like
-/// Zed's `ElevationIndex::ModalSurface`.
-fn popover_shadow() -> Vec<BoxShadow> {
-    vec![
-        BoxShadow {
-            color: hsla(0., 0., 0., 0.32),
-            offset: point(px(0.), px(4.)),
-            blur_radius: px(12.),
-            spread_radius: px(-2.),
-        },
-        BoxShadow {
-            color: hsla(0., 0., 0., 0.4),
-            offset: point(px(0.), px(12.)),
-            blur_radius: px(32.),
-            spread_radius: px(-8.),
-        },
-    ]
-}
-
-/// Trailing check mark on the selected row (label first, check on the
-/// right, like Zed's menus).
-fn trailing_check(selected: bool) -> impl IntoElement + use<> {
-    if selected {
-        icon("icons/check.svg", 11., TEXT).into_any_element()
-    } else {
-        div().into_any_element()
-    }
-}
-
-fn empty_row(kind: PickerKind) -> impl IntoElement + use<> {
+fn trailing_check(selected: bool, theme: Theme) -> impl IntoElement + use<> {
     div()
-        .h(px(ROW_H))
-        .mx(px(6.))
-        .px(px(6.))
+        .w(px(12.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(if selected {
+            icon("icons/check.svg", 11., theme.text).into_any_element()
+        } else {
+            div().into_any_element()
+        })
+}
+
+fn empty_row(kind: PickerKind, theme: Theme) -> impl IntoElement + use<> {
+    div()
+        .px(px(12.))
+        .pt(px(8.))
+        .pb(px(6.))
         .flex()
         .items_center()
         .text_size(px(12.5))
-        .text_color(rgb(TEXT_3))
+        .text_color(theme.text_3)
         .child(match kind {
             PickerKind::Model => "No matching models",
             PickerKind::Thinking => "No matching levels",
@@ -460,17 +453,17 @@ fn render_row(
     ix: usize,
     highlighted: bool,
     this: &Entity<ModelSelector>,
+    theme: Theme,
 ) -> impl IntoElement + use<> {
     let row = &rows[ix];
     let base = div()
         .id(ElementId::NamedInteger("picker-row".into(), ix as u64))
         .h(px(ROW_H))
-        .mx(px(6.))
-        .px(px(6.))
+        .px(px(8.))
         .rounded(px(6.))
         .flex()
         .items_center()
-        .gap_2()
+        .gap(px(8.))
         .cursor_pointer()
         // Hover moves the keyboard highlight; click activates the row.
         .on_hover({
@@ -495,14 +488,14 @@ fn render_row(
                 });
             }
         })
-        .when(highlighted, |row| row.bg(overlay()));
+        .when(highlighted, |row| row.bg(theme.overlay));
 
     match row {
         Row::Level { level, selected } => base
             .text_size(px(12.5))
-            .text_color(rgb(if *selected { TEXT } else { TEXT_2 }))
+            .text_color(if *selected { theme.text } else { theme.text_2 })
             .child({
-                let (path, color) = thinking_icon(level);
+                let (path, color) = thinking_icon(level, &theme);
                 icon(path, 12., color)
             })
             .child(
@@ -512,26 +505,37 @@ fn render_row(
                     .truncate()
                     .child(thinking_display(level)),
             )
-            .child(trailing_check(*selected)),
+            .child(trailing_check(*selected, theme)),
         Row::Model { model_ix, selected } => {
             let model = &models[*model_ix];
             base.text_size(px(12.5))
-                .text_color(rgb(if *selected { TEXT } else { TEXT_2 }))
-                .child(icon_dyn(provider_icon(&model.provider), 13., TEXT_2))
+                .text_color(if *selected { theme.text } else { theme.text_2 })
+                .child(icon_dyn(provider_icon(&model.provider), 12., theme.text_2))
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        .truncate()
-                        .child(model.name.clone()),
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .truncate()
+                                .child(model.name.clone()),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_shrink_0()
+                                .truncate()
+                                .text_size(px(11.))
+                                .text_color(theme.text_3)
+                                .child(model.provider.clone()),
+                        ),
                 )
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(rgb(TEXT_3))
-                        .child(model.provider.clone()),
-                )
-                .child(trailing_check(*selected))
+                .child(trailing_check(*selected, theme))
         }
     }
 }

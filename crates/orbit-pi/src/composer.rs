@@ -8,14 +8,16 @@ use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 
 use gpui::{
-    div, hsla, prelude::*, relative, App, Bounds, ClipboardItem, Context, CursorStyle, Element,
-    ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId,
-    InspectorElementId, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Pixels, ShapedLine, SharedString, Style, TextRun, UTF16Selection, Window,
+    div, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem, Context,
+    CursorStyle, Element, ElementInputHandler, Entity, EntityInputHandler, FocusHandle, Focusable,
+    GlobalElementId, InspectorElementId, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PaintQuad, Pixels, ShapedLine, SharedString, Style, TextRun, UTF16Selection,
+    Window,
 };
 
 use crate::{
-    Backspace, Copy, Cut, Delete, End, Home, Left, Paste, Right, SelectAll, SelectLeft, SelectRight,
+    theme, Backspace, Copy, Cut, Delete, End, Home, Left, Paste, Right, SelectAll, SelectLeft,
+    SelectRight,
 };
 
 pub struct ComposerInput {
@@ -399,6 +401,8 @@ impl IntoElement for TextElement {
 
 struct PrepaintState {
     line: Option<ShapedLine>,
+    cursor: Option<PaintQuad>,
+    selection: Option<PaintQuad>,
 }
 
 impl Element for TextElement {
@@ -437,10 +441,13 @@ impl Element for TextElement {
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
         let content = input.content.clone();
+        let selected_range = input.selected_range.clone();
+        let cursor = input.cursor_offset();
         let style = window.text_style();
+        let theme = theme::get(cx);
 
         let (display_text, text_color) = if content.is_empty() {
-            (input.placeholder.clone(), hsla(0., 0., 0.55, 1.))
+            (input.placeholder.clone(), theme.text_3)
         } else {
             (SharedString::from(content), style.color)
         };
@@ -458,12 +465,49 @@ impl Element for TextElement {
             .text_system()
             .shape_line(display_text, font_size, &[run], None);
 
+        // The app's focus accent (Waku `--ring`) carries the insertion point
+        // and the selection wash.
+        let cursor_pos = line.x_for_index(cursor);
+        let (selection, cursor_quad) = if selected_range.is_empty() {
+            (
+                None,
+                Some(fill(
+                    Bounds::new(
+                        point(bounds.left() + cursor_pos, bounds.top() + px(2.)),
+                        size(px(2.), bounds.bottom() - bounds.top() - px(4.)),
+                    ),
+                    theme.spark_orange,
+                )),
+            )
+        } else {
+            (
+                Some(fill(
+                    Bounds::from_corners(
+                        point(
+                            bounds.left() + line.x_for_index(selected_range.start),
+                            bounds.top(),
+                        ),
+                        point(
+                            bounds.left() + line.x_for_index(selected_range.end),
+                            bounds.bottom(),
+                        ),
+                    ),
+                    theme.spark_orange.opacity(0.25),
+                )),
+                None,
+            )
+        };
+
         self.input.update(cx, |input, _cx| {
             input.last_layout = Some(line.clone());
             input.last_bounds = Some(bounds);
         });
 
-        PrepaintState { line: Some(line) }
+        PrepaintState {
+            line: Some(line),
+            cursor: cursor_quad,
+            selection,
+        }
     }
 
     fn paint(
@@ -483,13 +527,20 @@ impl Element for TextElement {
             cx,
         );
 
+        // Selection under the text, caret over it — gpui `input` example
+        // paint order.
+        if let Some(selection) = prepaint.selection.take() {
+            window.paint_quad(selection);
+        }
         let line = prepaint.line.take().unwrap();
         line.paint(bounds.origin, window.line_height(), window, cx)
             .unwrap();
 
-        // No focused underline — the caret (and the composer's border) carry
-        // focus; a full-width line reads as a rendering defect.
-        let _ = &focus_handle;
+        if focus_handle.is_focused(window) {
+            if let Some(cursor) = prepaint.cursor.take() {
+                window.paint_quad(cursor);
+            }
+        }
     }
 }
 

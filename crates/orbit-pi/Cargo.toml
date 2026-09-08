@@ -1,9 +1,15 @@
 [package]
 name = "orbit-pi"
 version = "0.1.0"
-description = "Phase 0 spike: GPUI chat-list rendering proof of concept for Orbit"
+description = "Native GPUI workbench for the pi coding agent"
 edition.workspace = true
 license.workspace = true
+
+[package.metadata.bundle]
+name = "Orbit Pi"
+identifier = "dev.orbit.pi"
+icon = ["../../assets/icons/icon.icns"]
+osx_minimum_system_version = "13.0"
 
 [dependencies]
 gpui = { version = "0.2.2", features = ["runtime_shaders"] }
@@ -12,6 +18,10 @@ serde_json = { workspace = true }
 unicode-segmentation = "1"
 include_dir = "0.7"
 anyhow = { workspace = true }
-# filetype glyphs + theme colors for file/folder icons (rendered with the
-# embedded Symbols Nerd Font — see src/file_icons.rs)
-devicons = "0.6"
+# Local-time formatting for response-footer timestamps
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Match gpui 0.2.2 so we can set the Dock icon from the embedded PNG
+# when running without a bundled .app (cargo run).
+cocoa = "=0.26.0"

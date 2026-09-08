@@ -1,4 +1,4 @@
-//! App assets — embedded HugeIcons SVGs (free set, MIT).
+//! App assets — embedded HugeIcons SVGs (free set, MIT) plus the app mark.
 //!
 //! `Assets` implements gpui's `AssetSource` over a compile-time-embedded
 //! directory so packaged builds don't depend on filesystem layout.

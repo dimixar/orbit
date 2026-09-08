@@ -4,12 +4,16 @@
 //! JSONL RPC protocol (see `crates/orbit-rpc`). Quit with cmd-q.
 
 mod app;
+mod app_icon;
 mod assets;
 mod composer;
-mod file_icons;
+mod context_meter;
+mod message_scroller;
 mod model_selector;
 mod sessions;
+mod theme;
 mod transcript;
+mod transcript_view;
 
 use std::time::Duration;
 
@@ -104,18 +108,15 @@ fn main() {
     Application::new()
         .with_assets(assets::Assets)
         .run(|cx: &mut App| {
-            // Nerd Font for devicons filetype glyphs (see file_icons.rs).
-            cx.text_system()
-                .add_fonts(vec![std::borrow::Cow::Borrowed(
-                    include_bytes!("../assets/fonts/SymbolsNerdFont-Regular.ttf").as_slice(),
-                )])
-                .expect("failed to register embedded Symbols Nerd Font");
-
             bind_keys(cx);
+            theme::init(cx);
+            app_icon::set_dock_icon();
 
-            // Size the window relative to the display so it always fits and
-            // centers, even on small/scaled screens (a hardcoded 1240x840 gets
-            // clamped and shoved top-left by macOS on ~1366x768 displays).
+            // Open maximized: full width of the screen, filling the visible
+            // frame (Waku-style workbench). The computed bounds are the
+            // restore size macOS returns to when the window is un-zoomed,
+            // sized relative to the display so it always fits even on
+            // small/scaled screens.
             let (w, h) = match cx.primary_display().map(|d| d.bounds().size) {
                 Some(s) => (
                     (f32::from(s.width) * 0.85).min(1440.),
@@ -123,11 +124,11 @@ fn main() {
                 ),
                 None => (1240., 840.),
             };
-            let bounds = Bounds::centered(None, size(px(w), px(h)), cx);
+            let restore_bounds = Bounds::centered(None, size(px(w), px(h)), cx);
             let _window = cx
                 .open_window(
                     WindowOptions {
-                        window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        window_bounds: Some(WindowBounds::Maximized(restore_bounds)),
                         titlebar: Some(TitlebarOptions {
                             title: Some(SharedString::from("Orbit Pi")),
                             // Transparent titlebar: the sidebar extends to the top
@@ -135,6 +136,7 @@ fn main() {
                             appears_transparent: true,
                             traffic_light_position: Some(point(px(12.), px(13.))),
                         }),
+                        app_id: Some("dev.orbit.pi".into()),
                         focus: true,
                         ..Default::default()
                     },

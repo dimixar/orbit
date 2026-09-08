@@ -25,6 +25,8 @@ pub struct SessionInfo {
     pub cwd: PathBuf,
     /// First user message, truncated — the title shown in the sidebar.
     pub title: String,
+    /// First user message preview (longer than the title line).
+    pub first_message: String,
     pub modified: SystemTime,
 }
 
@@ -39,7 +41,12 @@ fn dirs_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// Load every session in pi's store, newest first.
+/// Load every session in pi's store, newest-*created* first.
+///
+/// Ordering is deliberately keyed on the session file's creation timestamp
+/// (embedded in pi's filename), NOT on last-activity time: a session that
+/// receives new messages must keep its exact position in the sidebar
+/// instead of jumping to the top of its group.
 pub fn load_sessions() -> Vec<SessionInfo> {
     let mut out = Vec::new();
     let Ok(groups) = fs::read_dir(sessions_dir()) else {
@@ -58,8 +65,27 @@ pub fn load_sessions() -> Vec<SessionInfo> {
             }
         }
     }
-    out.sort_by(|a, b| b.modified.cmp(&a.modified));
+    // Newest-created first, with the path as a deterministic tiebreak.
+    out.sort_by(|a, b| {
+        creation_key(&b.path)
+            .cmp(&creation_key(&a.path))
+            .then_with(|| b.path.cmp(&a.path))
+    });
     out
+}
+
+/// Stable sort key: the creation timestamp prefix of pi's session filename
+/// (`<timestamp>_<uuid>.jsonl`, e.g. `2026-08-25T07-50-59-952Z_…`).
+/// The fixed-width UTC format sorts correctly as a plain string. Files that
+/// don't follow the convention sort last; `modified` is never used here so
+/// that new activity cannot reorder the list.
+fn creation_key(path: &Path) -> String {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.split_once('_'))
+        .map(|(stamp, _)| stamp.to_string())
+        .filter(|stamp| stamp.len() >= 10 && stamp.as_bytes()[0].is_ascii_digit())
+        .unwrap_or_default()
 }
 
 fn read_session(path: &Path) -> Option<SessionInfo> {
@@ -77,8 +103,10 @@ fn read_session(path: &Path) -> Option<SessionInfo> {
     let id = header.get("id")?.as_str()?.to_string();
     let cwd = PathBuf::from(header.get("cwd")?.as_str()?);
 
-    // Scan a bounded number of lines for the first user message → title.
+    // Scan a bounded number of lines for the first user message → title
+    // and preview.
     let mut title = String::new();
+    let mut first_message = String::new();
     for _ in 0..60 {
         let mut line = String::new();
         match reader.read_line(&mut line) {
@@ -90,7 +118,9 @@ fn read_session(path: &Path) -> Option<SessionInfo> {
                 if value.get("type")?.as_str() == Some("message") {
                     let message = &value["message"];
                     if message["role"].as_str() == Some("user") {
-                        title = first_user_text(message);
+                        let text = first_user_text(message);
+                        title = cap_chars(&text, 80);
+                        first_message = cap_chars(&text, 110);
                         break;
                     }
                 }
@@ -106,11 +136,21 @@ fn read_session(path: &Path) -> Option<SessionInfo> {
         id,
         cwd,
         title,
+        first_message,
         modified,
     })
 }
 
-/// Extract the first text block from a user message's content.
+fn cap_chars(text: &str, max: usize) -> String {
+    let trimmed = text.trim();
+    let mut out: String = trimmed.chars().take(max).collect();
+    if trimmed.chars().count() > max {
+        out.push('…');
+    }
+    out
+}
+
+/// Extract the first text block from a user message's content, as one line.
 fn first_user_text(message: &Value) -> String {
     let content = &message["content"];
     let text = match content {
@@ -123,13 +163,7 @@ fn first_user_text(message: &Value) -> String {
             .to_string(),
         _ => String::new(),
     };
-    let one_line = text.replace('\n', " ");
-    let trimmed = one_line.trim();
-    let mut out: String = trimmed.chars().take(80).collect();
-    if trimmed.chars().count() > 80 {
-        out.push('…');
-    }
-    out
+    text.replace('\n', " ")
 }
 
 /// Basename of a workspace path, used as a group label in the sidebar.
@@ -190,8 +224,26 @@ mod tests {
     fn load_sessions_returns_real_sessions() {
         let sessions = load_sessions();
         assert!(!sessions.is_empty(), "expected sessions in pi store");
-        assert!(sessions.windows(2).all(|w| w[0].modified >= w[1].modified));
+        // Newest-created first, stable across activity: creation keys
+        // descend, and only new sessions may join the front.
+        assert!(sessions
+            .windows(2)
+            .all(|w| creation_key(&w[0].path) >= creation_key(&w[1].path)));
         assert!(sessions[0].id.len() > 10);
+    }
+
+    #[test]
+    fn creation_key_uses_filename_timestamp_not_modified() {
+        let dir = std::env::temp_dir().join("orbit-creation-key-test");
+        fs::create_dir_all(&dir).unwrap();
+        let older = dir.join("2026-08-25T07-50-59-952Z_aaa.jsonl");
+        let newer = dir.join("2026-09-01T10-00-00-000Z_bbb.jsonl");
+        fs::write(&older, b"").unwrap();
+        fs::write(&newer, b"").unwrap();
+
+        assert!(creation_key(&newer) > creation_key(&older));
+        assert_eq!(creation_key(&dir.join("irregular-name.jsonl")), "");
+        let _ = fs::remove_dir_all(&dir);
     }
 }
 

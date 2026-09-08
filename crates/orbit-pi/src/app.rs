@@ -6,63 +6,56 @@
 //! bar (workspace, Local, git branch).
 
 use std::{
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     rc::Rc,
     time::{Duration, Instant},
 };
 
 use gpui::{
-    anchored, deferred, div, hsla, list, point, prelude::*, px, rgb, AnchoredPositionMode,
-    AnyElement, App, Context, Corner, Entity, FocusHandle, Focusable, FontWeight, IntoElement,
-    ListAlignment, ListState, MouseButton, MouseUpEvent, Render, SharedString, Window,
-    WindowControlArea,
+    anchored, deferred, div, img, list, point, prelude::*, px, Animation, AnimationExt,
+    AnchoredPositionMode, AnyElement, App, Context, Corner, Entity, FocusHandle, Focusable,
+    FontWeight, Hsla, IntoElement, ListAlignment, ListState, MouseButton, MouseUpEvent, Render,
+    SharedString, Subscription, Transformation, Window, WindowControlArea, radians,
 };
-use orbit_rpc::{CommandBody, Event, PiClient};
+use orbit_rpc::{CommandBody, ContextUsage, Event, PiClient};
+use serde_json::Value;
 
 use crate::composer::ComposerInput;
+use crate::context_meter::{self, ContextPopup};
 use crate::model_selector::{
     provider_icon, thinking_display, thinking_icon, ModelSelector, PickerKind,
 };
 use crate::sessions::{self, SessionInfo};
-use crate::transcript::Transcript;
-
-// ── palette (waku dark) ────────────────────────────────────────────────────
-// Reference UI: warm dark zinc, slightly lifted blacks for depth separation.
-const BG_MAIN: u32 = 0x18181A;
-const BG_SIDEBAR: u32 = 0x121214;
-const BG_COMPOSER: u32 = 0x1E1E20;
-const BG_RAISED: u32 = 0x252528;
-const BG_HOVER: u32 = 0x2C2C30;
-pub(crate) const BORDER: u32 = 0x2C2C2F;
-pub(crate) const TEXT: u32 = 0xE4E4E7;
-pub(crate) const TEXT_2: u32 = 0xA1A1AA;
-pub(crate) const TEXT_3: u32 = 0x7D7D7D;
-const OK_GREEN: u32 = 0x6FDC7F;
-const STOP_RED: u32 = 0xC05050;
-const ADD_GREEN: u32 = 0x7CC97F;
-const DEL_RED: u32 = 0xE06C5F;
-pub(crate) const SPARK_ORANGE: u32 = 0xE75F3B;
-
-// Menu surface (Waku `raised` + translucent overlays).
-pub(crate) const MENU_BG: u32 = 0x232323;
-/// Hover wash inside menus (Waku `overlay`).
-pub(crate) fn overlay() -> gpui::Hsla {
-    hsla(220.0 / 360.0, 0.10, 0.90, 0.05)
-}
-/// Stronger wash for the open-menu trigger (Waku `overlay_strong`).
-fn overlay_strong() -> gpui::Hsla {
-    hsla(220.0 / 360.0, 0.10, 0.90, 0.09)
-}
-/// Menu border (Waku `border_strong`).
-pub(crate) fn border_strong() -> gpui::Hsla {
-    hsla(220.0 / 360.0, 0.10, 0.90, 0.14)
-}
+use crate::theme::{self, Theme, ThemeMode};
+use crate::transcript::{self, Transcript};
 
 const SIDEBAR_W: f32 = 248.;
 const CONTENT_MAX_W: f32 = 760.;
 
+/// Maximum sessions kept alive in the background. Beyond this, settled
+/// sessions are evicted (their process torn down); running ones never are.
+const MAX_LIVE_SESSIONS: usize = 6;
+
+/// A session running (or recently run) in the background: its own pi
+/// process, its own live transcript, and its own agent-run state. Parked
+/// when the user switches away mid-run; the run continues and events keep
+/// draining every tick, so reopening the session resumes exactly where the
+/// stream left off.
+struct ParkedSession {
+    client: PiClient,
+    transcript: Transcript,
+    busy: bool,
+    added: u64,
+    removed: u64,
+}
+
 pub struct OrbitApp {
     client: Option<PiClient>,
+    /// Sessions with a live pi process, keyed by session-file path. The
+    /// active session lives in `client`/`transcript` above; this map holds
+    /// the background ones (see `ParkedSession`).
+    lives: HashMap<PathBuf, ParkedSession>,
     transcript: Transcript,
     sessions: Vec<SessionInfo>,
     sidebar_list: ListState,
@@ -103,6 +96,13 @@ pub struct OrbitApp {
     /// When the popup was dismissed by an outside mouse-down; guards against
     /// the same click's mouse-up immediately re-opening it via the chip.
     menu_dismissed_at: Option<Instant>,
+    /// Live context-window usage from `get_session_stats`. `None` when pi
+    /// hasn't advertised a window (no model) or the command isn't supported.
+    context: Option<ContextUsage>,
+    /// Hover compact card vs click-to-open breakdown for the context ring.
+    context_popup: ContextPopup,
+    /// Keeps the theme global observer alive so a settings toggle redraws.
+    _theme_sub: Subscription,
 }
 
 /// A model choice from the pi runtime catalog.
@@ -125,8 +125,17 @@ impl OrbitApp {
             Err(err) => (None, format!("pi spawn failed: {err}")),
         };
 
+        let theme_sub = cx.observe_global::<Theme>(|this, cx| {
+            this.input.update(cx, |_, cx| cx.notify());
+            if let Some((_, selector)) = &this.model_selector {
+                selector.update(cx, |_, cx| cx.notify());
+            }
+            cx.notify();
+        });
+
         let mut app = Self {
             client,
+            lives: HashMap::new(),
             transcript: Transcript::new(),
             sessions: sessions::load_sessions(),
             sidebar_list: ListState::new(0, ListAlignment::Top, px(80.)),
@@ -152,6 +161,9 @@ impl OrbitApp {
             collapsed_workspaces: std::collections::HashSet::new(),
             current_session_path: None,
             menu_dismissed_at: None,
+            context: None,
+            context_popup: ContextPopup::None,
+            _theme_sub: theme_sub,
         };
 
         if app.client.is_some() {
@@ -185,15 +197,54 @@ impl OrbitApp {
         );
     }
 
+    /// Re-fetch the current context-window estimate. Cheap; call after
+    /// settle, session switch, compaction, and model changes — never per tick.
+    fn refresh_context_stats(&mut self) {
+        self.send(CommandBody::GetSessionStats, "get_session_stats");
+    }
+
+    /// Register the active client under the session file pi reports. The
+    /// startup process has no known path until pi's first state/stats
+    /// response; a `new_session` re-keys it the same way (the handler clears
+    /// `current_session_path` and the next response adopts the new file).
+    /// An explicit switch never re-keys — its path is already claimed.
+    fn adopt_session_file(&mut self, file: PathBuf) {
+        if self.current_session_path.is_none() {
+            self.current_session_path = Some(file);
+        }
+    }
+
+    /// Park a background session, evicting a settled one if over the cap.
+    /// Running sessions are never evicted.
+    fn park(&mut self, path: PathBuf, parked: ParkedSession) {
+        if self.lives.len() >= MAX_LIVE_SESSIONS {
+            let victim = self
+                .lives
+                .iter()
+                .find(|(_, p)| !p.busy)
+                .map(|(k, _)| k.clone());
+            if let Some(victim) = victim {
+                self.lives.remove(&victim);
+            }
+        }
+        self.lives.insert(path, parked);
+    }
+
     /// Heartbeat (~90ms): drain protocol events into the UI.
     pub fn tick(&mut self, cx: &mut Context<Self>) {
+        self.tick_background(cx);
         let events = {
             let Some(client) = self.client.as_ref() else {
                 return;
             };
             client.drain_events()
         };
+        let copy_pending = self.transcript.prune_copy_feedback();
         if events.is_empty() {
+            // Keep the live "Working for…" clock moving while a turn is open.
+            if self.busy || self.transcript.is_streaming() || copy_pending {
+                cx.notify();
+            }
             return;
         }
 
@@ -201,9 +252,46 @@ impl OrbitApp {
         for event in &events {
             match event {
                 Event::AgentStart => self.busy = true,
+                // pi blocks interactive extension dialogs on a client
+                // response; Orbit has no dialog surface yet — cancel the
+                // request so the run can settle (Waku parity).
+                Event::ExtensionUiRequest { id, .. } => {
+                    self.send(
+                        CommandBody::Raw(serde_json::json!({
+                            "type": "extension_ui_response",
+                            "id": id,
+                            "cancelled": true
+                        })),
+                        "extension_ui_response",
+                    );
+                }
+                Event::SessionInfoChanged { name } => {
+                    // pi names the session after the first user message;
+                    // forward it live the way Waku does.
+                    if let Some(name) = name {
+                        self.current_title = Some(name.clone());
+                    }
+                    refresh_sessions = true;
+                }
+                Event::AutoRetryEnd { value } => {
+                    let success = value.get("success").and_then(|v| v.as_bool());
+                    if success == Some(false) {
+                        let error = value
+                            .get("finalError")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("pi exhausted its automatic retries");
+                        self.status = format!("retry failed: {error}");
+                    }
+                }
                 Event::AgentSettled => {
                     self.busy = false;
                     refresh_sessions = true;
+                    self.refresh_context_stats();
+                }
+                Event::CompactionEnd { .. } => {
+                    // Post-compaction usage is unknown until the next turn;
+                    // refresh so the meter can show an empty/unknown state.
+                    self.refresh_context_stats();
                 }
                 Event::ProcessExited => {
                     self.busy = false;
@@ -211,7 +299,7 @@ impl OrbitApp {
                 }
                 Event::MessageEnd { value } => {
                     // Real edit stats from finalized tool calls.
-                    let (a, r) = diff_from_message(value);
+                    let (a, r) = transcript::diff_from_message(value);
                     self.added += a;
                     self.removed += r;
                 }
@@ -237,6 +325,63 @@ impl OrbitApp {
         // (model/thinking labels, catalogs, status) — always redraw a frame
         // in which events were processed so those changes become visible.
         cx.notify();
+    }
+
+    /// Drain background (parked) sessions. Their runs continue in their own
+    /// pi processes; events keep their transcripts current, so reopening a
+    /// parked session resumes the live stream exactly where it left off.
+    fn tick_background(&mut self, cx: &mut Context<Self>) {
+        if self.lives.is_empty() {
+            return;
+        }
+        let mut changed = false;
+        let mut any_busy = false;
+        let mut dead: Vec<PathBuf> = Vec::new();
+        for (path, parked) in self.lives.iter_mut() {
+            for event in parked.client.drain_events() {
+                match &event {
+                    Event::AgentStart => parked.busy = true,
+                    // `agent_settled` is the real settle (queued steering /
+                    // follow-up / retry can continue past `agent_end`).
+                    Event::AgentSettled | Event::ProcessExited => parked.busy = false,
+                    // pi blocks extension dialogs on a client response;
+                    // cancel so a background run can settle (same as the
+                    // active-session handling in `tick`).
+                    Event::ExtensionUiRequest { id, .. } => {
+                        let _ = parked.client.respond_dialog(
+                            id,
+                            serde_json::json!({
+                                "type": "extension_ui_response",
+                                "id": id,
+                                "cancelled": true
+                            }),
+                        );
+                        continue;
+                    }
+                    Event::MessageEnd { value } => {
+                        // Real edit stats from finalized tool calls.
+                        let (a, r) = transcript::diff_from_message(value);
+                        parked.added += a;
+                        parked.removed += r;
+                    }
+                    _ => {}
+                }
+                changed |= parked.transcript.apply_event(&event);
+            }
+            if !parked.client.is_alive() {
+                dead.push(path.clone());
+            }
+            any_busy |= parked.busy;
+        }
+        for path in dead {
+            self.lives.remove(&path);
+        }
+        if changed || any_busy {
+            // Repaint while a background run is live (sidebar loader phase,
+            // park-state changes) even though the visible transcript's
+            // active client produced no events this tick.
+            cx.notify();
+        }
     }
 
     fn on_response(
@@ -290,7 +435,11 @@ impl OrbitApp {
                 {
                     self.thinking_label = level.to_string();
                 }
+                if let Some(file) = data.get("sessionFile").and_then(Value::as_str) {
+                    self.adopt_session_file(PathBuf::from(file));
+                }
                 self.sync_model_selector(cx);
+                self.refresh_context_stats();
             }
             "get_messages" => {
                 self.transcript.load_from(data);
@@ -299,11 +448,12 @@ impl OrbitApp {
                 self.removed = 0;
                 if let Some(messages) = data.get("messages").and_then(serde_json::Value::as_array) {
                     for message in messages {
-                        let (a, r) = diff_from_message(message);
+                        let (a, r) = transcript::diff_from_message(message);
                         self.added += a;
                         self.removed += r;
                     }
                 }
+                self.refresh_context_stats();
             }
             "get_available_models" => {
                 self.available_models = data
@@ -339,6 +489,12 @@ impl OrbitApp {
                     .unwrap_or_default();
                 self.sync_model_selector(cx);
             }
+            "get_session_stats" => {
+                self.context = ContextUsage::from_stats(data);
+                if let Some(file) = data.get("sessionFile").and_then(Value::as_str) {
+                    self.adopt_session_file(PathBuf::from(file));
+                }
+            }
             "switch_session" => {
                 if success {
                     self.send(CommandBody::GetMessages, "get_messages");
@@ -352,6 +508,7 @@ impl OrbitApp {
                 self.current_session_path = None;
                 self.added = 0;
                 self.removed = 0;
+                self.context = None;
                 *refresh_sessions = true;
                 self.send(CommandBody::GetState, "get_state");
                 self.refresh_catalogs();
@@ -369,14 +526,22 @@ impl OrbitApp {
         if text.is_empty() {
             return;
         }
-        self.send(
-            CommandBody::Prompt {
-                message: text,
-                images: None,
-                streaming_behavior: None,
-            },
-            "prompt",
-        );
+        // Waku behavior: while the agent is mid-turn a follow-up message is
+        // a *steer* (injected into the running turn), not a new prompt.
+        if self.busy || self.transcript.is_streaming() {
+            self.send(CommandBody::Steer { message: text.clone() }, "steer");
+        } else {
+            self.send(
+                CommandBody::Prompt {
+                    message: text.clone(),
+                    images: None,
+                    streaming_behavior: None,
+                },
+                "prompt",
+            );
+        }
+        // Show the prompt immediately — pi does not echo it back in RPC mode.
+        self.transcript.append_user_message(&text);
         self.input.update(cx, |input, cx| input.clear(cx));
         cx.notify();
     }
@@ -401,6 +566,11 @@ impl OrbitApp {
         }
         if self.model_selector.is_some() {
             self.close_model_selector(window, cx);
+            return;
+        }
+        if self.context_popup != ContextPopup::None {
+            self.context_popup = ContextPopup::None;
+            cx.notify();
             return;
         }
         self.send(CommandBody::Abort, "abort");
@@ -576,15 +746,79 @@ impl OrbitApp {
 
     /// Switch the live session. With `push`, the visit is recorded in the
     /// top-bar history (forward entries are dropped, like browser history).
-    /// Navigation itself calls this with `push: false`.
+    ///
+    /// Each session gets its own pi process, so switching never interrupts a
+    /// run: the outgoing session is *parked* mid-run (its process and live
+    /// transcript keep going in the background — events drain every tick),
+    /// and a parked target resumes exactly where it left off. Idle sessions
+    /// are torn down and reload from disk when reopened.
     fn switch_to_session(&mut self, session: SessionInfo, push: bool, cx: &mut Context<Self>) {
-        self.send(
-            CommandBody::SwitchSession {
-                session_path: session.path.to_string_lossy().into_owned(),
-            },
-            "switch_session",
-        );
-        self.transcript.clear();
+        if self.current_session_path.as_ref() == Some(&session.path) {
+            return;
+        }
+        // ── park the outgoing session ──
+        if let Some(old_path) = self.current_session_path.take() {
+            let old_busy = self.busy || self.transcript.is_streaming();
+            if let Some(client) = self.client.take() {
+                if old_busy {
+                    // Swap the transcript out first so the park doesn't
+                    // borrow `self.transcript` while `self` is borrowed.
+                    let transcript = std::mem::replace(&mut self.transcript, Transcript::new());
+                    self.park(
+                        old_path,
+                        ParkedSession {
+                            client,
+                            transcript,
+                            busy: true,
+                            added: self.added,
+                            removed: self.removed,
+                        },
+                    );
+                }
+                // Idle: drop the client — the process is torn down and the
+                // session reloads from pi's session file when reopened.
+            }
+        }
+        self.busy = false;
+        self.added = 0;
+        self.removed = 0;
+        self.transcript = Transcript::new();
+
+        // ── activate the target ──
+        if let Some(parked) = self.lives.remove(&session.path) {
+            // Resume a background run. The parked transcript is already up
+            // to date (its events drain every tick); anything buffered in
+            // the process channel streams in from the next tick on.
+            self.client = Some(parked.client);
+            self.transcript = parked.transcript;
+            self.busy = parked.busy;
+            self.added = parked.added;
+            self.removed = parked.removed;
+            self.send(CommandBody::GetState, "get_state");
+            self.refresh_context_stats();
+        } else {
+            // Fresh open: spawn a dedicated pi process rooted at the
+            // session's workspace and point it at the session file. The
+            // `switch_session` response triggers the get_messages snapshot.
+            let spawned = PiClient::spawn(&session.cwd, None)
+                .or_else(|_| PiClient::spawn(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")), None));
+            match spawned {
+                Ok(client) => {
+                    self.client = Some(client);
+                    self.send(
+                        CommandBody::SwitchSession {
+                            session_path: session.path.to_string_lossy().into_owned(),
+                        },
+                        "switch_session",
+                    );
+                    self.send(CommandBody::GetState, "get_state");
+                }
+                Err(err) => {
+                    self.client = None;
+                    self.status = format!("pi spawn failed: {err}");
+                }
+            }
+        }
         self.current_title = Some(session.title.clone());
         self.current_workspace = Some(session.cwd.clone());
         self.current_session_path = Some(session.path.clone());
@@ -697,58 +931,6 @@ impl Focusable for OrbitApp {
     }
 }
 
-// ── diff stats (real, from tool calls) ─────────────────────────────────────
-
-/// Count added/removed lines from the `edit` / `write` tool calls inside a
-/// message value. Counts are honest — they only reflect what the agent did.
-fn diff_from_message(value: &serde_json::Value) -> (u64, u64) {
-    let mut added = 0u64;
-    let mut removed = 0u64;
-    let Some(serde_json::Value::Array(blocks)) = value
-        .get("message")
-        .and_then(|m| m.get("content"))
-        .or_else(|| value.get("content"))
-    else {
-        return (0, 0);
-    };
-    for block in blocks {
-        let kind = block
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        if kind != "toolCall" && kind != "tool_call" {
-            continue;
-        }
-        let name = block
-            .get("name")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        let args = block.get("arguments").unwrap_or(&serde_json::Value::Null);
-        match name {
-            "edit" => {
-                if let Some(edits) = args.get("edits").and_then(serde_json::Value::as_array) {
-                    for edit in edits {
-                        removed += count_lines(edit.get("oldText"));
-                        added += count_lines(edit.get("newText"));
-                    }
-                }
-            }
-            "write" => {
-                added += count_lines(args.get("content"));
-            }
-            _ => {}
-        }
-    }
-    (added, removed)
-}
-
-fn count_lines(value: Option<&serde_json::Value>) -> u64 {
-    value
-        .and_then(serde_json::Value::as_str)
-        .map(|text| text.split('\n').count() as u64)
-        .unwrap_or(0)
-}
-
 // ── sidebar model ──────────────────────────────────────────────────────────
 
 enum SideRow {
@@ -772,10 +954,12 @@ enum SettingsSection {
 }
 
 impl Render for OrbitApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = *theme::get(cx);
         // Flatten sidebar rows: workspace groups (ordered by each group's
-        // most recent session — the list arrives newest-first) + their
-        // sessions, time-sorted, skipping collapsed groups.
+        // most recently *created* session — stable, so activity never
+        // reorders the list) + their sessions, same order, skipping
+        // collapsed groups.
         let mut side_rows: Vec<SideRow> = Vec::new();
         let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
         for (ix, session) in self.sessions.iter().enumerate() {
@@ -806,8 +990,31 @@ impl Render for OrbitApp {
         let sessions_data = Rc::new(self.sessions.clone());
         let active_path = Rc::new(self.current_session_path.clone());
         let this = cx.entity();
+        // The open session's agent activity, plus which parked (background)
+        // sessions are mid-run — both drive the sidebar's running loader.
+        let agent_running = self.busy || self.transcript.is_streaming();
+        let running_paths: Rc<HashSet<PathBuf>> = Rc::new(
+            self.lives
+                .iter()
+                .filter(|(_, parked)| parked.busy)
+                .map(|(path, _)| path.clone())
+                .collect(),
+        );
 
         let workspace_label = self.workspace_label();
+        let review_workspace = self
+            .current_workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok());
+        // The rail gates on the main area's width (Waku: 872px transcript
+        // container), which excludes the sessions sidebar when visible.
+        let viewport = window.viewport_size();
+        let main_width = viewport.width
+            - px(if self.sidebar_visible && !self.settings_open {
+                SIDEBAR_W
+            } else {
+                0.
+            });
 
         // ── top-bar left controls: sidebar toggle + session history ──
         let back_enabled = self.history_index > 0;
@@ -823,9 +1030,9 @@ impl Render for OrbitApp {
                     .p_1()
                     .rounded_sm()
                     .cursor_pointer()
-                    .hover(|s| s.bg(rgb(BG_HOVER)))
+                    .hover(|s| s.bg(theme.bg_hover))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_toggle_sidebar))
-                    .child(icon("icons/panel-left.svg", 16., TEXT_2)),
+                    .child(icon("icons/panel-left.svg", 16., theme.text_2)),
             )
             .child(
                 div()
@@ -834,13 +1041,17 @@ impl Render for OrbitApp {
                     .rounded_sm()
                     .when(back_enabled, |b| {
                         b.cursor_pointer()
-                            .hover(|s| s.bg(rgb(BG_HOVER)))
+                            .hover(|s| s.bg(theme.bg_hover))
                             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_history_back))
                     })
                     .child(icon(
                         "icons/arrow-left.svg",
                         14.,
-                        if back_enabled { TEXT_2 } else { TEXT_3 },
+                        if back_enabled {
+                            theme.text_2
+                        } else {
+                            theme.text_3
+                        },
                     )),
             )
             .child(
@@ -850,13 +1061,17 @@ impl Render for OrbitApp {
                     .rounded_sm()
                     .when(forward_enabled, |b| {
                         b.cursor_pointer()
-                            .hover(|s| s.bg(rgb(BG_HOVER)))
+                            .hover(|s| s.bg(theme.bg_hover))
                             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_history_forward))
                     })
                     .child(icon(
                         "icons/arrow-right.svg",
                         14.,
-                        if forward_enabled { TEXT_2 } else { TEXT_3 },
+                        if forward_enabled {
+                            theme.text_2
+                        } else {
+                            theme.text_3
+                        },
                     )),
             );
 
@@ -866,13 +1081,13 @@ impl Render for OrbitApp {
             .child(
                 div()
                     .text_size(px(12.))
-                    .text_color(rgb(ADD_GREEN))
+                    .text_color(theme.add_green)
                     .child(format!("+{}", self.added)),
             )
             .child(
                 div()
                     .text_size(px(12.))
-                    .text_color(rgb(DEL_RED))
+                    .text_color(theme.del_red)
                     .child(format!("-{}", self.removed)),
             );
         top_controls = top_controls
@@ -883,19 +1098,23 @@ impl Render for OrbitApp {
                     .items_center()
                     .gap_1()
                     .rounded_md()
-                    .bg(rgb(BG_RAISED))
+                    .bg(theme.bg_raised)
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(theme.border)
                     .px(px(6.))
                     .py(px(4.))
                     .text_size(px(12.))
-                    .text_color(rgb(TEXT_2))
+                    .text_color(theme.text_2)
                     .cursor_pointer()
-                    .hover(|s| s.bg(rgb(BG_HOVER)))
+                    .hover(|s| s.bg(theme.bg_hover))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_model_trigger_click))
-                    .child(icon_dyn(provider_icon(&self.model_provider), 13., TEXT_2))
-                    .child(div().w(px(1.)).h(px(12.)).bg(rgb(BORDER)))
-                    .child(icon("icons/chevron-down.svg", 12., TEXT_3)),
+                    .child(icon_dyn(
+                        provider_icon(&self.model_provider),
+                        13.,
+                        theme.text_2,
+                    ))
+                    .child(div().w(px(1.)).h(px(12.)).bg(theme.border))
+                    .child(icon("icons/chevron-down.svg", 12., theme.text_3)),
             )
             .child(
                 div()
@@ -903,16 +1122,16 @@ impl Render for OrbitApp {
                     .p_1()
                     .rounded_sm()
                     .cursor_pointer()
-                    .hover(|s| s.bg(rgb(BG_HOVER)))
+                    .hover(|s| s.bg(theme.bg_hover))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_info_click))
-                    .child(icon("icons/info.svg", 16., TEXT_2)),
+                    .child(icon("icons/info.svg", 16., theme.text_2)),
             );
 
         div()
             .size_full()
             .flex()
-            .bg(rgb(BG_MAIN))
-            .text_color(rgb(TEXT))
+            .bg(theme.bg_main)
+            .text_color(theme.text)
             // ── sidebar ── (hidden while the settings surface is open —
             // settings is a full-window surface with its own nav, like the
             // reference UI)
@@ -920,9 +1139,9 @@ impl Render for OrbitApp {
                 div()
                     .w(px(SIDEBAR_W))
                     .h_full()
-                    .bg(rgb(BG_SIDEBAR))
+                    .bg(theme.bg_sidebar)
                     .border_r_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(theme.border)
                     .flex()
                     .flex_col()
                     // traffic-light strip (drag region)
@@ -947,8 +1166,9 @@ impl Render for OrbitApp {
                                 Some(Box::new(cx.listener(|this, _: &MouseUpEvent, w, cx| {
                                     this.on_new_session(&crate::NewSession, w, cx)
                                 }))),
+                                theme,
                             ))
-                            .child(self.nav_row("icons/search.svg", "Search", true, None)),
+                            .child(self.nav_row("icons/search.svg", "Search", true, None, theme)),
                     )
                     // session list (scrolls), grouped by age
                     .child(
@@ -959,13 +1179,16 @@ impl Render for OrbitApp {
                             .px_2()
                             .relative()
                             .child(
-                                list(self.sidebar_list.clone(), move |ix, _window, _cx| {
+                                list(self.sidebar_list.clone(), move |ix, _window, cx| {
                                     render_side_row(
                                         &side_rows,
                                         &sessions_data,
                                         active_path.as_deref(),
                                         ix,
                                         &this,
+                                        agent_running,
+                                        &running_paths,
+                                        *theme::get(cx),
                                     )
                                     .into_any_element()
                                 })
@@ -986,21 +1209,21 @@ impl Render for OrbitApp {
                                     .p_1()
                                     .rounded_sm()
                                     .cursor_pointer()
-                                    .hover(|s| s.bg(rgb(BG_HOVER)))
+                                    .hover(|s| s.bg(theme.bg_hover))
                                     .on_mouse_up(
                                         MouseButton::Left,
                                         cx.listener(Self::on_settings_gear_click),
                                     )
-                                    .child(icon("icons/settings.svg", 16., TEXT_3)),
+                                    .child(icon("icons/settings.svg", 16., theme.text_3)),
                             )
                             .child(div().flex_1())
-                            .child(div().size(px(7.)).rounded_full().bg(rgb(
+                            .child(div().size(px(7.)).rounded_full().bg(
                                 if self.client.is_some() {
-                                    OK_GREEN
+                                    theme.ok_green
                                 } else {
-                                    STOP_RED
+                                    theme.stop_red
                                 },
-                            ))),
+                            )),
                     )
             }))
             // ── main ──
@@ -1033,7 +1256,7 @@ impl Render for OrbitApp {
                                     .flex()
                                     .items_center()
                                     .child(
-                                        div().text_size(px(13.)).text_color(rgb(TEXT_2)).child(
+                                        div().text_size(px(13.)).text_color(theme.text_2).child(
                                             self.current_title
                                                 .clone()
                                                 .unwrap_or_else(|| "New task".into()),
@@ -1044,15 +1267,19 @@ impl Render for OrbitApp {
                     )
                     // transcript (centered column) or empty state
                     .child(if self.transcript.is_empty() {
-                        empty_state(&workspace_label).into_any_element()
+                        empty_state(theme).into_any_element()
                     } else {
                         div()
                             .flex_1()
                             .min_h_0()
                             .w_full()
-                            .flex()
-                            .justify_center()
-                            .child(self.transcript.render())
+                            .relative()
+                            .child(self.transcript.render(
+                                review_workspace.as_deref(),
+                                window.viewport_size().height,
+                                main_width,
+                                cx,
+                            ))
                             .into_any_element()
                     })
                     // floating composer + status bar — one centered column
@@ -1078,9 +1305,9 @@ impl Render for OrbitApp {
                                     .child(
                                         div()
                                             .w_full()
-                                            .bg(rgb(BG_COMPOSER))
+                                            .bg(theme.bg_composer)
                                             .border_1()
-                                            .border_color(rgb(BORDER))
+                                            .border_color(theme.border)
                                             .rounded_lg()
                                             .px_3()
                                             .pt_2()
@@ -1095,7 +1322,7 @@ impl Render for OrbitApp {
                                             .child(self.input.clone())
                                             .child(self.composer_row(cx)),
                                     )
-                                    .child(self.status_bar(&workspace_label)),
+                                    .child(self.status_bar(&workspace_label, cx)),
                             ),
                     )
                     .into_any_element()
@@ -1120,7 +1347,11 @@ impl OrbitApp {
             .child(self.model_chip(cx))
             .child(self.thinking_chip(cx))
             // access mode (pi runs with full tool access)
-            .child(pill_static("icons/lock.svg", "Full access"))
+            .child(pill_static(
+                "icons/lock.svg",
+                "Full access",
+                *theme::get(cx),
+            ))
             .child(div().flex_1())
             .child(self.send_button(cx))
     }
@@ -1147,6 +1378,7 @@ impl OrbitApp {
     /// The model chip: chat glyph + model name + caret. Highlighted while
     /// its dropdown is open.
     fn model_chip(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let theme = *theme::get(cx);
         div()
             .flex()
             .flex_col()
@@ -1164,21 +1396,27 @@ impl OrbitApp {
                     .border_1()
                     .text_size(px(12.))
                     .cursor_pointer()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(BG_RAISED))
-                    .hover(|s| s.bg(overlay()))
+                    .border_color(theme.border)
+                    .bg(theme.bg_raised)
+                    .hover(|s| s.bg(theme.overlay))
                     .when(self.picker_is_open(PickerKind::Model), |chip| {
-                        chip.bg(overlay_strong()).border_color(border_strong())
+                        chip.bg(theme.overlay_strong)
+                            .border_color(theme.border_strong)
                     })
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_model_trigger_click))
-                    .child(icon_dyn(provider_icon(&self.model_provider), 12., TEXT_2))
-                    .child(div().text_color(rgb(TEXT)).child(self.model_label.clone()))
-                    .child(icon("icons/chevron-down.svg", 11., TEXT_3)),
+                    .child(icon_dyn(
+                        provider_icon(&self.model_provider),
+                        12.,
+                        theme.text_2,
+                    ))
+                    .child(div().text_color(theme.text).child(self.model_label.clone()))
+                    .child(icon("icons/chevron-down.svg", 11., theme.text_3)),
             )
     }
 
     /// The thinking-level chip: spark glyph + reasoning level + caret.
     fn thinking_chip(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let theme = *theme::get(cx);
         div()
             .flex()
             .flex_col()
@@ -1196,33 +1434,34 @@ impl OrbitApp {
                     .border_1()
                     .text_size(px(12.))
                     .cursor_pointer()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(BG_RAISED))
-                    .hover(|s| s.bg(overlay()))
+                    .border_color(theme.border)
+                    .bg(theme.bg_raised)
+                    .hover(|s| s.bg(theme.overlay))
                     .when(self.picker_is_open(PickerKind::Thinking), |chip| {
-                        chip.bg(overlay_strong()).border_color(border_strong())
+                        chip.bg(theme.overlay_strong)
+                            .border_color(theme.border_strong)
                     })
                     .on_mouse_up(
                         MouseButton::Left,
                         cx.listener(Self::on_thinking_trigger_click),
                     )
                     .child({
-                        let (path, color) = thinking_icon(&self.thinking_label);
+                        let (path, color) = thinking_icon(&self.thinking_label, &theme);
                         icon(path, 12., color)
                     })
                     .child(
                         div()
-                            .text_color(rgb(TEXT))
+                            .text_color(theme.text)
                             .child(thinking_display(&self.thinking_label)),
                     )
-                    .child(icon("icons/chevron-down.svg", 11., TEXT_3)),
+                    .child(icon("icons/chevron-down.svg", 11., theme.text_3)),
             )
     }
 
     /// Status bar under the composer: workspace / transport / branch on the
-    /// left, run-state indicator on the right. Aligned to the composer edges.
-    /// Uses a folder icon for the workspace/project to match the reference UI.
-    fn status_bar(&self, workspace_label: &str) -> impl IntoElement + use<> {
+    /// left, used-context percent + ring on the right.
+    fn status_bar(&self, workspace_label: &str, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let theme = *theme::get(cx);
         let cwd = self
             .current_workspace
             .clone()
@@ -1235,13 +1474,13 @@ impl OrbitApp {
             .items_center()
             .gap_4()
             .text_size(px(11.5))
-            .text_color(rgb(TEXT_3))
+            .text_color(theme.text_3)
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    .child(icon("icons/folder.svg", 12., TEXT_3))
+                    .child(icon("icons/folder.svg", 12., theme.text_3))
                     .child(workspace_label.to_string()),
             )
             .child(
@@ -1249,7 +1488,7 @@ impl OrbitApp {
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    .child(icon("icons/monitor.svg", 12., TEXT_3))
+                    .child(icon("icons/monitor.svg", 12., theme.text_3))
                     .child("Local"),
             )
             .children(git_branch(&cwd).map(|branch| {
@@ -1257,32 +1496,56 @@ impl OrbitApp {
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    .child(icon("icons/branch.svg", 12., TEXT_3))
+                    .child(icon("icons/branch.svg", 12., theme.text_3))
                     .child(branch)
             }))
             .child(div().flex_1())
-            .child(self.run_indicator())
+            .child(self.context_button(cx))
     }
 
-    /// Run-state indicator: hollow circle while idle, orange spark while the
-    /// agent runs, red dot if the pi process is gone.
-    fn run_indicator(&self) -> impl IntoElement + use<> {
-        if !self.client.is_some() {
-            return div()
-                .size(px(9.))
-                .rounded_full()
-                .bg(rgb(STOP_RED))
-                .into_any_element();
-        }
-        if self.busy {
-            return icon("icons/spark.svg", 12., SPARK_ORANGE).into_any_element();
-        }
-        div()
-            .size(px(9.))
-            .rounded_full()
-            .border_1()
-            .border_color(rgb(TEXT_3))
-            .into_any_element()
+    fn context_button(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let entity = cx.entity();
+        let theme = *theme::get(cx);
+        context_meter::context_control(
+            self.context.as_ref(),
+            self.transcript.estimated_tokens(),
+            self.context_popup,
+            &entity,
+            theme,
+            |app, hovered, cx| {
+                if app.context_popup == ContextPopup::Details {
+                    return;
+                }
+                app.context_popup = if hovered {
+                    ContextPopup::Hover
+                } else {
+                    ContextPopup::None
+                };
+                cx.notify();
+            },
+            |app, _, cx| {
+                const GESTURE: Duration = Duration::from_millis(200);
+                if let Some(dismissed) = app.menu_dismissed_at.take() {
+                    if dismissed.elapsed() < GESTURE {
+                        return;
+                    }
+                }
+                app.context_popup = if app.context_popup == ContextPopup::Details {
+                    ContextPopup::None
+                } else {
+                    ContextPopup::Details
+                };
+                if app.context_popup == ContextPopup::Details {
+                    app.refresh_context_stats();
+                }
+                cx.notify();
+            },
+            |app, _, cx| {
+                app.menu_dismissed_at = Some(Instant::now());
+                app.context_popup = ContextPopup::None;
+                cx.notify();
+            },
+        )
     }
 
     fn nav_row(
@@ -1291,11 +1554,12 @@ impl OrbitApp {
         label: &str,
         dimmed: bool,
         on_click: Option<Box<dyn Fn(&MouseUpEvent, &mut Window, &mut App) + 'static>>,
+        theme: Theme,
     ) -> impl IntoElement + use<> {
         let (color, icon_color) = if dimmed {
-            (TEXT_3, TEXT_3)
+            (theme.text_3, theme.text_3)
         } else {
-            (TEXT, TEXT_2)
+            (theme.text, theme.text_2)
         };
         let mut row = div()
             .w_full()
@@ -1306,9 +1570,9 @@ impl OrbitApp {
             .flex()
             .items_center()
             .gap_2()
-            .hover(|s| s.bg(rgb(BG_HOVER)))
+            .hover(|s| s.bg(theme.bg_hover))
             .child(icon(icon_path, 16., icon_color))
-            .child(div().text_color(rgb(color)).child(label.to_string()));
+            .child(div().text_color(color).child(label.to_string()));
 
         if let Some(handler) = on_click {
             row = row.cursor_pointer().on_mouse_up(MouseButton::Left, handler);
@@ -1317,34 +1581,35 @@ impl OrbitApp {
     }
 
     fn send_button(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let theme = *theme::get(cx);
         if self.busy {
             div()
                 .id("stop-btn")
                 .size(px(28.))
                 .rounded_full()
-                .bg(rgb(STOP_RED))
-                .hover(|s| s.bg(rgb(0xD06060)))
+                .bg(theme.stop_red)
+                .hover(|s| s.bg(theme.stop_red_hover))
                 .cursor_pointer()
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(rgb(TEXT))
+                .text_color(theme.send_fg)
                 .on_mouse_up(MouseButton::Left, cx.listener(Self::on_abort_mouse))
-                .child(icon("icons/stop.svg", 12., TEXT))
+                .child(icon("icons/stop.svg", 12., theme.send_fg))
         } else {
             div()
                 .id("send-btn")
                 .size(px(28.))
                 .rounded_full()
-                .bg(rgb(0x2A2A2C))
-                .hover(|s| s.bg(rgb(0x343438)))
+                .bg(theme.send_bg)
+                .hover(|s| s.bg(theme.send_bg_hover))
                 .cursor_pointer()
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(rgb(TEXT_2))
+                .text_color(theme.send_fg)
                 .on_mouse_up(MouseButton::Left, cx.listener(Self::on_send_click))
-                .child(icon("icons/send.svg", 14., TEXT))
+                .child(icon("icons/send.svg", 14., theme.send_fg))
         }
     }
 }
@@ -1358,6 +1623,7 @@ impl OrbitApp {
 
     fn render_settings(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let this = cx.entity();
+        let theme = *theme::get(cx);
         let sections: [(SettingsSection, &'static str, &'static str); 4] = [
             (SettingsSection::General, "icons/settings.svg", "General"),
             (
@@ -1373,16 +1639,16 @@ impl OrbitApp {
             .flex_1()
             .min_h_0()
             .flex()
-            .bg(rgb(BG_MAIN))
+            .bg(theme.bg_main)
             // ── nav column ──
             .child(
                 div()
                     .w(px(240.))
                     .h_full()
                     .flex_shrink_0()
-                    .bg(rgb(BG_SIDEBAR))
+                    .bg(theme.bg_sidebar)
                     .border_r_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(theme.border)
                     .flex()
                     .flex_col()
                     // traffic-light strip (drag region)
@@ -1404,13 +1670,13 @@ impl OrbitApp {
                                 .items_center()
                                 .gap_1p5()
                                 .cursor_pointer()
-                                .hover(|s| s.bg(rgb(BG_HOVER)))
+                                .hover(|s| s.bg(theme.bg_hover))
                                 .on_mouse_up(MouseButton::Left, cx.listener(Self::on_settings_back))
-                                .child(icon("icons/arrow-left.svg", 14., TEXT_2))
+                                .child(icon("icons/arrow-left.svg", 14., theme.text_2))
                                 .child(
                                     div()
                                         .text_size(px(13.))
-                                        .text_color(rgb(TEXT_2))
+                                        .text_color(theme.text_2)
                                         .child("Back"),
                                 ),
                         ),
@@ -1436,8 +1702,8 @@ impl OrbitApp {
                                     .items_center()
                                     .gap_2()
                                     .cursor_pointer()
-                                    .when(selected, |row| row.bg(rgb(BG_RAISED)))
-                                    .when(!selected, |row| row.hover(|s| s.bg(rgb(BG_HOVER))))
+                                    .when(selected, |row| row.bg(theme.bg_raised))
+                                    .when(!selected, |row| row.hover(|s| s.bg(theme.bg_hover)))
                                     .on_mouse_up(MouseButton::Left, move |_, _, cx| {
                                         this.update(cx, |app, cx| {
                                             app.settings_section = section;
@@ -1447,11 +1713,15 @@ impl OrbitApp {
                                     .child(icon(
                                         section_icon,
                                         15.,
-                                        if selected { TEXT } else { TEXT_3 },
+                                        if selected { theme.text } else { theme.text_3 },
                                     ))
                                     .child(
                                         div()
-                                            .text_color(rgb(if selected { TEXT } else { TEXT_2 }))
+                                            .text_color(if selected {
+                                                theme.text
+                                            } else {
+                                                theme.text_2
+                                            })
                                             .child(label.to_string()),
                                     )
                             })),
@@ -1474,19 +1744,19 @@ impl OrbitApp {
                             .flex()
                             .flex_col()
                             .gap_3()
-                            .child(self.settings_header())
-                            .children(self.settings_rows(&this)),
+                            .child(self.settings_header(theme))
+                            .children(self.settings_rows(&this, theme)),
                     ),
             )
     }
 
-    fn settings_header(&self) -> impl IntoElement + use<> {
+    fn settings_header(&self, theme: Theme) -> impl IntoElement + use<> {
         let (title, subtitle) = match self.settings_section {
             SettingsSection::General => (
                 "General",
                 "How Orbit connects to the pi agent and stores your data.",
             ),
-            SettingsSection::Appearance => ("Appearance", "Window and layout preferences."),
+            SettingsSection::Appearance => ("Appearance", "Window, layout, and color preferences."),
             SettingsSection::Providers => (
                 "Providers",
                 "Models and providers advertised by the running pi agent.",
@@ -1498,17 +1768,20 @@ impl OrbitApp {
             .flex_col()
             .gap_1()
             .pb_1()
+            .when(self.settings_section == SettingsSection::About, |header| {
+                header.child(img(crate::app_icon::ASSET).size(px(72.)).flex_none())
+            })
             .child(
                 div()
                     .text_size(px(20.))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(TEXT))
+                    .text_color(theme.text)
                     .child(title.to_string()),
             )
             .child(
                 div()
                     .text_size(px(12.5))
-                    .text_color(rgb(TEXT_2))
+                    .text_color(theme.text_2)
                     .child(subtitle.to_string()),
             )
     }
@@ -1516,21 +1789,24 @@ impl OrbitApp {
     /// The rows for the active section, as card elements. `this` rides
     /// along for closures in interactive controls (rows themselves are
     /// built read-only from app state).
-    fn settings_rows(&self, this: &Entity<OrbitApp>) -> Vec<AnyElement> {
+    fn settings_rows(&self, this: &Entity<OrbitApp>, theme: Theme) -> Vec<AnyElement> {
         match self.settings_section {
             SettingsSection::General => vec![
                 self.card(
+                    theme,
                     "pi agent",
                     "Spawned as a child process — newline-delimited JSON over stdio.",
-                    Some(self.connection_status()),
+                    Some(self.connection_status(theme)),
                 ),
                 self.card_with_path(
+                    theme,
                     "Local by default",
                     "Sessions live in pi's own store on this computer — no daemon, no cloud.",
                     Some(&sessions::sessions_dir().to_string_lossy()),
                     None,
                 ),
                 self.card_with_path(
+                    theme,
                     "Workspace",
                     "New tasks start in this directory.",
                     Some(
@@ -1546,53 +1822,65 @@ impl OrbitApp {
             ],
             SettingsSection::Appearance => vec![
                 self.card(
-                    "Show sidebar",
-                    "Show the sessions sidebar. Also toggleable from the top bar.",
-                    Some(self.sidebar_toggle(this.clone())),
+                    theme,
+                    "Theme",
+                    "Dark or light appearance for the workbench.",
+                    Some(self.theme_toggle(theme, this.clone())),
                 ),
                 self.card(
+                    theme,
+                    "Show sidebar",
+                    "Show the sessions sidebar. Also toggleable from the top bar.",
+                    Some(self.sidebar_toggle(theme, this.clone())),
+                ),
+                self.card(
+                    theme,
                     "GPU-rendered streaming",
                     "Stream commits are coalesced (~8 Hz) and highlighting is paint-only, so long tasks never reflow the transcript.",
                     None,
                 ),
             ],
-            SettingsSection::Providers => self.provider_rows(),
+            SettingsSection::Providers => self.provider_rows(theme),
             SettingsSection::About => vec![
                 self.card(
+                    theme,
                     "Orbit Pi",
                     "Native workbench for the pi coding agent.",
                     Some(
                         div()
                             .text_size(px(12.))
-                            .text_color(rgb(TEXT_2))
+                            .text_color(theme.text_2)
                             .child(format!("v{}", env!("CARGO_PKG_VERSION")))
                             .into_any_element(),
                     ),
                 ),
                 self.card(
+                    theme,
                     "GPUI",
                     "GPU-accelerated UI framework (pinned; runtime shaders).",
                     Some(
                         div()
                             .text_size(px(12.))
-                            .text_color(rgb(TEXT_2))
+                            .text_color(theme.text_2)
                             .child("0.2.2")
                             .into_any_element(),
                     ),
                 ),
                 self.card(
+                    theme,
                     "pi CLI",
                     "The only agent runtime — pi speaks its own RPC protocol over stdio.",
-                    Some(self.connection_status()),
+                    Some(self.connection_status(theme)),
                 ),
             ],
         }
     }
 
     /// Providers from the live pi catalog, deduplicated in catalog order.
-    fn provider_rows(&self) -> Vec<AnyElement> {
+    fn provider_rows(&self, theme: Theme) -> Vec<AnyElement> {
         if self.available_models.is_empty() {
             return vec![self.card(
+                theme,
                 "No models in the catalog",
                 if self.client.is_some() {
                     "The running pi agent hasn't advertised any models yet."
@@ -1614,27 +1902,27 @@ impl OrbitApp {
             .map(|(provider, count)| {
                 div()
                     .w_full()
-                    .bg(rgb(BG_COMPOSER))
+                    .bg(theme.bg_composer)
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(theme.border)
                     .rounded_lg()
                     .px(px(14.))
                     .py(px(10.))
                     .flex()
                     .items_center()
                     .gap_2p5()
-                    .child(icon_dyn(provider_icon(&provider), 14., TEXT_2))
+                    .child(icon_dyn(provider_icon(&provider), 14., theme.text_2))
                     .child(
                         div()
                             .text_size(px(13.))
-                            .text_color(rgb(TEXT))
+                            .text_color(theme.text)
                             .child(provider.clone()),
                     )
                     .child(div().flex_1())
                     .child(
                         div()
                             .text_size(px(12.))
-                            .text_color(rgb(TEXT_2))
+                            .text_color(theme.text_2)
                             .child(format!(
                                 "{} model{}",
                                 count,
@@ -1648,13 +1936,20 @@ impl OrbitApp {
 
     /// A setting card: title + description on the left, optional control on
     /// the right.
-    fn card(&self, title: &str, desc: &str, control: Option<AnyElement>) -> AnyElement {
-        self.card_with_path(title, desc, None, control)
+    fn card(
+        &self,
+        theme: Theme,
+        title: &str,
+        desc: &str,
+        control: Option<AnyElement>,
+    ) -> AnyElement {
+        self.card_with_path(theme, title, desc, None, control)
     }
 
     /// Same as [`card`] with an optional dimmed third line (paths).
     fn card_with_path(
         &self,
+        theme: Theme,
         title: &str,
         desc: &str,
         path: Option<&str>,
@@ -1662,9 +1957,9 @@ impl OrbitApp {
     ) -> AnyElement {
         div()
             .w_full()
-            .bg(rgb(BG_COMPOSER))
+            .bg(theme.bg_composer)
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(theme.border)
             .rounded_lg()
             .px(px(14.))
             .py(px(12.))
@@ -1682,19 +1977,19 @@ impl OrbitApp {
                         div()
                             .text_size(px(13.))
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(TEXT))
+                            .text_color(theme.text)
                             .child(title.to_string()),
                     )
                     .child(
                         div()
                             .text_size(px(12.))
-                            .text_color(rgb(TEXT_2))
+                            .text_color(theme.text_2)
                             .child(desc.to_string()),
                     )
                     .children(path.map(|p| {
                         div()
                             .text_size(px(11.5))
-                            .text_color(rgb(TEXT_3))
+                            .text_color(theme.text_3)
                             .truncate()
                             .child(p.to_string())
                     })),
@@ -1704,7 +1999,7 @@ impl OrbitApp {
     }
 
     /// Connection state: green dot + "Connected" / red dot + "Not running".
-    fn connection_status(&self) -> AnyElement {
+    fn connection_status(&self, theme: Theme) -> AnyElement {
         div()
             .flex()
             .items_center()
@@ -1713,13 +2008,13 @@ impl OrbitApp {
                 div()
                     .size(px(7.))
                     .rounded_full()
-                    .bg(rgb(if self.client.is_some() {
-                        OK_GREEN
+                    .bg(if self.client.is_some() {
+                        theme.ok_green
                     } else {
-                        STOP_RED
-                    })),
+                        theme.stop_red
+                    }),
             )
-            .child(div().text_size(px(12.)).text_color(rgb(TEXT_2)).child(
+            .child(div().text_size(px(12.)).text_color(theme.text_2).child(
                 if self.client.is_some() {
                     "Connected"
                 } else {
@@ -1730,7 +2025,7 @@ impl OrbitApp {
     }
 
     /// The real sidebar toggle, wired to the same state as the top bar.
-    fn sidebar_toggle(&self, this: Entity<OrbitApp>) -> AnyElement {
+    fn sidebar_toggle(&self, theme: Theme, this: Entity<OrbitApp>) -> AnyElement {
         let on = self.sidebar_visible;
         div()
             .id("settings-sidebar-toggle")
@@ -1739,35 +2034,81 @@ impl OrbitApp {
             .rounded_full()
             .p(px(2.))
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(theme.border)
             .flex()
             .items_center()
             .cursor_pointer()
-            .when(on, |t| t.bg(rgb(SPARK_ORANGE)).justify_end())
-            .when(!on, |t| t.bg(rgb(BG_RAISED)).justify_start())
+            .when(on, |t| t.bg(theme.spark_orange).justify_end())
+            .when(!on, |t| t.bg(theme.bg_raised).justify_start())
             .on_mouse_up(MouseButton::Left, move |_, _, cx| {
                 this.update(cx, |app, cx| {
                     app.sidebar_visible = !app.sidebar_visible;
                     cx.notify();
                 });
             })
-            .child(div().size(px(14.)).rounded_full().bg(rgb(TEXT)))
+            .child(div().size(px(14.)).rounded_full().bg(theme.text))
+            .into_any_element()
+    }
+
+    /// Dark / Light segmented control on Appearance.
+    fn theme_toggle(&self, theme: Theme, this: Entity<OrbitApp>) -> AnyElement {
+        div()
+            .flex()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .p(px(2.))
+            .gap_0p5()
+            .child(theme_choice("Dark", ThemeMode::Dark, theme, &this))
+            .child(theme_choice("Light", ThemeMode::Light, theme, &this))
             .into_any_element()
     }
 }
 
+fn theme_choice(
+    label: &'static str,
+    mode: ThemeMode,
+    theme: Theme,
+    this: &Entity<OrbitApp>,
+) -> impl IntoElement {
+    let selected = theme.mode == mode;
+    let this = this.clone();
+    div()
+        .id(if mode == ThemeMode::Dark {
+            "theme-dark"
+        } else {
+            "theme-light"
+        })
+        .px(px(10.))
+        .py(px(4.))
+        .rounded_sm()
+        .text_size(px(12.))
+        .cursor_pointer()
+        .when(selected, |s| s.bg(theme.bg_raised).text_color(theme.text))
+        .when(!selected, |s| {
+            s.text_color(theme.text_2).hover(|s| s.bg(theme.bg_hover))
+        })
+        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+            this.update(cx, |_, cx| {
+                theme::set_mode(cx, mode);
+                cx.notify();
+            });
+        })
+        .child(label)
+}
+
 /// Render an embedded HugeIcons SVG tinted with the given color.
-pub(crate) fn icon(path: &'static str, size: f32, color: u32) -> impl IntoElement + use<> {
-    gpui::svg().path(path).size(px(size)).text_color(rgb(color))
+pub(crate) fn icon(path: &'static str, size: f32, color: Hsla) -> impl IntoElement + use<> {
+    gpui::svg().path(path).size(px(size)).text_color(color)
 }
 
 /// Same as [`icon`] but for runtime-computed paths (per-provider marks).
-pub(crate) fn icon_dyn(path: SharedString, size: f32, color: u32) -> impl IntoElement + use<> {
-    gpui::svg().path(path).size(px(size)).text_color(rgb(color))
+pub(crate) fn icon_dyn(path: SharedString, size: f32, color: Hsla) -> impl IntoElement + use<> {
+    gpui::svg().path(path).size(px(size)).text_color(color)
 }
 
 /// A non-interactive pill used for static meta in the composer row.
-fn pill_static(icon_path: &'static str, label: &str) -> impl IntoElement + use<> {
+fn pill_static(icon_path: &'static str, label: &str, theme: Theme) -> impl IntoElement + use<> {
     div()
         .flex()
         .items_center()
@@ -1775,17 +2116,17 @@ fn pill_static(icon_path: &'static str, label: &str) -> impl IntoElement + use<>
         .px(px(7.))
         .py(px(3.))
         .rounded_md()
-        .bg(rgb(BG_RAISED))
+        .bg(theme.bg_raised)
         .border_1()
-        .border_color(rgb(BORDER))
+        .border_color(theme.border)
         .text_size(px(12.))
-        .text_color(rgb(TEXT_2))
-        .child(icon(icon_path, 12., TEXT_2))
+        .text_color(theme.text_2)
+        .child(icon(icon_path, 12., theme.text_2))
         .child(label.to_string())
 }
 
-/// Centered empty state — spark + "What should we build in <workspace>?".
-fn empty_state(workspace_label: &str) -> impl IntoElement + use<> {
+/// Centered empty state — spark + Waku's "What should we build?" onboarding.
+fn empty_state(theme: Theme) -> impl IntoElement + use<> {
     div()
         .flex_1()
         .min_h_0()
@@ -1795,13 +2136,13 @@ fn empty_state(workspace_label: &str) -> impl IntoElement + use<> {
         .items_center()
         .justify_center()
         .gap_3()
-        .child(icon("icons/spark.svg", 26., SPARK_ORANGE))
+        .child(icon("icons/spark.svg", 20., theme.accent_bar))
         .child(
             div()
-                .text_size(px(21.))
+                .text_size(px(20.))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(TEXT))
-                .child(format!("What should we build in {workspace_label}?")),
+                .text_color(theme.text)
+                .child("What should we build?"),
         )
 }
 
@@ -1813,12 +2154,16 @@ fn git_branch(cwd: &Path) -> Option<String> {
         .or_else(|| head.get(..7).map(str::to_string))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_side_row(
     rows: &Rc<Vec<SideRow>>,
     sessions_data: &Rc<Vec<SessionInfo>>,
     active_path: Option<&Path>,
     ix: usize,
     this: &Entity<OrbitApp>,
+    agent_running: bool,
+    running_paths: &Rc<HashSet<PathBuf>>,
+    theme: Theme,
 ) -> impl IntoElement {
     match &rows[ix] {
         SideRow::Workspace {
@@ -1839,7 +2184,7 @@ fn render_side_row(
                 .gap_1p5()
                 .rounded_md()
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(BG_HOVER)))
+                .hover(|s| s.bg(theme.bg_hover))
                 .on_mouse_up(MouseButton::Left, move |_, _, cx| {
                     let label = label_for_click.clone();
                     this.update(cx, |app, cx| {
@@ -1858,9 +2203,9 @@ fn render_side_row(
                         "icons/chevron-down.svg"
                     },
                     11.,
-                    TEXT_3,
+                    theme.text_3,
                 ))
-                .child(icon("icons/folder.svg", 13., TEXT_2))
+                .child(icon("icons/folder.svg", 13., theme.text_2))
                 .child(
                     div()
                         .flex_1()
@@ -1868,13 +2213,13 @@ fn render_side_row(
                         .truncate()
                         .text_size(px(12.5))
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgb(TEXT))
+                        .text_color(theme.text)
                         .child(label.clone()),
                 )
                 .child(
                     div()
                         .text_size(px(11.))
-                        .text_color(rgb(TEXT_3))
+                        .text_color(theme.text_3)
                         .child(format!("{}", count)),
                 )
                 .into_any_element()
@@ -1883,40 +2228,92 @@ fn render_side_row(
             let session = sessions_data[*ix].clone();
             let session_for_click = session.clone();
             let active = active_path == Some(session.path.as_path());
+            // The open session runs live; parked (background) sessions run
+            // in their own pi processes — both get the loader (Waku).
+            let running = (active && agent_running)
+                || running_paths.contains(&session.path);
             let this = this.clone();
+            // Indented under the workspace group so the list reads as a tree.
             div()
                 .w_full()
-                .px_2()
-                .py(px(5.))
+                .pl(px(30.))
+                .pr(px(8.))
+                .py(px(6.))
                 .rounded_md()
                 .cursor_pointer()
                 .flex()
-                .items_center()
-                .gap_2()
-                .when(active, |row| row.bg(rgb(BG_RAISED)))
-                .when(!active, |row| row.hover(|s| s.bg(rgb(BG_HOVER))))
+                .flex_col()
+                .gap(px(3.))
+                .when(active, |row| row.bg(theme.bg_raised))
+                .when(!active, |row| row.hover(|s| s.bg(theme.bg_hover)))
                 .on_mouse_up(MouseButton::Left, move |_, _, cx| {
                     let session = session_for_click.clone();
                     this.update(cx, |app, cx| {
                         app.on_open_session(session, cx);
                     });
                 })
+                // Line 1 — title + running loader.
                 .child(
                     div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(12.5))
-                        .text_color(rgb(if active { TEXT } else { TEXT_2 }))
-                        .child(session.title.clone()),
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(12.5))
+                                .line_height(px(16.))
+                                .text_color(if active { theme.text } else { theme.text_2 })
+                                .child(session.title.clone()),
+                        )
+                        .when(running, |row| row.child(running_loader(theme, *ix))),
                 )
+                // Line 2 — first message preview + age.
                 .child(
                     div()
-                        .text_size(px(11.))
-                        .text_color(rgb(TEXT_3))
-                        .child(sessions::relative_time(session.modified)),
+                        .flex()
+                        .items_center()
+                        .gap_1p5()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(11.))
+                                .line_height(px(14.))
+                                .text_color(theme.text_3)
+                                .child(session.first_message.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(10.5))
+                                .text_color(theme.text_3)
+                                .child(sessions::relative_time(session.modified)),
+                        ),
                 )
                 .into_any_element()
         }
     }
+}
+
+/// Waku's sidebar working spinner: a rotating loader arc on the running
+/// session's row. GPUI's `with_animation` drives the rotation itself
+/// (self-repainting — no help needed from the app tick).
+fn running_loader(theme: Theme, id: usize) -> impl IntoElement + use<> {
+    gpui::svg()
+        .path("icons/loader.svg")
+        .size(px(12.))
+        .text_color(theme.ok_green)
+        .with_animation(
+            id,
+            Animation::new(Duration::from_millis(900)).repeat(),
+            |svg, delta| {
+                svg.with_transformation(Transformation::rotate(radians(
+                    delta * std::f32::consts::TAU,
+                )))
+            },
+        )
 }

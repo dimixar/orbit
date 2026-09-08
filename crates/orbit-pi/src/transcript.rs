@@ -8,40 +8,112 @@
 
 use std::{
     cell::{Cell, RefCell},
+    collections::{HashMap, HashSet},
+    path::Path,
     rc::Rc,
+    time::{Duration, Instant},
 };
 
-use gpui::{div, list, prelude::*, px, rgb, ListAlignment, ListOffset, ListScrollEvent, ListState};
+use gpui::{point, px, prelude::*, Pixels, ScrollHandle};
 
-use crate::file_icons::dev_icon;
+use crate::message_scroller::MessageScrollerState;
+use crate::transcript_view::{self, TranscriptView};
 use orbit_rpc::{AssistantMessageEvent, Event};
 use serde_json::Value;
 
+/// One streaming step of an assistant turn: the reasoning it did, the tool
+/// calls it made, and the text it produced — rendered in sequence.
+#[derive(Clone, Default)]
+pub struct Step {
+    pub thinking: String,
+    pub tools: Vec<ToolCall>,
+    pub text: String,
+}
+
 pub struct ChatMessage {
     pub user: bool,
-    pub text: String,
-    pub thinking: String,
-    /// Tool calls rendered under the assistant text.
-    pub tools: Vec<ToolCall>,
+    /// A turn's steps in sequence — thinking/tools/text per step.
+    pub steps: Vec<Step>,
+    /// Wall time of this assistant turn, recorded when the stream ends.
+    pub elapsed: Option<Duration>,
+    /// When this message was completed (epoch millis). Snapshot messages
+    /// carry pi's own `timestamp`; live ones are stamped at `message_end`.
+    pub finished_at: Option<i64>,
+}
+
+impl ChatMessage {
+    /// The concatenated answer text (steps in sequence).
+    pub fn text(&self) -> String {
+        self.steps
+            .iter()
+            .map(|step| step.text.as_str())
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    /// Concatenated reasoning across steps.
+    pub fn thinking(&self) -> String {
+        self.steps
+            .iter()
+            .map(|step| step.thinking.as_str())
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Every tool call of the turn, in order.
+    pub fn tools(&self) -> impl Iterator<Item = &ToolCall> {
+        self.steps.iter().flat_map(|step| step.tools.iter())
+    }
+
+    pub fn tool_count(&self) -> usize {
+        self.steps.iter().map(|step| step.tools.len()).sum()
+    }
+
+    pub fn has_hidden_work(&self) -> bool {
+        self.steps
+            .iter()
+            .any(|step| !step.thinking.is_empty() || !step.tools.is_empty())
+    }
 }
 
 /// One tool call row: name, args summary, and the file path it operates on
 /// (when the tool is file-oriented — drives the devicons glyph).
+#[derive(Clone)]
 pub struct ToolCall {
     pub name: String,
     pub summary: String,
     pub path: Option<String>,
+    /// Line counts from `edit` / `write` args. Zero for other tools.
+    pub added: u64,
+    pub removed: u64,
+    /// pi `toolCallId` when known — links live `tool_execution_*` events
+    /// (and their results) to this row.
+    pub id: Option<String>,
+    /// Full arguments as received; drives the expandable detail card.
+    pub args: Option<Value>,
+    /// Result payload captured from `tool_execution_end` (live runs).
+    pub output: Option<Value>,
+    /// The tool execution reported `isError`.
+    pub failed: bool,
 }
 
 impl ToolCall {
     fn from_value(name: &str, args: Option<&Value>) -> Self {
+        let empty = Value::Null;
+        let args = args.unwrap_or(&empty);
+        let (added, removed) = tool_line_stats(name, args);
         Self {
             name: name.to_string(),
-            summary: summarize_value(args.unwrap_or(&Value::Null)),
-            path: args
-                .and_then(|a| a.get("path"))
-                .and_then(Value::as_str)
-                .map(str::to_string),
+            summary: summarize_value(args),
+            path: args.get("path").and_then(Value::as_str).map(str::to_string),
+            added,
+            removed,
+            id: None,
+            args: if args.is_null() { None } else { Some(args.clone()) },
+            output: None,
+            failed: false,
         }
     }
 }
@@ -50,47 +122,66 @@ impl ChatMessage {
     fn empty_assistant() -> Self {
         Self {
             user: false,
-            text: String::new(),
-            thinking: String::new(),
-            tools: Vec::new(),
+            steps: vec![Step::default()],
+            elapsed: None,
+            finished_at: None,
         }
     }
 
-    /// Parse one `AgentMessage` JSON value from pi.
+    /// Parse one `AgentMessage` JSON value from pi. Live message events wrap
+    /// the message under `"message"`; snapshots list it flat — accept both.
+    /// Blocks become ONE step: the reasoning, the calls, and the text.
     fn from_value(value: &Value) -> Option<ChatMessage> {
+        let value = value.get("message").unwrap_or(value);
         let role = value.get("role")?.as_str()?;
         let user = role == "user";
         let mut message = ChatMessage {
             user,
-            text: String::new(),
-            thinking: String::new(),
-            tools: Vec::new(),
+            steps: vec![Step::default()],
+            elapsed: None,
+            finished_at: parse_timestamp(value.get("timestamp")),
         };
+        let step = message.steps.last_mut().expect("one step");
 
         match value.get("content") {
-            Some(Value::String(text)) => message.text = text.clone(),
+            Some(Value::String(text)) => step.text = text.clone(),
             Some(Value::Array(blocks)) => {
                 for block in blocks {
                     let kind = block.get("type").and_then(Value::as_str).unwrap_or("");
                     match kind {
                         "text" => {
                             if let Some(text) = block.get("text").and_then(Value::as_str) {
-                                if !message.text.is_empty() {
-                                    message.text.push_str("\n\n");
+                                if !step.text.is_empty() {
+                                    step.text.push_str("\n\n");
                                 }
-                                message.text.push_str(text);
+                                step.text.push_str(text);
                             }
                         }
                         "thinking" => {
                             if let Some(text) = block.get("thinking").and_then(Value::as_str) {
-                                message.thinking.push_str(text);
+                                step.thinking.push_str(text);
                             }
                         }
                         "toolCall" | "tool_call" => {
-                            let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
-                            message
-                                .tools
-                                .push(ToolCall::from_value(name, block.get("arguments")));
+                            let name =
+                                block.get("name").and_then(Value::as_str).unwrap_or("tool");
+                            let mut tool = ToolCall::from_value(name, block.get("arguments"));
+                            tool.id = block
+                                .get("id")
+                                .or_else(|| block.get("toolCallId"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string);
+                            // Some finalized entries carry the result inline.
+                            tool.output = block
+                                .get("result")
+                                .or_else(|| block.get("output"))
+                                .filter(|result| !result.is_null())
+                                .cloned();
+                            tool.failed = block
+                                .get("isError")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false);
+                            step.tools.push(tool);
                         }
                         _ => {}
                     }
@@ -100,6 +191,111 @@ impl ChatMessage {
         }
         Some(message)
     }
+}
+
+/// Extract a tool result message: `(toolCallId, output, isError)`. pi sends
+/// `role: "toolResult"` messages — not chat rows; their output belongs on
+/// the matching tool call (Waku renders it inside the activity detail).
+fn tool_result_parts(value: &Value) -> Option<(String, Option<Value>, bool)> {
+    let value = value.get("message").unwrap_or(value);
+    if value.get("role").and_then(Value::as_str) != Some("toolResult") {
+        return None;
+    }
+    let id = value.get("toolCallId").and_then(Value::as_str)?.to_string();
+    let output = tool_result_output(value);
+    let failed = value.get("isError").and_then(Value::as_bool).unwrap_or(false);
+    Some((id, output, failed))
+}
+
+/// Tool result payloads: joined text blocks; images are skipped.
+fn tool_result_output(value: &Value) -> Option<Value> {
+    let blocks = value.get("content").and_then(Value::as_array)?;
+    let mut text = String::new();
+    for block in blocks {
+        if block.get("type").and_then(Value::as_str) != Some("text") {
+            continue;
+        }
+        if let Some(part) = block.get("text").and_then(Value::as_str) {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(part);
+        }
+    }
+    if text.is_empty() {
+        None
+    } else {
+        Some(Value::String(text))
+    }
+}
+
+/// Attach a tool result to the newest tool call carrying `id` (snapshot
+/// path — the live path routes through `attach_tool_result` positions).
+fn attach_tool_output(
+    messages: &mut [ChatMessage],
+    id: &str,
+    output: Option<Value>,
+    failed: bool,
+) {
+    for message in messages.iter_mut().rev() {
+        let Some(tool) = message
+            .steps
+            .iter_mut()
+            .rev()
+            .flat_map(|step| step.tools.iter_mut())
+            .find(|t| t.id.as_deref() == Some(id))
+        else {
+            continue;
+        };
+        if tool.output.is_none() {
+            tool.output = output;
+        }
+        tool.failed = failed;
+        return;
+    }
+}
+
+/// Where the current assistant step began within its (possibly merged)
+/// message — a turn's steps stream into one row, so a step's settled
+/// content replaces only its own contribution.
+#[derive(Clone, Copy, Default, PartialEq)]
+struct StepMark {
+    step: usize,
+    text: usize,
+    thinking: usize,
+    tools: usize,
+}
+
+/// Merge one assistant step into its run's message: each step appends as
+/// its own sequence entry, so the page can interleave thought/tool groups
+/// with the texts between them.
+fn merge_step(slot: &mut ChatMessage, step: ChatMessage) {
+    let elapsed = step.elapsed;
+    let finished_at = step.finished_at;
+    slot.steps.push(step.into_step());
+    if elapsed.is_some() {
+        slot.elapsed = elapsed;
+    }
+    if finished_at.is_some() {
+        slot.finished_at = finished_at;
+    }
+}
+
+impl ChatMessage {
+    /// A parsed message carries exactly one step — take it.
+    fn into_step(mut self) -> Step {
+        self.steps.pop().expect("parsed messages carry one step")
+    }
+}
+
+/// Role of a message event payload — unwrapping the live envelope pi
+/// wraps around message start/end events (`{"type":…, "message": {…}}`).
+fn message_role(value: &Value) -> Option<&str> {
+    value
+        .get("message")
+        .unwrap_or(value)
+        .get("role")
+        .and_then(Value::as_str)
 }
 
 fn summarize_value(value: &Value) -> String {
@@ -113,33 +309,170 @@ fn summarize_value(value: &Value) -> String {
     }
 }
 
+/// Tolerant epoch-millis parser for message timestamps. pi may send an
+/// RFC 3339 string, seconds, or milliseconds.
+fn parse_timestamp(value: Option<&Value>) -> Option<i64> {
+    let value = value?;
+    if let Some(text) = value.as_str() {
+        return chrono::DateTime::parse_from_rfc3339(text)
+            .ok()
+            .map(|dt| dt.timestamp_millis());
+    }
+    let seconds = value
+        .as_u64()
+        .or_else(|| value.as_f64().filter(|f| *f >= 0.).map(|f| f as u64))?;
+    let millis = if seconds > 1_000_000_000_000 {
+        seconds
+    } else {
+        seconds * 1000
+    };
+    i64::try_from(millis).ok()
+}
+
+fn now_millis() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+/// Added/removed lines from one `edit` or `write` tool's arguments.
+fn tool_line_stats(name: &str, args: &Value) -> (u64, u64) {
+    match name {
+        "edit" => {
+            let mut added = 0u64;
+            let mut removed = 0u64;
+            if let Some(edits) = args.get("edits").and_then(Value::as_array) {
+                for edit in edits {
+                    removed += count_lines(edit.get("oldText"));
+                    added += count_lines(edit.get("newText"));
+                }
+            }
+            (added, removed)
+        }
+        "write" => (count_lines(args.get("content")), 0),
+        _ => (0, 0),
+    }
+}
+
+fn count_lines(value: Option<&Value>) -> u64 {
+    value
+        .and_then(Value::as_str)
+        .map(|text| {
+            if text.is_empty() {
+                0
+            } else {
+                text.split('\n').count() as u64
+            }
+        })
+        .unwrap_or(0)
+}
+
+/// Count added/removed lines from the `edit` / `write` tool calls inside a
+/// message value. Counts are honest — they only reflect what the agent did.
+pub(crate) fn diff_from_message(value: &Value) -> (u64, u64) {
+    let mut added = 0u64;
+    let mut removed = 0u64;
+    let Some(Value::Array(blocks)) = value
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .or_else(|| value.get("content"))
+    else {
+        return (0, 0);
+    };
+    for block in blocks {
+        let kind = block.get("type").and_then(Value::as_str).unwrap_or("");
+        if kind != "toolCall" && kind != "tool_call" {
+            continue;
+        }
+        let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+        let args = block.get("arguments").unwrap_or(&Value::Null);
+        let (a, r) = tool_line_stats(name, args);
+        added += a;
+        removed += r;
+    }
+    (added, removed)
+}
+
+/// Merge edit/write tools by path for the per-message changed-files card.
+pub(crate) fn changed_files(message: &ChatMessage) -> Vec<(String, u64, u64)> {
+    let mut files: Vec<(String, u64, u64)> = Vec::new();
+    for tool in message.tools() {
+        if tool.added == 0 && tool.removed == 0 {
+            continue;
+        }
+        let Some(path) = tool.path.as_deref() else {
+            continue;
+        };
+        if let Some(entry) = files.iter_mut().find(|(existing, _, _)| existing == path) {
+            entry.1 += tool.added;
+            entry.2 += tool.removed;
+        } else {
+            files.push((path.to_string(), tool.added, tool.removed));
+        }
+    }
+    files
+}
+
+type ExpandedActivities = Rc<RefCell<HashMap<(usize, usize), bool>>>;
+type ExpandedTools = Rc<RefCell<HashSet<(usize, usize)>>>;
+type CopiedSections = Rc<RefCell<HashMap<(usize, usize, u8), Instant>>>;
+
 /// Transcript state shared between the view and the RPC event pump.
 pub struct Transcript {
     messages: Rc<RefCell<Vec<ChatMessage>>>,
-    list: ListState,
-    pinned: Rc<Cell<bool>>,
+    scroller: MessageScrollerState,
     /// Index of the assistant message currently being streamed, if any.
     streaming: Rc<Cell<Option<usize>>>,
+    /// When the current assistant turn started (for the live Working clock).
+    stream_started: Rc<Cell<Option<Instant>>>,
+    /// Settled turns whose thinking/tools are disclosed (Waku turn fold).
+    expanded_turns: Rc<RefCell<HashSet<usize>>>,
+    /// Messages whose changed-files list is fully expanded.
+    expanded_files: Rc<RefCell<HashSet<usize>>>,
+    /// Per-message activity cluster open state. Missing means "expanded iff live".
+    expanded_activities: ExpandedActivities,
+    /// When each assistant reply was last copied (Copy → Copied feedback).
+    copied: Rc<RefCell<HashMap<usize, Instant>>>,
+    /// Per-tool detail-card open state, keyed `(message_ix, tool_ix)`.
+    expanded_tools: ExpandedTools,
+    /// Per detail-section copy feedback, keyed `(message_ix, tool_ix, section)`.
+    copied_sections: CopiedSections,
+    /// `toolCallId` -> `(message_ix, tool_ix)` so `tool_execution_end` results
+    /// land on the right row.
+    tool_positions: Rc<RefCell<HashMap<String, (usize, usize, usize)>>>,
+    /// Rail tick currently hovered (drives the turn preview card).
+    hovered_turn: Rc<Cell<Option<usize>>>,
+    /// Transcript row currently hovered (reveals the ghost footer).
+    hovered_row: Rc<Cell<Option<usize>>>,
+    /// Messages whose thinking disclosure is expanded, keyed by message ix.
+    expanded_thinking: Rc<RefCell<HashSet<usize>>>,
+    /// Scroll position of the conversation-turn rail (Waku's scrollable rail).
+    rail_scroll: ScrollHandle,
+    /// Last turn the rail auto-scrolled to — re-fires only when it changes.
+    rail_autoscroll: Rc<Cell<Option<usize>>>,
+    /// Where the streaming step began in its (merged) message.
+    step_mark: Rc<Cell<Option<StepMark>>>,
 }
 
 impl Transcript {
     pub fn new() -> Self {
         let messages = Rc::new(RefCell::new(Vec::new()));
-        let list = ListState::new(0, ListAlignment::Bottom, px(120.));
-
-        let pinned = Rc::new(Cell::new(true));
-        {
-            let pinned = pinned.clone();
-            list.set_scroll_handler(move |event: &ListScrollEvent, _window, _cx| {
-                pinned.set(!event.is_scrolled);
-            });
-        }
-
         Self {
             messages,
-            list,
-            pinned,
+            scroller: MessageScrollerState::new(0),
             streaming: Rc::new(Cell::new(None)),
+            stream_started: Rc::new(Cell::new(None)),
+            expanded_turns: Rc::new(RefCell::new(HashSet::new())),
+            expanded_files: Rc::new(RefCell::new(HashSet::new())),
+            expanded_activities: Rc::new(RefCell::new(HashMap::new())),
+            expanded_tools: Rc::new(RefCell::new(HashSet::new())),
+            copied: Rc::new(RefCell::new(HashMap::new())),
+            copied_sections: Rc::new(RefCell::new(HashMap::new())),
+            tool_positions: Rc::new(RefCell::new(HashMap::new())),
+            hovered_turn: Rc::new(Cell::new(None)),
+            hovered_row: Rc::new(Cell::new(None)),
+            expanded_thinking: Rc::new(RefCell::new(HashSet::new())),
+            rail_scroll: ScrollHandle::new(),
+            rail_autoscroll: Rc::new(Cell::new(None)),
+            step_mark: Rc::new(Cell::new(None)),
         }
     }
 
@@ -148,23 +481,67 @@ impl Transcript {
         let mut parsed = Vec::new();
         if let Some(messages) = data.get("messages").and_then(Value::as_array) {
             for message in messages {
+                // Tool results are not chat rows — attach the output to the
+                // matching tool call (by id) and keep the transcript clean.
+                if let Some((id, output, failed)) = tool_result_parts(message) {
+                    attach_tool_output(&mut parsed, &id, output, failed);
+                    continue;
+                }
                 if let Some(parsed_message) = ChatMessage::from_value(message) {
-                    parsed.push(parsed_message);
+                    // Consecutive assistant messages are one logical turn
+                    // (Waku): one row, one fold, one footer — not a stack of
+                    // "Worked" dividers per streaming step.
+                    let continues_run = parsed
+                        .last()
+                        .map(|last| !last.user)
+                        .unwrap_or(false);
+                    if continues_run {
+                        merge_step(parsed.last_mut().expect("checked"), parsed_message);
+                    } else {
+                        parsed.push(parsed_message);
+                    }
                 }
             }
         }
         let count = parsed.len();
         *self.messages.borrow_mut() = parsed;
-        self.list.reset(count);
-        self.scroll_to_end();
+        self.scroller.reset(count);
         self.streaming.set(None);
+        self.stream_started.set(None);
+        self.expanded_turns.borrow_mut().clear();
+        self.expanded_files.borrow_mut().clear();
+        self.expanded_activities.borrow_mut().clear();
+        self.expanded_tools.borrow_mut().clear();
+        self.copied.borrow_mut().clear();
+        self.copied_sections.borrow_mut().clear();
+        self.tool_positions.borrow_mut().clear();
+        self.hovered_turn.set(None);
+        self.hovered_row.set(None);
+        self.expanded_thinking.borrow_mut().clear();
+        self.rail_scroll.set_offset(point(px(0.), px(0.)));
+        self.rail_autoscroll.set(None);
+        self.step_mark.set(None);
     }
 
     /// Clear for a fresh session.
     pub fn clear(&mut self) {
         *self.messages.borrow_mut() = Vec::new();
-        self.list.reset(0);
+        self.scroller.reset(0);
         self.streaming.set(None);
+        self.stream_started.set(None);
+        self.expanded_turns.borrow_mut().clear();
+        self.expanded_files.borrow_mut().clear();
+        self.expanded_activities.borrow_mut().clear();
+        self.expanded_tools.borrow_mut().clear();
+        self.copied.borrow_mut().clear();
+        self.copied_sections.borrow_mut().clear();
+        self.tool_positions.borrow_mut().clear();
+        self.hovered_turn.set(None);
+        self.hovered_row.set(None);
+        self.expanded_thinking.borrow_mut().clear();
+        self.rail_scroll.set_offset(point(px(0.), px(0.)));
+        self.rail_autoscroll.set(None);
+        self.step_mark.set(None);
     }
 
     /// Apply one protocol event; returns `true` if the transcript changed.
@@ -173,30 +550,80 @@ impl Transcript {
             Event::MessageStart { value } => self.on_message_boundary(value),
             Event::MessageUpdate { assistant, .. } => self.on_message_update(assistant),
             Event::MessageEnd { value } => self.on_message_end(value),
+            Event::ToolExecutionStart { value } => self.on_tool_execution(value, false),
+            Event::ToolExecutionEnd { value } => self.on_tool_execution(value, true),
+            // A settled run closes its working clock; the next run re-arms it.
+            Event::AgentSettled => {
+                self.end_live_run();
+                false
+            }
+            Event::AgentEnd { will_retry } => {
+                if !*will_retry {
+                    self.end_live_run();
+                }
+                false
+            }
+            Event::ProcessExited => {
+                self.end_live_run();
+                false
+            }
             _ => false,
         }
     }
 
     fn on_message_boundary(&mut self, value: &Value) -> bool {
+        // `toolResult` messages carry the output for an existing tool call —
+        // never a chat row (a row here would also corrupt the stream target).
+        if message_role(value) == Some("toolResult") {
+            return self.attach_tool_result(value);
+        }
         let Some(message) = ChatMessage::from_value(value) else {
             return false;
         };
         let mut messages = self.messages.borrow_mut();
         if message.user {
             // pi echoes the user's own message; show it (dedupe if identical).
-            if messages.last().map(|m| m.user && m.text == message.text) != Some(true) {
+            if messages
+                .last()
+                .map(|m| m.user && m.text() == message.text())
+                != Some(true)
+            {
                 messages.push(message);
                 self.streaming.set(None);
-                self.on_appended(&messages);
+                self.stream_started.set(None);
+                drop(messages);
+                self.insert_row();
                 return true;
             }
             return false;
         }
-        // Assistant message starts (possibly empty) — becomes the stream target.
+        // Assistant message starts. A turn's steps stream into ONE row
+        // (Waku): when the previous row is an assistant message, this step
+        // continues it instead of stacking another "Worked" fold.
+        let continues_run = messages.last().map(|m| !m.user).unwrap_or(false);
+        if continues_run {
+            let ix = messages.len() - 1;
+            let slot = &mut messages[ix];
+            self.step_mark.set(Some(StepMark {
+                step: slot.steps.len(),
+                text: 0,
+                thinking: 0,
+                tools: 0,
+            }));
+            merge_step(slot, message);
+            self.streaming.set(Some(ix));
+            self.mark_stream_start();
+            drop(messages);
+            self.remeasure_row(ix);
+            return true;
+        }
         messages.push(message);
         let ix = messages.len() - 1;
         self.streaming.set(Some(ix));
-        self.on_appended(&messages);
+        self.step_mark.set(Some(StepMark::default()));
+        self.mark_stream_start();
+        drop(messages);
+        self.insert_row();
         true
     }
 
@@ -205,103 +632,477 @@ impl Transcript {
         let Some(assistant) = assistant else {
             return false;
         };
-        let changed = match assistant {
-            Am::TextDelta { delta } => self.with_streaming(|m| m.text.push_str(delta)),
-            Am::ThinkingDelta { delta } => self.with_streaming(|m| m.thinking.push_str(delta)),
+        let (changed, created) = match assistant {
+            Am::TextDelta { delta } => {
+                self.with_streaming(|m| m.steps.last_mut().expect("step").text.push_str(delta))
+            }
+            Am::ThinkingDelta { delta } => {
+                self.with_streaming(|m| {
+                    m.steps
+                        .last_mut()
+                        .expect("step")
+                        .thinking
+                        .push_str(delta)
+                })
+            }
             Am::ToolcallStart { value } => {
                 let name = value
                     .get("toolName")
                     .and_then(Value::as_str)
                     .unwrap_or("tool");
-                self.with_streaming(|m| {
-                    m.tools
-                        .push(ToolCall::from_value(name, value.get("arguments")))
-                })
+                let id = value
+                    .get("toolCallId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let (changed, created) = self.with_streaming(|m| {
+                    let mut tool = ToolCall::from_value(name, value.get("arguments"));
+                    tool.id = id.clone();
+                    m.steps
+                        .last_mut()
+                        .expect("step")
+                        .tools
+                        .push(tool);
+                });
+                if changed {
+                    let id = id.as_deref().map(str::to_string);
+                    if let (Some(mix), Some(id)) = (self.streaming.get(), id) {
+                        let messages = self.messages.borrow();
+                        let step_ix = messages[mix].steps.len().saturating_sub(1);
+                        let tool_ix = messages[mix].steps[step_ix]
+                            .tools
+                            .len()
+                            .saturating_sub(1);
+                        self.tool_positions
+                            .borrow_mut()
+                            .insert(id, (mix, step_ix, tool_ix));
+                    }
+                }
+                (changed, created)
             }
             Am::ToolcallEnd { value } => {
                 let name = value
                     .get("toolName")
                     .and_then(Value::as_str)
                     .unwrap_or("tool");
-                let tool = ToolCall::from_value(name, value.get("arguments"));
+                let id = value
+                    .get("toolCallId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
                 self.with_streaming(|m| {
-                    if let Some(last) = m.tools.last_mut() {
-                        *last = tool;
-                    } else {
-                        m.tools.push(tool);
+                    let mut tool = ToolCall::from_value(name, value.get("arguments"));
+                    tool.id = id.clone();
+                    // Replace the matching call (or the newest one, which is
+                    // what pi streams) but keep any result already captured.
+                    let step = m.steps.last_mut().expect("step");
+                    let position = id
+                        .as_deref()
+                        .and_then(|id| step.tools.iter().position(|t| t.id.as_deref() == Some(id)));
+                    match position {
+                        Some(ix) => {
+                            tool.output = step.tools[ix].output.take();
+                            tool.failed = step.tools[ix].failed;
+                            step.tools[ix] = tool;
+                        }
+                        None => {
+                            if let Some(last) = step.tools.last_mut() {
+                                tool.output = last.output.take();
+                                tool.failed = last.failed;
+                                *last = tool;
+                            } else {
+                                step.tools.push(tool);
+                            }
+                        }
                     }
                 })
             }
-            _ => false,
+            Am::Other { kind, value } => match kind.as_str() {
+                // Providers without streaming deliver whole blocks at once —
+                // land the content even though no delta ever arrived.
+                "text_end" | "thinking_end" => {
+                    let content = value
+                        .get("content")
+                        .or_else(|| value.get("thinking"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    match content {
+                        Some(content) => {
+                            let is_text = kind == "text_end";
+                            let mark = self
+                                .step_mark
+                                .get()
+                                .map(|m| if is_text { m.text } else { m.thinking })
+                                .unwrap_or(0);
+                            self.with_streaming(move |m| {
+                                let step = m.steps.last_mut().expect("step");
+                                let target = if is_text {
+                                    &mut step.text
+                                } else {
+                                    &mut step.thinking
+                                };
+                                // Deltas may already have streamed this block.
+                                if target.ends_with(&content) {
+                                    return;
+                                }
+                                let streamed = target.get(mark..).unwrap_or("");
+                                if content.starts_with(streamed) {
+                                    target.truncate(mark);
+                                } else if !target.is_empty() {
+                                    target.push_str("\n\n");
+                                }
+                                target.push_str(&content);
+                            })
+                        }
+                        None => (false, false),
+                    }
+                }
+                _ => (false, false),
+            },
+            _ => (false, false),
         };
         if changed {
-            let messages = self.messages.borrow();
-            self.on_appended(&messages);
+            if created {
+                self.insert_row();
+            } else if let Some(ix) = self.streaming.get() {
+                self.remeasure_row(ix);
+            }
         }
         changed
     }
 
     fn on_message_end(&mut self, value: &Value) -> bool {
-        let Some(final_message) = ChatMessage::from_value(value) else {
+        // A settled tool result lands on its call — not a chat row (and not
+        // a replacement for the streaming assistant message).
+        if message_role(value) == Some("toolResult") {
+            return self.attach_tool_result(value);
+        }
+        let Some(mut final_message) = ChatMessage::from_value(value) else {
             return false;
         };
+        if !final_message.user {
+            // The step's wall clock runs from the start of its turn; the
+            // settled step replaces only its own slice of the merged row.
+            final_message.elapsed = self.stream_started.get().map(|started| started.elapsed());
+        }
         let mut messages = self.messages.borrow_mut();
         if final_message.user {
             // A finalized user message replaces any optimistic copy.
             if let Some(last) = messages.last_mut() {
-                if last.user && last.text == final_message.text {
+                if last.user && last.text() == final_message.text() {
                     return false;
                 }
             }
             messages.push(final_message);
-        } else if let Some(ix) = self.streaming.get() {
+            drop(messages);
+            self.insert_row();
+            return true;
+        }
+        if let Some(ix) = self.streaming.get() {
             if let Some(slot) = messages.get_mut(ix) {
-                *slot = final_message;
+                // The settled step replaces only its own slice of the merged
+                // row; results captured live by `tool_execution_end` survive
+                // the replacement (pi's final toolCall blocks omit them).
+                let mark = self.step_mark.get().unwrap_or(StepMark {
+                    step: slot.steps.len().saturating_sub(1),
+                    text: 0,
+                    thinking: 0,
+                    tools: 0,
+                });
+                let live_results: Vec<(Option<String>, Option<Value>, bool)> = slot
+                    .steps
+                    .get(mark.step)
+                    .map(|step| {
+                        step.tools
+                            .iter()
+                            .skip(mark.tools)
+                            .map(|t| (t.id.clone(), t.output.clone(), t.failed))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut settled_step = final_message.into_step();
+                // Re-attach results pi captured live (its settled blocks omit
+                // them).
+                for tool in &mut settled_step.tools {
+                    if tool.output.is_some() {
+                        continue;
+                    }
+                    let Some(id) = &tool.id else { continue };
+                    if let Some((_, output, failed)) = live_results
+                        .iter()
+                        .rev()
+                        .find(|(live_id, _, _)| live_id.as_deref() == Some(id))
+                    {
+                        tool.output = output.clone();
+                        tool.failed = *failed;
+                    }
+                }
+                match slot.steps.get_mut(mark.step) {
+                    Some(step) => *step = settled_step,
+                    None => slot.steps.push(settled_step),
+                }
+                if slot.finished_at.is_none() {
+                    slot.finished_at = Some(now_millis());
+                }
             }
             self.streaming.set(None);
-        } else {
-            messages.push(final_message);
+            self.step_mark.set(None);
+            drop(messages);
+            self.remeasure_row(ix);
+            return true;
         }
-        self.on_appended(&messages);
+        // Settled without a stream target — continue the run's last row.
+        let continues_run = messages.last().map(|m| !m.user).unwrap_or(false);
+        if continues_run {
+            let ix = messages.len() - 1;
+            merge_step(&mut messages[ix], final_message);
+            drop(messages);
+            self.remeasure_row(ix);
+            return true;
+        }
+        if final_message.finished_at.is_none() {
+            final_message.finished_at = Some(now_millis());
+        }
+        messages.push(final_message);
+        drop(messages);
+        self.insert_row();
         true
     }
 
-    /// Mutate the assistant message currently being streamed (creating it if
-    /// a delta arrives before its `message_start`).
-    fn with_streaming(&mut self, mutate: impl FnOnce(&mut ChatMessage)) -> bool {
+    /// Attach a `toolResult` message's output to the tool call it answers
+    /// (by `toolCallId`). The live path knows positions from
+    /// `tool_execution_start`; otherwise scan backwards through the loaded
+    /// messages.
+    fn attach_tool_result(&mut self, value: &Value) -> bool {
+        let Some((id, output, failed)) = tool_result_parts(value) else {
+            return false;
+        };
+        let position = self.tool_positions.borrow().get(&id).copied();
+        if let Some((mix, step_ix, tool_ix)) = position {
+            let changed = {
+                let mut messages = self.messages.borrow_mut();
+                match messages
+                    .get_mut(mix)
+                    .and_then(|m| m.steps.get_mut(step_ix))
+                    .and_then(|step| step.tools.get_mut(tool_ix))
+                {
+                    Some(tool) => {
+                        let before = (tool.output.clone(), tool.failed);
+                        if tool.output.is_none() {
+                            tool.output = output;
+                        }
+                        tool.failed = failed;
+                        before != (tool.output.clone(), tool.failed)
+                    }
+                    None => false,
+                }
+            };
+            if changed {
+                self.remeasure_row(mix);
+            }
+            return changed;
+        }
         let mut messages = self.messages.borrow_mut();
-        let ix = match self.streaming.get() {
-            Some(ix) => ix,
+        for message in messages.iter_mut().rev() {
+            let Some(tool) = message
+                .steps
+                .iter_mut()
+                .rev()
+                .flat_map(|step| step.tools.iter_mut())
+                .find(|t| t.id.as_deref() == Some(id.as_str()))
+            else {
+                continue;
+            };
+            let before = (tool.output.clone(), tool.failed);
+            if tool.output.is_none() {
+                tool.output = output;
+            }
+            tool.failed = failed;
+            return before != (tool.output.clone(), tool.failed);
+        }
+        false
+    }
+
+    /// `tool_execution_start` upserts the call on the streaming message and
+    /// records where its result should land; `tool_execution_end` attaches it.
+    fn on_tool_execution(&mut self, value: &Value, end: bool) -> bool {
+        let id = value
+            .get("toolCallId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if end {
+            let Some(id) = id.as_deref() else {
+                return false;
+            };
+            let Some(&(mix, step_ix, tool_ix)) = self.tool_positions.borrow().get(id) else {
+                return false;
+            };
+            let changed = {
+                let mut messages = self.messages.borrow_mut();
+                let Some(tool) = messages
+                    .get_mut(mix)
+                    .and_then(|m| m.steps.get_mut(step_ix))
+                    .and_then(|step| step.tools.get_mut(tool_ix))
+                else {
+                    return false;
+                };
+                let before = (tool.output.clone(), tool.failed);
+                tool.output = value
+                    .get("result")
+                    .cloned()
+                    .or_else(|| value.get("partialResult").cloned());
+                tool.failed = value
+                    .get("isError")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                before != (tool.output.clone(), tool.failed)
+            };
+            if changed {
+                self.remeasure_row(mix);
+            }
+            return changed;
+        }
+        // Start: upsert on the streaming message (creating it if a tool
+        // execution begins before any `message_start`).
+        let name = value
+            .get("toolName")
+            .and_then(Value::as_str)
+            .unwrap_or("tool")
+            .to_string();
+        let mut created = false;
+        let mut messages = self.messages.borrow_mut();
+        let mix = match self.streaming.get() {
+            Some(mix) => mix,
             None => {
-                messages.push(ChatMessage::empty_assistant());
-                let ix = messages.len() - 1;
-                self.streaming.set(Some(ix));
-                ix
+                // Execution starts after the assistant step settled — adopt
+                // the run's merged row instead of stacking a new one.
+                if messages.last().is_some_and(|m| !m.user) {
+                    let ix = messages.len() - 1;
+                    self.step_mark.set(Some(StepMark {
+                        step: messages[ix].steps.len().saturating_sub(1),
+                        text: 0,
+                        thinking: 0,
+                        tools: 0,
+                    }));
+                    self.streaming.set(Some(ix));
+                    self.mark_stream_start();
+                    ix
+                } else {
+                    messages.push(ChatMessage::empty_assistant());
+                    let mix = messages.len() - 1;
+                    self.streaming.set(Some(mix));
+                    self.mark_stream_start();
+                    created = true;
+                    mix
+                }
             }
         };
-        if let Some(message) = messages.get_mut(ix) {
-            mutate(message);
-            true
+        let Some(message) = messages.get_mut(mix) else {
+            return false;
+        };
+        let step_ix = message.steps.len().saturating_sub(1);
+        let Some(step) = message.steps.get_mut(step_ix) else {
+            return false;
+        };
+        let position = id
+            .as_deref()
+            .and_then(|id| step.tools.iter().position(|t| t.id.as_deref() == Some(id)))
+            .or_else(|| {
+                // Adopt an id-less row created by `toolcall_start` for the
+                // same call instead of duplicating it.
+                let last = step.tools.last_mut()?;
+                if last.id.is_none() && last.name == name {
+                    if let Some(id) = &id {
+                        last.id = Some(id.clone());
+                    }
+                    Some(step.tools.len() - 1)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                let mut tool = ToolCall::from_value(&name, value.get("args"));
+                tool.id = id.clone();
+                step.tools.push(tool);
+                step.tools.len() - 1
+            });
+        if let Some(id) = &id {
+            self.tool_positions
+                .borrow_mut()
+                .insert(id.clone(), (mix, step_ix, position));
+        }
+        drop(messages);
+        if created {
+            self.insert_row();
         } else {
-            false
+            self.remeasure_row(mix);
+        }
+        true
+    }
+
+    /// Mutate the assistant message currently being streamed. A turn's
+    /// steps share one row: with no stream target, a previous assistant row
+    /// continues (with a step mark) instead of stacking a new one. Returns
+    /// `(changed, created)` — `created` inserts a list row.
+    fn with_streaming(&mut self, mutate: impl FnOnce(&mut ChatMessage)) -> (bool, bool) {
+        let mut messages = self.messages.borrow_mut();
+        let (ix, created) = match self.streaming.get() {
+            Some(ix) => (ix, false),
+            None => {
+                if messages.last().is_some_and(|m| !m.user) {
+                    // Continue the settled step's row with a fresh step.
+                    let ix = messages.len() - 1;
+                    self.step_mark.set(Some(StepMark {
+                        step: messages[ix].steps.len(),
+                        text: 0,
+                        thinking: 0,
+                        tools: 0,
+                    }));
+                    self.streaming.set(Some(ix));
+                    (ix, false)
+                } else {
+                    messages.push(ChatMessage::empty_assistant());
+                    let ix = messages.len() - 1;
+                    self.streaming.set(Some(ix));
+                    self.step_mark.set(Some(StepMark::default()));
+                    (ix, true)
+                }
+            }
+        };
+        self.mark_stream_start();
+        let changed = messages
+            .get_mut(ix)
+            .map(|message| {
+                // Deltas stream into the run's current (last) step.
+                if message.steps.is_empty() {
+                    message.steps.push(Step::default());
+                }
+                mutate(message);
+                true
+            })
+            .unwrap_or(false);
+        (changed, created)
+    }
+
+    fn mark_stream_start(&self) {
+        if self.stream_started.get().is_none() {
+            self.stream_started.set(Some(Instant::now()));
         }
     }
 
-    fn on_appended(&self, messages: &[ChatMessage]) {
-        let count = messages.len();
-        self.list
-            .splice(count.saturating_sub(1)..count.saturating_sub(1), 1);
-        if self.pinned.get() {
-            self.scroll_to_end();
-        }
+    fn insert_row(&self) {
+        self.scroller.append(1);
     }
 
-    fn scroll_to_end(&self) {
+    /// Same item count, new height — do not insert a blank row.
+    fn remeasure_row(&self, ix: usize) {
+        self.scroller.remeasure_items(ix..ix + 1);
+    }
+
+    /// Recover if stream updates previously inserted extra list slots.
+    fn resync_list(&self) {
         let count = self.messages.borrow().len();
-        self.list.scroll_to(ListOffset {
-            item_ix: count,
-            offset_in_item: px(0.),
-        });
+        if self.scroller.item_count() != count {
+            self.scroller.reset(count);
+        }
     }
 
     /// True when no messages are loaded (drives the empty state).
@@ -309,130 +1110,768 @@ impl Transcript {
         self.messages.borrow().is_empty()
     }
 
-    /// Render into the chat panel — a centered, max-width column.
-    pub fn render(&self) -> impl IntoElement + use<> {
-        let messages = self.messages.clone();
+    /// Show the just-sent prompt immediately — pi does not echo user
+    /// messages in RPC mode. A later identical echo is deduped.
+    pub fn append_user_message(&mut self, text: &str) -> bool {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let mut messages = self.messages.borrow_mut();
+        if messages.last().map(|m| m.user && m.text() == trimmed) == Some(true) {
+            return false;
+        }
+        messages.push(ChatMessage {
+            user: true,
+            steps: vec![Step {
+                text: trimmed.to_string(),
+                ..Step::default()
+            }],
+            elapsed: None,
+            finished_at: None,
+        });
+        drop(messages);
+        self.insert_row();
+        true
+    }
 
-        div()
-            .flex_1()
-            .w_full()
-            .flex()
-            .justify_center()
-            .min_h_0()
-            .child(
-                list(self.list.clone(), move |ix, _window, _cx| {
-                    render_message(&messages, ix).into_any_element()
-                })
-                .w_full()
-                .max_w(px(760.)),
-            )
+    /// Turn end (or abort): drop live streaming state so the working
+    /// indicator and stop affordances clear even if a message end was missed.
+    fn end_live_run(&mut self) {
+        self.streaming.set(None);
+        self.step_mark.set(None);
+        self.stream_started.set(None);
+    }
+
+    /// True while an assistant message is still streaming.
+    pub fn is_streaming(&self) -> bool {
+        self.streaming.get().is_some()
+    }
+
+    /// chars/4 heuristic over loaded messages — same estimate pi's /context
+    /// view uses when the provider-serialized payload isn't available.
+    pub fn estimated_tokens(&self) -> u64 {
+        let chars: usize = self
+            .messages
+            .borrow()
+            .iter()
+            .map(|message| {
+                message
+                    .steps
+                    .iter()
+                    .map(|step| {
+                        step.text.chars().count()
+                            + step.thinking.chars().count()
+                            + step
+                                .tools
+                                .iter()
+                                .map(|tool| {
+                                    tool.name.chars().count() + tool.summary.chars().count()
+                                })
+                                .sum::<usize>()
+                    })
+                    .sum::<usize>()
+            })
+            .sum();
+        chars.div_ceil(4) as u64
+    }
+
+    /// Drop stale Copy feedback. Returns true while any entry still needs a tick.
+    pub fn prune_copy_feedback(&self) -> bool {
+        let mut copied = self.copied.borrow_mut();
+        if copied.is_empty() {
+            return false;
+        }
+        copied.retain(|_, at| at.elapsed() < Duration::from_secs(2));
+        self.copied_sections
+            .borrow_mut()
+            .retain(|_, at| at.elapsed() < Duration::from_secs(2));
+        true
+    }
+
+    /// Render into the chat panel — rail + centered 760px column. The
+    /// workspace roots the changed-files Review git diff; the viewport
+    /// height caps the rail, and the main-area width gates its visibility.
+    pub fn render(
+        &self,
+        workspace: Option<&Path>,
+        viewport_height: Pixels,
+        main_width: Pixels,
+        cx: &gpui::App,
+    ) -> impl IntoElement + use<> {
+        self.resync_list();
+        transcript_view::render_transcript(
+            TranscriptView {
+                messages: self.messages.clone(),
+                scroller: self.scroller.clone(),
+                streaming: self.streaming.clone(),
+                stream_started: self.stream_started.clone(),
+                expanded_turns: self.expanded_turns.clone(),
+                expanded_files: self.expanded_files.clone(),
+                expanded_activities: self.expanded_activities.clone(),
+                expanded_tools: self.expanded_tools.clone(),
+                copied: self.copied.clone(),
+                copied_sections: self.copied_sections.clone(),
+                hovered_turn: self.hovered_turn.clone(),
+                hovered_row: self.hovered_row.clone(),
+                expanded_thinking: self.expanded_thinking.clone(),
+                workspace: workspace.map(Path::to_path_buf),
+                viewport_height,
+                main_width,
+                rail_scroll: self.rail_scroll.clone(),
+                rail_autoscroll: self.rail_autoscroll.clone(),
+            },
+            cx,
+        )
     }
 }
 
-use gpui::AnyElement;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
 
-fn render_message(messages: &Rc<RefCell<Vec<ChatMessage>>>, ix: usize) -> AnyElement {
-    let messages = messages.borrow();
-    let message = &messages[ix];
-
-    if message.user {
-        return div()
-            .w_full()
-            .flex()
-            .justify_end()
-            .px_4()
-            .py_2()
-            .child(
-                div()
-                    .max_w(px(640.))
-                    .rounded_lg()
-                    .bg(rgb(0x2c3a55))
-                    .text_color(rgb(0xc9d4ea))
-                    .px_3()
-                    .py_2()
-                    .text_size(px(14.))
-                    .child(message.text.clone()),
-            )
-            .into_any_element();
-    }
-
-    // Assistant: thinking block (dimmed) → text → tool rows.
-    let mut column = div().flex_1().flex_col().gap_2();
-
-    if !message.thinking.is_empty() {
-        column = column.child(
-            div()
-                .rounded_md()
-                .bg(rgb(0x1c1f27))
-                .border_l_2()
-                .border_color(rgb(0x6b5c8f))
-                .px_3()
-                .py_2()
-                .text_size(px(12.5))
-                .text_color(rgb(0x9a8fb8))
-                .children(
-                    message
-                        .thinking
-                        .lines()
-                        .map(|line| div().h(px(17.)).child(format!("  {line}"))),
-                ),
-        );
-    }
-
-    if !message.text.is_empty() {
-        column = column.child(
-            div()
-                .text_size(px(14.))
-                .text_color(rgb(0xd6d9e0))
-                .whitespace_normal()
-                .child(message.text.clone()),
-        );
-    }
-
-    if !message.tools.is_empty() {
-        column = column.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .children(message.tools.iter().map(|tool| {
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .rounded_md()
-                        .bg(rgb(0x141820))
-                        .border_1()
-                        .border_color(rgb(0x29303a))
-                        .px_3()
-                        .py_1()
-                        .font_family("Menlo")
-                        .text_size(px(12.))
-                        .text_color(rgb(0xd69c4c))
-                        // devicons glyph for the target file, gear otherwise
-                        .child(match &tool.path {
-                            Some(path) => dev_icon(path, 13., 0x8b90a0).into_any_element(),
-                            None => div().child("⚙").into_any_element(),
+    #[test]
+    fn real_session_payload_renders_changed_files_card() {
+        // Ground-truth check against the live pi session when present:
+        // `get_messages` snapshots must yield edit/write tools with paths and
+        // line counts, otherwise the Waku changed-files card never appears.
+        // Regenerates the payload from the newest real session on disk.
+        let mut data = None;
+        if let Ok(sample) = std::fs::read_to_string("/tmp/orbit-sample.json") {
+            data = serde_json::from_str(&sample).ok();
+        }
+        let data = data.unwrap_or_else(|| {
+            let pattern = format!(
+                "{}/.pi/agent/sessions/*/*.jsonl",
+                std::env::var("HOME").unwrap_or_default()
+            );
+            let mut files: Vec<std::path::PathBuf> = glob_files(&pattern);
+            files.sort_by_key(|path| {
+                std::fs::metadata(path).and_then(|m| m.modified()).ok()
+            });
+            for path in files.into_iter().rev() {
+                let Ok(content) = std::fs::read_to_string(path) else {
+                    continue;
+                };
+                let messages: Vec<Value> = content
+                    .lines()
+                    .filter_map(|line| serde_json::from_str(line).ok())
+                    .filter_map(|entry: Value| {
+                        let message = entry.get("message").cloned();
+                        message.filter(|m| {
+                            m.get("role").and_then(Value::as_str)
+                                .is_some_and(|role| role == "user" || role == "assistant")
                         })
-                        .child(tool.name.clone())
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_color(rgb(0x8b90a0))
-                                .overflow_x_hidden()
-                                .child(tool.summary.clone()),
-                        )
-                })),
+                    })
+                    .collect();
+                if messages
+                    .iter()
+                    .any(|m| {
+                        serde_json::to_string(m)
+                            .is_ok_and(|s| s.contains("\"name\":\"edit\""))
+                    })
+                {
+                    return serde_json::json!({ "messages": messages });
+                }
+            }
+            eprintln!("skipping: no real session data");
+            serde_json::json!({ "messages": [] })
+        });
+        let mut transcript = Transcript::new();
+        transcript.load_from(&data);
+        let messages = transcript.messages.borrow();
+        if messages.is_empty() {
+            eprintln!("skipping: empty session");
+            return;
+        }
+        let cards: Vec<_> = messages
+            .iter()
+            .filter(|m| !changed_files(m).is_empty())
+            .collect();
+        assert!(
+            !cards.is_empty(),
+            "edit/write tool calls must produce changed-files cards"
+        );
+        assert!(
+            cards
+                .iter()
+                .any(|m| m.tools().any(|t| t.added > 0 || t.removed > 0)),
+            "edit tools must carry line counts"
         );
     }
 
-    div()
-        .w_full()
-        .flex()
-        .px_4()
-        .py_2()
-        .gap_3()
-        .child(div().w(px(3.)).rounded_sm().bg(rgb(0x4c8dff)))
-        .child(column)
-        .into_any_element()
+    /// Sorted file list for a glob-ish pattern (no glob dep — simple scan).
+    fn glob_files(pattern: &str) -> Vec<std::path::PathBuf> {
+        let (dir, _rest) = pattern.split_once("/*/").unwrap_or((pattern, ""));
+        let mut out = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    if let Ok(sessions) = std::fs::read_dir(entry.path()) {
+                        for session in sessions.flatten() {
+                            if session.path().extension().is_some_and(|e| e == "jsonl") {
+                                out.push(session.path());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn tool_results_never_become_rows_and_attach_to_calls() {
+        let payload = json!({
+            "messages": [
+                {"role": "user", "content": "fix it"},
+                {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "toolCall",
+                        "id": "call_1",
+                        "name": "bash",
+                        "arguments": {"command": "tsc"}
+                    }]
+                },
+                {
+                    "role": "toolResult",
+                    "toolCallId": "call_1",
+                    "toolName": "bash",
+                    "isError": true,
+                    "content": [{
+                        "type": "text",
+                        "text": "src/app.tsx(1,1): error TS1005: ')' expected."
+                    }]
+                }
+            ]
+        });
+        let mut transcript = Transcript::new();
+        transcript.load_from(&payload);
+        let messages = transcript.messages.borrow();
+        // Two rows: the prompt and the assistant call. The toolResult must
+        // NOT add a prose row (that is what mangled code into paragraphs).
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].tools().count(), 1);
+        let tool = messages[1].tools().next().unwrap();
+        assert!(tool.failed);
+        assert_eq!(
+            tool.output.as_ref().and_then(|v: &serde_json::Value| v.as_str()),
+            Some("src/app.tsx(1,1): error TS1005: ')' expected.")
+        );
+    }
+
+    #[test]
+    fn live_nested_events_render_and_settle() {
+        // pi wraps live message events: {"type": "message_end", "message": {...}}.
+        // Unwrapped parsing previously dropped the echo, the streaming text
+        // (for non-delta providers) and left the working state stuck.
+        let mut t = Transcript::new();
+        // Non-delta provider: whole content arrives via text_end.
+        t.apply_event(&Event::MessageStart {
+            value: json!({"type": "message_start", "message": {
+                "role": "assistant", "content": [], "stopReason": "pending"
+            }}),
+        });
+        t.apply_event(&Event::MessageUpdate {
+            usage: None,
+            assistant: Some(AssistantMessageEvent::Other {
+                kind: "text_end".into(),
+                value: json!({"type": "text_end", "content": "hello", "contentIndex": 0}),
+            }),
+        });
+        assert!(t.is_streaming());
+        {
+            let messages = t.messages.borrow();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].text(), "hello");
+        }
+        t.apply_event(&Event::MessageEnd {
+            value: json!({"type": "message_end", "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "hello"}],
+                "stopReason": "stop"
+            }}),
+        });
+        assert!(!t.is_streaming(), "message end must clear the live state");
+        let messages = t.messages.borrow();
+        assert_eq!(messages[0].text(), "hello");
+        assert!(messages[0].finished_at.is_some());
+    }
+
+    #[test]
+    fn nested_user_echo_dedupes_optimistic_message() {
+        let mut t = Transcript::new();
+        assert!(t.append_user_message("fix it"));
+        // pi's echo (nested) must not duplicate the optimistic row.
+        t.apply_event(&Event::MessageStart {
+            value: json!({"type": "message_start", "message": {
+                "role": "user", "content": "fix it"
+            }}),
+        });
+        t.apply_event(&Event::MessageEnd {
+            value: json!({"type": "message_end", "message": {
+                "role": "user", "content": "fix it"
+            }}),
+        });
+        let messages = t.messages.borrow();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].user);
+    }
+
+    #[test]
+    fn live_assistant_steps_merge_into_one_row() {
+        // One turn, many steps: each step is a separate assistant message
+        // from pi, but the transcript renders ONE row with ONE fold.
+        let mut t = Transcript::new();
+        t.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": ""}),
+        });
+        t.apply_event(&Event::MessageUpdate {
+            usage: None,
+            assistant: Some(AssistantMessageEvent::TextDelta { delta: "step one".into() }),
+        });
+        t.apply_event(&Event::MessageUpdate {
+            usage: None,
+            assistant: Some(AssistantMessageEvent::ToolcallStart {
+                value: json!({"toolCallId": "c1", "toolName": "bash", "arguments": {"command": "ls"}}),
+            }),
+        });
+        t.apply_event(&Event::MessageEnd {
+            value: json!({
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "step one"},
+                    {"type": "toolCall", "id": "c1", "name": "bash", "arguments": {"command": "ls"}}
+                ]
+            }),
+        });
+        t.apply_event(&Event::ToolExecutionStart {
+            value: json!({"toolCallId": "c1", "toolName": "bash", "args": {"command": "ls"}}),
+        });
+        t.apply_event(&Event::ToolExecutionEnd {
+            value: json!({"toolCallId": "c1", "result": "out", "isError": false}),
+        });
+        // Step 2 continues the same row.
+        t.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": ""}),
+        });
+        t.apply_event(&Event::MessageUpdate {
+            usage: None,
+            assistant: Some(AssistantMessageEvent::TextDelta { delta: "step two".into() }),
+        });
+        t.apply_event(&Event::MessageEnd {
+            value: json!({"role": "assistant", "content": "step two"}),
+        });
+        {
+            let messages = t.messages.borrow();
+            assert_eq!(messages.len(), 1, "steps must share one row");
+            assert_eq!(messages[0].text(), "step one\n\nstep two");
+            assert_eq!(messages[0].tools().count(), 1);
+            assert_eq!(
+                messages[0]
+                    .tools()
+                    .next()
+                    .unwrap()
+                    .output
+                    .as_ref()
+                    .and_then(|v: &serde_json::Value| v.as_str()),
+                Some("out")
+            );
+            assert!(messages[0].elapsed.is_some(), "fold carries the run clock");
+        }
+        // A new prompt starts a fresh row.
+        t.apply_event(&Event::MessageStart {
+            value: json!({"role": "user", "content": "next"}),
+        });
+        t.apply_event(&Event::MessageEnd {
+            value: json!({"role": "user", "content": "next"}),
+        });
+        t.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": ""}),
+        });
+        t.apply_event(&Event::MessageUpdate {
+            usage: None,
+            assistant: Some(AssistantMessageEvent::TextDelta { delta: "second".into() }),
+        });
+        let messages = t.messages.borrow();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[2].text(), "second");
+        assert!(!messages[2].has_hidden_work());
+    }
+
+    #[test]
+    fn snapshot_merges_consecutive_assistants() {
+        let payload = json!({
+            "messages": [
+                {"role": "user", "content": "do it"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "hmm"},
+                    {"type": "toolCall", "id": "c1", "name": "read", "arguments": {"path": "a.rs"}},
+                    {"type": "text", "text": "first part"}
+                ]},
+                {"role": "toolResult", "toolCallId": "c1", "toolName": "read",
+                 "content": [{"type": "text", "text": "contents"}]},
+                {"role": "assistant", "content": "second part"}
+            ]
+        });
+        let mut t = Transcript::new();
+        t.load_from(&payload);
+        let messages = t.messages.borrow();
+        assert_eq!(messages.len(), 2, "user + merged assistant turn");
+        assert_eq!(messages[1].text(), "first part\n\nsecond part");
+        assert_eq!(messages[1].thinking, "hmm");
+        assert_eq!(messages[1].tools().count(), 1);
+        assert_eq!(
+            messages[1]
+                .tools()
+                .next()
+                .unwrap()
+                .output
+                .as_ref()
+                .and_then(|v: &serde_json::Value| v.as_str()),
+            Some("contents")
+        );
+        assert!(messages[1].has_hidden_work());
+    }
+
+    #[test]
+    fn live_tool_result_message_attaches_without_a_row() {
+        let mut transcript = Transcript::new();
+        transcript.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": ""}),
+        });
+        transcript.apply_event(&Event::MessageUpdate {
+            usage: None,
+            assistant: Some(AssistantMessageEvent::TextDelta { delta: "working".into() }),
+        });
+        transcript.apply_event(&Event::ToolExecutionStart {
+            value: json!({
+                "toolCallId": "call_9",
+                "toolName": "bash",
+                "args": {"command": "ls"}
+            })
+        });
+        // pi settles a tool call with a `toolResult` message — it must not
+        // replace the streaming assistant message with tool output.
+        transcript.apply_event(&Event::MessageEnd {
+            value: json!({
+                "role": "toolResult",
+                "toolCallId": "call_9",
+                "toolName": "bash",
+                "isError": false,
+                "content": [{"type": "text", "text": "file-a\nfile-b"}]
+            })
+        });
+        assert!(transcript.is_streaming());
+        {
+            let messages = transcript.messages.borrow();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].text(), "working");
+            assert_eq!(messages[0].tools.len(), 1);
+        }
+        assert!(transcript.apply_event(&Event::MessageEnd {
+            value: json!({
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "working"},
+                    {
+                        "type": "toolCall",
+                        "id": "call_9",
+                        "name": "bash",
+                        "arguments": {"command": "ls"}
+                    }
+                ]
+            }),
+        }));
+        let messages = transcript.messages.borrow();
+        assert_eq!(
+            messages[0]
+                .tools()
+                .next()
+                .unwrap()
+                .output
+                .as_ref()
+                .and_then(|v: &serde_json::Value| v.as_str()),
+            Some("file-a\nfile-b")
+        );
+    }
+
+    #[test]
+    fn hidden_work_is_thinking_or_tools() {
+        let empty = ChatMessage::empty_assistant();
+        assert!(!has_hidden_work(&empty));
+        let mut thinking = ChatMessage::empty_assistant();
+        thinking.thinking = "hmm".into();
+        assert!(has_hidden_work(&thinking));
+    }
+
+    #[test]
+    fn edit_counts_old_and_new_text() {
+        let args = json!({
+            "path": "src/main.rs",
+            "edits": [
+                {"oldText": "a\nb", "newText": "a\nb\nc"}
+            ]
+        });
+        assert_eq!(tool_line_stats("edit", &args), (3, 2));
+    }
+
+    #[test]
+    fn write_counts_content_as_added() {
+        let args = json!({ "path": "a.txt", "content": "one\ntwo\nthree" });
+        assert_eq!(tool_line_stats("write", &args), (3, 0));
+    }
+
+    #[test]
+    fn write_with_empty_content_counts_zero() {
+        let args = json!({ "path": "a.txt", "content": "" });
+        assert_eq!(tool_line_stats("write", &args), (0, 0));
+    }
+
+    #[test]
+    fn other_tools_have_no_diff() {
+        let args = json!({ "path": "a.txt" });
+        assert_eq!(tool_line_stats("read", &args), (0, 0));
+    }
+
+    #[test]
+    fn tool_call_from_value_keeps_path_and_stats() {
+        let args = json!({
+            "path": "lib.rs",
+            "edits": [{"oldText": "x", "newText": "x\ny"}]
+        });
+        let tool = ToolCall::from_value("edit", Some(&args));
+        assert_eq!(tool.path.as_deref(), Some("lib.rs"));
+        assert_eq!((tool.added, tool.removed), (2, 1));
+    }
+
+    #[test]
+    fn diff_from_message_sums_edit_and_write() {
+        let message = json!({
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "toolCall",
+                    "name": "edit",
+                    "arguments": {
+                        "path": "a.rs",
+                        "edits": [{"oldText": "old", "newText": "new\nline"}]
+                    }
+                },
+                {
+                    "type": "toolCall",
+                    "name": "write",
+                    "arguments": { "path": "b.rs", "content": "a\nb" }
+                },
+                {
+                    "type": "toolCall",
+                    "name": "read",
+                    "arguments": { "path": "c.rs" }
+                }
+            ]
+        });
+        assert_eq!(diff_from_message(&message), (4, 1));
+    }
+
+    #[test]
+    fn diff_from_message_unwraps_nested_message() {
+        let value = json!({
+            "message": {
+                "content": [{
+                    "type": "tool_call",
+                    "name": "write",
+                    "arguments": { "content": "hi" }
+                }]
+            }
+        });
+        assert_eq!(diff_from_message(&value), (1, 0));
+    }
+
+    #[test]
+    fn changed_files_merges_same_path() {
+        let tools = vec![
+            ToolCall {
+                name: "edit".into(),
+                summary: String::new(),
+                path: Some("a.rs".into()),
+                added: 2,
+                removed: 1,
+                ..ToolCall::from_value("edit", None)
+            },
+            ToolCall {
+                name: "edit".into(),
+                summary: String::new(),
+                path: Some("a.rs".into()),
+                added: 3,
+                removed: 0,
+                ..ToolCall::from_value("edit", None)
+            },
+            ToolCall {
+                name: "write".into(),
+                summary: String::new(),
+                path: Some("b.rs".into()),
+                added: 4,
+                removed: 0,
+                ..ToolCall::from_value("write", None)
+            },
+            ToolCall {
+                name: "read".into(),
+                summary: String::new(),
+                path: Some("c.rs".into()),
+                added: 0,
+                removed: 0,
+                ..ToolCall::from_value("read", None)
+            },
+        ];
+        assert_eq!(
+            changed_files(&tools),
+            vec![("a.rs".into(), 5, 1), ("b.rs".into(), 4, 0)]
+        );
+    }
+
+    #[test]
+    fn chat_message_parses_tool_stats() {
+        let value = json!({
+            "role": "assistant",
+            "content": [{
+                "type": "toolCall",
+                "name": "write",
+                "arguments": { "path": "n.rs", "content": "a\nb\nc" }
+            }]
+        });
+        let message = ChatMessage::from_value(&value).unwrap();
+        assert_eq!(message.tools().count(), 1);
+        assert_eq!(message.tools().next().unwrap().added, 3);
+        assert_eq!(message.tools().next().unwrap().path.as_deref(), Some("n.rs"));
+    }
+
+    #[test]
+    fn stream_updates_keep_one_list_row() {
+        let mut transcript = Transcript::new();
+        assert!(transcript.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": ""}),
+        }));
+        assert_eq!(transcript.scroller.item_count(), 1);
+        for _ in 0..8 {
+            assert!(transcript.apply_event(&Event::MessageUpdate {
+                usage: None,
+                assistant: Some(AssistantMessageEvent::TextDelta { delta: "x".into() }),
+            }));
+        }
+        assert_eq!(transcript.scroller.item_count(), 1);
+        assert_eq!(transcript.messages.borrow()[0].text, "xxxxxxxx");
+        assert!(transcript.apply_event(&Event::MessageEnd {
+            value: json!({"role": "assistant", "content": "xxxxxxxx"}),
+        }));
+        assert_eq!(transcript.scroller.item_count(), 1);
+    }
+
+    #[test]
+    fn tool_execution_events_attach_results_by_id() {
+        let mut transcript = Transcript::new();
+        assert!(transcript.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": ""}),
+        }));
+        assert!(transcript.apply_event(&Event::ToolExecutionStart {
+            value: json!({
+                "toolCallId": "t1",
+                "toolName": "read",
+                "args": {"path": "lib.rs"}
+            })
+        }));
+        assert!(transcript.apply_event(&Event::ToolExecutionEnd {
+            value: json!({
+                "toolCallId": "t1",
+                "result": {"content": "contents"},
+                "isError": false
+            })
+        }));
+        let messages = transcript.messages.borrow();
+        let tool = messages[0].tools().next().unwrap();
+        assert_eq!(tool.name, "read");
+        assert_eq!(tool.path.as_deref(), Some("lib.rs"));
+        assert_eq!(
+            tool.output.as_ref().and_then(|v| v.get("content")).and_then(Value::as_str),
+            Some("contents")
+        );
+        assert!(!tool.failed);
+    }
+
+    #[test]
+    fn message_end_carries_live_results_into_final_message() {
+        let mut transcript = Transcript::new();
+        assert!(transcript.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": ""}),
+        }));
+        assert!(transcript.apply_event(&Event::ToolExecutionStart {
+            value: json!({
+                "toolCallId": "t1",
+                "toolName": "bash",
+                "args": {"command": "ls"}
+            })
+        }));
+        assert!(transcript.apply_event(&Event::ToolExecutionEnd {
+            value: json!({"toolCallId": "t1", "result": "done", "isError": true})
+        }));
+        assert!(transcript.apply_event(&Event::MessageEnd {
+            value: json!({
+                "role": "assistant",
+                "content": [{
+                    "type": "toolCall",
+                    "id": "t1",
+                    "name": "bash",
+                    "arguments": {"command": "ls"}
+                }]
+            })
+        }));
+        let messages = transcript.messages.borrow();
+        let tool = messages[0].tools().next().unwrap();
+        assert_eq!(tool.output.as_ref(), Some(&Value::String("done".into())));
+        assert!(tool.failed);
+        assert!(messages[0].finished_at.is_some());
+    }
+
+    #[test]
+    fn snapshot_timestamps_parse_rfc3339_and_epochs() {
+        let message = json!({
+            "role": "assistant",
+            "content": "hi",
+            "timestamp": "2026-08-01T10:30:00Z"
+        });
+        let parsed = ChatMessage::from_value(&message).unwrap();
+        assert!(parsed.finished_at.is_some());
+
+        let seconds = ChatMessage::from_value(&json!({
+            "role": "assistant", "content": "hi", "timestamp": 1_800_000_000u64
+        }))
+        .unwrap();
+        let millis = ChatMessage::from_value(&json!({
+            "role": "assistant", "content": "hi", "timestamp": 1_800_000_000_000u64
+        }))
+        .unwrap();
+        assert_eq!(seconds.finished_at, millis.finished_at);
+    }
+
+    #[test]
+    fn live_assistant_end_stamps_wall_time() {
+        let mut transcript = Transcript::new();
+        transcript.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": ""}),
+        });
+        transcript.apply_event(&Event::MessageEnd {
+            value: json!({"role": "assistant", "content": "answer"}),
+        });
+        assert!(transcript.messages.borrow()[0].finished_at.is_some());
+    }
+
+    #[test]
+    fn resync_drops_extra_list_slots() {
+        let transcript = Transcript::new();
+        transcript.scroller.splice(0..0, 5);
+        *transcript.messages.borrow_mut() = vec![ChatMessage::empty_assistant()];
+        transcript.resync_list();
+        assert_eq!(transcript.scroller.item_count(), 1);
+    }
 }

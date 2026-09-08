@@ -54,11 +54,8 @@ fn live_catalog_round_trip() {
     eprintln!(
         "models: {} entries, first: {:?}",
         arr.len(),
-        arr.first().map(|m| (
-            m["id"].as_str(),
-            m["name"].as_str(),
-            m["provider"].as_str()
-        ))
+        arr.first()
+            .map(|m| (m["id"].as_str(), m["name"].as_str(), m["provider"].as_str()))
     );
     let levels = levels_seen.expect("levels response");
     eprintln!("levels: {levels:?}");

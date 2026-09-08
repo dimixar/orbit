@@ -56,8 +56,12 @@ impl PiClient {
     pub fn spawn(workspace_dir: &Path, session_dir: Option<&Path>) -> Result<Self> {
         let bin = std::env::var(PI_BIN_ENV).unwrap_or_else(|_| "pi".into());
         let mut command = std::process::Command::new(&bin);
+        // Waku parity: `--approve` auto-approves tool calls so the RPC
+        // session never stalls on an approval dialog it cannot render, and
+        // the version check is noise for a child we just spawned.
         command
-            .args(["--mode", "rpc"])
+            .args(["--mode", "rpc", "--approve"])
+            .env("PI_SKIP_VERSION_CHECK", "1")
             .current_dir(workspace_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

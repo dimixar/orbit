@@ -4,9 +4,6 @@ members = [
     "crates/orbit-pi",
     "crates/orbit-rpc",
 ]
-# src-tauri keeps its own lockfile/build — it is the legacy app and must not
-# join the workspace until it is deleted at parity.
-exclude = ["src-tauri"]
 
 [workspace.package]
 edition = "2021"

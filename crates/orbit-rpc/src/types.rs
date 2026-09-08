@@ -38,6 +38,11 @@ pub enum CommandBody {
     Abort,
     /// Drop everything queued for the current session.
     ClearQueue,
+    /// Inject a follow-up message into the running turn without aborting it
+    /// (Waku's steer: the agent sees it as soon as the current step ends).
+    Steer {
+        message: String,
+    },
     /// Create a fresh session (new session id/file returned in the response).
     NewSession,
     /// Load a different session file.
@@ -60,6 +65,18 @@ pub enum CommandBody {
     },
     CycleThinkingLevel,
     GetCommands,
+    /// Token totals + current context-window usage for the open session.
+    GetSessionStats,
+    /// Message list (with `entryId`s) used to build a fork point.
+    GetForkMessages,
+    /// Rewind the session to just before `entry_id` (drops later turns).
+    Fork {
+        #[serde(rename = "entryId")]
+        entry_id: String,
+    },
+    /// Duplicate the session as-is (fork with nothing removed).
+    #[serde(rename = "clone")]
+    CloneSession,
 
     /// Anything the typed enum does not cover yet; sent verbatim.
     Raw(Value),
@@ -78,7 +95,11 @@ impl Command {
         let value = match &self.body {
             CommandBody::Raw(payload) => {
                 let mut value = payload.clone();
-                value["id"] = Value::String(self.id.clone());
+                // A payload may carry its own id (extension UI responses
+                // reference the request's id) — only stamp ours when absent.
+                if value.get("id").is_none() {
+                    value["id"] = Value::String(self.id.clone());
+                }
                 value
             }
             _ => serde_json::to_value(self)?,
@@ -149,6 +170,12 @@ pub enum Event {
     },
     AutoRetryEnd {
         value: Value,
+    },
+
+    /// pi renamed the open session (`name` is `null` when cleared). Waku
+    /// forwards this as an automatic session title.
+    SessionInfoChanged {
+        name: Option<String>,
     },
     ExtensionError {
         value: Value,
@@ -289,6 +316,14 @@ impl Event {
             "compaction_end" => Event::CompactionEnd { value },
             "auto_retry_start" => Event::AutoRetryStart { value },
             "auto_retry_end" => Event::AutoRetryEnd { value },
+            "session_info_changed" => Event::SessionInfoChanged {
+                name: value
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned),
+            },
             "extension_error" => Event::ExtensionError { value },
             "extension_ui_request" => Event::ExtensionUiRequest {
                 id: value
@@ -335,6 +370,9 @@ impl Event {
             },
             Event::AgentStart => "agent_start".into(),
             Event::AgentEnd { will_retry } => format!("agent_end (retry={will_retry})"),
+            Event::SessionInfoChanged { name } => {
+                format!("session rename → {}", name.as_deref().unwrap_or("(cleared)"))
+            }
             Event::AgentSettled => "agent_settled ✓".into(),
             Event::ExtensionUiRequest { method, .. } => format!("ui request: {method}"),
             Event::ProcessExited => "pi exited".into(),
@@ -350,6 +388,75 @@ fn delta_summary(delta: &str) -> String {
         "(empty)".into()
     } else {
         t
+    }
+}
+
+/// Current context-window snapshot from `get_session_stats`.
+///
+/// `tokens` / `percent` are `None` immediately after compaction until the
+/// next assistant response establishes a fresh baseline. `contextUsage` itself
+/// is omitted when no model (or no window) is set — then [`from_stats`]
+/// returns `None`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContextUsage {
+    pub tokens: Option<u64>,
+    pub context_window: u64,
+    pub percent: Option<f64>,
+}
+
+impl ContextUsage {
+    /// Parse the `contextUsage` object on a `get_session_stats` payload.
+    pub fn from_stats(data: &Value) -> Option<Self> {
+        let usage = data.get("contextUsage")?;
+        if usage.is_null() {
+            return None;
+        }
+        let context_window = json_u64(usage.get("contextWindow")?)?;
+        if context_window == 0 {
+            return None;
+        }
+        let tokens = usage.get("tokens").and_then(json_u64_or_null);
+        let percent = match usage.get("percent").and_then(json_f64_or_null) {
+            Some(p) => Some(p),
+            None => tokens.map(|t| (t as f64 / context_window as f64) * 100.0),
+        };
+        Some(Self {
+            tokens,
+            context_window,
+            percent,
+        })
+    }
+
+    /// Fill fraction for a meter, 0..=1. `None` when the estimate is unknown.
+    pub fn fraction(&self) -> Option<f32> {
+        self.percent.map(|p| (p / 100.0).clamp(0.0, 1.0) as f32)
+    }
+}
+
+fn json_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok()))
+        .or_else(|| value.as_f64().filter(|f| *f >= 0.0).map(|f| f as u64))
+}
+
+fn json_f64(value: &Value) -> Option<f64> {
+    value.as_f64().or_else(|| value.as_u64().map(|n| n as f64))
+}
+
+fn json_u64_or_null(value: &Value) -> Option<u64> {
+    if value.is_null() {
+        None
+    } else {
+        json_u64(value)
+    }
+}
+
+fn json_f64_or_null(value: &Value) -> Option<f64> {
+    if value.is_null() {
+        None
+    } else {
+        json_f64(value)
     }
 }
 
@@ -430,6 +537,48 @@ mod tests {
     }
 
     #[test]
+    fn steer_serializes_with_message() {
+        let wire = Command::new("st1", CommandBody::Steer {
+            message: "use tokio instead".into(),
+        })
+        .to_wire()
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        assert_eq!(parsed["type"], "steer");
+        assert_eq!(parsed["message"], "use tokio instead");
+    }
+
+    #[test]
+    fn fork_family_serializes_like_pi_expects() {
+        let fork = Command::new("f1", CommandBody::Fork {
+            entry_id: "turn-2".into(),
+        })
+        .to_wire()
+        .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&fork).unwrap();
+        assert_eq!(parsed["type"], "fork");
+        assert_eq!(parsed["entryId"], "turn-2");
+
+        let clone = Command::new("f2", CommandBody::CloneSession)
+            .to_wire()
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&clone).unwrap();
+        assert_eq!(parsed["type"], "clone");
+    }
+
+    #[test]
+    fn session_rename_parses_and_trims() {
+        assert!(matches!(
+            Event::parse_line(r#"{"type":"session_info_changed","name":"  Named by pi  "}"#),
+            Event::SessionInfoChanged { name: Some(n) } if n == "Named by pi"
+        ));
+        assert!(matches!(
+            Event::parse_line(r#"{"type":"session_info_changed","name":null}"#),
+            Event::SessionInfoChanged { name: None }
+        ));
+    }
+
+    #[test]
     fn tolerates_unknown_events() {
         let ev = Event::parse_line(r#"{"type":"brand_new_shape","thing":1}"#);
         assert!(matches!(ev, Event::Unknown(_)));
@@ -439,5 +588,46 @@ mod tests {
     fn framing_strips_carriage_return() {
         let line = "{\"type\":\"agent_start\"}\r";
         assert!(matches!(Event::parse_line(line), Event::AgentStart));
+    }
+
+    #[test]
+    fn get_session_stats_serializes() {
+        let wire = Command::new("s1", CommandBody::GetSessionStats)
+            .to_wire()
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        assert_eq!(parsed["id"], "s1");
+        assert_eq!(parsed["type"], "get_session_stats");
+    }
+
+    #[test]
+    fn context_usage_from_stats_payload() {
+        let data: serde_json::Value = serde_json::from_str(
+            r#"{"contextUsage":{"tokens":60000,"contextWindow":200000,"percent":30}}"#,
+        )
+        .unwrap();
+        let usage = ContextUsage::from_stats(&data).expect("contextUsage");
+        assert_eq!(usage.tokens, Some(60_000));
+        assert_eq!(usage.context_window, 200_000);
+        assert_eq!(usage.percent, Some(30.0));
+        assert!((usage.fraction().unwrap() - 0.3).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn context_usage_null_after_compaction() {
+        let data: serde_json::Value = serde_json::from_str(
+            r#"{"contextUsage":{"tokens":null,"contextWindow":200000,"percent":null}}"#,
+        )
+        .unwrap();
+        let usage = ContextUsage::from_stats(&data).expect("window still known");
+        assert_eq!(usage.tokens, None);
+        assert_eq!(usage.percent, None);
+        assert_eq!(usage.fraction(), None);
+    }
+
+    #[test]
+    fn context_usage_omitted_without_model() {
+        let data = serde_json::json!({"tokens":{"total":10}});
+        assert!(ContextUsage::from_stats(&data).is_none());
     }
 }
