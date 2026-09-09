@@ -11,7 +11,7 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use base64::Engine as _;
@@ -38,6 +38,7 @@ use crate::onboarding::{self, Dependency};
 use crate::platform::{self, ExternalApp};
 use crate::session_picker::SessionPicker;
 use crate::sessions::{self, SessionInfo};
+use crate::sidepane::{SidePane, SidePaneResize};
 use crate::theme::{self, Theme, ThemeId, ThemeMode};
 use crate::transcript::{self, Transcript};
 
@@ -48,6 +49,8 @@ const SIDEBAR_MAX_W: f32 = 440.;
 const SIDEBAR_GROUP_SESSIONS_VISIBLE: usize = 10;
 /// Height of the sidebar nav action rows (New Task, Search).
 const SIDEBAR_ACTION_ROW_H: f32 = 32.;
+/// Room the side-pane resize keeps for the transcript column.
+const PANE_MAX_RESERVE: f32 = 480.;
 
 /// Drag marker for the sidebar resize handle (gpui typed drag state).
 struct SidebarResize;
@@ -191,6 +194,8 @@ pub struct OrbitApp {
     session_details_open: bool,
     /// The `sessionId` pi reports for the active session (its task id).
     session_id: Option<String>,
+    /// Right side pane — Review (git diff), Terminal, Browser tabs.
+    sidepane: Entity<SidePane>,
 }
 
 /// An image queued to ride along with the next prompt.
@@ -305,6 +310,9 @@ impl OrbitApp {
         // can show install commands when something is missing.
         let deps = onboarding::check_dependencies();
 
+        // Right side pane: Review / Terminal / Browser tabs.
+        let sidepane = cx.new(SidePane::new);
+
         let mut app = Self {
             client,
             sidebar_width: px(SIDEBAR_DEFAULT_W),
@@ -362,6 +370,7 @@ impl OrbitApp {
             refreshing: false,
             session_details_open: false,
             session_id: None,
+            sidepane,
         };
 
         if app.client.is_some() {
@@ -495,6 +504,9 @@ impl OrbitApp {
                     self.busy = false;
                     refresh_sessions = true;
                     self.refresh_context_stats();
+                    // The run may have changed files — Review goes stale.
+                    self.sidepane
+                        .update(cx, |pane, cx| pane.mark_review_stale(cx));
                 }
                 Event::CompactionEnd { .. } => {
                     // Post-compaction usage is unknown until the next turn;
@@ -1159,7 +1171,7 @@ impl OrbitApp {
 
         let picker = cx.new(|cx| {
             SessionPicker::new(
-                self.sessions.clone(),
+                self.sidebar_sessions(),
                 self.current_session_path.clone(),
                 on_open,
                 on_dismiss,
@@ -2351,6 +2363,21 @@ impl OrbitApp {
         cx.notify();
     }
 
+    fn on_toggle_side_pane(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.sidepane.update(cx, |pane, cx| pane.toggle(cx));
+        cx.notify();
+    }
+
+    /// Hands the transcript's changed-files cards a way to open the side
+    /// pane's Review tab (the pane lives in the app, the cards don't know
+    /// that). Cheap to build per frame — an `Rc` closure over the entity.
+    fn review_opener(&self, _: &Context<Self>) -> crate::transcript_view::ReviewOpener {
+        let pane = self.sidepane.clone();
+        Rc::new(move |_window, cx| {
+            pane.update(cx, |pane, cx| pane.show_review(cx));
+        })
+    }
+
     fn on_composer_click(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.input.read(cx).focus(window);
     }
@@ -2674,6 +2701,23 @@ impl OrbitApp {
 
     // ── labels ─────────────────────────────────────────────────────────────
 
+    /// Sidebar view of the session store: the sessions on disk plus a
+    /// placeholder row for the open session while pi hasn't flushed its
+    /// file yet. pi creates a session's `.jsonl` lazily — only when the
+    /// first message is appended — so right after `new_session` the store
+    /// holds nothing new and a disk-only list hides the session the user
+    /// just started until the first prompt lands. Prepending the
+    /// placeholder shows it instantly at the top; it disappears once the
+    /// real row loads (same path ⇒ no duplicate).
+    fn sidebar_sessions(&self) -> Vec<SessionInfo> {
+        sessions_with_placeholder(
+            &self.sessions,
+            self.current_session_path.as_deref(),
+            self.current_title.as_deref(),
+            self.current_workspace.as_deref(),
+        )
+    }
+
     fn workspace_label(&self) -> String {
         self.current_workspace
             .as_ref()
@@ -2758,8 +2802,9 @@ impl Render for OrbitApp {
         // session). Only the active workspace is expanded by default; each
         // open group shows up to SIDEBAR_GROUP_SESSIONS_VISIBLE sessions
         // with per-group Show more / Show less toggles.
+        let sidebar_sessions = self.sidebar_sessions();
         let side_rows = Rc::new(build_sidebar_rows(
-            &self.sessions,
+            &sidebar_sessions,
             &working_label,
             &self.collapsed_workspaces,
             &self.expanded_workspace_groups,
@@ -2770,7 +2815,7 @@ impl Render for OrbitApp {
         if old != side_rows.len() {
             self.sidebar_list.splice(0..old, side_rows.len());
         }
-        let sessions_data = Rc::new(self.sessions.clone());
+        let sessions_data = Rc::new(sidebar_sessions);
         let active_path = Rc::new(self.current_session_path.clone());
         let session_menu = Rc::new(self.session_menu.clone());
         let this = cx.entity();
@@ -2793,12 +2838,28 @@ impl Render for OrbitApp {
         // The rail gates on the main area's width (Waku: 872px transcript
         // container), which excludes the sessions sidebar when visible.
         let viewport = window.viewport_size();
+        // The right side pane is hidden while settings/onboarding own the
+        // main area (same rule as the sessions sidebar).
+        let pane_visible = self.sidepane.read(cx).is_open()
+            && !self.settings_open
+            && self.dependencies_ready();
+        let pane_width = if pane_visible {
+            self.sidepane.read(cx).width()
+        } else {
+            px(0.)
+        };
+        // Keep the pane's workspace in sync with the app (cheap no-op when
+        // unchanged; a change marks Review stale).
+        let pane_workspace = self.current_workspace.clone();
+        self.sidepane
+            .update(cx, |pane, cx| pane.set_workspace(pane_workspace, cx));
         let main_width = viewport.width
             - if self.sidebar_visible && !self.settings_open {
                 self.sidebar_width
             } else {
                 px(0.)
-            };
+            }
+            - pane_width;
 
         // ── top-bar left controls: sidebar toggle + session history ──
         let back_enabled = self.history_index > 0;
@@ -2886,6 +2947,21 @@ impl Render for OrbitApp {
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_info_click))
                     .children(self.render_session_details_popup(cx))
                     .child(icon("icons/info.svg", 16., theme.text_2)),
+            )
+            // side-pane toggle sits right after the about (info) button
+            .child(
+                div()
+                    .id("toggle-side-pane")
+                    .p_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_toggle_side_pane))
+                    .child(icon(
+                        "icons/panel-right.svg",
+                        16.,
+                        if pane_visible { theme.text } else { theme.text_2 },
+                    )),
             );
 
         div()
@@ -2968,7 +3044,7 @@ impl Render for OrbitApp {
                     )
                     // session list (scrolls), grouped by workspace — or the
                     // empty state when pi's store has no sessions yet
-                    .child(if self.sessions.is_empty() {
+                    .child(if sessions_data.is_empty() {
                         empty_sessions_state(theme).into_any_element()
                     } else {
                         div()
@@ -3086,6 +3162,7 @@ impl Render for OrbitApp {
                                 review_workspace.as_deref(),
                                 window.viewport_size().height,
                                 main_width,
+                                Some(self.review_opener(cx)),
                                 cx,
                             ))
                             .into_any_element()
@@ -3185,6 +3262,8 @@ impl Render for OrbitApp {
                     )
                     .into_any_element()
             })
+            // ── right side pane (Review / Terminal / Browser) ──
+            .children(pane_visible.then(|| self.sidepane.clone().into_any_element()))
             .track_focus(&self.focus_handle(cx))
             // Sidebar resize: fires for every mouse move while the handle
             // drag is active, wherever the pointer travels.
@@ -3203,6 +3282,20 @@ impl Render for OrbitApp {
                         app.sidebar_width = width;
                         cx.notify();
                     }
+                }),
+            )
+            .on_drag_move(cx.listener(
+                |app: &mut Self,
+                 event: &DragMoveEvent<SidePaneResize>,
+                 _: &mut Window,
+                 cx: &mut Context<Self>| {
+                    // The pane hugs the window's right edge, so its width is
+                    // the distance from the pointer to that edge.
+                    let width = event.bounds.size.width - event.event.position.x;
+                    let max = event.bounds.size.width - px(PANE_MAX_RESERVE);
+                    app.sidepane.update(cx, |pane, cx| {
+                        pane.set_width(width.min(max), cx);
+                    });
                 }),
             )
             .on_action(cx.listener(Self::on_submit))
@@ -5100,6 +5193,49 @@ fn visible_sessions_in_group(
     indices
 }
 
+/// Sidebar session list: `sessions` (newest-first, from disk) plus a
+/// placeholder row for the open session when its file is not in the store
+/// yet — see [`OrbitApp::sidebar_sessions`]. The placeholder carries the
+/// workspace the pi process runs in, pi's live title when it has already
+/// named the session, and a `now` stamp so it sorts to the top of the
+/// sidebar.
+fn sessions_with_placeholder(
+    sessions: &[SessionInfo],
+    current_path: Option<&Path>,
+    current_title: Option<&str>,
+    current_workspace: Option<&Path>,
+) -> Vec<SessionInfo> {
+    let mut rows = sessions.to_vec();
+    let Some(path) = current_path else {
+        return rows;
+    };
+    if rows.iter().any(|s| s.path == path) {
+        return rows;
+    }
+    let workspace = current_workspace
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    rows.insert(
+        0,
+        SessionInfo {
+            path: path.to_path_buf(),
+            id: path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            cwd: workspace,
+            title: current_title
+                .filter(|title| !title.is_empty())
+                .unwrap_or("New Task")
+                .to_string(),
+            first_message: String::new(),
+            modified: SystemTime::now(),
+        },
+    );
+    rows
+}
+
 /// Build the grouped sidebar session list. Each workspace shows at most
 /// [`SIDEBAR_GROUP_SESSIONS_VISIBLE`] sessions until expanded.
 fn build_sidebar_rows(
@@ -5881,6 +6017,82 @@ mod devicons_tests {
         let (_, dark) = dev_file_icon("Cargo.toml", true).unwrap();
         let (_, light) = dev_file_icon("Cargo.toml", false).unwrap();
         let _ = (dark, light);
+    }
+}
+
+#[cfg(test)]
+mod sidebar_placeholder_tests {
+    use super::*;
+
+    fn store_session(name: &str, cwd: &str) -> SessionInfo {
+        SessionInfo {
+            path: PathBuf::from(format!("/store/{name}.jsonl")),
+            id: name.into(),
+            cwd: PathBuf::from(cwd),
+            title: format!("{name} title"),
+            first_message: "preview".into(),
+            modified: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn placeholder_prepends_missing_current_session() {
+        // pi flushes a fresh session's file lazily, so the active session is
+        // absent from the store right after `new_session`. The sidebar must
+        // still show it — instantly, at the top, under its workspace.
+        let store = vec![store_session("old", "/work/alpha")];
+        let fresh = PathBuf::from("/store/2026-09-09_new.jsonl");
+        let rows = sessions_with_placeholder(
+            &store,
+            Some(&fresh),
+            None,
+            Some(Path::new("/work/beta")),
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].path, fresh);
+        assert_eq!(rows[0].cwd, PathBuf::from("/work/beta"));
+        assert_eq!(rows[0].title, "New Task");
+        // The disk rows are untouched behind it.
+        assert_eq!(rows[1].path, store[0].path);
+    }
+
+    #[test]
+    fn placeholder_uses_pis_title_when_already_named() {
+        let fresh = PathBuf::from("/store/new.jsonl");
+        let rows = sessions_with_placeholder(&[], Some(&fresh), Some("Fix login bug"), None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "Fix login bug");
+        assert_eq!(rows[0].first_message, "");
+    }
+
+    #[test]
+    fn no_placeholder_when_current_session_is_on_disk() {
+        let fresh = PathBuf::from("/store/new.jsonl");
+        let store = vec![store_session("new", "/work/alpha")];
+        let rows =
+            sessions_with_placeholder(&store, Some(&fresh), None, Some(Path::new("/work/alpha")));
+        assert_eq!(rows.len(), 1, "duplicate row for the same session");
+        assert_eq!(rows[0].id, "new", "the real on-disk row must win");
+    }
+
+    #[test]
+    fn no_placeholder_without_an_open_session() {
+        let store = vec![store_session("old", "/work/alpha")];
+        let rows = sessions_with_placeholder(&store, None, None, None);
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn empty_store_with_open_session_is_not_empty() {
+        // A brand-new store plus a fresh session: the sidebar must render
+        // the session row, not the "No sessions yet" empty state.
+        let rows = sessions_with_placeholder(
+            &[],
+            Some(&PathBuf::from("/store/new.jsonl")),
+            None,
+            Some(Path::new("/work/beta")),
+        );
+        assert!(!rows.is_empty());
     }
 }
 

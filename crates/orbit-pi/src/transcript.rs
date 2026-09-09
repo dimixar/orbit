@@ -1279,11 +1279,13 @@ impl Transcript {
     /// Render into the chat panel — rail + centered 760px column. The
     /// workspace roots the changed-files Review git diff; the viewport
     /// height caps the rail, and the main-area width gates its visibility.
+    /// `review_changes` wires the cards' Review buttons to the side pane.
     pub fn render(
         &self,
         workspace: Option<&Path>,
         viewport_height: Pixels,
         main_width: Pixels,
+        review_changes: Option<crate::transcript_view::ReviewOpener>,
         cx: &gpui::App,
     ) -> impl IntoElement + use<> {
         self.resync_list();
@@ -1320,6 +1322,7 @@ impl Transcript {
                 rail_autoscroll: self.rail_autoscroll.clone(),
                 summary_files,
                 summary_finished_at,
+                review_changes,
             },
             cx,
         )

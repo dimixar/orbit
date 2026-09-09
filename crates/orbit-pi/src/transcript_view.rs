@@ -20,10 +20,10 @@ use std::{
 };
 
 use gpui::{
-    div, img, linear_color_stop, linear_gradient, list, point, prelude::*, px, relative, svg,
-    AnyElement, ClipboardItem, ElementId, Font, FontFeatures, FontStyle, FontWeight, Hsla,
-    ImageSource, InteractiveText, ObjectFit, Pixels, ScrollHandle, SharedString,
-    StrikethroughStyle, StyledText, TextRun, UnderlineStyle,
+    div, img, linear_color_stop, linear_gradient, list, point, prelude::*, px, relative, svg, AnyElement,
+    App, ClipboardItem, ElementId, Font, FontFeatures, FontStyle, FontWeight, Hsla, ImageSource,
+    InteractiveText, ObjectFit, Pixels, ScrollHandle, SharedString, StrikethroughStyle, StyledText,
+    TextRun, UnderlineStyle, Window,
 };
 
 use std::ops::Range;
@@ -35,6 +35,11 @@ use serde_json::Value;
 use crate::message_scroller::{self, MessageScrollerState};
 use crate::theme::{self, Theme};
 use crate::transcript::{changed_files, ChatMessage, Step, ToolCall};
+
+/// Opens the changed-files Review in the side pane (see `sidepane.rs`) —
+/// handed down from the app so the transcript's Review buttons can point
+/// at it without knowing the pane exists.
+pub(crate) type ReviewOpener = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// Waku `CONTENT_MAX_WIDTH` (the `max-w-[760px]` transcript column).
 const CONTENT_MAX_WIDTH: f32 = 960.0;
@@ -105,6 +110,9 @@ pub(crate) struct TranscriptView {
     /// When the settled run finished (last message's timestamp) — shown in
     /// the summary card's footer next to the copy affordance.
     pub summary_finished_at: Option<i64>,
+    /// Opens the changed-files Review in the side pane (the cards'
+    /// "Review" buttons); `None` hides the buttons.
+    pub review_changes: Option<ReviewOpener>,
 }
 
 struct RowPaint {
@@ -129,6 +137,7 @@ struct RowPaint {
     scroller: MessageScrollerState,
     expanded_tools: ExpandedTools,
     copied_sections: CopiedSections,
+    review_changes: Option<ReviewOpener>,
 }
 
 pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl IntoElement + use<> {
@@ -150,6 +159,7 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
     let scroller = view.scroller.clone();
     let summary_files = view.summary_files.clone();
     let summary_finished_at = view.summary_finished_at;
+    let review_changes = view.review_changes.clone();
 
     let (user_turns, active_turn) = {
         let messages = messages.borrow();
@@ -224,6 +234,7 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
                 expanded_files.borrow().contains(&ix),
                 expanded_files.clone(),
                 scroller.clone(),
+                review_changes.clone(),
             );
             // Waku-style footer under the summary card: copy affordance
             // (duplicates the changed-file list) + settled timestamp.
@@ -328,6 +339,7 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
             scroller: scroller.clone(),
             expanded_tools: expanded_tools.clone(),
             copied_sections: copied_sections.clone(),
+            review_changes: review_changes.clone(),
         })
         .into_any_element()
     })
@@ -845,6 +857,7 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
                     paint.files_open,
                     paint.expanded_files.clone(),
                     paint.scroller.clone(),
+                    paint.review_changes.clone(),
                 )),
         );
     }
@@ -2466,6 +2479,7 @@ fn render_changed_files(
     expanded: bool,
     expanded_files: Rc<RefCell<HashSet<usize>>>,
     scroller: MessageScrollerState,
+    review_changes: Option<ReviewOpener>,
 ) -> impl IntoElement {
     const EXPANDED_PREVIEW_LIMIT: usize = 12;
     let additions: u64 = files.iter().map(|(_, added, _)| *added).sum();
@@ -2521,11 +2535,9 @@ fn render_changed_files(
         );
     }
 
-    // Review affordance: pi's RPC exposes no diff, so build one from the
-    // workspace's git repo and open it in the default text editor.
-    let review = workspace.map(|workspace| {
-        let workspace = workspace.to_path_buf();
-        let files = files.to_vec();
+    // Review affordance: opens the changed-files diff in the right side
+    // pane's Review tab (Waku parity — no external editor hop).
+    let review = review_changes.map(|review| {
         div()
             .id(ElementId::NamedInteger(
                 "review-changes".into(),
@@ -2547,7 +2559,7 @@ fn render_changed_files(
             .hover(|style| style.bg(theme.bg_raised))
             .child(glyph("icons/file-diff.svg", 12., theme.text_3))
             .child("Review")
-            .on_click(move |_, _, _| open_review_diff(&workspace, &files))
+            .on_click(move |_, window, cx| review(window, cx))
     });
 
     let mut header = div()
@@ -2681,41 +2693,6 @@ fn render_changed_files(
     }
 
     card
-}
-
-/// Review action: `git diff HEAD` over the task's changed files, opened in
-/// the default text editor. Workspaces without an uncommitted diff still
-/// get the per-file change list the transcript tracked.
-fn open_review_diff(workspace: &Path, files: &[(String, u64, u64)]) {
-    let mut command = std::process::Command::new("git");
-    command
-        .current_dir(workspace)
-        .arg("diff")
-        .arg("HEAD")
-        .arg("--");
-    for (path, _, _) in files {
-        command.arg(workspace_relative_path(path, Some(workspace)));
-    }
-    let text = match command.output().ok().filter(|out| out.status.success()) {
-        Some(out) if !String::from_utf8_lossy(&out.stdout).trim().is_empty() => {
-            String::from_utf8_lossy(&out.stdout).into_owned()
-        }
-        _ => {
-            let mut fallback = String::from("Changes in this task (no uncommitted git diff):\n\n");
-            for (path, added, removed) in files {
-                let path = workspace_relative_path(path, Some(workspace));
-                fallback.push_str(&format!("{path}  +{added} -{removed}\n"));
-            }
-            fallback
-        }
-    };
-    let path = std::env::temp_dir().join("orbit-review.diff");
-    if std::fs::write(&path, text).is_ok() {
-        let _ = std::process::Command::new("open")
-            .arg("-t")
-            .arg(&path)
-            .spawn();
-    }
 }
 
 fn toggle_index(set: &Rc<RefCell<HashSet<usize>>>, ix: usize) {

@@ -80,7 +80,9 @@ fn read_head_branch(cwd: &Path) -> Option<String> {
         .or_else(|| head.get(..7).map(str::to_string))
 }
 
-fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
+/// Run a git command in `cwd`, returning trimmed stdout. Shared with the
+/// Review side pane (see `sidepane.rs`).
+pub(crate) fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     let output = Command::new("git")
         .args(args)
         .current_dir(cwd)

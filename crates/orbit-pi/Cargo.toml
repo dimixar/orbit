@@ -25,6 +25,8 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # base64 payloads for prompt image attachments
 base64 = "0.22"
 devicons = "0.6"
+# Reader-mode fetches for the Browser side-pane tab
+ureq = { version = "2", default-features = false, features = ["tls"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Match gpui 0.2.2 so we can set the Dock icon from the embedded PNG
