@@ -34,6 +34,7 @@ use crate::model_selector::{
     provider_icon, thinking_display, thinking_icon, ModelSelector, PickerKind,
 };
 use crate::model_selector_match::is_model_selected;
+use crate::onboarding::{self, Dependency};
 use crate::platform::{self, ExternalApp};
 use crate::session_picker::SessionPicker;
 use crate::sessions::{self, SessionInfo};
@@ -182,6 +183,14 @@ pub struct OrbitApp {
     preferred_open_in_app: Option<String>,
     /// Keeps the theme global observer alive so a settings toggle redraws.
     _theme_sub: Subscription,
+    /// Onboarding dependency check results (pi, node, git).
+    deps: Vec<Dependency>,
+    /// Whether the setup page's Refresh check is in flight (spins the button).
+    refreshing: bool,
+    /// Whether the top-bar session-details popover is open.
+    session_details_open: bool,
+    /// The `sessionId` pi reports for the active session (its task id).
+    session_id: Option<String>,
 }
 
 /// An image queued to ride along with the next prompt.
@@ -292,6 +301,10 @@ impl OrbitApp {
             cx.notify();
         });
 
+        // Probe the runtime pieces we need (pi, node, git) so the setup page
+        // can show install commands when something is missing.
+        let deps = onboarding::check_dependencies();
+
         let mut app = Self {
             client,
             sidebar_width: px(SIDEBAR_DEFAULT_W),
@@ -345,6 +358,10 @@ impl OrbitApp {
             branch_operation_pending: false,
             preferred_open_in_app: platform::load_preferred_open_in_app(),
             _theme_sub: theme_sub,
+            deps,
+            refreshing: false,
+            session_details_open: false,
+            session_id: None,
         };
 
         if app.client.is_some() {
@@ -627,6 +644,9 @@ impl OrbitApp {
                 }
                 if let Some(file) = data.get("sessionFile").and_then(Value::as_str) {
                     self.adopt_session_file(PathBuf::from(file));
+                }
+                if let Some(id) = data.get("sessionId").and_then(Value::as_str) {
+                    self.session_id = Some(id.to_string());
                 }
                 self.sync_model_selector(cx);
                 self.refresh_context_stats();
@@ -2067,10 +2087,263 @@ impl OrbitApp {
     }
 
     fn on_info_click(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        // The top-bar info affordance opens Settings → About.
-        self.settings_open = true;
-        self.settings_section = SettingsSection::About;
+        // The top-bar info affordance shows the active session's details.
+        self.session_details_open = !self.session_details_open;
         cx.notify();
+    }
+
+    /// Stage, commit, and push the workspace's changes (the details popover's
+    /// "Commit or push" row). Runs off the main thread.
+    fn commit_and_push(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(cwd) = self
+            .current_workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+        else {
+            self.status = "No workspace".into();
+            cx.notify();
+            return;
+        };
+        if self.branch_operation_pending {
+            return;
+        }
+        self.branch_operation_pending = true;
+        self.session_details_open = false;
+        cx.notify();
+
+        let message = format!("orbit: {}", chrono::Local::now().format("%Y-%m-%d %H:%M"));
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::git::commit_and_push(&cwd, &message) })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                app.branch_operation_pending = false;
+                match result {
+                    Ok(msg) => app.status = msg,
+                    Err(err) => app.status = format!("Commit or push failed: {err}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The top-bar info popover: active session's environment + identifiers.
+    fn render_session_details_popup(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if !self.session_details_open {
+            return None;
+        }
+        let theme = *theme::get(cx);
+        let this = cx.entity();
+        let title = self.current_title.clone().unwrap_or_else(|| "New task".into());
+        let session_id = self.session_id.clone().unwrap_or_default();
+        let session_file = self
+            .current_session_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let workspace = self
+            .current_workspace
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+        let model = self.model_label.clone();
+        let thinking = self.thinking_label.clone();
+
+        let popup = div()
+            .w(px(300.))
+            .font_family(theme::ui_font_family())
+            .rounded(px(8.))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.menu_bg)
+            .shadow(theme.popover_shadow())
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .occlude()
+            .on_mouse_down_out({
+                let this = this.clone();
+                move |_: &MouseDownEvent, _, cx: &mut App| {
+                    this.update(cx, |app, cx| {
+                        if app.session_details_open {
+                            app.session_details_open = false;
+                            cx.notify();
+                        }
+                    });
+                }
+            })
+            .child(
+                div()
+                    .px(px(12.))
+                    .py(px(10.))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text_3)
+                            .child(if session_id.is_empty() {
+                                "No active session".to_string()
+                            } else {
+                                "Session details".to_string()
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .px(px(12.))
+                    .py(px(6.))
+                    .text_size(theme.ui_px(11.))
+                    .text_color(theme.text_3)
+                    .child("Environment"),
+            )
+            .child(
+                div()
+                    .id(ElementId::Name("sess-commit-push".into()))
+                    .px(px(12.))
+                    .py(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .on_click({
+                        let this = this.clone();
+                        move |_, window, cx| {
+                            this.update(cx, |app, cx| {
+                                app.commit_and_push(window, cx);
+                            });
+                        }
+                    })
+                    .child(icon("icons/branch.svg", 13., theme.text_2))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.text)
+                            .child("Commit or push"),
+                    )
+                    .child(icon("icons/chevron-right.svg", 11., theme.text_3)),
+            )
+            .child(
+                div()
+                    .id(ElementId::Name("sess-compare-branch".into()))
+                    .px(px(12.))
+                    .py(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .on_click({
+                        let this = this.clone();
+                        move |_, window, cx| {
+                            this.update(cx, |app, cx| {
+                                app.toggle_branch_picker(window, cx);
+                            });
+                        }
+                    })
+                    .child(icon("icons/file-diff.svg", 13., theme.text_2))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.text)
+                            .child("Compare branch"),
+                    )
+                    .child(icon("icons/chevron-right.svg", 11., theme.text_3)),
+            )
+            .child(self.session_detail_row(0, "Session ID", &session_id, theme))
+            .child(self.session_detail_row(1, "Session file", &session_file, theme))
+            .child(self.session_detail_row(2, "Workspace", &workspace, theme))
+            .child(self.session_detail_row(3, "Model", &model, theme))
+            .child(self.session_detail_row(4, "Thinking", &thinking, theme));
+
+        Some(
+            div()
+                .absolute()
+                .bottom_0()
+                .right_0()
+                .size(px(0.))
+                .child(
+                    anchored()
+                        .position_mode(AnchoredPositionMode::Local)
+                        .anchor(Corner::TopRight)
+                        .offset(point(px(0.), px(4.)))
+                        .snap_to_window()
+                        .child(deferred(popup)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// A read-only identifier row in the session-details popover, with a copy
+    /// affordance that copies `value` to the clipboard.
+    fn session_detail_row(
+        &self,
+        ix: usize,
+        label: &str,
+        value: &str,
+        theme: Theme,
+    ) -> impl IntoElement + use<> {
+        let label = label.to_string();
+        let value = value.to_string();
+        let v = value.clone();
+        div()
+            .px(px(12.))
+            .py(px(8.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text_3)
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.text)
+                            .truncate()
+                            .child(if value.is_empty() { "—".to_string() } else { value }),
+                    ),
+            )
+            .child(
+                div()
+                    .id(("sess-copy", ix))
+                    .p_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .on_click(move |_, _window, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(v.clone()));
+                    })
+                    .child(icon("icons/copy.svg", 12., theme.text_3)),
+            )
     }
 
     fn on_toggle_sidebar(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -2605,11 +2878,13 @@ impl Render for OrbitApp {
             .child(
                 div()
                     .id("info")
+                    .relative()
                     .p_1()
                     .rounded_sm()
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.bg_hover))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_info_click))
+                    .children(self.render_session_details_popup(cx))
                     .child(icon("icons/info.svg", 16., theme.text_2)),
             );
 
@@ -2755,6 +3030,10 @@ impl Render for OrbitApp {
             // ── main ──
             .child(if self.settings_open {
                 self.render_settings(cx).into_any_element()
+            } else if !self.dependencies_ready() {
+                // Missing runtime pieces (pi / node): show the setup page
+                // with install commands instead of the empty composer.
+                self.render_onboarding(cx).into_any_element()
             } else {
                 div()
                     .flex_1()
@@ -3222,6 +3501,314 @@ impl OrbitApp {
                             ),
                     ),
             )
+    }
+
+    /// Whether every required runtime dependency is installed.
+    fn dependencies_ready(&self) -> bool {
+        onboarding::all_required_installed(&self.deps)
+    }
+
+    /// Re-run the dependency probe and, if `pi` just became available, spawn
+    /// the agent client. Runs the probe off the main thread and spins the
+    /// setup page's Refresh button while it's in flight.
+    fn refresh_setup(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        if self.refreshing {
+            return; // ignore double-clicks while a refresh is running
+        }
+        self.refreshing = true;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let deps = cx
+                .background_executor()
+                .spawn(async {
+                    // Short pause so the spinner reads as "working" rather than
+                    // a flash before the probe returns.
+                    std::thread::sleep(Duration::from_millis(250));
+                    onboarding::check_dependencies()
+                })
+                .await;
+            let ready = onboarding::all_required_installed(&deps);
+            let _ = this.update(cx, |app, cx| {
+                app.deps = deps;
+                app.refreshing = false;
+                if ready && app.client.is_none() {
+                    let workspace = app
+                        .current_workspace
+                        .clone()
+                        .or_else(|| std::env::current_dir().ok())
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    match PiClient::spawn(&workspace, None) {
+                        Ok(client) => {
+                            app.client = Some(client);
+                            app.send(CommandBody::GetState, "get_state");
+                            app.refresh_catalogs();
+                            app.status = "Connected".into();
+                        }
+                        Err(err) => app.status = format!("pi spawn failed: {err}"),
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Full-page setup screen shown when a required dependency is missing.
+    fn render_onboarding(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let theme = *theme::get(cx);
+        let missing = onboarding::missing_required_count(&self.deps);
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .relative()
+            .overflow_hidden()
+            .child(Self::new_task_background(theme))
+            .child(
+                div()
+                    .relative()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .px(px(24.))
+                    .pb(px(40.))
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(560.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(18.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .gap(px(10.))
+                                    .child(
+                                        div()
+                                            .size(px(44.))
+                                            .rounded_full()
+                                            .bg(theme.accent.opacity(0.12))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(icon("icons/spark.svg", 18., theme.accent)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(theme.ui_px(22.))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.text)
+                                            .child("Set up Orbit"),
+                                    )
+                                    .child(
+                                        div()
+                                            .max_w(px(420.))
+                                            .text_size(theme.ui_px(13.))
+                                            .text_color(theme.text_3)
+                                            .text_align(TextAlign::Center)
+                                            .child(
+                                                "A few pieces are missing before Orbit can run the pi agent. Install them, then refresh.",
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(10.))
+                                    .children(self.deps.iter().enumerate().map(|(ix, dep)| {
+                                        self.render_dependency_row(dep, ix, cx).into_any_element()
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap(px(14.))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.))
+                                            .text_size(theme.ui_px(12.))
+                                            .text_color(theme.text_3)
+                                            .child(
+                                                div().size(px(8.)).rounded_full().bg(theme.stop_red),
+                                            )
+                                            .child(if missing > 0 {
+                                                format!("{missing} required piece(s) missing")
+                                            } else {
+                                                "Ready".to_string()
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("refresh-setup")
+                                            .px(px(12.))
+                                            .py(px(6.))
+                                            .rounded_md()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.))
+                                            .when(self.refreshing, |b| b.opacity(0.55))
+                                            .when(!self.refreshing, |b| {
+                                                b.cursor_pointer().hover(|s| s.bg(theme.bg_hover))
+                                            })
+                                            .on_click({
+                                                let this = cx.entity();
+                                                move |_, window, cx| {
+                                                    this.update(cx, |app, cx| {
+                                                        app.refresh_setup(window, cx);
+                                                    });
+                                                }
+                                            })
+                                            .child(if self.refreshing {
+                                                gpui::svg()
+                                                    .path("icons/loader.svg")
+                                                    .size(px(13.))
+                                                    .text_color(theme.text_2)
+                                                    .with_animation(
+                                                        "refresh-spin",
+                                                        Animation::new(Duration::from_millis(800))
+                                                            .repeat(),
+                                                        |svg, delta| {
+                                                            svg.with_transformation(
+                                                                Transformation::rotate(radians(
+                                                                    delta * std::f32::consts::TAU,
+                                                                )),
+                                                            )
+                                                        },
+                                                    )
+                                                    .into_any_element()
+                                            } else {
+                                                icon("icons/refresh.svg", 13., theme.text_2)
+                                                    .into_any_element()
+                                            })
+                                            .child(
+                                                div()
+                                                    .text_size(theme.ui_px(12.))
+                                                    .text_color(theme.text_2)
+                                                    .child(if self.refreshing {
+                                                        "Checking…"
+                                                    } else {
+                                                        "Refresh"
+                                                    }),
+                                            ),
+                                    ),
+                            ),
+                    ),
+            )
+    }
+
+    /// One dependency row: status dot, name + detail, and either a version
+    /// chip (installed) or the install command with a copy affordance.
+    fn render_dependency_row(
+        &self,
+        dep: &Dependency,
+        ix: usize,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let theme = *theme::get(cx);
+        let status_color = if dep.installed {
+            theme.ok_green
+        } else {
+            theme.stop_red
+        };
+
+        div()
+            .w_full()
+            .px(px(14.))
+            .py(px(12.))
+            .rounded_lg()
+            .bg(theme.bg_raised)
+            .border_1()
+            .border_color(theme.border)
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(div().size(px(9.)).rounded_full().bg(status_color))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_size(theme.ui_px(13.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(dep.name),
+                            )
+                            .child(
+                                div()
+                                    .text_size(theme.ui_px(11.))
+                                    .text_color(theme.text_3)
+                                    .child(if dep.required { "required" } else { "optional" }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(11.5))
+                            .text_color(theme.text_3)
+                            .child(dep.detail),
+                    ),
+            )
+            .child(if dep.installed {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .text_size(theme.ui_px(11.5))
+                    .text_color(theme.ok_green)
+                    .child(icon("icons/check.svg", 12., theme.ok_green))
+                    .child(dep.version.clone().unwrap_or_else(|| "installed".into()))
+                    .into_any_element()
+            } else {
+                let cmd = dep.install_hint;
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .px(px(8.))
+                            .py(px(4.))
+                            .rounded_md()
+                            .bg(theme.code_bg)
+                            .border_1()
+                            .border_color(theme.border)
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.code_text)
+                            .child(cmd),
+                    )
+                    .child(
+                        div()
+                            .id(("copy", ix))
+                            .p_1()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.bg_hover))
+                            .on_click(move |_, _window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(cmd.to_string()));
+                            })
+                            .child(icon("icons/copy.svg", 13., theme.text_2)),
+                    )
+                    .into_any_element()
+            })
     }
 
     /// Status bar under the composer: workspace / transport / branch on the

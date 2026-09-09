@@ -59,6 +59,19 @@ pub fn create_and_checkout_branch(cwd: &Path, name: &str) -> Result<(), String> 
     run_git(cwd, &["checkout", "-b", name]).map(|_| ())
 }
 
+/// Stage all changes, commit with `message`, and push to the remote. Returns
+/// an error (instead of a failed `git commit`) when the tree is clean.
+pub fn commit_and_push(cwd: &Path, message: &str) -> Result<String, String> {
+    let dirty = run_git(cwd, &["status", "--porcelain"])?;
+    if dirty.trim().is_empty() {
+        return Err("No changes to commit".into());
+    }
+    run_git(cwd, &["add", "-A"])?;
+    run_git(cwd, &["commit", "-m", message])?;
+    run_git(cwd, &["push"])?;
+    Ok("Committed and pushed".into())
+}
+
 fn read_head_branch(cwd: &Path) -> Option<String> {
     let head = std::fs::read_to_string(cwd.join(".git/HEAD")).ok()?;
     let head = head.trim();

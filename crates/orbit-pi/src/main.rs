@@ -15,6 +15,7 @@ mod mentions;
 mod message_scroller;
 mod model_selector;
 mod model_selector_match;
+mod onboarding;
 mod session_picker;
 mod sessions;
 mod theme;

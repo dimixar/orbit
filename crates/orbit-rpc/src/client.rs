@@ -14,8 +14,9 @@
 
 use std::{
     collections::{HashMap, VecDeque},
+    ffi::OsString,
     io::{BufRead, BufReader, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Stdio},
     sync::{
         mpsc::{self, Receiver, Sender},
@@ -33,6 +34,22 @@ use crate::types::{CommandBody, Event};
 pub const PI_BIN_ENV: &str = "PI_BIN";
 /// Cap on retained stderr lines (dropped oldest first).
 const STDERR_RING_CAP: usize = 200;
+
+/// Common install locations probed for `pi` when it isn't on `PATH`. `pi` is
+/// a Node script installed via Homebrew, so the launcher and `node` both live
+/// under these `bin` dirs. A bundled `.app` is launched with a minimal PATH
+/// (`/usr/bin:/bin:/usr/sbin:/sbin`), so we probe these to keep packaged
+/// builds working without the user exporting anything.
+const PI_SEARCH_DIRS: &[&str] = &[
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/opt/local/bin",
+    "/usr/bin",
+    "/bin",
+];
+/// Dirs prepended to the child's PATH so `node` (and `pi`) resolve from a
+/// bundled app launch.
+const PATH_EXTRA_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"];
 
 pub struct PiClient {
     child: Child,
@@ -54,7 +71,7 @@ impl PiClient {
     /// so sessions created here are the same ones the CLI sees. Pass an
     /// explicit dir to isolate (tests, throwaway demos).
     pub fn spawn(workspace_dir: &Path, session_dir: Option<&Path>) -> Result<Self> {
-        let bin = std::env::var(PI_BIN_ENV).unwrap_or_else(|_| "pi".into());
+        let bin = resolve_pi_bin();
         let mut command = std::process::Command::new(&bin);
         // Waku parity: `--approve` auto-approves tool calls so the RPC
         // session never stalls on an approval dialog it cannot render, and
@@ -62,6 +79,10 @@ impl PiClient {
         command
             .args(["--mode", "rpc", "--approve"])
             .env("PI_SKIP_VERSION_CHECK", "1")
+            // Augment PATH with Homebrew-style dirs so `node` (required by
+            // pi's `#!/usr/bin/env node` shebang) resolves when launched from
+            // a bundled `.app`.
+            .env("PATH", augmented_path())
             .current_dir(workspace_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -263,4 +284,51 @@ impl Drop for PiClient {
             wire: String::new(),
         });
     }
+}
+
+/// Resolve the `pi` executable to spawn.
+///
+/// `PI_BIN` (if set) wins. Otherwise we look for `pi` on `PATH`, then in the
+/// common Homebrew/install dirs, and finally fall back to the bare name so
+/// any spawn error still names something meaningful.
+fn resolve_pi_bin() -> String {
+    if let Ok(bin) = std::env::var(PI_BIN_ENV) {
+        if !bin.is_empty() {
+            return bin;
+        }
+    }
+    let name = if cfg!(windows) { "pi.exe" } else { "pi" };
+    if let Some(found) = find_on_path(name) {
+        return found;
+    }
+    for dir in PI_SEARCH_DIRS {
+        let candidate = Path::new(dir).join(name);
+        if candidate.is_file() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+    name.to_string()
+}
+
+/// Walk `PATH` and return the first executable named `name` found on it.
+fn find_on_path(name: &str) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+/// The PATH handed to the child: common install dirs prepended to whatever
+/// PATH the parent process has.
+fn augmented_path() -> OsString {
+    let mut dirs: Vec<PathBuf> = PATH_EXTRA_DIRS.iter().map(PathBuf::from).collect();
+    if let Some(path) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&path));
+    }
+    std::env::join_paths(dirs)
+        .unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
 }
