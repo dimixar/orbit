@@ -113,8 +113,11 @@ fn read_session(path: &Path) -> Option<SessionInfo> {
             }
         }
     }
+    // A header-only file is a draft: pi writes it at `new_session` time,
+    // before anything is sent. Don't list it (Waku drafts parity) — the
+    // session joins the sidebar once its first user message lands.
     if title.is_empty() {
-        title = "(empty session)".into();
+        return None;
     }
 
     Some(SessionInfo {
@@ -217,6 +220,30 @@ mod tests {
     }
 
     #[test]
+    fn header_only_session_is_a_draft_and_not_listed() {
+        // pi writes the session file at `new_session` time; it must not show
+        // up in the sidebar until the first user message lands.
+        let dir = std::env::temp_dir().join("orbit-draft-session-test");
+        fs::create_dir_all(&dir).unwrap();
+        let draft = dir.join("2026-01-01T00-00-00-000Z_draft.jsonl");
+        fs::write(
+            &draft,
+            "{\"type\":\"session\",\"id\":\"draft\",\"cwd\":\"/tmp/ws\"}\n",
+        )
+        .unwrap();
+        assert!(read_session(&draft).is_none());
+        // Once a user message lands, the session is listable.
+        fs::write(
+            &draft,
+            "{\"type\":\"session\",\"id\":\"draft\",\"cwd\":\"/tmp/ws\"}\n\
+             {\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n",
+        )
+        .unwrap();
+        assert_eq!(read_session(&draft).map(|s| s.title).as_deref(), Some("hi"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn load_sessions_orders_by_modified_not_creation() {
         // Two sessions whose creation stamps and modified times disagree:
         // the older-created but recently-touched one must come first.
@@ -227,7 +254,10 @@ mod tests {
         for (path, id) in [(&older_created, "aaa"), (&newer_created, "bbb")] {
             fs::write(
                 path,
-                format!("{{\"type\":\"session\",\"id\":\"{id}\",\"cwd\":\"/tmp/ws\"}}\n"),
+                format!(
+                    "{{\"type\":\"session\",\"id\":\"{id}\",\"cwd\":\"/tmp/ws\"}}\n\
+                     {{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":\"hi\"}}}}\n"
+                ),
             )
             .unwrap();
         }

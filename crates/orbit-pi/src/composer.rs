@@ -67,7 +67,7 @@ impl ComposerInput {
         Self {
             focus_handle: cx_focus_handle(_cx),
             content: String::new(),
-            placeholder: "Do anything...".into(),
+            placeholder: "Do anything…".into(),
             key_context: "Composer".into(),
             selected_range: 0..0,
             selection_reversed: false,

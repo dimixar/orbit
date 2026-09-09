@@ -1,7 +1,7 @@
 //! Git branch picker — search, checkout, and create-from-current-state.
 //!
 //! Opened from the status-bar branch chip; follows the same popover conventions
-//! as [`crate::session_picker::SessionPicker`].
+//! as [`crate::command_palette::CommandPalette`].
 
 use gpui::{
     div, point, prelude::*, px, App, Context, ElementId, Entity, FocusHandle, Focusable,
@@ -25,7 +25,6 @@ enum Mode {
 }
 
 pub struct BranchPicker {
-    workspace_label: String,
     branches: Vec<String>,
     current: String,
     filter: Entity<ComposerInput>,
@@ -60,7 +59,6 @@ impl BranchPicker {
                 .with_key_context("Composer Picker")
         });
         Self {
-            workspace_label,
             branches,
             current,
             filter,

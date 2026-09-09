@@ -47,6 +47,8 @@ pub struct Dependency {
     /// Human name shown in the list.
     pub name: &'static str,
     /// Executable to probe on disk (may differ from `name`, e.g. `node`).
+    /// Read by tests; in the UI the install hint already names the binary.
+    #[allow(dead_code)]
     pub bin: &'static str,
     /// True when Orbit can't run without it (vs. a nice-to-have).
     pub required: bool,

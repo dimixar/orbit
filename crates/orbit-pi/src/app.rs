@@ -17,16 +17,18 @@ use std::{
 use base64::Engine as _;
 use gpui::{
     anchored, deferred, div, img, list, point, prelude::*, px, radians, svg, uniform_list,
-    AnchoredPositionMode, Animation, AnimationExt, AnyElement, App, ClipboardItem, Context,
-    Corner, DragMoveEvent, ElementId, Entity, ExternalPaths, FocusHandle, Focusable, FontWeight,
-    Hsla, ImageSource, IntoElement, ListAlignment, ListState, MouseButton, MouseDownEvent,
-    MouseUpEvent, ObjectFit, CursorStyle, Pixels, Render, SharedString, StatefulInteractiveElement,
-    Subscription, TextAlign, Transformation, Window, WindowControlArea,
+    AnchoredPositionMode, Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Corner,
+    CursorStyle, DragMoveEvent, ElementId, Entity, ExternalPaths, FocusHandle, Focusable,
+    FontWeight, Hsla, ImageSource, IntoElement, ListAlignment, ListState, MouseButton,
+    MouseDownEvent, MouseUpEvent, ObjectFit, Pixels, Render, SharedString,
+    StatefulInteractiveElement, Subscription, TextAlign, Transformation, Window, WindowControlArea,
 };
 use orbit_rpc::{CommandBody, ContextUsage, Event, PiClient};
 use serde_json::Value;
 
 use crate::branch_picker::BranchPicker;
+use crate::workspace_picker::{WorkspaceEntry, WorkspacePicker};
+use crate::command_palette::{self, CommandPalette, PaletteCommand, PaletteSnapshot};
 use crate::composer::ComposerInput;
 use crate::context_meter::{self, ContextPopup};
 use crate::mentions::{self, AcEntry, SharedAutocomplete, SlashCommand, Trigger, TriggerKind};
@@ -36,7 +38,6 @@ use crate::model_selector::{
 use crate::model_selector_match::is_model_selected;
 use crate::onboarding::{self, Dependency};
 use crate::platform::{self, ExternalApp};
-use crate::session_picker::SessionPicker;
 use crate::sessions::{self, SessionInfo};
 use crate::sidepane::{SidePane, SidePaneResize};
 use crate::theme::{self, Theme, ThemeId, ThemeMode};
@@ -44,11 +45,8 @@ use crate::transcript::{self, Transcript};
 
 const SIDEBAR_DEFAULT_W: f32 = 248.;
 const SIDEBAR_MIN_W: f32 = 200.;
-const SIDEBAR_MAX_W: f32 = 440.;
 /// Sessions shown under each workspace group before "Show more" appears.
 const SIDEBAR_GROUP_SESSIONS_VISIBLE: usize = 10;
-/// Height of the sidebar nav action rows (New Task, Search).
-const SIDEBAR_ACTION_ROW_H: f32 = 32.;
 /// Room the side-pane resize keeps for the transcript column.
 const PANE_MAX_RESERVE: f32 = 480.;
 
@@ -69,6 +67,16 @@ const CONTENT_MAX_W: f32 = 960.;
 const AUTOCOMPLETE_LIMIT: usize = 8;
 /// Images that may ride along with one prompt.
 const MAX_ATTACHMENTS: usize = 8;
+
+/// How long a status message stays visible in the status bar.
+const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(6);
+
+/// Rows in the composer's "+" add menu (icon, label, trailing hint).
+const ADD_MENU_ITEMS: [(&str, &str, &str); 3] = [
+    ("icons/image.svg", "Attach image…", ""),
+    ("icons/file.svg", "Attach file…", ""),
+    ("icons/at-sign.svg", "Mention file", "@"),
+];
 
 /// Maximum sessions kept alive in the background. Beyond this, settled
 /// sessions are evicted (their process torn down); running ones never are.
@@ -108,6 +116,9 @@ pub struct OrbitApp {
     thinking_label: String,
     busy: bool,
     status: String,
+    /// When the current `status` message was set; the status bar shows it
+    /// for [`STATUS_MESSAGE_TTL`] and then lets it lapse.
+    status_at: Option<Instant>,
     current_title: Option<String>,
     current_workspace: Option<PathBuf>,
     /// Real line counts from edit/write tool calls this session.
@@ -122,8 +133,8 @@ pub struct OrbitApp {
     /// kind travels with the entity; creating/dropping this *is* the
     /// open/closed state. Each popup is anchored above its own chip.
     model_selector: Option<(PickerKind, Entity<ModelSelector>)>,
-    /// The session switcher palette (sidebar Search row), if open.
-    session_picker: Option<Entity<SessionPicker>>,
+    /// The window-wide command palette (⌘P / sidebar Search row), if open.
+    command_palette: Option<Entity<CommandPalette>>,
     /// Open row-actions menu in the sessions sidebar (which session's path
     /// plus whether the popup is showing the delete confirmation).
     session_menu: Option<SessionMenu>,
@@ -178,14 +189,27 @@ pub struct OrbitApp {
     open_in_menu_open: bool,
     /// Filter text for the open-in menu.
     open_in_filter: Entity<ComposerInput>,
+    /// Whether the composer's "+" add menu is open.
+    add_menu_open: bool,
+    /// Highlighted row in the add menu (arrow keys + hover move it).
+    add_menu_highlight: usize,
+    /// Focus handle that carries the `AddMenu` key context while the menu
+    /// is open (focus moves here so ↑/↓/Enter/Escape hit the menu, then
+    /// returns to the composer).
+    add_menu_focus: FocusHandle,
     /// Git branch picker anchored to the status-bar branch chip.
     branch_picker: Option<Entity<BranchPicker>>,
+    /// Folder selector anchored under the new-task page's workspace field.
+    workspace_picker: Option<Entity<WorkspacePicker>>,
     /// A checkout/create is running on the background executor.
     branch_operation_pending: bool,
     /// Persisted preferred open-in app id (see [`ExternalApp::id`]).
     preferred_open_in_app: Option<String>,
     /// Keeps the theme global observer alive so a settings toggle redraws.
     _theme_sub: Subscription,
+    /// Keeps the composer observer alive: edits re-render the app so the
+    /// send button's quiet/ready state tracks the text live.
+    _input_sub: Subscription,
     /// Onboarding dependency check results (pi, node, git).
     deps: Vec<Dependency>,
     /// Whether the setup page's Refresh check is in flight (spins the button).
@@ -306,6 +330,10 @@ impl OrbitApp {
             cx.notify();
         });
 
+        // Composer edits notify only the input entity; re-render the app so
+        // the send button's quiet/ready state tracks the text as you type.
+        let input_sub = cx.observe(&input, |_, _, cx| cx.notify());
+
         // Probe the runtime pieces we need (pi, node, git) so the setup page
         // can show install commands when something is missing.
         let deps = onboarding::check_dependencies();
@@ -319,7 +347,7 @@ impl OrbitApp {
             lives: HashMap::new(),
             transcript: Transcript::new(),
             sessions: sessions::load_sessions(),
-            sidebar_list: ListState::new(0, ListAlignment::Top, px(80.)),
+            sidebar_list: ListState::new(0, ListAlignment::Top, px(44.)),
             sidebar_visible: true,
             input,
             model_label: "…".into(),
@@ -327,7 +355,8 @@ impl OrbitApp {
             model_provider: String::new(),
             thinking_label: "…".into(),
             busy: false,
-            status: connect_error,
+            status: connect_error.clone(),
+            status_at: (!connect_error.is_empty()).then(Instant::now),
             current_title: None,
             current_workspace: None,
             added: 0,
@@ -336,7 +365,7 @@ impl OrbitApp {
             available_models: Vec::new(),
             available_thinking_levels: Vec::new(),
             model_selector: None,
-            session_picker: None,
+            command_palette: None,
             session_menu: None,
             settings_open: false,
             settings_section: SettingsSection::General,
@@ -362,10 +391,15 @@ impl OrbitApp {
             open_in_apps: Rc::new(Vec::new()),
             open_in_menu_open: false,
             open_in_filter: open_in_filter,
+            add_menu_open: false,
+            add_menu_highlight: 0,
+            add_menu_focus: cx.focus_handle(),
             branch_picker: None,
+            workspace_picker: None,
             branch_operation_pending: false,
             preferred_open_in_app: platform::load_preferred_open_in_app(),
             _theme_sub: theme_sub,
+            _input_sub: input_sub,
             deps,
             refreshing: false,
             session_details_open: false,
@@ -385,14 +419,27 @@ impl OrbitApp {
         app
     }
 
-    fn send(&mut self, body: CommandBody, label: &str) {
+    /// Record a status message; the status bar surfaces it briefly (see
+    /// [`STATUS_MESSAGE_TTL`]). Internal RPC chatter never calls this —
+    /// only user-meaningful facts and failures.
+    fn set_status(&mut self, message: impl Into<String>) {
+        self.status = message.into();
+        self.status_at = Some(Instant::now());
+    }
+
+    /// Send a command to pi. Returns `false` when the write failed (or
+    /// there is no process) so callers can keep the user's input intact.
+    fn send(&mut self, body: CommandBody, label: &str) -> bool {
         let Some(client) = self.client.as_ref() else {
-            self.status = "pi is not running".into();
-            return;
+            self.set_status("pi is not running");
+            return false;
         };
         match client.send(body) {
-            Ok(_) => self.status = format!("→ {label}"),
-            Err(err) => self.status = format!("send failed: {err}"),
+            Ok(_) => true,
+            Err(err) => {
+                self.set_status(format!("send failed ({label}): {err}"));
+                false
+            }
         }
     }
 
@@ -441,6 +488,14 @@ impl OrbitApp {
 
     /// Heartbeat (~90ms): drain protocol events into the UI.
     pub fn tick(&mut self, cx: &mut Context<Self>) {
+        // Let a lapsed status message disappear from the status bar.
+        if self
+            .status_at
+            .is_some_and(|at| at.elapsed() >= STATUS_MESSAGE_TTL)
+        {
+            self.status_at = None;
+            cx.notify();
+        }
         self.tick_background(cx);
         // Images pasted in the composer become message attachments.
         self.drain_pasted_images(cx);
@@ -497,7 +552,7 @@ impl OrbitApp {
                             .get("finalError")
                             .and_then(|v| v.as_str())
                             .unwrap_or("pi exhausted its automatic retries");
-                        self.status = format!("retry failed: {error}");
+                        self.set_status(format!("retry failed: {error}"));
                     }
                 }
                 Event::AgentSettled => {
@@ -515,7 +570,7 @@ impl OrbitApp {
                 }
                 Event::ProcessExited => {
                     self.busy = false;
-                    self.status = "pi process exited — restart the app".into();
+                    self.set_status("pi process exited — restart the app");
                 }
                 Event::MessageEnd { value } => {
                     // Real edit stats from finalized tool calls.
@@ -643,7 +698,8 @@ impl OrbitApp {
                     if let Some(id) = model.get("id").and_then(serde_json::Value::as_str) {
                         self.model_id = id.to_string();
                     }
-                    if let Some(provider) = model.get("provider").and_then(serde_json::Value::as_str)
+                    if let Some(provider) =
+                        model.get("provider").and_then(serde_json::Value::as_str)
                     {
                         self.model_provider = provider.to_string();
                     }
@@ -774,7 +830,7 @@ impl OrbitApp {
             .update(cx, |input, _| std::mem::take(&mut input.pasted_images));
         for image in &pasted {
             if self.attachments.len() >= MAX_ATTACHMENTS {
-                self.status = format!("at most {MAX_ATTACHMENTS} images per message");
+                self.set_status(format!("at most {MAX_ATTACHMENTS} images per message"));
                 break;
             }
             let index = self.attachments.len();
@@ -793,7 +849,7 @@ impl OrbitApp {
         // Collect any paste that raced the submit tick.
         self.drain_pasted_images(cx);
         // Attached images ride prompts; the steer body carries no image
-        // field, so they are dropped when the message steers a live run.
+        // field, so they stay queued when the message steers a live run.
         let attachments = std::mem::take(&mut self.attachments);
         let images = if attachments.is_empty() {
             None
@@ -808,17 +864,16 @@ impl OrbitApp {
         // Waku behavior: while the agent is mid-turn a follow-up message is
         // a *steer* (injected into the running turn), not a new prompt.
         let steer = self.busy || self.transcript.is_streaming();
-        if steer {
+        let sent = if steer {
             if !attachments.is_empty() {
-                self.status =
-                    "attachments can't ride a steer — send them with the next prompt".into();
+                self.set_status("attachments can't ride a steer — kept for the next prompt");
             }
             self.send(
                 CommandBody::Steer {
                     message: text.clone(),
                 },
                 "steer",
-            );
+            )
         } else {
             self.send(
                 CommandBody::Prompt {
@@ -827,21 +882,32 @@ impl OrbitApp {
                     streaming_behavior: None,
                 },
                 "prompt",
-            );
+            )
+        };
+        if !sent {
+            // Keep the prompt and the queued attachments so the user can
+            // retry (pi offline, broken pipe, …) instead of losing work.
+            self.attachments = attachments;
+            cx.notify();
+            return;
+        }
+        // A steer never carries the queued images — hand them back.
+        if steer && !attachments.is_empty() {
+            self.attachments = attachments;
+            self.transcript.append_user_message(&text, Vec::new());
+            self.input.update(cx, |input, cx| input.clear(cx));
+            cx.notify();
+            return;
         }
         // Show the prompt immediately — pi does not echo it back in RPC mode.
         // The decoded previews ride along so the chat window shows what was
         // attached (pi echoes/snapshots carry image blocks for reloads).
         self.transcript.append_user_message(
             &text,
-            if steer {
-                Vec::new()
-            } else {
-                attachments
-                    .iter()
-                    .filter_map(|a| a.preview.clone())
-                    .collect()
-            },
+            attachments
+                .iter()
+                .filter_map(|a| a.preview.clone())
+                .collect(),
         );
         self.input.update(cx, |input, cx| input.clear(cx));
         cx.notify();
@@ -866,11 +932,26 @@ impl OrbitApp {
     }
 
     fn on_abort(&mut self, _: &crate::AbortRun, window: &mut Window, cx: &mut Context<Self>) {
-        // Escape backs out of the topmost surface: the autocomplete menu
-        // first, then settings, popovers, then a running agent.
+        // Escape backs out of the topmost surface: the command palette (when
+        // focus somehow sits outside it), the autocomplete menu first, then
+        // settings, popovers, then a running agent.
+        if self.command_palette.take().is_some() {
+            self.input.read(cx).focus(window);
+            cx.notify();
+            return;
+        }
+        if self.workspace_picker.take().is_some() {
+            self.input.read(cx).focus(window);
+            cx.notify();
+            return;
+        }
         if self.autocomplete.borrow().open {
             self.autocomplete_dismissed = true;
             cx.notify();
+            return;
+        }
+        if self.add_menu_open {
+            self.close_add_menu(window, cx);
             return;
         }
         if self.settings_open {
@@ -905,7 +986,12 @@ impl OrbitApp {
         self.on_abort(&crate::AbortRun, window, cx);
     }
 
-    fn on_new_session(&mut self, _: &crate::NewSession, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_new_session(
+        &mut self,
+        _: &crate::NewSession,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.send(CommandBody::NewSession, "new_session");
         cx.notify();
     }
@@ -957,11 +1043,11 @@ impl OrbitApp {
                 self.client = Some(client);
                 self.send(CommandBody::NewSession, "new_session");
                 self.refresh_catalogs();
-                self.status = "New session".into();
+                self.set_status("New session");
             }
             Err(err) => {
                 self.client = None;
-                self.status = format!("pi spawn failed: {err}");
+                self.set_status(format!("pi spawn failed: {err}"));
             }
         }
         self.input.read(cx).focus(window);
@@ -976,12 +1062,124 @@ impl OrbitApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.browse_for_folder(window, cx);
+    }
+
+    /// The native folder dialog — the workspace picker's "Choose folder…" row
+    /// and the status-bar chip both land here.
+    fn browse_for_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let picked = rfd::FileDialog::new()
             .set_title("Choose a folder for this task")
             .pick_folder();
         if let Some(folder) = picked {
             self.start_task_in_folder(folder, window, cx);
         }
+    }
+
+    /// Recent workspaces for the folder selector: distinct session folders,
+    /// newest activity first (`load_sessions` pre-sorts), with the current
+    /// workspace pinned to the top even when it has no sessions yet.
+    fn recent_workspaces(&self) -> Vec<WorkspaceEntry> {
+        let current = self
+            .current_workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok());
+        let mut entries: Vec<WorkspaceEntry> = Vec::new();
+        if let Some(cwd) = &current {
+            entries.push(WorkspaceEntry {
+                name: sessions::workspace_label(cwd),
+                path: cwd.clone(),
+                last_active: None,
+            });
+        }
+        for session in &self.sessions {
+            if entries.len() >= crate::workspace_picker::MAX_RECENTS {
+                break;
+            }
+            if entries.iter().any(|e| e.path == session.cwd) {
+                continue;
+            }
+            entries.push(WorkspaceEntry {
+                name: sessions::workspace_label(&session.cwd),
+                path: session.cwd.clone(),
+                last_active: Some(sessions::relative_time(session.modified)),
+            });
+        }
+        entries
+    }
+
+    /// Toggle the workspace picker under the new-task page's folder field.
+    /// Mutually exclusive with the other popovers; Escape/outside-down
+    /// dismiss returns focus to the composer.
+    fn toggle_workspace_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        const GESTURE: Duration = Duration::from_millis(200);
+        if let Some(dismissed) = self.menu_dismissed_at.take() {
+            if dismissed.elapsed() < GESTURE {
+                return;
+            }
+        }
+        if self.workspace_picker.take().is_some() {
+            self.input.read(cx).focus(window);
+            cx.notify();
+            return;
+        }
+        if self.model_selector.is_some() {
+            self.close_model_selector(window, cx);
+        }
+        self.branch_picker = None;
+        self.session_menu = None;
+
+        let entries = self.recent_workspaces();
+        let current = self
+            .current_workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok());
+        // Match the field's width basis exactly (main area = window minus the
+        // sidebar) so the popover lands flush under the card at any size.
+        let main_width = f32::from(window.viewport_size().width)
+            - if self.sidebar_visible && !self.settings_open {
+                self.sidebar_width.into()
+            } else {
+                0.
+            };
+        let width = crate::workspace_picker::width_for_window(main_width);
+
+        let this = cx.weak_entity();
+        let on_pick = Box::new(move |folder: PathBuf, window: &mut Window, cx: &mut App| {
+            this.update(cx, |app, cx| {
+                app.workspace_picker = None;
+                app.start_task_in_folder(folder, window, cx);
+            })
+            .ok();
+        }) as Box<dyn Fn(PathBuf, &mut Window, &mut App)>;
+        let this = cx.weak_entity();
+        let on_browse = Box::new(move |window: &mut Window, cx: &mut App| {
+            this.update(cx, |app, cx| {
+                app.workspace_picker = None;
+                cx.notify();
+                app.browse_for_folder(window, cx);
+            })
+            .ok();
+        }) as Box<dyn Fn(&mut Window, &mut App)>;
+        let this = cx.weak_entity();
+        let on_dismiss = Box::new(move |by_mouse: bool, window: &mut Window, cx: &mut App| {
+            this.update(cx, |app, cx| {
+                if by_mouse {
+                    app.menu_dismissed_at = Some(Instant::now());
+                }
+                app.workspace_picker = None;
+                app.input.read(cx).focus(window);
+                cx.notify();
+            })
+            .ok();
+        }) as Box<dyn Fn(bool, &mut Window, &mut App)>;
+
+        let picker = cx.new(|cx| {
+            WorkspacePicker::new(entries, current, width, on_pick, on_browse, on_dismiss, cx)
+        });
+        window.focus(&picker.read(cx).focus_handle(cx));
+        self.workspace_picker = Some(picker);
+        cx.notify();
     }
 
     /// Start a new task rooted at `folder`: spawn a fresh pi process with
@@ -1008,10 +1206,10 @@ impl OrbitApp {
                 self.client = Some(client);
                 self.send(CommandBody::GetState, "get_state");
                 self.refresh_catalogs();
-                self.status = "New task started".into();
+                self.set_status("New task started");
             }
             Err(err) => {
-                self.status = format!("pi spawn failed: {err}");
+                self.set_status(format!("pi spawn failed: {err}"));
             }
         }
         // Ready to type: the empty state is gone, so put the caret in the
@@ -1041,6 +1239,10 @@ impl OrbitApp {
     fn open_picker(&mut self, kind: PickerKind, window: &mut Window, cx: &mut Context<Self>) {
         self.refresh_catalogs();
         self.send(CommandBody::GetState, "get_state");
+        // Mutually exclusive with the composer's add menu and the new-task
+        // page's workspace picker.
+        self.add_menu_open = false;
+        self.workspace_picker = None;
 
         // The popup talks back exclusively through these callbacks; it never
         // borrows app state.
@@ -1124,20 +1326,30 @@ impl OrbitApp {
         }
     }
 
-    // ── session switcher palette (sidebar Search row) ─────────────────
+    // ── command palette (⌘P, sidebar Search row) ───────────────────────
 
-    /// Toggle the session switcher palette from the sidebar's Search row.
-    /// Mutually exclusive with the composer pickers and the row menu.
-    fn toggle_session_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_toggle_command_palette(
+        &mut self,
+        _: &crate::ToggleCommandPalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_command_palette(window, cx);
+    }
+
+    /// Toggle the window-wide command palette. Mutually exclusive with the
+    /// chip popovers, the branch picker, and the row menu.
+    fn toggle_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A dismissal from the same click's mouse-down must not immediately
-        // re-open — same guard the composer chips use.
+        // re-open — the sidebar Search row opens on mouse-up, and the scrim
+        // dismisses on mouse-down.
         const GESTURE: Duration = Duration::from_millis(200);
         if let Some(dismissed) = self.menu_dismissed_at.take() {
             if dismissed.elapsed() < GESTURE {
                 return;
             }
         }
-        if self.session_picker.take().is_some() {
+        if self.command_palette.take().is_some() {
             self.input.read(cx).focus(window);
             cx.notify();
             return;
@@ -1145,71 +1357,105 @@ impl OrbitApp {
         if self.model_selector.is_some() {
             self.close_model_selector(window, cx);
         }
+        self.branch_picker = None;
+        self.workspace_picker = None;
         self.session_menu = None;
+
+        let snapshot = PaletteSnapshot {
+            sessions: self.sidebar_sessions(),
+            active_path: self.current_session_path.clone(),
+            busy: self.busy || self.transcript.is_streaming(),
+            session_id: self.session_id.clone(),
+            sidebar_visible: self.sidebar_visible,
+            side_panel_visible: self.sidepane.read(cx).is_open(),
+            can_choose_model: !self.available_models.is_empty(),
+            can_choose_thinking: !self.available_thinking_levels.is_empty(),
+        };
 
         let this = cx.weak_entity();
         let on_open = Box::new(
             move |session: SessionInfo, _window: &mut Window, cx: &mut App| {
                 this.update(cx, |app, cx| {
-                    app.session_picker = None;
+                    app.command_palette = None;
                     app.on_open_session(session, cx);
                 })
                 .ok();
             },
         ) as Box<dyn Fn(SessionInfo, &mut Window, &mut App)>;
         let this = cx.weak_entity();
-        let on_dismiss = Box::new(move |by_mouse: bool, _window: &mut Window, cx: &mut App| {
+        let on_command = Box::new(
+            move |command: PaletteCommand, window: &mut Window, cx: &mut App| {
+                this.update(cx, |app, cx| {
+                    app.command_palette = None;
+                    app.run_palette_command(command, window, cx);
+                })
+                .ok();
+            },
+        ) as Box<dyn Fn(PaletteCommand, &mut Window, &mut App)>;
+        let this = cx.weak_entity();
+        let on_dismiss = Box::new(move |by_mouse: bool, window: &mut Window, cx: &mut App| {
             this.update(cx, |app, cx| {
                 if by_mouse {
                     app.menu_dismissed_at = Some(Instant::now());
                 }
-                app.session_picker = None;
+                app.command_palette = None;
+                // The palette's focus handle dies with it; hand focus back to
+                // the composer so typing continues after Escape.
+                app.input.read(cx).focus(window);
                 cx.notify();
             })
             .ok();
         }) as Box<dyn Fn(bool, &mut Window, &mut App)>;
 
-        let picker = cx.new(|cx| {
-            SessionPicker::new(
-                self.sidebar_sessions(),
-                self.current_session_path.clone(),
-                on_open,
-                on_dismiss,
-                cx,
-            )
-        });
+        let palette =
+            cx.new(|cx| CommandPalette::new(snapshot, on_open, on_command, on_dismiss, cx));
         // Focus the palette's filter input so typing filters immediately.
-        window.focus(&picker.read(cx).focus_handle(cx));
-        self.session_picker = Some(picker);
+        window.focus(&palette.read(cx).focus_handle(cx));
+        self.command_palette = Some(palette);
         cx.notify();
     }
 
-    /// The anchored palette, rendered inside the sidebar's nav column so it
-    /// drops below the Search row.
-    ///
-    /// Taffy places absolutely-positioned children at the container's start
-    /// corner (respecting its alignment) rather than at their in-flow
-    /// position — a raw `anchored()` child of the nav column would anchor to
-    /// the column's top-left and overlap the rows above. The palette is
-    /// therefore wrapped in a zero-height relative anchor that participates
-    /// in the column flow right after the Search row, and the popup hangs
-    /// from that point.
-    fn session_palette(&self) -> Option<AnyElement> {
-        self.session_picker.clone().map(|picker| {
-            div()
-                .relative()
-                .w_full()
-                .h(px(0.))
-                .child(
-                    anchored()
-                        .position_mode(AnchoredPositionMode::Local)
-                        .anchor(Corner::TopLeft)
-                        .offset(point(px(0.), px(4.)))
-                        .snap_to_window()
-                        .child(deferred(picker)),
-                )
-                .into_any_element()
-        })
+    /// Execute a command chosen in the palette (the palette is already
+    /// closed; focus returns to the composer unless the command opens
+    /// another surface).
+    fn run_palette_command(
+        &mut self,
+        command: PaletteCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            PaletteCommand::NewSession => self.on_new_session(&crate::NewSession, window, cx),
+            PaletteCommand::RefreshSessions => self.on_refresh(&crate::RefreshSessions, window, cx),
+            PaletteCommand::FocusComposer => {
+                self.input.read(cx).focus(window);
+            }
+            PaletteCommand::ToggleSidebar => {
+                self.sidebar_visible = !self.sidebar_visible;
+                cx.notify();
+            }
+            PaletteCommand::ToggleSidePanel => {
+                self.sidepane.update(cx, |pane, cx| pane.toggle(cx));
+            }
+            PaletteCommand::ReviewChanges => {
+                self.sidepane.update(cx, |pane, cx| pane.show_review(cx));
+            }
+            PaletteCommand::ChooseModel => self.toggle_picker(PickerKind::Model, window, cx),
+            PaletteCommand::ChooseThinking => self.toggle_picker(PickerKind::Thinking, window, cx),
+            PaletteCommand::AbortRun => self.on_abort(&crate::AbortRun, window, cx),
+            PaletteCommand::CopySessionId => {
+                if let Some(id) = self.session_id.clone() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(id));
+                    self.set_status("Session ID copied");
+                    cx.notify();
+                }
+            }
+            PaletteCommand::OpenSettings(section) => {
+                self.settings_open = true;
+                self.settings_section = section;
+                cx.notify();
+            }
+        }
     }
 
     /// Toggle the Git branch picker from the status-bar branch chip.
@@ -1231,7 +1477,7 @@ impl OrbitApp {
         if self.model_selector.is_some() {
             self.close_model_selector(window, cx);
         }
-        self.session_picker = None;
+        self.workspace_picker = None;
         self.session_menu = None;
 
         let cwd = match self
@@ -1243,35 +1489,31 @@ impl OrbitApp {
             None => return,
         };
         if !crate::git::is_repo(&cwd) {
-            self.status = "Not a Git repository".into();
+            self.set_status("Not a Git repository");
             cx.notify();
             return;
         }
         let current = crate::git::current_branch(&cwd).unwrap_or_else(|| "HEAD".into());
         let branches = crate::git::list_branches(&cwd).unwrap_or_else(|err| {
-            self.status = format!("branch list failed: {err}");
+            self.set_status(format!("branch list failed: {err}"));
             vec![current.clone()]
         });
         let workspace_label = sessions::workspace_label(&cwd);
 
         let this = cx.weak_entity();
-        let on_checkout = Box::new(
-            move |branch: String, _window: &mut Window, cx: &mut App| {
-                this.update(cx, |app, cx| {
-                    app.checkout_branch(branch, cx);
-                })
-                .ok();
-            },
-        ) as Box<dyn Fn(String, &mut Window, &mut App)>;
+        let on_checkout = Box::new(move |branch: String, _window: &mut Window, cx: &mut App| {
+            this.update(cx, |app, cx| {
+                app.checkout_branch(branch, cx);
+            })
+            .ok();
+        }) as Box<dyn Fn(String, &mut Window, &mut App)>;
         let this = cx.weak_entity();
-        let on_create = Box::new(
-            move |name: String, _window: &mut Window, cx: &mut App| {
-                this.update(cx, |app, cx| {
-                    app.create_branch(name, cx);
-                })
-                .ok();
-            },
-        ) as Box<dyn Fn(String, &mut Window, &mut App)>;
+        let on_create = Box::new(move |name: String, _window: &mut Window, cx: &mut App| {
+            this.update(cx, |app, cx| {
+                app.create_branch(name, cx);
+            })
+            .ok();
+        }) as Box<dyn Fn(String, &mut Window, &mut App)>;
         let this = cx.weak_entity();
         let on_dismiss = Box::new(move |by_mouse: bool, _window: &mut Window, cx: &mut App| {
             this.update(cx, |app, cx| {
@@ -1321,8 +1563,8 @@ impl OrbitApp {
             let _ = this.update(cx, |app, cx| {
                 app.branch_operation_pending = false;
                 match result {
-                    Ok(()) => app.status = format!("Switched to {label}"),
-                    Err(err) => app.status = format!("Branch switch failed: {err}"),
+                    Ok(()) => app.set_status(format!("Switched to {label}")),
+                    Err(err) => app.set_status(format!("Branch switch failed: {err}")),
                 }
                 cx.notify();
             });
@@ -1351,13 +1593,33 @@ impl OrbitApp {
             let _ = this.update(cx, |app, cx| {
                 app.branch_operation_pending = false;
                 match result {
-                    Ok(()) => app.status = format!("Created and switched to {label}"),
-                    Err(err) => app.status = format!("Branch create failed: {err}"),
+                    Ok(()) => app.set_status(format!("Created and switched to {label}")),
+                    Err(err) => app.set_status(format!("Branch create failed: {err}")),
                 }
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// Popover anchored below the new-task page's workspace field.
+    fn workspace_picker_popup(&self) -> Option<AnyElement> {
+        self.workspace_picker.clone().map(|picker| {
+            div()
+                .absolute()
+                .bottom_0()
+                .left_0()
+                .size(px(0.))
+                .child(
+                    anchored()
+                        .position_mode(AnchoredPositionMode::Local)
+                        .anchor(Corner::TopLeft)
+                        .offset(point(px(0.), px(6.)))
+                        .snap_to_window()
+                        .child(deferred(picker)),
+                )
+                .into_any_element()
+        })
     }
 
     /// Popover anchored above the status-bar branch chip.
@@ -1401,10 +1663,13 @@ impl OrbitApp {
             cx.notify();
             return;
         }
-        if self.session_picker.take().is_some() {
+        if self.command_palette.take().is_some() {
             self.input.read(cx).focus(window);
         }
         if self.branch_picker.take().is_some() {
+            self.input.read(cx).focus(window);
+        }
+        if self.workspace_picker.take().is_some() {
             self.input.read(cx).focus(window);
         }
         if self.model_selector.is_some() {
@@ -1444,9 +1709,9 @@ impl OrbitApp {
     fn on_menu_delete_confirm(&mut self, cx: &mut Context<Self>) {
         if let Some(menu) = self.session_menu.take() {
             if let Err(err) = fs::remove_file(&menu.path) {
-                self.status = format!("delete failed: {err}");
+                self.set_status(format!("delete failed: {err}"));
             } else {
-                self.status = "Session deleted".into();
+                self.set_status("Session deleted");
             }
             self.sessions = sessions::load_sessions();
             cx.notify();
@@ -1719,7 +1984,11 @@ impl OrbitApp {
                                     .truncate()
                                     .text_size(theme.ui_px(12.))
                                     .font_weight(FontWeight::MEDIUM)
-                                    .text_color(if selected { theme.active_fg } else { theme.text_2 })
+                                    .text_color(if selected {
+                                        theme.active_fg
+                                    } else {
+                                        theme.text_2
+                                    })
                                     .child(title),
                             )
                             .when(!subtitle.is_empty(), |row| {
@@ -1870,7 +2139,7 @@ impl OrbitApp {
         }
         for path in paths.paths() {
             if self.attachments.len() >= MAX_ATTACHMENTS {
-                self.status = format!("at most {MAX_ATTACHMENTS} images per message");
+                self.set_status(format!("at most {MAX_ATTACHMENTS} images per message"));
                 break;
             }
             match Attachment::from_path(path) {
@@ -1886,10 +2155,10 @@ impl OrbitApp {
         cx.notify();
     }
 
-    /// Click on the attach chip: pick an image file and queue it.
-    fn on_attach_click(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    /// Add menu → "Attach image…": pick an image file and queue it.
+    fn attach_image(&mut self, cx: &mut Context<Self>) {
         if self.attachments.len() >= MAX_ATTACHMENTS {
-            self.status = format!("at most {MAX_ATTACHMENTS} images per message");
+            self.set_status(format!("at most {MAX_ATTACHMENTS} images per message"));
             cx.notify();
             return;
         }
@@ -1905,9 +2174,124 @@ impl OrbitApp {
                 self.attachments.push(attachment);
             }
             None => {
-                self.status = "unsupported image format".into();
+                self.set_status("unsupported image format");
             }
         }
+        cx.notify();
+    }
+
+    /// Add menu → "Attach file…": any file. Images become attachments;
+    /// anything else is referenced by path at the caret (same rule as a
+    /// file dropped on the window).
+    fn attach_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Attach a file")
+            .pick_file()
+        else {
+            return;
+        };
+        if let Some(attachment) = Attachment::from_path(&path) {
+            if self.attachments.len() >= MAX_ATTACHMENTS {
+                self.set_status(format!("at most {MAX_ATTACHMENTS} images per message"));
+            } else {
+                self.attachments.push(attachment);
+            }
+        } else {
+            self.input.update(cx, |input, cx| {
+                input.insert_at_caret(&format!("{} ", path.display()), cx);
+            });
+            self.input.read(cx).focus(window);
+        }
+        cx.notify();
+    }
+
+    /// Mouse-up on the composer's "+" button: toggle the add menu, with the
+    /// same click-through guard as the model/thinking chips.
+    fn on_add_trigger_click(
+        &mut self,
+        _: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        const GESTURE: Duration = Duration::from_millis(200);
+        if let Some(dismissed) = self.menu_dismissed_at.take() {
+            if dismissed.elapsed() < GESTURE {
+                return;
+            }
+        }
+        self.toggle_add_menu(window, cx);
+    }
+
+    fn toggle_add_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.add_menu_open {
+            self.close_add_menu(window, cx);
+            return;
+        }
+        // Mutually exclusive with the other composer popovers.
+        self.model_selector = None;
+        self.context_popup = ContextPopup::None;
+        self.autocomplete_dismissed = true;
+        self.autocomplete.borrow_mut().open = false;
+        self.add_menu_open = true;
+        self.add_menu_highlight = 0;
+        // Focus the menu so ↑/↓/Enter/Escape dispatch to it.
+        window.focus(&self.add_menu_focus);
+        cx.notify();
+    }
+
+    /// Close the add menu and hand focus back to the composer input.
+    fn close_add_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.add_menu_open {
+            self.add_menu_open = false;
+            self.add_menu_highlight = 0;
+            self.input.read(cx).focus(window);
+            cx.notify();
+        }
+    }
+
+    fn on_add_menu_next(&mut self, _: &crate::AddMenuNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.add_menu_highlight = (self.add_menu_highlight + 1) % ADD_MENU_ITEMS.len();
+        cx.notify();
+    }
+
+    fn on_add_menu_prev(&mut self, _: &crate::AddMenuPrev, _: &mut Window, cx: &mut Context<Self>) {
+        self.add_menu_highlight =
+            (self.add_menu_highlight + ADD_MENU_ITEMS.len() - 1) % ADD_MENU_ITEMS.len();
+        cx.notify();
+    }
+
+    fn on_add_menu_confirm(
+        &mut self,
+        _: &crate::AddMenuConfirm,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_add_menu_item(self.add_menu_highlight, window, cx);
+    }
+
+    fn on_add_menu_close(
+        &mut self,
+        _: &crate::AddMenuClose,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_add_menu(window, cx);
+    }
+
+    /// Execute add-menu row `ix` (see [`ADD_MENU_ITEMS`]), then close.
+    fn run_add_menu_item(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_menu_open = false;
+        self.add_menu_highlight = 0;
+        match ix {
+            0 => self.attach_image(cx),
+            1 => self.attach_file(window, cx),
+            // Insert `@` at the caret — the file-mention autocomplete opens
+            // on its own from the text trigger.
+            _ => self
+                .input
+                .update(cx, |input, cx| input.insert_at_caret("@", cx)),
+        }
+        self.input.read(cx).focus(window);
         cx.notify();
     }
 
@@ -2054,7 +2438,7 @@ impl OrbitApp {
                 }
                 Err(err) => {
                     self.client = None;
-                    self.status = format!("pi spawn failed: {err}");
+                    self.set_status(format!("pi spawn failed: {err}"));
                 }
             }
         }
@@ -2112,7 +2496,7 @@ impl OrbitApp {
             .clone()
             .or_else(|| std::env::current_dir().ok())
         else {
-            self.status = "No workspace".into();
+            self.set_status("No workspace");
             cx.notify();
             return;
         };
@@ -2132,8 +2516,8 @@ impl OrbitApp {
             let _ = this.update(cx, |app, cx| {
                 app.branch_operation_pending = false;
                 match result {
-                    Ok(msg) => app.status = msg,
-                    Err(err) => app.status = format!("Commit or push failed: {err}"),
+                    Ok(msg) => app.set_status(msg),
+                    Err(err) => app.set_status(format!("Commit or push failed: {err}")),
                 }
                 cx.notify();
             });
@@ -2148,7 +2532,10 @@ impl OrbitApp {
         }
         let theme = *theme::get(cx);
         let this = cx.entity();
-        let title = self.current_title.clone().unwrap_or_else(|| "New task".into());
+        let title = self
+            .current_title
+            .clone()
+            .unwrap_or_else(|| "New task".into());
         let session_id = self.session_id.clone().unwrap_or_default();
         let session_file = self
             .current_session_path
@@ -2341,7 +2728,11 @@ impl OrbitApp {
                             .text_size(theme.ui_px(12.))
                             .text_color(theme.text)
                             .truncate()
-                            .child(if value.is_empty() { "—".to_string() } else { value }),
+                            .child(if value.is_empty() {
+                                "—".to_string()
+                            } else {
+                                value
+                            }),
                     ),
             )
             .child(
@@ -2480,7 +2871,8 @@ impl OrbitApp {
         }
         self.open_in_menu_open = !self.open_in_menu_open;
         if self.open_in_menu_open {
-            self.open_in_filter.update(cx, |filter, cx| filter.clear(cx));
+            self.open_in_filter
+                .update(cx, |filter, cx| filter.clear(cx));
             let handle = self.open_in_filter.read(cx).focus_handle(cx);
             window.focus(&handle);
         }
@@ -2535,7 +2927,9 @@ impl OrbitApp {
             .justify_center()
             .cursor_pointer()
             .hover(|s| s.bg(theme.overlay))
-            .when(self.open_in_menu_open, |s| s.bg(theme.active).text_color(theme.active_fg))
+            .when(self.open_in_menu_open, |s| {
+                s.bg(theme.active).text_color(theme.active_fg)
+            })
             .child(icon("icons/chevron-down.svg", 11., theme.text_3))
             // Pin the dropdown to the caret's bottom-right — same zero-size
             // anchor trick as the session row menu, so flex centering doesn't
@@ -2706,15 +3100,17 @@ impl OrbitApp {
     /// file yet. pi creates a session's `.jsonl` lazily — only when the
     /// first message is appended — so right after `new_session` the store
     /// holds nothing new and a disk-only list hides the session the user
-    /// just started until the first prompt lands. Prepending the
-    /// placeholder shows it instantly at the top; it disappears once the
-    /// real row loads (same path ⇒ no duplicate).
+    /// just started. A draft (nothing sent yet) stays hidden; once the
+    /// first prompt lands in the transcript the placeholder shows it
+    /// instantly at the top, and it disappears once the real row loads
+    /// (same path ⇒ no duplicate).
     fn sidebar_sessions(&self) -> Vec<SessionInfo> {
         sessions_with_placeholder(
             &self.sessions,
             self.current_session_path.as_deref(),
             self.current_title.as_deref(),
             self.current_workspace.as_deref(),
+            !self.transcript.is_empty(),
         )
     }
 
@@ -2773,7 +3169,7 @@ struct SessionMenu {
 
 /// Sections of the settings surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SettingsSection {
+pub(crate) enum SettingsSection {
     General,
     Appearance,
     Providers,
@@ -2831,6 +3227,10 @@ impl Render for OrbitApp {
         );
 
         let workspace_label = self.workspace_label();
+        // Focus ring on the composer box: the border strengthens while the
+        // input is focused (focus changes refresh the window, so this
+        // tracks without extra wiring).
+        let composer_focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         let review_workspace = self
             .current_workspace
             .clone()
@@ -2840,9 +3240,8 @@ impl Render for OrbitApp {
         let viewport = window.viewport_size();
         // The right side pane is hidden while settings/onboarding own the
         // main area (same rule as the sessions sidebar).
-        let pane_visible = self.sidepane.read(cx).is_open()
-            && !self.settings_open
-            && self.dependencies_ready();
+        let pane_visible =
+            self.sidepane.read(cx).is_open() && !self.settings_open && self.dependencies_ready();
         let pane_width = if pane_visible {
             self.sidepane.read(cx).width()
         } else {
@@ -2860,6 +3259,9 @@ impl Render for OrbitApp {
                 px(0.)
             }
             - pane_width;
+        // Composer toolbar compaction: below this column width the access
+        // pill drops out and the model label clamps (Send stays reachable).
+        let composer_compact = (main_width - px(32.)).min(px(CONTENT_MAX_W)) < px(600.);
 
         // ── top-bar left controls: sidebar toggle + session history ──
         let back_enabled = self.history_index > 0;
@@ -2960,7 +3362,11 @@ impl Render for OrbitApp {
                     .child(icon(
                         "icons/panel-right.svg",
                         16.,
-                        if pane_visible { theme.text } else { theme.text_2 },
+                        if pane_visible {
+                            theme.text
+                        } else {
+                            theme.text_2
+                        },
                     )),
             );
 
@@ -3007,40 +3413,20 @@ impl Render for OrbitApp {
                             .w(px(6.))
                             .cursor(CursorStyle::ResizeLeftRight)
                             .hover(|style| style.bg(theme.accent.opacity(0.4)))
-                            .on_drag(
-                                SidebarResize,
-                                |_, _, _, cx| cx.new(|_| DragGhost),
-                            ),
+                            .on_drag(SidebarResize, |_, _, _, cx| cx.new(|_| DragGhost)),
                     )
-                    // nav
+                    // nav — one primary action (New Task), one quiet row
+                    // (Search); the switcher palette anchors under Search
                     .child(
                         div()
-                            .px_2()
+                            .px_3()
                             .pt_1()
+                            .pb_2()
                             .flex()
                             .flex_col()
-                            .gap_0p5()
-                            .child(self.sidebar_action_row(
-                                "sidebar-new-session",
-                                "icons/compose.svg",
-                                "New Task",
-                                Some(Box::new(cx.listener(|this, _: &MouseUpEvent, w, cx| {
-                                    this.on_new_session(&crate::NewSession, w, cx)
-                                }))),
-                                theme,
-                            ))
-                            .child(self.sidebar_action_row(
-                                "sidebar-search",
-                                "icons/search.svg",
-                                "Search",
-                                Some(Box::new(cx.listener(|this, _: &MouseUpEvent, w, cx| {
-                                    this.toggle_session_picker(w, cx)
-                                }))),
-                                theme,
-                            ))
-                            // session switcher palette, anchored under the
-                            // Search row (rendered only while open)
-                            .children(self.session_palette()),
+                            .gap_1()
+                            .child(self.sidebar_new_task_button(theme, cx))
+                            .child(self.sidebar_search_row(theme, cx)),
                     )
                     // session list (scrolls), grouped by workspace — or the
                     // empty state when pi's store has no sessions yet
@@ -3048,59 +3434,105 @@ impl Render for OrbitApp {
                         empty_sessions_state(theme).into_any_element()
                     } else {
                         div()
-                            .id("sidebar-sessions")
                             .flex_1()
                             .min_h_0()
-                            .px_2()
-                            .relative()
+                            .flex()
+                            .flex_col()
+                            // section label — anchors the list below the nav
                             .child(
-                                list(self.sidebar_list.clone(), move |ix, _window, cx| {
-                                    render_side_row(
-                                        &side_rows,
-                                        &sessions_data,
-                                        active_path.as_deref(),
-                                        ix,
-                                        &this,
-                                        agent_running,
-                                        &running_paths,
-                                        session_menu.as_ref().as_ref(),
-                                        *theme::get(cx),
-                                    )
-                                    .into_any_element()
-                                })
-                                .w_full()
-                                .h_full(),
+                                div()
+                                    .px(px(14.))
+                                    .pb(px(2.))
+                                    .text_size(theme.ui_px(11.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text_3)
+                                    .child("Sessions"),
+                            )
+                            .child(
+                                div()
+                                    .id("sidebar-sessions")
+                                    .flex_1()
+                                    .min_h_0()
+                                    .px_2()
+                                    .relative()
+                                    .child(
+                                        list(self.sidebar_list.clone(), move |ix, _window, cx| {
+                                            render_side_row(
+                                                &side_rows,
+                                                &sessions_data,
+                                                active_path.as_deref(),
+                                                ix,
+                                                &this,
+                                                agent_running,
+                                                &running_paths,
+                                                session_menu.as_ref().as_ref(),
+                                                *theme::get(cx),
+                                            )
+                                            .into_any_element()
+                                        })
+                                        .w_full()
+                                        .h_full(),
+                                    ),
                             )
                             .into_any_element()
                     })
-                    // footer — settings gear + connection dot
+                    // footer — Settings row + connection status, set off
+                    // from the session list by a hairline
                     .child(
                         div()
-                            .h(px(40.))
+                            .h(px(44.))
                             .px_3()
+                            .border_t_1()
+                            .border_color(theme.border)
                             .flex()
                             .items_center()
                             .child(
                                 div()
                                     .id("settings")
-                                    .p_1()
-                                    .rounded_sm()
+                                    .h(px(28.))
+                                    .px(px(8.))
+                                    .rounded_md()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(7.))
                                     .cursor_pointer()
                                     .hover(|s| s.bg(theme.bg_hover))
                                     .on_mouse_up(
                                         MouseButton::Left,
                                         cx.listener(Self::on_settings_gear_click),
                                     )
-                                    .child(icon("icons/settings.svg", 16., theme.text_3)),
+                                    .child(icon("icons/settings.svg", 14., theme.text_3))
+                                    .child(
+                                        div()
+                                            .text_size(theme.ui_px(12.))
+                                            .text_color(theme.text_2)
+                                            .child("Settings"),
+                                    ),
                             )
                             .child(div().flex_1())
-                            .child(div().size(px(7.)).rounded_full().bg(
-                                if self.client.is_some() {
-                                    theme.ok_green
-                                } else {
-                                    theme.stop_red
-                                },
-                            )),
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .child(div().size(px(6.)).rounded_full().bg(
+                                        if self.client.is_some() {
+                                            theme.ok_green
+                                        } else {
+                                            theme.stop_red
+                                        },
+                                    ))
+                                    .child(
+                                        div()
+                                            .text_size(theme.ui_px(11.))
+                                            .text_color(theme.text_3)
+                                            .child(if self.client.is_some() {
+                                                "Connected"
+                                            } else {
+                                                "Offline"
+                                            }),
+                                    ),
+                            ),
                     )
             }))
             // ── main ──
@@ -3151,7 +3583,7 @@ impl Render for OrbitApp {
                     )
                     // transcript (centered column) or empty state
                     .child(if self.transcript.is_empty() {
-                        self.render_empty_state(cx).into_any_element()
+                        self.render_empty_state(main_width, cx).into_any_element()
                     } else {
                         div()
                             .flex_1()
@@ -3199,10 +3631,13 @@ impl Render for OrbitApp {
                                             .border_1()
                                             .border_color(if self.file_drag_hovered {
                                                 theme.accent
+                                            } else if composer_focused {
+                                                theme.border_strong
                                             } else {
                                                 theme.border
                                             })
-                                            .rounded_lg()
+                                            .rounded_xl()
+                                            .shadow(theme.composer_shadow())
                                             .px_3()
                                             .pt_2()
                                             .pb_2()
@@ -3220,7 +3655,7 @@ impl Render for OrbitApp {
                                             .on_drag_move(cx.listener(Self::on_file_drag_move))
                                             .children(self.attachments_row(cx))
                                             .child(self.input.clone())
-                                            .child(self.composer_row(cx))
+                                            .child(self.composer_row(composer_compact, cx))
                                             // Drop-target overlay (Waku): fades
                                             // in over the box while files are
                                             // dragged across it. Absolute, so
@@ -3229,7 +3664,7 @@ impl Render for OrbitApp {
                                                 div()
                                                     .absolute()
                                                     .inset_0()
-                                                    .rounded_lg()
+                                                    .rounded_xl()
                                                     .bg(theme.bg_composer.opacity(0.92))
                                                     .border_1()
                                                     .border_color(theme.accent)
@@ -3264,6 +3699,14 @@ impl Render for OrbitApp {
             })
             // ── right side pane (Review / Terminal / Browser) ──
             .children(pane_visible.then(|| self.sidepane.clone().into_any_element()))
+            // ── command palette (⌘P) — a full-window deferred layer above
+            // every other floating surface; the entity renders its own
+            // absolute scrim + centered card.
+            .children(
+                self.command_palette
+                    .clone()
+                    .map(|palette| command_palette::layer(palette).into_any_element()),
+            )
             .track_focus(&self.focus_handle(cx))
             // Sidebar resize: fires for every mouse move while the handle
             // drag is active, wherever the pointer travels.
@@ -3282,8 +3725,8 @@ impl Render for OrbitApp {
                         app.sidebar_width = width;
                         cx.notify();
                     }
-                }),
-            )
+                },
+            ))
             .on_drag_move(cx.listener(
                 |app: &mut Self,
                  event: &DragMoveEvent<SidePaneResize>,
@@ -3296,50 +3739,173 @@ impl Render for OrbitApp {
                     app.sidepane.update(cx, |pane, cx| {
                         pane.set_width(width.min(max), cx);
                     });
-                }),
-            )
+                },
+            ))
             .on_action(cx.listener(Self::on_submit))
             .on_action(cx.listener(Self::on_abort))
             .on_action(cx.listener(Self::on_refresh))
             .on_action(cx.listener(Self::on_open_settings))
+            .on_action(cx.listener(Self::on_toggle_command_palette))
     }
 }
 
 impl OrbitApp {
-    /// Bottom row inside the composer: separate model and thinking-level
-    /// chips (each opens its own dropdown anchored above it), full-access
-    /// pill, and the round send button.
-    fn composer_row(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
-        let theme = *theme::get(cx);
+    /// Bottom row inside the composer: the "+" add menu and the access-mode
+    /// fact on the left; model / thinking chips and the round send button on
+    /// the right. `compact` (narrow window) drops the access pill and clamps
+    /// the model label so Send always stays reachable.
+    fn composer_row(&self, compact: bool, cx: &Context<Self>) -> impl IntoElement + use<> {
         div()
             .flex()
             .items_center()
             .gap_2()
-            // attach image (paperclip-style: file picker; paste also works)
+            .child(self.add_menu_button(cx))
+            // access mode (pi runs with full tool access) — a fact, not a
+            // control; first thing to yield when the row gets narrow.
+            .when(!compact, |row| {
+                row.child(pill_static(
+                    "icons/lock.svg",
+                    "Full access",
+                    *theme::get(cx),
+                ))
+            })
+            .child(div().flex_1())
+            .child(self.model_chip(compact, cx))
+            .child(self.thinking_chip(cx))
+            .child(self.send_button(cx))
+    }
+
+    /// The composer's "+" button and its add menu (anchored above the
+    /// button, same deferred pattern as the chip pickers). The menu carries
+    /// the `AddMenu` key context, so ↑/↓/Enter/Escape drive it while open.
+    fn add_menu_button(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let theme = *theme::get(cx);
+        div()
+            .flex()
+            .flex_col()
+            .items_start()
+            .children(self.add_menu_popup(cx))
             .child(
                 div()
                     .id("attach-chip")
-                    .h(px(24.))
-                    .w(px(26.))
+                    .size(px(24.))
                     .rounded_md()
                     .flex()
                     .items_center()
                     .justify_center()
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.overlay))
+                    .when(self.add_menu_open, |b| {
+                        b.bg(theme.active).text_color(theme.active_fg)
+                    })
                     .child(icon("icons/plus.svg", 13., theme.text_3))
-                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_attach_click)),
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_add_trigger_click)),
             )
-            .child(self.model_chip(cx))
-            .child(self.thinking_chip(cx))
-            // access mode (pi runs with full tool access)
-            .child(pill_static(
-                "icons/lock.svg",
-                "Full access",
-                *theme::get(cx),
-            ))
-            .child(div().flex_1())
-            .child(self.send_button(cx))
+    }
+
+    /// The add menu popup, while open. Real actions only: attach an image,
+    /// attach any file (by path at the caret), or start an @-mention.
+    fn add_menu_popup(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if !self.add_menu_open {
+            return None;
+        }
+        let theme = *theme::get(cx);
+        let this = cx.weak_entity();
+        let mut list = div().w_full().p(px(4.)).flex().flex_col().gap(px(2.));
+        for (ix, (icon_path, label, hint)) in ADD_MENU_ITEMS.iter().enumerate() {
+            let highlighted = ix == self.add_menu_highlight;
+            let this = this.clone();
+            list = list.child(
+                div()
+                    .id(ElementId::NamedInteger("add-menu-row".into(), ix as u64))
+                    .h(px(28.))
+                    .px(px(8.))
+                    .rounded(px(6.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .cursor_pointer()
+                    .when(highlighted, |row| row.bg(theme.active))
+                    .hover(|style| style.bg(theme.overlay))
+                    .on_hover(move |hovered, _, cx| {
+                        if *hovered {
+                            this.update(cx, |app, cx| {
+                                if app.add_menu_highlight != ix {
+                                    app.add_menu_highlight = ix;
+                                    cx.notify();
+                                }
+                            })
+                            .ok();
+                        }
+                    })
+                    .on_mouse_up(MouseButton::Left, {
+                        let this = cx.weak_entity();
+                        move |_, window, cx| {
+                            this.update(cx, |app, cx| app.run_add_menu_item(ix, window, cx))
+                                .ok();
+                        }
+                    })
+                    .child(icon(icon_path, 13., theme.text_3))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(if highlighted {
+                                theme.active_fg
+                            } else {
+                                theme.text_2
+                            })
+                            .child(*label),
+                    )
+                    .when(!hint.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .text_size(theme.ui_px(11.))
+                                .text_color(theme.text_3)
+                                .child(*hint),
+                        )
+                    }),
+            );
+        }
+
+        let popup = div()
+            .w(px(200.))
+            .font_family(theme::ui_font_family())
+            .rounded(px(8.))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.menu_bg)
+            .shadow(theme.popover_shadow())
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .occlude()
+            // The menu owns the keyboard while open (`AddMenu` bindings in
+            // main.rs sit deeper than the global escape/enter).
+            .key_context("AddMenu")
+            .track_focus(&self.add_menu_focus)
+            .on_action(cx.listener(Self::on_add_menu_next))
+            .on_action(cx.listener(Self::on_add_menu_prev))
+            .on_action(cx.listener(Self::on_add_menu_confirm))
+            .on_action(cx.listener(Self::on_add_menu_close))
+            .on_mouse_down_out(cx.listener(|app, _, window, cx| {
+                // Arm the click-through guard so the same click's mouse-up
+                // on the "+" button doesn't re-open the menu.
+                app.menu_dismissed_at = Some(Instant::now());
+                app.close_add_menu(window, cx);
+            }))
+            .child(list);
+
+        Some(
+            anchored()
+                .position_mode(AnchoredPositionMode::Local)
+                .anchor(Corner::BottomLeft)
+                .offset(point(px(0.), px(-4.)))
+                .snap_to_window()
+                .child(deferred(popup))
+                .into_any_element(),
+        )
     }
 
     /// The anchored popup for `kind`, when that picker is open. `deferred`
@@ -3361,9 +3927,11 @@ impl OrbitApp {
             })
     }
 
-    /// The model chip: chat glyph + model name + caret. Highlighted while
-    /// its dropdown is open.
-    fn model_chip(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+    /// The model chip: provider glyph + model name + caret. Ghost style —
+    /// configuration is secondary to the prompt, so chips carry no border
+    /// or fill until hovered/open. `compact` clamps the label so narrow
+    /// windows keep Send reachable.
+    fn model_chip(&self, compact: bool, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = *theme::get(cx);
         div()
             .flex()
@@ -3379,29 +3947,31 @@ impl OrbitApp {
                     .px(px(7.))
                     .h(px(24.))
                     .rounded_md()
-                    .border_1()
                     .text_size(theme.ui_px(12.))
                     .cursor_pointer()
-                    .border_color(theme.border)
-                    .bg(theme.bg_raised)
                     .hover(|s| s.bg(theme.overlay))
                     .when(self.picker_is_open(PickerKind::Model), |chip| {
-                        chip.bg(theme.active)
-                            .text_color(theme.active_fg)
-                            .border_color(theme.border_strong)
+                        chip.bg(theme.active).text_color(theme.active_fg)
                     })
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_model_trigger_click))
                     .child(icon_dyn(
                         provider_icon(&self.model_provider),
                         12.,
-                        theme.text_2,
+                        theme.text_3,
                     ))
-                    .child(div().text_color(theme.text).child(self.model_label.clone()))
+                    .child(
+                        div()
+                            .max_w(px(if compact { 120. } else { 220. }))
+                            .truncate()
+                            .text_color(theme.text_2)
+                            .child(self.model_label.clone()),
+                    )
                     .child(icon("icons/chevron-down.svg", 11., theme.text_3)),
             )
     }
 
-    /// The thinking-level chip: level icon + reasoning level + caret.
+    /// The thinking-level chip: level icon + reasoning level + caret. Ghost
+    /// style, same hierarchy as the model chip.
     fn thinking_chip(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = *theme::get(cx);
         div()
@@ -3418,16 +3988,11 @@ impl OrbitApp {
                     .px(px(7.))
                     .h(px(24.))
                     .rounded_md()
-                    .border_1()
                     .text_size(theme.ui_px(12.))
                     .cursor_pointer()
-                    .border_color(theme.border)
-                    .bg(theme.bg_raised)
                     .hover(|s| s.bg(theme.overlay))
                     .when(self.picker_is_open(PickerKind::Thinking), |chip| {
-                        chip.bg(theme.active)
-                            .text_color(theme.active_fg)
-                            .border_color(theme.border_strong)
+                        chip.bg(theme.active).text_color(theme.active_fg)
                     })
                     .on_mouse_up(
                         MouseButton::Left,
@@ -3439,7 +4004,7 @@ impl OrbitApp {
                     })
                     .child(
                         div()
-                            .text_color(theme.text)
+                            .text_color(theme.text_2)
                             .child(thinking_display(&self.thinking_label)),
                     )
                     .child(icon("icons/chevron-down.svg", 11., theme.text_3)),
@@ -3451,8 +4016,8 @@ impl OrbitApp {
     /// (patterns/masks do not survive the renderer).
     fn new_task_background(theme: Theme) -> impl IntoElement + use<> {
         let dot_color = match theme.mode {
-            ThemeMode::Light => theme.text_3.opacity(0.38),
-            ThemeMode::Dark => theme.text_3.opacity(0.28),
+            ThemeMode::Light => theme.text_3.opacity(0.75),
+            ThemeMode::Dark => theme.text_3.opacity(0.65),
         };
         div()
             .absolute()
@@ -3470,8 +4035,20 @@ impl OrbitApp {
 
     /// New-task empty state — minimal onboarding over the dot grid: one
     /// headline, a ghost workspace row, and the composer below for input.
-    fn render_empty_state(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+    ///
+    /// `main_width` comes from the caller (window minus sidebar/pane) because
+    /// the field below gets a definite width: `w_full().max_w(_)` chains
+    /// nested under the centered column resolve their percentages against the
+    /// unclamped page width in this gpui/taffy stack, which painted the card
+    /// to the window's right edge. `width_for_window` keeps the field and the
+    /// picker popover the same width from one source of truth.
+    fn render_empty_state(
+        &self,
+        main_width: Pixels,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
         let theme = *theme::get(cx);
+        let field_w = px(crate::workspace_picker::width_for_window(main_width.into()));
         let cwd = self
             .current_workspace
             .clone()
@@ -3479,6 +4056,7 @@ impl OrbitApp {
             .unwrap_or_default();
         let folder_name = sessions::workspace_label(&cwd);
         let path_label = cwd.to_string_lossy().into_owned();
+        let picker_open = self.workspace_picker.is_some();
 
         div()
             .flex_1()
@@ -3495,26 +4073,31 @@ impl OrbitApp {
                     .flex_col()
                     .items_center()
                     .justify_center()
-                    .px(px(24.))
+                    .px(px(crate::workspace_picker::PAGE_PAD))
                     .pb(px(88.))
                     .child(
                         div()
                             .w_full()
-                            .max_w(px(400.))
+                            .max_w(px(crate::workspace_picker::FIELD_MAX_W))
                             .flex()
                             .flex_col()
                             .items_center()
                             .gap(px(20.))
-                            // Spark mark — soft accent wash, no heavy card chrome.
+                            // Rocket mark (HugeIcons start-up-02) — hero-size
+                            // disc over the dot grid; soft accent wash, no
+                            // heavy card chrome. `flex_none` keeps the disc a
+                            // true circle when a larger UI font makes the
+                            // column shrink its children.
                             .child(
                                 div()
-                                    .size(px(44.))
+                                    .flex_none()
+                                    .size(px(72.))
                                     .rounded_full()
                                     .bg(theme.accent.opacity(0.12))
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .child(icon("icons/spark.svg", 18., theme.accent)),
+                                    .child(icon("icons/start-up.svg", 36., theme.accent)),
                             )
                             // Title block — one idea, one line of guidance.
                             .child(
@@ -3535,62 +4118,124 @@ impl OrbitApp {
                                             .text_size(theme.ui_px(13.))
                                             .text_color(theme.text_3)
                                             .text_align(TextAlign::Center)
-                                            .child("Pick a workspace, then describe your task below."),
+                                            .child(
+                                                "Pick a workspace, then describe your task below.",
+                                            ),
                                     ),
                             )
-                            // Workspace — single ghost row; the whole row opens the picker.
+                            // Workspace — a labeled select field, not a ghost
+                            // row. Click opens the workspace picker (recent
+                            // folders, filter, browse) anchored below; the
+                            // border takes the accent while it's open.
+                            //
+                            // Definite `w` (not `w_full().max_w()`): percent
+                            // widths nested under the centered `max_w` column
+                            // resolve against the unclamped page width here,
+                            // and the card painted to the window's edge.
                             .child(
                                 div()
-                                    .id("pick-folder")
-                                    .w_full()
-                                    .px(px(10.))
-                                    .py(px(8.))
-                                    .rounded_lg()
+                                    .w(field_w)
                                     .flex()
-                                    .items_center()
-                                    .gap(px(10.))
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(theme.overlay))
-                                    .active(|s| s.bg(theme.active).text_color(theme.active_fg))
-                                    .on_mouse_up(
-                                        MouseButton::Left,
-                                        cx.listener(Self::on_pick_folder_click),
+                                    .flex_col()
+                                    .gap(px(6.))
+                                    .child(
+                                        div()
+                                            .px(px(2.))
+                                            .text_size(theme.ui_px(10.5))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.text_3)
+                                            .child("Workspace"),
                                     )
                                     .child(
                                         div()
-                                            .size(px(32.))
-                                            .flex_none()
-                                            .rounded_md()
-                                            .bg(theme.bg_raised)
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .child(icon("icons/folder.svg", 15., theme.text_2)),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(2.))
+                                            .relative()
+                                            .w_full()
                                             .child(
                                                 div()
-                                                    .text_size(theme.ui_px(13.))
-                                                    .font_weight(FontWeight::MEDIUM)
-                                                    .text_color(theme.text)
-                                                    .truncate()
-                                                    .child(folder_name),
+                                                    .id("pick-folder")
+                                                    .w_full()
+                                                    .pl(px(8.))
+                                                    .pr(px(10.))
+                                                    .py(px(7.))
+                                                    .rounded(px(12.))
+                                                    .border_1()
+                                                    .border_color(if picker_open {
+                                                        theme.accent.opacity(0.55)
+                                                    } else {
+                                                        theme.border
+                                                    })
+                                                    .bg(theme.bg_raised)
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(10.))
+                                                    .cursor_pointer()
+                                                    .hover(|s| {
+                                                        s.border_color(theme.border_strong)
+                                                            .bg(theme.overlay)
+                                                    })
+                                                    .on_mouse_up(
+                                                        MouseButton::Left,
+                                                        cx.listener(|app, _, window, cx| {
+                                                            app.toggle_workspace_picker(
+                                                                window, cx,
+                                                            );
+                                                        }),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .size(px(34.))
+                                                            .flex_none()
+                                                            .rounded(px(9.))
+                                                            .bg(theme.accent.opacity(0.12))
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_center()
+                                                            .child(icon(
+                                                                "icons/folder.svg",
+                                                                16.,
+                                                                theme.accent,
+                                                            )),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .gap(px(1.))
+                                                            .child(
+                                                                div()
+                                                                    .text_size(theme.ui_px(13.))
+                                                                    .font_weight(
+                                                                        FontWeight::MEDIUM,
+                                                                    )
+                                                                    .text_color(theme.text)
+                                                                    .truncate()
+                                                                    .child(folder_name),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_size(theme.ui_px(11.))
+                                                                    .text_color(theme.text_3)
+                                                                    .truncate()
+                                                                    .child(path_label),
+                                                            ),
+                                                    )
+                                                    // Open state: the affordance
+                                                    // answers in accent, matching
+                                                    // the border.
+                                                    .child(icon(
+                                                        "icons/chevron-down.svg",
+                                                        12.,
+                                                        if picker_open {
+                                                            theme.accent
+                                                        } else {
+                                                            theme.text_3
+                                                        },
+                                                    )),
                                             )
-                                            .child(
-                                                div()
-                                                    .text_size(theme.ui_px(11.5))
-                                                    .text_color(theme.text_3)
-                                                    .truncate()
-                                                    .child(path_label),
-                                            ),
-                                    )
-                                    .child(icon("icons/chevron-down.svg", 12., theme.text_3)),
+                                            .children(self.workspace_picker_popup()),
+                                    ),
                             ),
                     ),
             )
@@ -3636,9 +4281,9 @@ impl OrbitApp {
                             app.client = Some(client);
                             app.send(CommandBody::GetState, "get_state");
                             app.refresh_catalogs();
-                            app.status = "Connected".into();
+                            app.set_status("Connected");
                         }
-                        Err(err) => app.status = format!("pi spawn failed: {err}"),
+                        Err(err) => app.set_status(format!("pi spawn failed: {err}")),
                     }
                 }
                 cx.notify();
@@ -3931,14 +4576,9 @@ impl OrbitApp {
                     .py(px(2.))
                     .rounded_md()
                     .cursor_pointer()
-                    .hover(|s| {
-                        s.bg(theme.overlay).text_color(theme.text_2)
-                    })
+                    .hover(|s| s.bg(theme.overlay).text_color(theme.text_2))
                     .active(|s| s.bg(theme.active).text_color(theme.active_fg))
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(Self::on_pick_folder_click),
-                    )
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_pick_folder_click))
                     .child(icon("icons/folder.svg", 12., theme.text_3))
                     .child(workspace_label.to_string()),
             )
@@ -3950,43 +4590,56 @@ impl OrbitApp {
                     .child(icon("icons/monitor.svg", 12., theme.text_3))
                     .child("Local"),
             )
-            .children(
-                crate::git::current_branch(&cwd).map(|branch| {
-                    let open = self.branch_picker.is_some();
-                    let pending = self.branch_operation_pending;
-                    div()
-                        .relative()
-                        .child(
-                            div()
-                                .id("status-branch")
-                                .flex()
-                                .items_center()
-                                .gap_1p5()
-                                .px(px(4.))
-                                .py(px(2.))
-                                .rounded_md()
-                                .when(!pending, |chip| chip.cursor_pointer())
-                                .when(open, |chip| chip.bg(theme.active).text_color(theme.active_fg))
-                                .when(!open && !pending, |chip| {
-                                    chip.hover(|s| s.bg(theme.overlay).text_color(theme.text_2))
-                                })
-                                .when(pending, |chip| chip.opacity(0.6))
-                                .on_mouse_up(
-                                    MouseButton::Left,
-                                    cx.listener(|app, _, window, cx| {
-                                        if !app.branch_operation_pending {
-                                            app.toggle_branch_picker(window, cx);
-                                        }
-                                    }),
-                                )
-                                .child(icon("icons/branch.svg", 12., theme.text_3))
-                                .child(branch),
-                        )
-                        .children(self.branch_picker_popup())
-                        .into_any_element()
-                }),
-            )
+            .children(crate::git::current_branch(&cwd).map(|branch| {
+                let open = self.branch_picker.is_some();
+                let pending = self.branch_operation_pending;
+                div()
+                    .relative()
+                    .child(
+                        div()
+                            .id("status-branch")
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .px(px(4.))
+                            .py(px(2.))
+                            .rounded_md()
+                            .when(!pending, |chip| chip.cursor_pointer())
+                            .when(open, |chip| {
+                                chip.bg(theme.active).text_color(theme.active_fg)
+                            })
+                            .when(!open && !pending, |chip| {
+                                chip.hover(|s| s.bg(theme.overlay).text_color(theme.text_2))
+                            })
+                            .when(pending, |chip| chip.opacity(0.6))
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|app, _, window, cx| {
+                                    if !app.branch_operation_pending {
+                                        app.toggle_branch_picker(window, cx);
+                                    }
+                                }),
+                            )
+                            .child(icon("icons/branch.svg", 12., theme.text_3))
+                            .child(branch),
+                    )
+                    .children(self.branch_picker_popup())
+                    .into_any_element()
+            }))
             .child(div().flex_1())
+            // Transient status (send failures, attachment limits, branch
+            // results): fresh messages only — the tick lets them lapse.
+            .children(
+                self.status_at
+                    .is_some_and(|at| at.elapsed() < STATUS_MESSAGE_TTL)
+                    .then(|| {
+                        div()
+                            .max_w(px(320.))
+                            .truncate()
+                            .text_color(theme.text_3)
+                            .child(self.status.clone())
+                    }),
+            )
             .child(self.context_button(cx))
     }
 
@@ -4037,47 +4690,89 @@ impl OrbitApp {
 
     /// Sidebar nav row — Waku `render_sidebar_action_row` shape: fixed height,
     /// icon in a 20px slot, secondary label, rounded hover surface.
-    fn sidebar_action_row(
+    /// The sidebar's primary action: a raised New Task button with the
+    /// ⌘N shortcut hint — the one emphasized control in the nav column.
+    fn sidebar_new_task_button(
         &self,
-        id: &'static str,
-        icon_path: &'static str,
-        label: &str,
-        on_click: Option<Box<dyn Fn(&MouseUpEvent, &mut Window, &mut App) + 'static>>,
         theme: Theme,
+        cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
-        let mut row = div()
-            .id(ElementId::Name(id.into()))
+        div()
+            .id("sidebar-new-session")
             .w_full()
-            .h(px(SIDEBAR_ACTION_ROW_H))
-            .px(px(4.))
-            .rounded(px(7.))
+            .h(px(34.))
+            .px(px(10.))
+            .rounded_md()
+            .bg(theme.bg_raised)
+            .border_1()
+            .border_color(theme.border)
             .flex()
             .items_center()
-            .gap(px(10.))
-            .hover(|s| s.bg(theme.bg_hover))
-            .active(|s| s.bg(theme.active).text_color(theme.active_fg))
-            .child(
-                div()
-                    .size(px(20.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(icon(icon_path, 14., theme.text_2)),
+            .gap(px(8.))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.bg_hover).border_color(theme.border_strong))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, w, cx| {
+                    this.on_new_session(&crate::NewSession, w, cx)
+                }),
             )
+            .child(icon("icons/compose.svg", 13., theme.accent))
             .child(
                 div()
+                    .flex_1()
                     .min_w_0()
                     .truncate()
                     .text_size(theme.ui_px(13.))
-                    .text_color(theme.text_2)
-                    .child(label.to_string()),
-            );
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child("New Task"),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(theme.ui_px(11.))
+                    .text_color(theme.text_3)
+                    .child("\u{2318}N"),
+            )
+    }
 
-        if let Some(handler) = on_click {
-            row = row.cursor_pointer().on_mouse_up(MouseButton::Left, handler);
-        }
-        row
+    /// The quiet nav row under the primary button: opens the command
+    /// palette. Ghost style — hover is the only affordance; the ⌘P hint
+    /// mirrors the ⌘N hint on the button above.
+    fn sidebar_search_row(&self, theme: Theme, cx: &Context<Self>) -> impl IntoElement + use<> {
+        div()
+            .id("sidebar-search")
+            .w_full()
+            .h(px(28.))
+            .px(px(10.))
+            .rounded_md()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.bg_hover))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, w, cx| this.toggle_command_palette(w, cx)),
+            )
+            .child(icon("icons/search.svg", 13., theme.text_3))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(theme.ui_px(12.5))
+                    .text_color(theme.text_3)
+                    .child("Search"),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(theme.ui_px(11.))
+                    .text_color(theme.text_3)
+                    .child("\u{2318}P"),
+            )
     }
 
     fn send_button(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
@@ -4089,6 +4784,7 @@ impl OrbitApp {
                 .rounded_full()
                 .bg(theme.stop_red)
                 .hover(|s| s.bg(theme.stop_red_hover))
+                .active(|s| s.bg(theme.stop_red))
                 .cursor_pointer()
                 .flex()
                 .items_center()
@@ -4097,19 +4793,29 @@ impl OrbitApp {
                 .on_mouse_up(MouseButton::Left, cx.listener(Self::on_abort_mouse))
                 .child(icon("icons/stop.svg", 12., theme.send_fg))
         } else {
+            // Nothing to send yet: the button stays clickable (submit
+            // no-ops on empty) but reads as quiet until there's a message
+            // or an attachment.
+            let empty = self.input.read(cx).text().trim().is_empty() && self.attachments.is_empty();
             div()
                 .id("send-btn")
                 .size(px(28.))
                 .rounded_full()
-                .bg(theme.send_bg)
-                .hover(|s| s.bg(theme.send_bg_hover))
-                .cursor_pointer()
+                .bg(if empty { theme.overlay } else { theme.send_bg })
+                .when(!empty, |btn| {
+                    btn.hover(|s| s.bg(theme.send_bg_hover))
+                        .active(|s| s.bg(theme.send_bg))
+                        .cursor_pointer()
+                })
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(theme.send_fg)
                 .on_mouse_up(MouseButton::Left, cx.listener(Self::on_send_click))
-                .child(icon("icons/send.svg", 14., theme.send_fg))
+                .child(icon(
+                    "icons/send.svg",
+                    14.,
+                    if empty { theme.text_3 } else { theme.send_fg },
+                ))
         }
     }
 }
@@ -4599,17 +5305,9 @@ impl OrbitApp {
     }
 
     /// Theme dropdown on Appearance — lists every selectable palette.
-    fn theme_select(
-        &self,
-        theme: Theme,
-        this: Entity<OrbitApp>,
-        cx: &Context<Self>,
-    ) -> AnyElement {
+    fn theme_select(&self, theme: Theme, this: Entity<OrbitApp>, cx: &Context<Self>) -> AnyElement {
         let all = ThemeId::ALL;
-        let selected = all
-            .iter()
-            .position(|id| *id == theme.theme_id)
-            .unwrap_or(0);
+        let selected = all.iter().position(|id| *id == theme.theme_id).unwrap_or(0);
         self.select_control(
             "theme-select",
             SettingsSelect::Theme,
@@ -4625,7 +5323,12 @@ impl OrbitApp {
     // ── Waku General-settings selects (language / font sizes) ──────────
 
     /// The Language dropdown (System / English).
-    fn language_select(&self, theme: Theme, this: Entity<OrbitApp>, cx: &Context<Self>) -> AnyElement {
+    fn language_select(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let selected = match theme.ui.language {
             crate::theme::Language::System => 0,
             crate::theme::Language::English => 1,
@@ -4700,7 +5403,16 @@ impl OrbitApp {
             .iter()
             .position(|f| f.as_str() == current.as_ref())
             .unwrap_or(0);
-        self.select_control(id, kind, current.to_string(), fonts, selected, theme, this, cx)
+        self.select_control(
+            id,
+            kind,
+            current.to_string(),
+            fonts,
+            selected,
+            theme,
+            this,
+            cx,
+        )
     }
 
     /// A Waku-style select: value chip + caret, dropdown above when open.
@@ -4749,7 +5461,8 @@ impl OrbitApp {
                                 app.settings_select = None;
                             } else {
                                 app.settings_select = Some(kind);
-                                app.settings_filter.update(cx, |filter, cx| filter.clear(cx));
+                                app.settings_filter
+                                    .update(cx, |filter, cx| filter.clear(cx));
                                 let handle = app.settings_filter.read(cx).focus_handle(cx);
                                 window.focus(&handle);
                             }
@@ -4827,44 +5540,41 @@ impl OrbitApp {
                         // flex list had between rows (uniform_list has no
                         // gap support, so the gap rides on the row shell).
                         children.push(
-                            div()
-                                .h(px(30.))
-                                .w_full()
-                                .child(
-                                    div()
-                                        .id(ElementId::NamedInteger(
-                                            "settings-select-row".into(),
-                                            orig_ix as u64,
-                                        ))
-                                        .h(px(28.))
-                                        .w_full()
-                                        .px(px(10.))
-                                        .rounded(px(6.))
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .gap(px(10.))
-                                        .cursor_pointer()
-                                        .when(selected_row, |row| row.bg(theme.active))
-                                        .hover(|style| style.bg(theme.overlay))
-                                        .text_size(theme.ui_px(12.))
-                                        .text_color(if selected_row {
-                                            theme.active_fg
-                                        } else {
-                                            theme.text_2
-                                        })
-                                        .child(option.clone())
-                                        .when(selected_row, |row| {
-                                            row.child(icon("icons/check.svg", 11., theme.accent))
-                                        })
-                                        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-                                            this.update(cx, |app, cx| {
-                                                app.apply_settings_select(kind, orig_ix, cx);
-                                                app.settings_select = None;
-                                                cx.notify();
-                                            });
-                                        }),
-                                ),
+                            div().h(px(30.)).w_full().child(
+                                div()
+                                    .id(ElementId::NamedInteger(
+                                        "settings-select-row".into(),
+                                        orig_ix as u64,
+                                    ))
+                                    .h(px(28.))
+                                    .w_full()
+                                    .px(px(10.))
+                                    .rounded(px(6.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(10.))
+                                    .cursor_pointer()
+                                    .when(selected_row, |row| row.bg(theme.active))
+                                    .hover(|style| style.bg(theme.overlay))
+                                    .text_size(theme.ui_px(12.))
+                                    .text_color(if selected_row {
+                                        theme.active_fg
+                                    } else {
+                                        theme.text_2
+                                    })
+                                    .child(option.clone())
+                                    .when(selected_row, |row| {
+                                        row.child(icon("icons/check.svg", 11., theme.accent))
+                                    })
+                                    .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                                        this.update(cx, |app, cx| {
+                                            app.apply_settings_select(kind, orig_ix, cx);
+                                            app.settings_select = None;
+                                            cx.notify();
+                                        });
+                                    }),
+                            ),
                         );
                     }
                     children
@@ -4936,7 +5646,7 @@ impl OrbitApp {
     fn apply_settings_select(&mut self, kind: SettingsSelect, ix: usize, cx: &mut Context<Self>) {
         match kind {
             SettingsSelect::Theme => {
-                let id = ThemeId::ALL.get(ix).copied().unwrap_or(ThemeId::OneDark);
+                let id = ThemeId::ALL.get(ix).copied().unwrap_or(ThemeId::Orbit);
                 theme::set_theme(cx, id);
                 return;
             }
@@ -5118,21 +5828,22 @@ pub(crate) fn file_badge(path: &str, theme: Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// A non-interactive pill used for static meta in the composer row.
+/// A non-interactive pill used for static meta in the composer row. Ghost
+/// style: it states a fact (the access mode), so it carries no border or
+/// fill and sits quieter than the interactive chips.
 fn pill_static(icon_path: &'static str, label: &str, theme: Theme) -> impl IntoElement + use<> {
     div()
         .flex()
         .items_center()
         .gap_1p5()
         .px(px(7.))
-        .py(px(3.))
+        // Fixed height so the pill aligns exactly with the 24px chips and
+        // the attach button in the composer row.
+        .h(px(24.))
         .rounded_md()
-        .bg(theme.bg_raised)
-        .border_1()
-        .border_color(theme.border)
         .text_size(theme.ui_px(12.))
-        .text_color(theme.text_2)
-        .child(icon(icon_path, 12., theme.text_2))
+        .text_color(theme.text_3)
+        .child(icon(icon_path, 12., theme.text_3))
         .child(label.to_string())
 }
 
@@ -5198,18 +5909,24 @@ fn visible_sessions_in_group(
 /// yet — see [`OrbitApp::sidebar_sessions`]. The placeholder carries the
 /// workspace the pi process runs in, pi's live title when it has already
 /// named the session, and a `now` stamp so it sorts to the top of the
-/// sidebar.
+/// sidebar. A session that hasn't started (`session_started` = false — no
+/// user message sent yet) gets no placeholder: a draft is not listed
+/// (Waku drafts parity).
 fn sessions_with_placeholder(
     sessions: &[SessionInfo],
     current_path: Option<&Path>,
     current_title: Option<&str>,
     current_workspace: Option<&Path>,
+    session_started: bool,
 ) -> Vec<SessionInfo> {
     let mut rows = sessions.to_vec();
     let Some(path) = current_path else {
         return rows;
     };
     if rows.iter().any(|s| s.path == path) {
+        return rows;
+    }
+    if !session_started {
         return rows;
     }
     let workspace = current_workspace
@@ -5269,12 +5986,19 @@ fn build_sidebar_rows(
             cwd: sessions[ixs[0]].cwd.clone(),
         });
         if collapsed {
+            // A collapsed group hides its sessions — except the open one,
+            // which stays pinned under the header so the sidebar always
+            // shows where the live session lives.
+            if let Some(active) = active_path {
+                if let Some(&ix) = ixs.iter().find(|&&ix| sessions[ix].path == *active) {
+                    side_rows.push(SideRow::Session(ix));
+                }
+            }
             continue;
         }
 
         let sessions_expanded = expanded_session_groups.contains(&label);
-        let visible =
-            visible_sessions_in_group(&ixs, sessions, sessions_expanded, active_path);
+        let visible = visible_sessions_in_group(&ixs, sessions, sessions_expanded, active_path);
         for ix in &visible {
             side_rows.push(SideRow::Session(*ix));
         }
@@ -5286,7 +6010,10 @@ fn build_sidebar_rows(
         } else if ixs.len() > SIDEBAR_GROUP_SESSIONS_VISIBLE {
             let hidden = ixs.len().saturating_sub(visible.len());
             if hidden > 0 {
-                side_rows.push(SideRow::ShowMore { label, count: hidden });
+                side_rows.push(SideRow::ShowMore {
+                    label,
+                    count: hidden,
+                });
             }
         }
     }
@@ -5319,18 +6046,21 @@ fn render_side_row(
             let this_new = this.clone();
             // Outer shell: inter-group spacing only — hover lives on the inner
             // card so the highlight doesn't bleed into the padding (same split
-            // as session rows below).
+            // as session rows below). The header is a minimal label row:
+            // chevron + folder + name, the session count pinned to the very
+            // end, and the new-session button fading in to the count's left
+            // on hover (both are flex_none, so nothing shifts when it appears).
             div()
                 .w_full()
                 .px_2()
-                .pt(px(10.))
+                .pt(px(12.))
                 .pb(px(2.))
                 .group("workspace-row")
                 .child(
                     div()
                         .w_full()
-                        .h(px(28.))
-                        .px(px(4.))
+                        .h(px(24.))
+                        .px(px(6.))
                         .rounded_md()
                         .flex()
                         .items_center()
@@ -5356,7 +6086,7 @@ fn render_side_row(
                             } else {
                                 "icons/chevron-down.svg"
                             },
-                            11.,
+                            10.,
                             theme.text_3,
                         ))
                         .child(icon("icons/folder.svg", 13., theme.text_2))
@@ -5365,32 +6095,14 @@ fn render_side_row(
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(theme.ui_px(12.5))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.text)
+                                .text_size(theme.ui_px(11.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.text_2)
                                 .child(label.clone()),
                         )
                         .child(
                             div()
-                                .px(px(5.))
-                                .h(px(16.))
-                                .min_w(px(16.))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_full()
-                                .bg(theme.bg_raised)
-                                .text_size(theme.ui_px(10.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.text_3)
-                                .child(format!("{count}")),
-                        )
-                        .child(
-                            div()
-                                .id(ElementId::Name(
-                                    format!("workspace-new-{label}").into(),
-                                ))
+                                .id(ElementId::Name(format!("workspace-new-{label}").into()))
                                 .flex_none()
                                 .size(px(18.))
                                 .rounded(px(4.))
@@ -5398,21 +6110,30 @@ fn render_side_row(
                                 .items_center()
                                 .justify_center()
                                 .cursor_pointer()
+                                // Revealed on row hover — the quiet default
+                                // keeps group headers to just label + count.
+                                .opacity(0.)
+                                .group_hover("workspace-row", |s| s.opacity(1.))
                                 .hover(|s| s.bg(theme.overlay))
-                                .on_mouse_up(
-                                    MouseButton::Left,
-                                    {
-                                        let this = this_new.clone();
-                                        move |_, window, cx| {
-                                            cx.stop_propagation();
-                                            let cwd = cwd_for_new.clone();
-                                            this.update(cx, |app, cx| {
-                                                app.on_new_session_in_workspace(cwd, window, cx);
-                                            });
-                                        }
-                                    },
-                                )
-                                .child(icon("icons/plus.svg", 14., theme.text_3)),
+                                .on_mouse_up(MouseButton::Left, {
+                                    let this = this_new.clone();
+                                    move |_, window, cx| {
+                                        cx.stop_propagation();
+                                        let cwd = cwd_for_new.clone();
+                                        this.update(cx, |app, cx| {
+                                            app.on_new_session_in_workspace(cwd, window, cx);
+                                        });
+                                    }
+                                })
+                                .child(icon("icons/plus.svg", 13., theme.text_3)),
+                        )
+                        // Session count, pinned to the header's right edge.
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(theme.ui_px(10.5))
+                                .text_color(theme.text_3)
+                                .child(format!("{count}")),
                         ),
                 )
                 .into_any_element()
@@ -5422,9 +6143,9 @@ fn render_side_row(
             let label_for_click = label.clone();
             div()
                 .w_full()
-                .pl(px(20.))
+                .h(px(26.))
+                .pl(px(22.))
                 .pr_2()
-                .py(px(4.))
                 .flex()
                 .items_center()
                 .gap_1p5()
@@ -5438,10 +6159,9 @@ fn render_side_row(
                         cx.notify();
                     });
                 })
-                .child(icon("icons/chevron-down.svg", 11., theme.text_3))
                 .child(
                     div()
-                        .text_size(theme.ui_px(12.))
+                        .text_size(theme.ui_px(11.5))
                         .text_color(theme.text_3)
                         .child(format!("Show {count} more")),
                 )
@@ -5452,9 +6172,9 @@ fn render_side_row(
             let label_for_click = label.clone();
             div()
                 .w_full()
-                .pl(px(20.))
+                .h(px(26.))
+                .pl(px(22.))
                 .pr_2()
-                .py(px(4.))
                 .flex()
                 .items_center()
                 .gap_1p5()
@@ -5468,10 +6188,9 @@ fn render_side_row(
                         cx.notify();
                     });
                 })
-                .child(icon("icons/chevron-up.svg", 11., theme.text_3))
                 .child(
                     div()
-                        .text_size(theme.ui_px(12.))
+                        .text_size(theme.ui_px(11.5))
                         .text_color(theme.text_3)
                         .child("Show less"),
                 )
@@ -5491,10 +6210,10 @@ fn render_side_row(
             // Sessions with a live pi process must not be deleted — the
             // process would recreate the file mid-run.
             let deletable = !active && !running;
-            // Indented under the workspace group so the list reads as a
-            // tree. The open row carries an accent-tinted leading icon so it
-            // reads at a glance; the icon chip gives every row an anchor to
-            // scan by.
+            // Two-line row (title + actions, then preview · age),
+            // indented under its workspace group so the list reads as a
+            // tree. The open session gets a raised fill and an accent bar
+            // in the indent gutter; row actions are revealed on hover.
             // Outer item carries the inter-row spacing (padding) and the click
             // handler; the inner card holds the background/hover so the gap
             // between cards stays clear. Padding (not margin) is used because
@@ -5502,7 +6221,7 @@ fn render_side_row(
             let mut row = div()
                 .id(ElementId::NamedInteger("side-session".into(), *ix as u64))
                 .w_full()
-                .py(px(2.))
+                .py(px(1.))
                 .cursor_pointer()
                 .on_mouse_up(MouseButton::Left, move |_, _, cx| {
                     let session = session_for_click.clone();
@@ -5514,19 +6233,30 @@ fn render_side_row(
                 .group("srow")
                 .relative()
                 .w_full()
-                .pl(px(20.))
-                .pr(px(6.))
-                .py(px(6.))
+                .pl(px(22.))
+                .pr(px(8.))
+                .py(px(5.))
                 .rounded_md()
                 .flex()
                 .items_center()
-                .gap(px(10.))
+                .gap(px(6.))
                 .when(active, |card| card.bg(theme.bg_raised))
                 .when(!active, |card| card.hover(|s| s.bg(theme.bg_hover)));
-            // Leading icon chip — the session-kind glyph, tinted on the
-            // open row so the active conversation stands out.
-            card = card.child(render_session_chip(active, theme));
-            // Two-line text column: title, then preview · age.
+            // Active marker: a short accent bar in the indent gutter.
+            if active {
+                card = card.child(
+                    div()
+                        .absolute()
+                        .left(px(8.))
+                        .top(px(8.))
+                        .bottom(px(8.))
+                        .w(px(2.))
+                        .rounded_full()
+                        .bg(theme.accent),
+                );
+            }
+            // Two-line text column: title + actions on top, then the
+            // preview with the age pinned to its right end.
             card = card.child(
                 div()
                     .flex_1()
@@ -5535,34 +6265,57 @@ fn render_side_row(
                     .flex_col()
                     .justify_center()
                     .gap(px(2.))
-                    // Line 1 — title (the hero line: wrapped in a flex row so
-                    // the `flex_1 min_w_0 truncate` pattern takes the full
-                    // column width and paints the name — instead of collapsing
-                    // to "…" as a bare flex-column child).
+                    // Line 1 — title with the row actions pinned to its
+                    // right: the spinner while running, the hover-revealed
+                    // `…` menu otherwise. Wrapped in a flex row so the
+                    // `flex_1 min_w_0 truncate` pattern takes the full
+                    // column width and paints the name — instead of
+                    // collapsing to "…" as a bare flex-column child.
                     .child(
                         div()
                             .w_full()
                             .flex()
                             .items_center()
+                            .gap(px(6.))
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
-                                    .text_size(theme.ui_px(13.5))
+                                    .text_size(theme.ui_px(13.))
                                     .line_height(px(18.))
-                                    .font_weight(FontWeight::NORMAL)
+                                    .font_weight(if active {
+                                        FontWeight::MEDIUM
+                                    } else {
+                                        FontWeight::NORMAL
+                                    })
                                     .text_color(if active { theme.text } else { theme.text_2 })
                                     .child(session.title.clone()),
-                            ),
+                            )
+                            .child(if running {
+                                running_loader(theme, *ix).into_any_element()
+                            } else {
+                                session_menu_button(
+                                    *ix,
+                                    menu,
+                                    session.path.clone(),
+                                    session.title.clone(),
+                                    deletable,
+                                    this_for_menu,
+                                    theme,
+                                )
+                                .into_any_element()
+                            }),
                     )
-                    // Line 2 — first message preview + age (kept subtle).
+                    // Line 2 — first-message preview with the age at the very
+                    // end (accent at low opacity, so the timestamp reads as
+                    // metadata, not content).
                     .child(
                         div()
                             .w_full()
                             .flex()
                             .items_center()
-                            .gap_1p5()
+                            .gap(px(6.))
                             .child(
                                 div()
                                     .flex_1()
@@ -5577,28 +6330,10 @@ fn render_side_row(
                                 div()
                                     .flex_none()
                                     .text_size(theme.ui_px(10.5))
-                                    .text_color(theme.text_3)
+                                    .text_color(theme.accent.opacity(0.75))
                                     .child(sessions::relative_time(session.modified)),
                             ),
                     ),
-            );
-            // Right edge — spinner while running, hover-revealed actions
-            // otherwise. Vertically centered against the two-line body.
-            card = card.child(
-                if running {
-                    running_loader(theme, *ix).into_any_element()
-                } else {
-                    session_menu_button(
-                        *ix,
-                        menu,
-                        session.path.clone(),
-                        session.title.clone(),
-                        deletable,
-                        this_for_menu,
-                        theme,
-                    )
-                    .into_any_element()
-                },
             );
             row = row.child(card);
             row.into_any_element()
@@ -5631,10 +6366,10 @@ fn session_menu_button(
         .justify_center()
         .cursor_pointer()
         // Hidden until the row (or the button itself) is hovered, or while
-        // this row's menu is open.
+        // this row's menu is open. Icon-only, no background — a filled hover
+        // square reads as a patch covering the row's right edge.
         .opacity(if menu_open { 1.0 } else { 0.0 })
         .group_hover("srow", |s| s.opacity(1.))
-        .hover(|s| s.bg(theme.bg_hover))
         .on_mouse_up(MouseButton::Left, move |_, window, cx| {
             // Keep the click from also opening the session via the row.
             cx.stop_propagation();
@@ -5667,35 +6402,6 @@ fn session_menu_button(
                 .size(px(0.))
                 .child(session_menu_popup(menu, this_for_popup.clone(), theme))
         }))
-}
-
-/// A session row's leading icon chip: a rounded surface holding the
-/// conversation glyph, tinted with the accent when the row is the open
-/// session (so the active conversation reads at a glance) and neutral
-/// otherwise. No interactivity of its own — the row is the click target.
-fn render_session_chip(active: bool, theme: Theme) -> impl IntoElement + use<> {
-    div()
-        .size(px(28.))
-        .flex_none()
-        .relative()
-        .rounded(px(7.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(if active {
-            theme.accent.opacity(0.16)
-        } else {
-            theme.bg_raised
-        })
-        .child(icon(
-            "icons/chat.svg",
-            15.,
-            if active {
-                theme.accent
-            } else {
-                theme.text_3
-            },
-        ))
 }
 
 /// Waku's sidebar working spinner: a rotating loader arc on the running
@@ -6036,10 +6742,8 @@ mod sidebar_placeholder_tests {
     }
 
     #[test]
-    fn placeholder_prepends_missing_current_session() {
-        // pi flushes a fresh session's file lazily, so the active session is
-        // absent from the store right after `new_session`. The sidebar must
-        // still show it — instantly, at the top, under its workspace.
+    fn no_placeholder_before_the_first_message_is_sent() {
+        // A fresh `new_session` is a draft: nothing sent, nothing listed.
         let store = vec![store_session("old", "/work/alpha")];
         let fresh = PathBuf::from("/store/2026-09-09_new.jsonl");
         let rows = sessions_with_placeholder(
@@ -6047,6 +6751,26 @@ mod sidebar_placeholder_tests {
             Some(&fresh),
             None,
             Some(Path::new("/work/beta")),
+            false,
+        );
+        assert_eq!(rows.len(), 1, "a draft session must not be listed");
+        assert_eq!(rows[0].path, store[0].path);
+    }
+
+    #[test]
+    fn placeholder_prepends_missing_current_session() {
+        // pi flushes a fresh session's file lazily, so the active session is
+        // absent from the store right after the first prompt is sent. The
+        // sidebar must still show it — instantly, at the top, under its
+        // workspace.
+        let store = vec![store_session("old", "/work/alpha")];
+        let fresh = PathBuf::from("/store/2026-09-09_new.jsonl");
+        let rows = sessions_with_placeholder(
+            &store,
+            Some(&fresh),
+            None,
+            Some(Path::new("/work/beta")),
+            true,
         );
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].path, fresh);
@@ -6059,7 +6783,7 @@ mod sidebar_placeholder_tests {
     #[test]
     fn placeholder_uses_pis_title_when_already_named() {
         let fresh = PathBuf::from("/store/new.jsonl");
-        let rows = sessions_with_placeholder(&[], Some(&fresh), Some("Fix login bug"), None);
+        let rows = sessions_with_placeholder(&[], Some(&fresh), Some("Fix login bug"), None, true);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].title, "Fix login bug");
         assert_eq!(rows[0].first_message, "");
@@ -6069,8 +6793,13 @@ mod sidebar_placeholder_tests {
     fn no_placeholder_when_current_session_is_on_disk() {
         let fresh = PathBuf::from("/store/new.jsonl");
         let store = vec![store_session("new", "/work/alpha")];
-        let rows =
-            sessions_with_placeholder(&store, Some(&fresh), None, Some(Path::new("/work/alpha")));
+        let rows = sessions_with_placeholder(
+            &store,
+            Some(&fresh),
+            None,
+            Some(Path::new("/work/alpha")),
+            true,
+        );
         assert_eq!(rows.len(), 1, "duplicate row for the same session");
         assert_eq!(rows[0].id, "new", "the real on-disk row must win");
     }
@@ -6078,21 +6807,153 @@ mod sidebar_placeholder_tests {
     #[test]
     fn no_placeholder_without_an_open_session() {
         let store = vec![store_session("old", "/work/alpha")];
-        let rows = sessions_with_placeholder(&store, None, None, None);
+        let rows = sessions_with_placeholder(&store, None, None, None, false);
         assert_eq!(rows.len(), 1);
     }
 
     #[test]
-    fn empty_store_with_open_session_is_not_empty() {
-        // A brand-new store plus a fresh session: the sidebar must render
+    fn empty_store_with_started_session_is_not_empty() {
+        // A brand-new store plus a started session: the sidebar must render
         // the session row, not the "No sessions yet" empty state.
         let rows = sessions_with_placeholder(
             &[],
             Some(&PathBuf::from("/store/new.jsonl")),
             None,
             Some(Path::new("/work/beta")),
+            true,
         );
         assert!(!rows.is_empty());
+    }
+
+    #[test]
+    fn empty_store_with_draft_session_shows_empty_state() {
+        // Nothing sent yet: the sidebar renders its empty state, not a row.
+        let rows = sessions_with_placeholder(
+            &[],
+            Some(&PathBuf::from("/store/new.jsonl")),
+            None,
+            Some(Path::new("/work/beta")),
+            false,
+        );
+        assert!(rows.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod sidebar_active_reveal_tests {
+    use super::*;
+
+    fn store_session(name: &str, cwd: &str) -> SessionInfo {
+        SessionInfo {
+            path: PathBuf::from(format!("/store/{name}.jsonl")),
+            id: name.into(),
+            cwd: PathBuf::from(cwd),
+            title: format!("{name} title"),
+            first_message: "preview".into(),
+            modified: SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    fn session_row_paths(rows: &[SideRow], sessions: &[SessionInfo]) -> Vec<PathBuf> {
+        rows.iter()
+            .filter_map(|r| match r {
+                SideRow::Session(ix) => Some(sessions[*ix].path.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn collapsed_workspace_pins_the_open_session() {
+        // "alpha" is the working workspace (expanded by default); "beta" is
+        // a foreign workspace, collapsed unless explicitly expanded. It
+        // holds the open session: the group stays collapsed (siblings
+        // hidden) but the open session's row stays pinned under the header.
+        let sessions = vec![
+            store_session("a1", "/work/alpha"),
+            store_session("b1", "/work/beta"),
+            store_session("b2", "/work/beta"),
+        ];
+        let active = Some(sessions[1].path.clone());
+        let rows = build_sidebar_rows(
+            &sessions,
+            "alpha",
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &active,
+        );
+        let visible = session_row_paths(&rows, &sessions);
+        assert!(
+            visible.contains(&sessions[1].path),
+            "the open session stays visible in a collapsed workspace"
+        );
+        assert!(
+            !visible.contains(&sessions[2].path),
+            "its siblings stay hidden while the group is collapsed"
+        );
+        let beta_header = rows.iter().find_map(|r| match r {
+            SideRow::Workspace {
+                label, collapsed, ..
+            } if label == "beta" => Some(*collapsed),
+            _ => None,
+        });
+        assert_eq!(
+            beta_header,
+            Some(true),
+            "the group header still reads as collapsed"
+        );
+    }
+
+    #[test]
+    fn collapsed_workspace_without_the_open_session_stays_closed() {
+        let sessions = vec![
+            store_session("a1", "/work/alpha"),
+            store_session("b1", "/work/beta"),
+        ];
+        let active = Some(sessions[0].path.clone());
+        let rows = build_sidebar_rows(
+            &sessions,
+            "alpha",
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &active,
+        );
+        assert!(
+            !session_row_paths(&rows, &sessions).contains(&sessions[1].path),
+            "a collapsed foreign workspace keeps its sessions hidden"
+        );
+    }
+
+    #[test]
+    fn manually_collapsed_working_workspace_pins_the_open_session() {
+        // The user collapsed their own workspace by hand — the open session
+        // still shows under the header; expanding brings back the rest.
+        let sessions = vec![
+            store_session("a1", "/work/alpha"),
+            store_session("a2", "/work/alpha"),
+        ];
+        let active = Some(sessions[0].path.clone());
+        let mut collapsed = HashSet::new();
+        collapsed.insert("alpha".to_string());
+        let rows = build_sidebar_rows(
+            &sessions,
+            "alpha",
+            &collapsed,
+            &HashSet::new(),
+            &HashSet::new(),
+            &active,
+        );
+        let visible = session_row_paths(&rows, &sessions);
+        assert!(
+            visible.contains(&sessions[0].path),
+            "the open session stays visible even when its workspace was collapsed by hand"
+        );
+        assert!(
+            !visible.contains(&sessions[1].path),
+            "the other sessions stay hidden until the header is expanded"
+        );
     }
 }
 
@@ -6109,32 +6970,24 @@ mod popup_layout_tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             let rows = 100;
             let list_h = (rows as f32 * 30. + 8.).min(220.);
-            div()
-                .flex()
-                .flex_col()
-                .child(div().h(px(34.)))
-                .child(
-                    uniform_list(
-                        "settings-select-list",
-                        rows,
-                        |range, _, _| {
-                            range
-                                .map(|ix| {
-                                    div()
-                                        .h(px(30.))
-                                        .w_full()
-                                        .child(format!("row {ix}"))
-                                        .into_any_element()
-                                })
-                                .collect()
-                        },
-                    )
-                    .track_scroll(self.0.clone())
-                    .w_full()
-                    .h(px(list_h))
-                    .px(px(4.))
-                    .py(px(4.)),
-                )
+            div().flex().flex_col().child(div().h(px(34.))).child(
+                uniform_list("settings-select-list", rows, |range, _, _| {
+                    range
+                        .map(|ix| {
+                            div()
+                                .h(px(30.))
+                                .w_full()
+                                .child(format!("row {ix}"))
+                                .into_any_element()
+                        })
+                        .collect()
+                })
+                .track_scroll(self.0.clone())
+                .w_full()
+                .h(px(list_h))
+                .px(px(4.))
+                .py(px(4.)),
+            )
         }
     }
 
@@ -6144,18 +6997,14 @@ mod popup_layout_tests {
     /// is what keeps the list visible. Regression test for the empty
     /// font/theme dropdowns.
     #[gpui::test]
-    fn settings_popup_list_keeps_a_viewport_in_zero_height_context(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn settings_popup_list_keeps_a_viewport_in_zero_height_context(cx: &mut gpui::TestAppContext) {
         use gpui::size;
 
         let cx = cx.add_empty_window();
         let scroll = gpui::UniformListScrollHandle::new();
-        let _ = cx.draw(
-            point(px(0.), px(0.)),
-            size(px(200.), px(0.)),
-            |_, cx| cx.new(|_| SettingsPopupListTestView(scroll.clone())),
-        );
+        let _ = cx.draw(point(px(0.), px(0.)), size(px(200.), px(0.)), |_, cx| {
+            cx.new(|_| SettingsPopupListTestView(scroll.clone()))
+        });
         let state = scroll.0.borrow();
         let size = state.last_item_size.expect("list was laid out");
         assert!(
@@ -6167,20 +7016,14 @@ mod popup_layout_tests {
     /// The same list with `max_h` instead of an explicit height collapses to
     /// 0 — this is the gpui behavior the explicit height works around.
     #[gpui::test]
-    fn max_h_collapses_uniform_list_in_zero_height_context(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn max_h_collapses_uniform_list_in_zero_height_context(cx: &mut gpui::TestAppContext) {
         use gpui::size;
 
         let cx = cx.add_empty_window();
         let scroll = gpui::UniformListScrollHandle::new();
-        let _ = cx.draw(
-            point(px(0.), px(0.)),
-            size(px(200.), px(0.)),
-            |_, cx| {
-                cx.new(|_| MaxHeightListTestView(scroll.clone()))
-            },
-        );
+        let _ = cx.draw(point(px(0.), px(0.)), size(px(200.), px(0.)), |_, cx| {
+            cx.new(|_| MaxHeightListTestView(scroll.clone()))
+        });
         let state = scroll.0.borrow();
         let size = state.last_item_size.expect("list was laid out");
         assert_eq!(
@@ -6196,21 +7039,17 @@ mod popup_layout_tests {
 
     impl Render for MaxHeightListTestView {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            uniform_list(
-                "settings-select-list",
-                100,
-                |range, _, _| {
-                    range
-                        .map(|ix| {
-                            div()
-                                .h(px(30.))
-                                .w_full()
-                                .child(format!("row {ix}"))
-                                .into_any_element()
-                        })
-                        .collect()
-                },
-            )
+            uniform_list("settings-select-list", 100, |range, _, _| {
+                range
+                    .map(|ix| {
+                        div()
+                            .h(px(30.))
+                            .w_full()
+                            .child(format!("row {ix}"))
+                            .into_any_element()
+                    })
+                    .collect()
+            })
             .track_scroll(self.0.clone())
             .w_full()
             .max_h(px(220.))
@@ -6219,5 +7058,3 @@ mod popup_layout_tests {
         }
     }
 }
-
-

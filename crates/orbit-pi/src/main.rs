@@ -7,22 +7,23 @@ mod app;
 mod app_icon;
 mod assets;
 mod branch_picker;
+mod command_palette;
 mod composer;
-mod git;
-mod platform;
 mod context_meter;
+mod git;
 mod mentions;
 mod message_scroller;
 mod model_selector;
 mod model_selector_match;
 mod onboarding;
+mod platform;
 mod reader;
-mod session_picker;
 mod sessions;
 mod sidepane;
 mod theme;
 mod transcript;
 mod transcript_view;
+mod workspace_picker;
 
 use std::time::Duration;
 
@@ -64,6 +65,7 @@ actions!(
         NewSession,
         RefreshSessions,
         OpenSettings,
+        ToggleCommandPalette,
         ToggleModelMenu,
         ToggleThinkingMenu
     ]
@@ -79,6 +81,13 @@ actions!(
         PickerSelectNext,
         PickerSelectPrev
     ]
+);
+
+// Composer "+" add-menu actions (bound to the `AddMenu` context, which
+// rides on the open menu's focus handle).
+actions!(
+    add_menu_keys,
+    [AddMenuNext, AddMenuPrev, AddMenuConfirm, AddMenuClose]
 );
 
 fn bind_keys(cx: &mut App) {
@@ -99,12 +108,14 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-c", Copy, Some("Composer")),
         KeyBinding::new("cmd-x", Cut, Some("Composer")),
         KeyBinding::new("enter", Submit, Some("Composer")),
+        KeyBinding::new("cmd-enter", Submit, Some("Composer")),
         KeyBinding::new("shift-enter", Newline, Some("Composer")),
         KeyBinding::new("up", Up, Some("Composer")),
         KeyBinding::new("down", Down, Some("Composer")),
         KeyBinding::new("cmd-n", NewSession, None),
         KeyBinding::new("cmd-r", RefreshSessions, None),
         KeyBinding::new("cmd-,", OpenSettings, None),
+        KeyBinding::new("cmd-p", ToggleCommandPalette, None),
         KeyBinding::new("cmd-period", AbortRun, None),
         // Model picker keys — the `Picker` context rides on the popup's
         // filter input, i.e. the *same* dispatch node as `Composer`, so these
@@ -116,6 +127,13 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", PickerConfirm, Some("Picker")),
         KeyBinding::new("up", PickerSelectPrev, Some("Picker")),
         KeyBinding::new("down", PickerSelectNext, Some("Picker")),
+        // Add-menu keys — the `AddMenu` context rides on the menu's own
+        // focus handle (deeper than the global escape/enter bindings, so
+        // these win while the menu is open).
+        KeyBinding::new("escape", AddMenuClose, Some("AddMenu")),
+        KeyBinding::new("enter", AddMenuConfirm, Some("AddMenu")),
+        KeyBinding::new("up", AddMenuPrev, Some("AddMenu")),
+        KeyBinding::new("down", AddMenuNext, Some("AddMenu")),
     ]);
 }
 

@@ -23,7 +23,7 @@ pi as a child process, no web, no webview, no Node daemon.
 2. **The pi CLI is the only agent runtime.** Spawn `pi --mode rpc` as a child process per open session and speak newline-delimited JSON over stdio (`crates/orbit-rpc`). There is no Node daemon.
 3. **GPUI is pre-1.0 and pinned.** `crates/orbit-pi` uses `gpui = { version = "0.2.2", features = ["runtime_shaders"] }`. Upgrade deliberately on a schedule, never track `main`.
 4. **Performance is a product requirement.** The transcript and sidebar are virtualized (`list()`). The UI drains RPC events on a ~90 ms heartbeat — never block a frame with I/O. Syntax highlighting, when it lands, must be paint-only so streaming never reflows.
-5. **Trust pi's truth.** Render real RPC events and on-disk state; nothing decorative pretending to be functional. Access modes the protocol can't deliver are shown as unavailable (or as a static fact), not faked. The sidebar **Search** row is a dimmed stub — do not wire a fake search.
+5. **Trust pi's truth.** Render real RPC events and on-disk state; nothing decorative pretending to be functional. Access modes the protocol can't deliver are shown as unavailable (or as a static fact), not faked. The sidebar **Search** row opens the command palette (sessions/commands/settings) — it is not a transcript-content search; do not wire a fake one.
 
 ## Repo layout
 
@@ -35,8 +35,10 @@ crates/orbit-pi/        GPUI app — window, shell, chat, settings
   src/transcript.rs     virtualized messages (snapshot + stream)
   src/transcript_view.rs Waku-style transcript paint (rail, activity cards, copy); plain-GPUI message rows (no component library)
   src/message_scroller.rs tail-following list + jump-to-latest (original, plain gpui ListState)
-  src/composer.rs       single-line EntityInputHandler
+  src/composer.rs       multi-line EntityInputHandler (wraps, auto-grows, scrolls)
   src/model_selector.rs model / thinking picker popover
+  src/command_palette.rs  ⌘P command palette (sections, fuzzy match, modal scrim layer)
+  src/workspace_picker.rs new-task folder selector (recent folders + native browse)
   src/sessions.rs       reads ~/.pi/agent/sessions
   src/assets.rs         include_dir AssetSource (SVGs + app icon)
   src/app_icon.rs       dock icon (macOS) + Settings → About mark
@@ -64,14 +66,14 @@ The product is the GPUI app (`cargo run -p orbit-pi`). The v0.1 React/Vite/Tauri
 | Area | Location | What is real today |
 |---|---|---|
 | Shell | `app.rs` | Transparent titlebar, traffic lights inside the sidebar, sessions sidebar grouped by workspace (collapsible), top-bar back/forward + title + edit +/− counts, floating composer, status bar (workspace / Local / git branch from `.git/HEAD`) |
-| Sessions | `sessions.rs` | Reads `~/.pi/agent/sessions/<slug>/*.jsonl`; title = first user message; `cmd-n` new, click to `switch_session` + `get_messages` |
+| Sessions | `sessions.rs` | Reads `~/.pi/agent/sessions/<slug>/*.jsonl`; title = first user message; header-only files (fresh `new_session`, nothing sent yet) are drafts and **not listed** until the first user message lands (Waku drafts parity); `cmd-n` new, click to `switch_session` + `get_messages` |
 | Transcript | `transcript.rs` + `transcript_view.rs` + `message.rs` + `message_scroller.rs` | Virtualized `list()` (max 720px) with MessageScroller tail-follow: append/remeasure without blank rows, **Jump to latest** when you scroll up. Rows use Message Start/End slots (avatar + content + Copy footer). Waku turn order: **Worked for** fold → answer → files-changed card → **Copy** (+ completion time when pi provides one); live turns keep a **Working** activity cluster and close with **Working for**. Left navigation ticks jump to user turns and show a hover preview card (prompt + response snippet). Tool rows expand into detail cards with Arguments/Output sections (Output captured live via `toolCallId` from `tool_execution_end`) and per-section copy buttons; failed tools show a red ✕. Counts from edit/write args, not git; no fork |
-| Composer | `composer.rs` | **Single-line** input (gpui `input` example pattern). Enter submits — as a **steer** (`steer` command) while the agent is mid-turn, as a `prompt` otherwise (Waku queue/steer parity). No attachments, no mentions, no multi-line |
+| Composer | `composer.rs` + `mentions.rs` | **Multi-line** input (wraps, grows to 8 rows, then scrolls). Enter submits — as a **steer** (`steer` command) while the agent is mid-turn, as a `prompt` otherwise (Waku queue/steer parity); `shift-enter` newline, `cmd-enter` submits. `/`-command + `@`-file autocomplete, image attachments (paste / drop / "+" menu → Attach image), non-image files referenced by path at the caret, "+" add menu (keyboard-driven, `AddMenu` context). Failed sends keep the prompt and attachments |
 | Side pane | `sidepane.rs` + `reader.rs` | Right panel (top-bar `panel-right` toggle, drag-resizable left edge) with Review / Terminal / Browser tabs. Empty pane = "Open tab" card grid. **Review**: `git diff HEAD --no-color` + untracked from `git status`, parsed into per-file cards with Waku-style numbered diff rows (old/new gutters resolved from hunk headers, tinted ±rows, hunk separators, no-newline notes); reloads on tab open, workspace change, and `agent_settled`. The transcript's changed-files cards' **Review** buttons open this tab via a `ReviewOpener` callback threaded from the app (replaced the old write-temp-diff-and-`open` flow). **Terminal**: `sh -c` runner in the workspace cwd on the background executor (Enter = `Submit` caught at the pane root before the app's prompt-submit; `clear` wipes the buffer). **Browser**: reader-mode fetch (`reader.rs`, `ureq` + tag-stripper) — no webview by design |
 | Catalog | `model_selector.rs` | Searchable popovers for `get_available_models` / `get_available_thinking_levels`; `set_model` / `set_thinking_level`. Two chips + a **static** "Full access" pill (not a control) |
 | Settings | `app.rs` | In-app surface (`cmd-,`): General / Appearance / Providers / About. Mostly read-only facts from the live process + a real sidebar toggle. About shows the app icon. **Not** providers CRUD |
 | RPC | `orbit-rpc` | Spawn (`--mode rpc --approve`, `PI_SKIP_VERSION_CHECK=1` — Waku parity), JSONL I/O, response correlation, typed-enough events incl. `steer`, fork family (`get_fork_messages`/`fork`/`clone`), `session_info_changed` (live auto-title) and `auto_retry_end` surfacing. UI does **not** yet answer `extension_ui_request` and has no rewind UI for fork |
-| Stubs | `app.rs` | Search nav (dimmed, no handler). No git diff panel (only +/− from edit/write tool args). No workbench pages |
+| Stubs | `app.rs` | No transcript-content search. No git diff panel (only +/− from edit/write tool args). No workbench pages |
 
 **Not started (parity backlog):** full markdown (tables, highlight), rich tool/approval UI, steer, fork/rename, file attach, mermaid, density persistence, packaging/CI.
 
@@ -137,9 +139,12 @@ These compiled and ran against the pinned version. When in doubt, check
 | `cmd-n` | New session | global |
 | `cmd-r` | Reload session list from disk | global |
 | `cmd-,` | Settings | global |
+| `cmd-p` | Command palette (sessions / commands / settings) | global |
 | `escape` / `cmd-.` | Close settings → close picker → `abort` | global / Composer |
-| `enter` | Submit prompt | `Composer` |
+| `enter` / `cmd-enter` | Submit prompt | `Composer` |
+| `shift-enter` | Newline | `Composer` |
 | `enter` / `escape` / `up` / `down` | Confirm / cancel / move | `Picker` (registered after Composer) |
+| `enter` / `escape` / `up` / `down` | Run / close / move | `AddMenu` (composer "+" menu; registered after Picker) |
 
 ## Pi CLI RPC protocol (official spec)
 

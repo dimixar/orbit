@@ -2702,22 +2702,6 @@ fn toggle_index(set: &Rc<RefCell<HashSet<usize>>>, ix: usize) {
     }
 }
 
-fn toggle_activity_cluster(map: &Rc<RefCell<HashMap<usize, bool>>>, ix: usize, live: bool) {
-    let mut map = map.borrow_mut();
-    let next = !map.get(&ix).copied().unwrap_or(live);
-    map.insert(ix, next);
-}
-
-pub(crate) fn activity_header_title(tool_count: usize, live: bool) -> String {
-    if live {
-        "Working".to_string()
-    } else if tool_count == 1 {
-        "Used 1 tool".to_string()
-    } else {
-        format!("Used {tool_count} tools")
-    }
-}
-
 pub(crate) fn activity_icon(name: &str) -> &'static str {
     match name {
         "edit" | "write" => "icons/file-diff.svg",
@@ -2869,13 +2853,6 @@ mod tests {
             summary_time_label_at(millis(older), now),
             older.format("%b %-d").to_string()
         );
-    }
-
-    #[test]
-    fn activity_header_matches_waku_copy() {
-        assert_eq!(activity_header_title(3, true), "Working");
-        assert_eq!(activity_header_title(1, false), "Used 1 tool");
-        assert_eq!(activity_header_title(4, false), "Used 4 tools");
     }
 
     #[test]

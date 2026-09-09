@@ -2,10 +2,9 @@
 //!
 //! Colors are semantic roles (backgrounds, text, borders, transcript
 //! surfaces) rather than raw steps, so every paint site reads from one
-//! place. A [`ThemeId`] names a Zed-compatible palette (Zed's own `One
-//! Dark`/`One Light`, plus the zedokai Monokai variants); each has a fixed
-//! appearance. The UI face is Zed's bundled IBM Plex Sans (`.ZedSans`);
-//! code surfaces use Zed's Lilex (`.ZedMono`).
+//! place. A [`ThemeId`] names the Orbit dark or light palette. The UI
+//! face is Zed's bundled IBM Plex Sans (`.ZedSans`); code surfaces use
+//! Zed's Lilex (`.ZedMono`).
 
 use std::path::PathBuf;
 use std::sync::{OnceLock, RwLock};
@@ -20,53 +19,20 @@ pub enum ThemeMode {
     Light,
 }
 
-/// One of the selectable Zed-compatible palettes.
+/// One of the selectable Orbit palettes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeId {
-    OneDark,
-    OneLight,
-    Zedokai,
-    ZedokaiDarker,
-    ZedokaiFilterOctagon,
-    ZedokaiDarkerFilterOctagon,
-    ZedokaiFilterSpectrum,
-    ZedokaiDarkerFilterSpectrum,
-    FlexokiDark,
-    FlexokiLight,
     Orbit,
     OrbitLight,
 }
 
 impl ThemeId {
     /// Selectable themes, in the order shown in the settings dropdown.
-    pub const ALL: [ThemeId; 12] = [
-        Self::OneDark,
-        Self::OneLight,
-        Self::Zedokai,
-        Self::ZedokaiDarker,
-        Self::ZedokaiFilterOctagon,
-        Self::ZedokaiDarkerFilterOctagon,
-        Self::ZedokaiFilterSpectrum,
-        Self::ZedokaiDarkerFilterSpectrum,
-        Self::FlexokiDark,
-        Self::FlexokiLight,
-        Self::Orbit,
-        Self::OrbitLight,
-    ];
+    pub const ALL: [ThemeId; 2] = [Self::Orbit, Self::OrbitLight];
 
-    /// Persisted key; also accepts the legacy `dark`/`light` mode names.
+    /// Persisted key; also accepts legacy theme names (mapped to Orbit).
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::OneDark => "one-dark",
-            Self::OneLight => "one-light",
-            Self::Zedokai => "zedokai",
-            Self::ZedokaiDarker => "zedokai-darker",
-            Self::ZedokaiFilterOctagon => "zedokai-filter-octagon",
-            Self::ZedokaiDarkerFilterOctagon => "zedokai-darker-filter-octagon",
-            Self::ZedokaiFilterSpectrum => "zedokai-filter-spectrum",
-            Self::ZedokaiDarkerFilterSpectrum => "zedokai-darker-filter-spectrum",
-            Self::FlexokiDark => "flexoki-dark",
-            Self::FlexokiLight => "flexoki-light",
             Self::Orbit => "orbit",
             Self::OrbitLight => "orbit-light",
         }
@@ -74,19 +40,19 @@ impl ThemeId {
 
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim() {
-            // `dark`/`light` are the pre-theme persisted values.
-            "one-dark" | "dark" => Some(Self::OneDark),
-            "one-light" | "light" => Some(Self::OneLight),
-            "zedokai" => Some(Self::Zedokai),
-            "zedokai-darker" => Some(Self::ZedokaiDarker),
-            "zedokai-filter-octagon" => Some(Self::ZedokaiFilterOctagon),
-            "zedokai-darker-filter-octagon" => Some(Self::ZedokaiDarkerFilterOctagon),
-            "zedokai-filter-spectrum" => Some(Self::ZedokaiFilterSpectrum),
-            "zedokai-darker-filter-spectrum" => Some(Self::ZedokaiDarkerFilterSpectrum),
-            "flexoki-dark" => Some(Self::FlexokiDark),
-            "flexoki-light" => Some(Self::FlexokiLight),
-            "orbit" => Some(Self::Orbit),
-            "orbit-light" => Some(Self::OrbitLight),
+            // Current keys, plus legacy dark theme names → Orbit.
+            "orbit"
+            | "dark"
+            | "one-dark"
+            | "zedokai"
+            | "zedokai-darker"
+            | "zedokai-filter-octagon"
+            | "zedokai-darker-filter-octagon"
+            | "zedokai-filter-spectrum"
+            | "zedokai-darker-filter-spectrum"
+            | "flexoki-dark" => Some(Self::Orbit),
+            // Current key, plus legacy light theme names → Orbit Light.
+            "orbit-light" | "light" | "one-light" | "flexoki-light" => Some(Self::OrbitLight),
             _ => None,
         }
     }
@@ -94,16 +60,6 @@ impl ThemeId {
     /// Human label for the settings dropdown.
     pub fn label(self) -> &'static str {
         match self {
-            Self::OneDark => "One Dark",
-            Self::OneLight => "One Light",
-            Self::Zedokai => "Zedokai",
-            Self::ZedokaiDarker => "Zedokai Darker",
-            Self::ZedokaiFilterOctagon => "Zedokai (Filter Octagon)",
-            Self::ZedokaiDarkerFilterOctagon => "Zedokai Darker (Filter Octagon)",
-            Self::ZedokaiFilterSpectrum => "Zedokai (Filter Spectrum)",
-            Self::ZedokaiDarkerFilterSpectrum => "Zedokai Darker (Filter Spectrum)",
-            Self::FlexokiDark => "Flexoki Dark",
-            Self::FlexokiLight => "Flexoki Light",
             Self::Orbit => "Orbit",
             Self::OrbitLight => "Orbit Light",
         }
@@ -111,8 +67,8 @@ impl ThemeId {
 
     pub fn appearance(self) -> ThemeMode {
         match self {
-            Self::OneLight | Self::FlexokiLight | Self::OrbitLight => ThemeMode::Light,
-            _ => ThemeMode::Dark,
+            Self::OrbitLight => ThemeMode::Light,
+            Self::Orbit => ThemeMode::Dark,
         }
     }
 
@@ -120,7 +76,7 @@ impl ThemeId {
         std::fs::read_to_string(persist_path())
             .ok()
             .and_then(|raw| Self::parse(&raw))
-            .unwrap_or(Self::OneDark)
+            .unwrap_or(Self::Orbit)
     }
 
     fn persist(self) {
@@ -302,7 +258,7 @@ impl UiPrefs {
 
 impl Default for Theme {
     fn default() -> Self {
-        Self::for_id(ThemeId::OneDark)
+        Self::for_id(ThemeId::Orbit)
     }
 }
 
@@ -430,346 +386,6 @@ struct Palette {
     trough: u32,
 }
 
-/// Zed `One Dark`: blue-gray canvas, editor panels, blue accent.
-const ONE_DARK: Palette = Palette {
-    bg_main: 0x3B414D,
-    bg_sidebar: 0x2F343E,
-    bg_raised: 0x2E343E,
-    bg_hover: 0x363C46,
-    active: 0x454A56,
-    active_fg: 0xDCE0E5,
-    border: 0x464B57,
-    text: 0xDCE0E5,
-    text_2: 0xA9AFBC,
-    text_3: 0x878A98,
-    ok_green: 0xA1C181,
-    stop_red: 0xD07277,
-    stop_red_hover: 0xE06C76,
-    add_green: 0xA1C181,
-    del_red: 0xD07277,
-    accent: 0x74ADE8,
-    menu_bg: 0x2F343E,
-    send_bg: 0x2E343E,
-    send_bg_hover: 0x363C46,
-    send_fg: 0xDCE0E5,
-    assistant_text: 0xDCE0E5,
-    code_bg: 0x282C33,
-    code_text: 0xACB2BE,
-    tool_border: 0x363C46,
-    tool_meta: 0xA9AFBC,
-    ring_track: 0x363C46,
-    ring_fill: 0xDCE0E5,
-    warn: 0xDEC184,
-    crit: 0xD07277,
-    trough: 0x2E343E,
-};
-
-/// Zed `One Light`: warm off-white canvas, raised surfaces, blue accent.
-const ONE_LIGHT: Palette = Palette {
-    bg_main: 0xDCDCDD,
-    bg_sidebar: 0xEBEBEC,
-    bg_raised: 0xEBEBEC,
-    bg_hover: 0xDFDFE0,
-    active: 0xCACACA,
-    active_fg: 0x242529,
-    border: 0xC9C9CA,
-    text: 0x242529,
-    text_2: 0x58585A,
-    text_3: 0x7E8086,
-    ok_green: 0x669F59,
-    stop_red: 0xD36151,
-    stop_red_hover: 0xE05C4D,
-    add_green: 0x669F59,
-    del_red: 0xD36151,
-    accent: 0x5C78E2,
-    menu_bg: 0xEBEBEC,
-    send_bg: 0xEBEBEC,
-    send_bg_hover: 0xDFDFE0,
-    send_fg: 0x242529,
-    assistant_text: 0x242529,
-    code_bg: 0xFAFAFA,
-    code_text: 0x242529,
-    tool_border: 0xDFDFE0,
-    tool_meta: 0x58585A,
-    ring_track: 0xDFDFE0,
-    ring_fill: 0x242529,
-    warn: 0xA48819,
-    crit: 0xD36151,
-    trough: 0xEBEBEC,
-};
-
-/// zedokai (Monokai Pro): warm gray canvas, yellow accent, pink/green hues.
-const ZEDOKAI: Palette = Palette {
-    bg_main: 0x2D2A2E,
-    bg_sidebar: 0x333034,
-    bg_raised: 0x403E41,
-    bg_hover: 0x333034,
-    active: 0x403E41,
-    active_fg: 0xFCFCFA,
-    border: 0x474448,
-    text: 0xFCFCFA,
-    text_2: 0x939293,
-    text_3: 0x727072,
-    ok_green: 0xA9DC76,
-    stop_red: 0xFF6188,
-    stop_red_hover: 0xFF7A94,
-    add_green: 0xA9DC76,
-    del_red: 0xFF6188,
-    accent: 0xFFD866,
-    menu_bg: 0x333034,
-    send_bg: 0x403E41,
-    send_bg_hover: 0x333034,
-    send_fg: 0xFCFCFA,
-    assistant_text: 0xFCFCFA,
-    code_bg: 0x2D2A2E,
-    code_text: 0xFCFCFA,
-    tool_border: 0x474448,
-    tool_meta: 0x939293,
-    ring_track: 0x333034,
-    ring_fill: 0xFCFCFA,
-    warn: 0xFC9867,
-    crit: 0xFF6188,
-    trough: 0x333034,
-};
-
-/// zedokai Darker: Monokai Pro with near-black panels and borders.
-const ZEDOKAI_DARKER: Palette = Palette {
-    bg_main: 0x2D2A2E,
-    bg_sidebar: 0x262427,
-    bg_raised: 0x403E41,
-    bg_hover: 0x262427,
-    active: 0x403E41,
-    active_fg: 0xFCFCFA,
-    border: 0x19181A,
-    text: 0xFCFCFA,
-    text_2: 0x939293,
-    text_3: 0x727072,
-    ok_green: 0xA9DC76,
-    stop_red: 0xFF6188,
-    stop_red_hover: 0xFF7A94,
-    add_green: 0xA9DC76,
-    del_red: 0xFF6188,
-    accent: 0xFFD866,
-    menu_bg: 0x262427,
-    send_bg: 0x403E41,
-    send_bg_hover: 0x262427,
-    send_fg: 0xFCFCFA,
-    assistant_text: 0xFCFCFA,
-    code_bg: 0x2D2A2E,
-    code_text: 0xFCFCFA,
-    tool_border: 0x19181A,
-    tool_meta: 0x939293,
-    ring_track: 0x262427,
-    ring_fill: 0xFCFCFA,
-    warn: 0xFC9867,
-    crit: 0xFF6188,
-    trough: 0x262427,
-};
-
-/// zedokai (Filter Octagon): cool blue-gray canvas, teal/green hues.
-const ZEDOKAI_FILTER_OCTAGON: Palette = Palette {
-    bg_main: 0x282A3A,
-    bg_sidebar: 0x2E3040,
-    bg_raised: 0x3A3D4B,
-    bg_hover: 0x2E3040,
-    active: 0x3A3D4B,
-    active_fg: 0xEAF2F1,
-    border: 0x424454,
-    text: 0xEAF2F1,
-    text_2: 0x888D94,
-    text_3: 0x696D77,
-    ok_green: 0xBAD761,
-    stop_red: 0xFF657A,
-    stop_red_hover: 0xFF7A8D,
-    add_green: 0xBAD761,
-    del_red: 0xFF657A,
-    accent: 0xFFD76D,
-    menu_bg: 0x2E3040,
-    send_bg: 0x3A3D4B,
-    send_bg_hover: 0x2E3040,
-    send_fg: 0xEAF2F1,
-    assistant_text: 0xEAF2F1,
-    code_bg: 0x282A3A,
-    code_text: 0xEAF2F1,
-    tool_border: 0x424454,
-    tool_meta: 0x888D94,
-    ring_track: 0x2E3040,
-    ring_fill: 0xEAF2F1,
-    warn: 0xFF9B5E,
-    crit: 0xFF657A,
-    trough: 0x2E3040,
-};
-
-/// zedokai Darker (Filter Octagon): Octagon palette with darker panels.
-const ZEDOKAI_DARKER_FILTER_OCTAGON: Palette = Palette {
-    bg_main: 0x282A3A,
-    bg_sidebar: 0x232532,
-    bg_raised: 0x3A3D4B,
-    bg_hover: 0x232532,
-    active: 0x3A3D4B,
-    active_fg: 0xEAF2F1,
-    border: 0x181A23,
-    text: 0xEAF2F1,
-    text_2: 0x888D94,
-    text_3: 0x696D77,
-    ok_green: 0xBAD761,
-    stop_red: 0xFF657A,
-    stop_red_hover: 0xFF7A8D,
-    add_green: 0xBAD761,
-    del_red: 0xFF657A,
-    accent: 0xFFD76D,
-    menu_bg: 0x232532,
-    send_bg: 0x3A3D4B,
-    send_bg_hover: 0x232532,
-    send_fg: 0xEAF2F1,
-    assistant_text: 0xEAF2F1,
-    code_bg: 0x282A3A,
-    code_text: 0xEAF2F1,
-    tool_border: 0x181A23,
-    tool_meta: 0x888D94,
-    ring_track: 0x232532,
-    ring_fill: 0xEAF2F1,
-    warn: 0xFF9B5E,
-    crit: 0xFF657A,
-    trough: 0x232532,
-};
-
-/// zedokai (Filter Spectrum): neutral gray canvas, warm yellow accent.
-const ZEDOKAI_FILTER_SPECTRUM: Palette = Palette {
-    bg_main: 0x222222,
-    bg_sidebar: 0x282828,
-    bg_raised: 0x363537,
-    bg_hover: 0x282828,
-    active: 0x363537,
-    active_fg: 0xF7F1FF,
-    border: 0x3C3C3C,
-    text: 0xF7F1FF,
-    text_2: 0x8B888F,
-    text_3: 0x69676C,
-    ok_green: 0x7BD88F,
-    stop_red: 0xFC618D,
-    stop_red_hover: 0xFC7B9E,
-    add_green: 0x7BD88F,
-    del_red: 0xFC618D,
-    accent: 0xFCE566,
-    menu_bg: 0x282828,
-    send_bg: 0x363537,
-    send_bg_hover: 0x282828,
-    send_fg: 0xF7F1FF,
-    assistant_text: 0xF7F1FF,
-    code_bg: 0x222222,
-    code_text: 0xF7F1FF,
-    tool_border: 0x3C3C3C,
-    tool_meta: 0x8B888F,
-    ring_track: 0x282828,
-    ring_fill: 0xF7F1FF,
-    warn: 0xFD9353,
-    crit: 0xFC618D,
-    trough: 0x282828,
-};
-
-/// zedokai Darker (Filter Spectrum): Spectrum palette with darker panels.
-const ZEDOKAI_DARKER_FILTER_SPECTRUM: Palette = Palette {
-    bg_main: 0x222222,
-    bg_sidebar: 0x1C1C1C,
-    bg_raised: 0x363537,
-    bg_hover: 0x1C1C1C,
-    active: 0x363537,
-    active_fg: 0xF7F1FF,
-    border: 0x0F0F0F,
-    text: 0xF7F1FF,
-    text_2: 0x8B888F,
-    text_3: 0x69676C,
-    ok_green: 0x7BD88F,
-    stop_red: 0xFC618D,
-    stop_red_hover: 0xFC7B9E,
-    add_green: 0x7BD88F,
-    del_red: 0xFC618D,
-    accent: 0xFCE566,
-    menu_bg: 0x1C1C1C,
-    send_bg: 0x363537,
-    send_bg_hover: 0x1C1C1C,
-    send_fg: 0xF7F1FF,
-    assistant_text: 0xF7F1FF,
-    code_bg: 0x222222,
-    code_text: 0xF7F1FF,
-    tool_border: 0x0F0F0F,
-    tool_meta: 0x8B888F,
-    ring_track: 0x1C1C1C,
-    ring_fill: 0xF7F1FF,
-    warn: 0xFD9353,
-    crit: 0xFC618D,
-    trough: 0x1C1C1C,
-};
-
-/// Flexoki Dark: warm paper-black canvas, teal accent (#3AA99F).
-const FLEXOKI_DARK: Palette = Palette {
-    bg_main: 0x100F0F,
-    bg_sidebar: 0x1C1B1A,
-    bg_raised: 0x1C1B1A,
-    bg_hover: 0x282726,
-    active: 0x343331,
-    active_fg: 0xCECDC3,
-    border: 0x282726,
-    text: 0xCECDC3,
-    text_2: 0x878580,
-    text_3: 0x575653,
-    ok_green: 0x879A39,
-    stop_red: 0xD14D41,
-    stop_red_hover: 0xF89A8A,
-    add_green: 0x879A39,
-    del_red: 0xD14D41,
-    accent: 0x3AA99F,
-    menu_bg: 0x1C1B1A,
-    send_bg: 0x1C1B1A,
-    send_bg_hover: 0x282726,
-    send_fg: 0xCECDC3,
-    assistant_text: 0xCECDC3,
-    code_bg: 0x100F0F,
-    code_text: 0xCECDC3,
-    tool_border: 0x343331,
-    tool_meta: 0x878580,
-    ring_track: 0x282726,
-    ring_fill: 0xCECDC3,
-    warn: 0xD0A215,
-    crit: 0xD14D41,
-    trough: 0x1C1B1A,
-};
-
-/// Flexoki Light: warm paper-white canvas, dark ink, teal accent (#24837B).
-const FLEXOKI_LIGHT: Palette = Palette {
-    bg_main: 0xFFFCF0,
-    bg_sidebar: 0xF2F0E5,
-    bg_raised: 0xF2F0E5,
-    bg_hover: 0xE6E4D9,
-    active: 0xDAD8CE,
-    active_fg: 0x100F0F,
-    border: 0xE6E4D9,
-    text: 0x100F0F,
-    text_2: 0x6F6E69,
-    text_3: 0xB7B5AC,
-    ok_green: 0x66800B,
-    stop_red: 0xAF3029,
-    stop_red_hover: 0xD14D41,
-    add_green: 0x66800B,
-    del_red: 0xAF3029,
-    accent: 0x24837B,
-    menu_bg: 0xF2F0E5,
-    send_bg: 0xF2F0E5,
-    send_bg_hover: 0xE6E4D9,
-    send_fg: 0x100F0F,
-    assistant_text: 0x100F0F,
-    code_bg: 0xFFFCF0,
-    code_text: 0x100F0F,
-    tool_border: 0xDAD8CE,
-    tool_meta: 0x6F6E69,
-    ring_track: 0xE6E4D9,
-    ring_fill: 0x100F0F,
-    warn: 0xAD8301,
-    crit: 0xAF3029,
-    trough: 0xF2F0E5,
-};
-
 /// Waku dark: near-black canvas, light primary buttons, orange ring accent.
 const ORBIT: Palette = Palette {
     bg_main: 0x1A1A1A,
@@ -840,16 +456,6 @@ const ORBIT_LIGHT: Palette = Palette {
 
 fn palette(id: ThemeId) -> Palette {
     match id {
-        ThemeId::OneDark => ONE_DARK,
-        ThemeId::OneLight => ONE_LIGHT,
-        ThemeId::Zedokai => ZEDOKAI,
-        ThemeId::ZedokaiDarker => ZEDOKAI_DARKER,
-        ThemeId::ZedokaiFilterOctagon => ZEDOKAI_FILTER_OCTAGON,
-        ThemeId::ZedokaiDarkerFilterOctagon => ZEDOKAI_DARKER_FILTER_OCTAGON,
-        ThemeId::ZedokaiFilterSpectrum => ZEDOKAI_FILTER_SPECTRUM,
-        ThemeId::ZedokaiDarkerFilterSpectrum => ZEDOKAI_DARKER_FILTER_SPECTRUM,
-        ThemeId::FlexokiDark => FLEXOKI_DARK,
-        ThemeId::FlexokiLight => FLEXOKI_LIGHT,
         ThemeId::Orbit => ORBIT,
         ThemeId::OrbitLight => ORBIT_LIGHT,
     }
@@ -862,12 +468,12 @@ impl Theme {
 
     #[cfg(test)]
     pub fn dark() -> Self {
-        Self::for_id(ThemeId::OneDark)
+        Self::for_id(ThemeId::Orbit)
     }
 
     #[cfg(test)]
     pub fn light() -> Self {
-        Self::for_id(ThemeId::OneLight)
+        Self::for_id(ThemeId::OrbitLight)
     }
 
     /// Keep the current UI customization across a palette switch.
@@ -959,6 +565,18 @@ impl Theme {
         ]
     }
 
+    /// Soft lift for the floating composer: one tight contact layer. The
+    /// hairline border carries definition, so no wide ambient here (a
+    /// border under a broad shadow reads as a ghost card).
+    pub fn composer_shadow(self) -> Vec<BoxShadow> {
+        vec![BoxShadow {
+            color: self.shadow_contact,
+            offset: point(px(0.), px(2.)),
+            blur_radius: px(10.),
+            spread_radius: px(-3.),
+        }]
+    }
+
     /// Compact hover-card shadow (slightly tighter than the picker).
     pub fn card_shadow(self) -> Vec<BoxShadow> {
         vec![
@@ -989,7 +607,7 @@ fn persist_path() -> PathBuf {
     home.join(".orbit-pi").join("theme")
 }
 
-/// Install the persisted (or default One Dark) theme as a GPUI global and
+/// Install the persisted (or default Orbit) theme as a GPUI global and
 /// load the persisted font families into the statics.
 pub fn init(cx: &mut App) {
     cx.set_global(Theme::for_id(ThemeId::load()).with_ui(UiPrefs::load()));
@@ -1054,48 +672,25 @@ mod tests {
 
     #[test]
     fn parse_theme_id() {
-        assert_eq!(ThemeId::parse("one-dark"), Some(ThemeId::OneDark));
-        assert_eq!(ThemeId::parse("  zedokai\n"), Some(ThemeId::Zedokai));
-        assert_eq!(
-            ThemeId::parse("zedokai-filter-octagon"),
-            Some(ThemeId::ZedokaiFilterOctagon)
-        );
-        assert_eq!(
-            ThemeId::parse("zedokai-darker-filter-spectrum"),
-            Some(ThemeId::ZedokaiDarkerFilterSpectrum)
-        );
-        assert_eq!(ThemeId::parse("flexoki-dark"), Some(ThemeId::FlexokiDark));
-        assert_eq!(ThemeId::parse("flexoki-light"), Some(ThemeId::FlexokiLight));
         assert_eq!(ThemeId::parse("orbit"), Some(ThemeId::Orbit));
         assert_eq!(ThemeId::parse("orbit-light"), Some(ThemeId::OrbitLight));
         assert_eq!(ThemeId::parse("system"), None);
-        // Legacy mode names still resolve to the One palettes.
-        assert_eq!(ThemeId::parse("dark"), Some(ThemeId::OneDark));
-        assert_eq!(ThemeId::parse("light"), Some(ThemeId::OneLight));
+        // Legacy theme names map onto Orbit / Orbit Light.
+        assert_eq!(ThemeId::parse("dark"), Some(ThemeId::Orbit));
+        assert_eq!(ThemeId::parse("light"), Some(ThemeId::OrbitLight));
+        assert_eq!(ThemeId::parse("one-dark"), Some(ThemeId::Orbit));
+        assert_eq!(ThemeId::parse("one-light"), Some(ThemeId::OrbitLight));
+        assert_eq!(ThemeId::parse("zedokai"), Some(ThemeId::Orbit));
+        assert_eq!(ThemeId::parse("flexoki-dark"), Some(ThemeId::Orbit));
+        assert_eq!(ThemeId::parse("flexoki-light"), Some(ThemeId::OrbitLight));
     }
 
     #[test]
     fn theme_appearance_matches_label() {
-        assert_eq!(ThemeId::OneDark.appearance(), ThemeMode::Dark);
-        assert_eq!(ThemeId::OneLight.appearance(), ThemeMode::Light);
-        assert_eq!(ThemeId::Zedokai.appearance(), ThemeMode::Dark);
-        assert_eq!(ThemeId::ZedokaiDarker.appearance(), ThemeMode::Dark);
-        assert_eq!(ThemeId::Zedokai.label(), "Zedokai");
-        assert_eq!(ThemeId::ZedokaiDarker.label(), "Zedokai Darker");
-        assert_eq!(
-            ThemeId::ZedokaiFilterOctagon.label(),
-            "Zedokai (Filter Octagon)"
-        );
-        assert_eq!(
-            ThemeId::ZedokaiDarkerFilterSpectrum.label(),
-            "Zedokai Darker (Filter Spectrum)"
-        );
-        assert_eq!(ThemeId::FlexokiDark.appearance(), ThemeMode::Dark);
-        assert_eq!(ThemeId::FlexokiLight.appearance(), ThemeMode::Light);
-        assert_eq!(ThemeId::FlexokiDark.label(), "Flexoki Dark");
         assert_eq!(ThemeId::Orbit.appearance(), ThemeMode::Dark);
         assert_eq!(ThemeId::OrbitLight.appearance(), ThemeMode::Light);
         assert_eq!(ThemeId::Orbit.label(), "Orbit");
+        assert_eq!(ThemeId::OrbitLight.label(), "Orbit Light");
     }
 
     #[test]
@@ -1136,8 +731,8 @@ mod tests {
         assert_eq!(theme.ui_px(14.), px(16.));
         assert_eq!(theme.code_px(13.), px(12.));
         // A palette switch carries UI customization over.
-        let light = Theme::for_id(ThemeId::OneLight).with_ui(theme.ui);
-        assert_eq!(light.theme_id, ThemeId::OneLight);
+        let light = Theme::for_id(ThemeId::OrbitLight).with_ui(theme.ui);
+        assert_eq!(light.theme_id, ThemeId::OrbitLight);
         assert_eq!(light.ui, theme.ui);
     }
 
@@ -1147,20 +742,17 @@ mod tests {
         let light = Theme::light();
         assert_ne!(dark.bg_main, light.bg_main);
         assert_ne!(dark.text, light.text);
-        assert_eq!(dark.theme_id, ThemeId::OneDark);
-        assert_eq!(light.theme_id, ThemeId::OneLight);
+        assert_eq!(dark.theme_id, ThemeId::Orbit);
+        assert_eq!(light.theme_id, ThemeId::OrbitLight);
         // Every palette is distinct from the default.
         for id in ThemeId::ALL {
             assert_eq!(Theme::for_id(id).theme_id, id);
         }
-        // Dark themes stay dark; One Light, Flexoki Light, Orbit Light are light.
+        // Orbit is dark; Orbit Light is light.
         for id in ThemeId::ALL {
             assert_eq!(
                 Theme::for_id(id).mode,
-                if id == ThemeId::OneLight
-                    || id == ThemeId::FlexokiLight
-                    || id == ThemeId::OrbitLight
-                {
+                if id == ThemeId::OrbitLight {
                     ThemeMode::Light
                 } else {
                     ThemeMode::Dark

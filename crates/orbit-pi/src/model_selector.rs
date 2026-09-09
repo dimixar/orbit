@@ -479,17 +479,17 @@ impl Render for ModelSelector {
 }
 
 /// Icon + tint for a pi thinking level (HugeIcons stroke set in
-/// `assets/icons/`). Mapping: slash-circle (off), dot (minimal), zap (low),
-/// bulb (medium), brain (high), sparkles (xhigh/max), AI-marked brain
-/// (auto). Unknown levels fall back to the plain spark.
+/// `assets/icons/`). Mapping: idea-01 (off/none), idea (low/minimal), brain
+/// (medium), brain-02 (high), ai-brain-02 (xhigh/ultra), ai-brain-03 (max),
+/// sparkles (auto). Unknown levels fall back to the plain spark.
 pub(crate) fn thinking_icon(level: &str, theme: &Theme) -> (&'static str, gpui::Hsla) {
     match level.to_ascii_lowercase().as_str() {
-        "off" => ("icons/thinking-off.svg", theme.text_3),
-        "minimal" => ("icons/thinking-minimal.svg", theme.accent),
-        "low" => ("icons/thinking-low.svg", theme.accent),
+        "off" | "none" => ("icons/thinking-none.svg", theme.text_3),
+        "minimal" | "low" => ("icons/thinking-low.svg", theme.accent),
         "medium" => ("icons/thinking-medium.svg", theme.accent),
         "high" => ("icons/thinking-high.svg", theme.accent),
-        "xhigh" | "max" | "ultra" => ("icons/thinking-xhigh.svg", theme.accent),
+        "xhigh" | "ultra" => ("icons/thinking-xhigh.svg", theme.accent),
+        "max" => ("icons/thinking-max.svg", theme.accent),
         "auto" => ("icons/thinking-auto.svg", theme.accent),
         _ => ("icons/spark.svg", theme.accent),
     }
@@ -563,12 +563,12 @@ pub(crate) fn thinking_display(level: &str) -> String {
 /// Short hint shown under the thinking level label in the picker.
 fn thinking_hint(level: &str) -> &'static str {
     match level.to_ascii_lowercase().as_str() {
-        "off" => "No extended reasoning",
-        "minimal" => "Lightweight reasoning",
-        "low" => "Quick reasoning pass",
-        "medium" => "Balanced depth",
-        "high" => "Deeper analysis",
-        "xhigh" | "max" | "ultra" => "Maximum reasoning",
+        "off" | "none" => "No reasoning",
+        "minimal" | "low" => "Fast reasoning",
+        "medium" => "Balanced reasoning",
+        "high" => "Deeper reasoning",
+        "xhigh" | "ultra" => "Extensive reasoning",
+        "max" => "Maximum reasoning",
         "auto" => "Model chooses depth",
         _ => "Custom reasoning level",
     }
