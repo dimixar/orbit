@@ -1,233 +1,151 @@
 //! Right side pane — the workbench's second column (Waku parity): a
-//! tabbed panel with **Review** (git diff of the workspace), **Terminal**
-//! (a simple shell runner) and **Browser** (reader-mode page fetch, see
-//! `reader.rs`). Closing the pane keeps the last tab; reopening resumes
-//! it. With no tab chosen the pane shows the "Open tab" card grid.
+//! **Review** panel showing the workspace's git changes.
 //!
-//! The pane is a GPUI [`Entity`] owned by [`crate::app::OrbitApp`], so it
-//! can hold its own composer inputs, scroll handles and background-job
-//! state. `Submit` (Enter) dispatched from a pane input is caught here —
-//! the action bubbles from the focused input and this pane's root handles
-//! it before the app root's prompt-submit does.
+//! The diff reads from a selectable [`review::Source`] — the last agent turn
+//! (from [`crate::checkpoint`] snapshots), uncommitted, unstaged, staged,
+//! committed, or the whole branch. The patch is parsed into a virtualized list
+//! of rows with sticky file headers and expandable context gaps, colored from
+//! [`crate::highlight`] tokens. A filterable changed-files tree sits alongside
+//! it and hides on narrow panes.
+//!
+//! The pane is a GPUI [`Entity`] owned by [`crate::app::OrbitApp`], so it can
+//! hold its own list state and background-job state.
 
-use std::path::{Path, PathBuf};
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use gpui::{
-    div, point, prelude::*, px, radians, Animation, AnimationExt, AnyElement, ClickEvent, Context,
-    CursorStyle, Entity, Focusable, FontWeight, Hsla, Pixels, Render, ScrollHandle, SharedString,
-    TextAlign, Transformation, Window,
+    div, prelude::*, px, radians, Animation, AnimationExt, AnyElement, ClickEvent, Context,
+    CursorStyle, Entity, Font, FontFeatures, FontStyle, FontWeight, Hsla, KeyDownEvent,
+    ListAlignment, ListOffset, ListState, MouseDownEvent, Pixels, Render, SharedString, StyledText,
+    TextAlign, TextRun, Transformation, Window,
 };
 
-use crate::app::icon;
+use crate::app::{file_glyph, icon, nerd_font_family};
 use crate::composer::ComposerInput;
 use crate::git;
-use crate::reader::{self, ReaderPage};
-use crate::theme::{self, Theme};
-use crate::Submit;
+use crate::highlight::TokenClass;
+use crate::review::{self, ExpansionDirection, GapPosition, LineKind, Snapshot, Source};
+use crate::theme::{self, Theme, ThemeMode};
 
 /// Pane width defaults / drag clamps.
-const PANE_DEFAULT_W: f32 = 400.;
+const PANE_DEFAULT_W: f32 = 460.;
 const PANE_MIN_W: f32 = 300.;
-/// Terminal buffer cap (lines) — older lines are dropped.
-const TERMINAL_MAX_LINES: usize = 800;
+/// Below this width the ±stats collapse out of the toolbar.
+const STATS_MIN_PANE_W: f32 = 380.;
+/// Below this width the changed-files tree is hidden (responsive).
+const TREE_MIN_PANE_W: f32 = 440.;
+/// Directory tree column width range.
+const TREE_MIN_COL_W: f32 = 180.;
+const TREE_MAX_COL_W: f32 = 240.;
+/// Review diff row metrics (Waku `DiffRowStyle::review`).
+const DIFF_TEXT_SIZE: f32 = 12.5;
+const REVIEW_FILE_HEADER_HEIGHT: f32 = 36.;
+const REVIEW_HUNK_HEIGHT: f32 = 24.;
+const REVIEW_GAP_HEIGHT: f32 = 32.;
 
 /// Drag marker for the side-pane resize handle (gpui typed drag state).
 pub struct SidePaneResize;
 
-/// The three tabs the pane can host.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SidePaneTab {
-    Review,
-    Terminal,
-    Browser,
-}
-
-impl SidePaneTab {
-    fn label(self) -> &'static str {
-        match self {
-            SidePaneTab::Review => "Review",
-            SidePaneTab::Terminal => "Terminal",
-            SidePaneTab::Browser => "Browser",
-        }
-    }
-
-    fn icon(self) -> &'static str {
-        match self {
-            SidePaneTab::Review => "icons/file-diff.svg",
-            SidePaneTab::Terminal => "icons/terminal.svg",
-            SidePaneTab::Browser => "icons/globe.svg",
-        }
-    }
-
-    const ALL: [SidePaneTab; 3] = [
-        SidePaneTab::Review,
-        SidePaneTab::Terminal,
-        SidePaneTab::Browser,
-    ];
-}
-
-/// One line of terminal output.
-#[derive(Debug, Clone)]
-pub struct TermLine {
-    kind: TermKind,
-    text: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TermKind {
-    /// The echoed command (accent prompt glyph).
-    Command,
-    /// stdout.
-    Output,
-    /// stderr (red).
-    Error,
-    /// Meta notes (exit codes, cwd).
-    Note,
-}
-
-/// Classification of one unified-diff line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DiffKind {
-    /// `diff --git`, `index`, `---`, `+++` … (never painted — the file
-    /// header row already carries the path).
-    Meta,
-    /// `@@ … @@` hunk headers (painted as Waku-style separators).
-    Hunk,
-    Added,
-    Removed,
-    Context,
-    /// `\ No newline at end of file`, untracked-file notes.
-    Note,
-}
-
-/// One unified-diff line with its old/new line numbers resolved from the
-/// hunk headers (Waku parity: numbered diff rows).
-#[derive(Debug, Clone)]
-pub struct DiffLine {
-    kind: DiffKind,
-    text: String,
-    old_no: Option<u32>,
-    new_no: Option<u32>,
-}
-
-impl DiffLine {
-    fn plain(kind: DiffKind, text: impl Into<String>) -> Self {
-        Self {
-            kind,
-            text: text.into(),
-            old_no: None,
-            new_no: None,
-        }
-    }
-}
-
-/// One file's diff, pre-parsed for rendering.
-#[derive(Debug, Clone)]
-pub struct DiffFile {
-    path: String,
-    added: u64,
-    removed: u64,
-    /// Binary files carry a note instead of line hunks.
-    binary: bool,
-    lines: Vec<DiffLine>,
-    /// Hunk cursor while parsing: current (old, new) line numbers.
-    hunk: HunkCursor,
-}
-
-impl DiffFile {
-    /// An untracked file: listed, with no diff content.
-    fn untracked(path: String) -> Self {
-        Self {
-            path,
-            added: 0,
-            removed: 0,
-            binary: false,
-            lines: vec![DiffLine::plain(DiffKind::Note, "untracked file")],
-            hunk: None,
-        }
-    }
-}
-
-/// Parsed `git diff HEAD` + untracked files, cached until stale.
-#[derive(Debug, Clone, Default)]
-pub struct ReviewData {
-    files: Vec<DiffFile>,
-    added: u64,
-    removed: u64,
-    error: Option<String>,
-}
-
 pub struct SidePane {
     /// Whether the pane is shown at all (toggled from the top bar).
     open: bool,
-    /// The selected tab; `None` shows the "Open tab" card grid.
-    tab: Option<SidePaneTab>,
     /// Pane width in pixels — adjusted by dragging its left edge.
     width: Pixels,
 
     /// Workspace the pane operates on (kept in sync by the app).
     workspace: Option<PathBuf>,
+    /// pi session id — keys the turn checkpoints behind `Last Turn`.
+    session: Option<String>,
+    /// Latest completed turn for this session, if any.
+    latest_turn: Option<usize>,
 
     // ── Review ──
-    review: Option<ReviewData>,
+    review: Option<Arc<Snapshot>>,
     review_loading: bool,
     /// Set when a run settles (or the workspace changes); the diff reloads
-    /// next time the Review tab is visible.
+    /// next time the pane is visible.
     review_stale: bool,
-    review_scroll: ScrollHandle,
+    review_error: Option<String>,
+    /// Which git snapshot is shown; changing it reloads the diff.
+    source: Source,
+    /// Monotonic id so a slow load for a previous source can be discarded.
+    load_generation: u64,
+    /// The source filter dropdown is open.
+    source_menu_open: bool,
+    /// Guards against the outside-dismiss click's mouse-up re-opening the
+    /// menu through the chip.
+    menu_dismissed_at: Option<Instant>,
+    /// Virtualized diff rows.
+    diff_list: ListState,
 
-    // ── Terminal ──
-    terminal_input: Entity<ComposerInput>,
-    terminal_lines: Vec<TermLine>,
-    terminal_running: bool,
-    terminal_scroll: ScrollHandle,
-
-    // ── Browser ──
-    url_input: Entity<ComposerInput>,
-    page: Option<ReaderPage>,
-    browser_loading: bool,
-    browser_error: Option<String>,
-    browser_scroll: ScrollHandle,
+    // ── Changed-files tree ──
+    /// User toggle (still auto-hidden on narrow panes).
+    tree_open: bool,
+    tree_filter: Entity<ComposerInput>,
+    tree_list: ListState,
+    /// Directories explicitly expanded; Waku auto-expands every directory a
+    /// fresh snapshot introduces.
+    expanded_paths: HashSet<String>,
+    /// File whose diff is highlighted.
+    selected_file: Option<usize>,
+    /// Cached visible tree rows (kept in step with `tree_list`).
+    tree_rows: Vec<review::TreeRow>,
+    /// Keyboard cursor within the tree.
+    tree_cursor: Option<usize>,
+    tree_focus: gpui::FocusHandle,
+    /// Cached filter text + dirty flag so the tree rebuilds only on change.
+    last_tree_filter: String,
+    tree_dirty: bool,
 }
 
 impl SidePane {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        let terminal_input = cx.new(|cx| {
+        let tree_filter = cx.new(|cx| {
             ComposerInput::new(cx)
-                .with_placeholder("Run a command…")
-                .with_key_context("Composer SidePane")
-        });
-        let url_input = cx.new(|cx| {
-            ComposerInput::new(cx)
-                .with_placeholder("Search or enter URL")
-                .with_key_context("Composer SidePane")
+                .with_placeholder("Filter files…")
+                .with_key_context("Composer Picker")
         });
         Self {
             open: false,
-            tab: None,
             width: px(PANE_DEFAULT_W),
             workspace: None,
+            session: None,
+            latest_turn: None,
             review: None,
             review_loading: false,
             review_stale: true,
-            review_scroll: ScrollHandle::new(),
-            terminal_input,
-            terminal_lines: Vec::new(),
-            terminal_running: false,
-            terminal_scroll: ScrollHandle::new(),
-            url_input,
-            page: None,
-            browser_loading: false,
-            browser_error: None,
-            browser_scroll: ScrollHandle::new(),
+            review_error: None,
+            source: Source::default(),
+            load_generation: 0,
+            source_menu_open: false,
+            menu_dismissed_at: None,
+            diff_list: ListState::new(0, ListAlignment::Top, px(400.)),
+            tree_open: true,
+            tree_filter,
+            tree_list: ListState::new(0, ListAlignment::Top, px(200.)),
+            expanded_paths: HashSet::new(),
+            selected_file: None,
+            tree_rows: Vec::new(),
+            tree_cursor: None,
+            tree_focus: cx.focus_handle(),
+            last_tree_filter: String::new(),
+            tree_dirty: true,
         }
     }
 
     // ── state entry points (called from the app shell) ─────────────────
 
-    /// Show/hide the pane (top-bar toggle). Keeps the selected tab.
+    /// Show/hide the pane (top-bar toggle).
     pub fn toggle(&mut self, cx: &mut Context<Self>) {
         self.open = !self.open;
+        if !self.open {
+            self.source_menu_open = false;
+        } else if self.review_stale && !self.review_loading {
+            self.load_review(cx);
+        }
         cx.notify();
     }
 
@@ -237,6 +155,21 @@ impl SidePane {
 
     pub fn width(&self) -> Pixels {
         self.width
+    }
+
+    /// Whether the source filter dropdown is open (Escape closes it before
+    /// falling through to `abort`).
+    pub fn is_source_menu_open(&self) -> bool {
+        self.source_menu_open
+    }
+
+    /// Close the source filter dropdown (Escape / app-level dismiss).
+    pub fn close_source_menu(&mut self, cx: &mut Context<Self>) {
+        if self.source_menu_open {
+            self.source_menu_open = false;
+            self.menu_dismissed_at = Some(Instant::now());
+            cx.notify();
+        }
     }
 
     /// Drag-resize from the pane's left edge.
@@ -254,55 +187,76 @@ impl SidePane {
         if workspace != self.workspace {
             self.workspace = workspace;
             self.review_stale = true;
-            if self.open && self.tab == Some(SidePaneTab::Review) {
+            if self.open {
                 self.load_review(cx);
             }
             cx.notify();
         }
     }
 
+    /// Keep the session id + latest turn in sync so `Last Turn` can resolve.
+    pub fn set_turn_context(
+        &mut self,
+        session: Option<String>,
+        latest_turn: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let session_changed = session != self.session;
+        let latest_changed = latest_turn != self.latest_turn;
+        if !session_changed && !latest_changed {
+            return;
+        }
+        self.session = session;
+        self.latest_turn = latest_turn;
+        // A session swap can strand the pane on `Last Turn`; fall back to the
+        // always-available uncommitted view rather than showing an error.
+        if session_changed
+            && matches!(self.source, Source::LastTurn { .. })
+            && self.last_turn_source().is_none()
+        {
+            self.source = Source::Uncommitted;
+        }
+        self.review_stale = true;
+        if self.open && !self.review_loading {
+            self.load_review(cx);
+        }
+        cx.notify();
+    }
+
     /// A run settled — Review is stale; reload immediately when visible.
     pub fn mark_review_stale(&mut self, cx: &mut Context<Self>) {
         self.review_stale = true;
-        if self.open && self.tab == Some(SidePaneTab::Review) && !self.review_loading {
+        if self.open && !self.review_loading {
             self.load_review(cx);
         }
     }
 
-    // ── tab / interactions ─────────────────────────────────────────────
-
-    fn select_tab(&mut self, tab: SidePaneTab, window: &mut Window, cx: &mut Context<Self>) {
-        self.open = true;
-        if self.tab == Some(tab) {
-            return;
-        }
-        self.tab = Some(tab);
-        match tab {
-            SidePaneTab::Review => {
-                if self.review_stale && !self.review_loading {
-                    self.load_review(cx);
-                }
-            }
-            SidePaneTab::Terminal => {
-                self.terminal_input.update(cx, |input, _cx| input.focus(window));
-            }
-            SidePaneTab::Browser => {
-                self.url_input.update(cx, |input, _cx| input.focus(window));
-            }
-        }
-        cx.notify();
-    }
-
     fn close(&mut self, cx: &mut Context<Self>) {
         self.open = false;
+        self.source_menu_open = false;
         cx.notify();
     }
 
-    /// Open the pane straight onto the Review tab — wired to the
-    /// transcript's changed-files cards' "Review" buttons (Waku parity).
+    /// Open Review on the working tree's **Uncommitted** changes — the
+    /// top-bar `+N -M` diff-stat chip's action.
+    pub fn show_uncommitted(&mut self, cx: &mut Context<Self>) {
+        self.open = true;
+        if self.source != Source::Uncommitted {
+            self.source = Source::Uncommitted;
+            self.source_menu_open = false;
+            self.clear_diff();
+        }
+        self.review_stale = true;
+        if !self.review_loading {
+            self.load_review(cx);
+        }
+        cx.notify();
+    }
+
+    /// Open the pane on Review — wired to the transcript's changed-files
+    /// cards' "Review" buttons and the command palette (Waku parity).
     pub fn show_review(&mut self, cx: &mut Context<Self>) {
         self.open = true;
-        self.tab = Some(SidePaneTab::Review);
         if self.review_stale && !self.review_loading {
             self.load_review(cx);
         }
@@ -318,21 +272,101 @@ impl SidePane {
             .clone()
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_default();
+        let source = self.source;
+        let session = self.session.clone();
+        self.load_generation = self.load_generation.wrapping_add(1);
+        let generation = self.load_generation;
         self.review_loading = true;
         self.review_stale = false;
         cx.spawn(async move |this, cx| {
-            let result = cx
+            let parsed = cx
                 .background_executor()
-                .spawn(async move { git_diff(&cwd) })
+                .spawn(async move {
+                    let data = git::collect_review_diff(&cwd, source, session.as_deref())?;
+                    Ok::<_, String>(review::parse_collected(
+                        source,
+                        &data.numstat,
+                        &data.patch,
+                        data.complete_context,
+                    ))
+                })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                // A newer load (e.g. the source changed while this ran) wins.
+                if this.load_generation != generation {
+                    return;
+                }
                 this.review_loading = false;
-                this.review = Some(result);
-                this.review_scroll.set_offset(point(px(0.), px(0.)));
+                match parsed {
+                    Ok(snapshot) => {
+                        this.apply_snapshot(snapshot);
+                        this.review_error = None;
+                    }
+                    Err(error) => {
+                        if this.review.is_none() {
+                            this.review_error = Some(error);
+                        }
+                    }
+                }
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    fn apply_snapshot(&mut self, snapshot: Snapshot) {
+        let previous_dirs = self.review.as_ref().map_or_else(HashSet::new, |snapshot| {
+            review::directory_paths(&snapshot.files)
+        });
+        let previous_path = self
+            .selected_file
+            .and_then(|index| self.review.as_ref()?.files.get(index))
+            .map(|file| file.path.clone());
+
+        let directories = review::directory_paths(&snapshot.files);
+        if self.review.is_some() {
+            self.expanded_paths
+                .retain(|path| directories.contains(path));
+            self.expanded_paths
+                .extend(directories.difference(&previous_dirs).cloned());
+        } else {
+            self.expanded_paths = directories;
+        }
+        self.selected_file = previous_path
+            .as_deref()
+            .and_then(|path| snapshot.files.iter().position(|file| file.path == path))
+            .or_else(|| (!snapshot.files.is_empty()).then_some(0));
+        self.tree_cursor = None;
+        self.diff_list.reset(snapshot.lines.len());
+        self.review = Some(Arc::new(snapshot));
+        self.mark_tree_dirty();
+    }
+
+    /// Recompute the visible tree rows against the snapshot + filter. The
+    /// rebuild only runs when the filter text or tree structure changed, so a
+    /// scroll frame is O(visible rows), not O(files).
+    fn sync_tree_rows(&mut self, cx: &Context<Self>) {
+        let filter = self.tree_filter.read(cx).text();
+        if !self.tree_dirty && filter == self.last_tree_filter {
+            return;
+        }
+        self.tree_dirty = false;
+        self.last_tree_filter = filter.clone();
+        let rows = self.review.as_ref().map_or_else(Vec::new, |snapshot| {
+            review::tree_rows(&snapshot.files, &self.expanded_paths, &filter)
+        });
+        self.set_tree_rows(rows);
+    }
+
+    fn mark_tree_dirty(&mut self) {
+        self.tree_dirty = true;
+    }
+
+    fn set_tree_rows(&mut self, rows: Vec<review::TreeRow>) {
+        if rows.len() != self.tree_list.item_count() {
+            self.tree_list.reset(rows.len());
+        }
+        self.tree_rows = rows;
     }
 
     fn refresh_review(&mut self, cx: &mut Context<Self>) {
@@ -341,175 +375,255 @@ impl SidePane {
         }
     }
 
-    // ── Terminal ───────────────────────────────────────────────────────
+    // ── source filter ──────────────────────────────────────────────────
 
-    fn push_terminal(&mut self, lines: Vec<TermLine>, cx: &mut Context<Self>) {
-        if lines.is_empty() {
-            return;
+    fn toggle_source_menu(&mut self, cx: &mut Context<Self>) {
+        const GESTURE: Duration = Duration::from_millis(200);
+        if let Some(at) = self.menu_dismissed_at.take() {
+            if at.elapsed() < GESTURE {
+                return;
+            }
         }
-        self.terminal_lines.extend(lines);
-        let overflow = self.terminal_lines.len().saturating_sub(TERMINAL_MAX_LINES);
-        if overflow > 0 {
-            self.terminal_lines.drain(0..overflow);
-        }
-        self.terminal_scroll.scroll_to_bottom();
+        self.source_menu_open = !self.source_menu_open;
         cx.notify();
     }
 
-    /// Run the composer's current text as a shell command in the workspace.
-    fn run_command(&mut self, cx: &mut Context<Self>) {
-        if self.terminal_running {
-            return;
-        }
-        let command = self.terminal_input.read(cx).text().trim().to_string();
-        if command.is_empty() {
-            return;
-        }
-        self.terminal_input.update(cx, |input, cx| input.clear(cx));
-        self.push_terminal(
-            vec![TermLine {
-                kind: TermKind::Command,
-                text: command.clone(),
-            }],
-            cx,
-        );
-        // Built-in: clear the buffer (it would otherwise echo nothing).
-        if command == "clear" || command == "cls" {
-            self.terminal_lines.clear();
+    fn dismiss_source_menu(&mut self, cx: &mut Context<Self>) {
+        self.close_source_menu(cx);
+    }
+
+    fn set_source(&mut self, source: Source, cx: &mut Context<Self>) {
+        self.source_menu_open = false;
+        self.menu_dismissed_at = Some(Instant::now());
+        if source == self.source {
             cx.notify();
             return;
         }
-        let cwd = self
-            .workspace
-            .clone()
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_default();
-        self.terminal_running = true;
+        self.source = source;
+        self.clear_diff();
+        self.load_review(cx);
         cx.notify();
-        cx.spawn(async move |this, cx| {
-            let lines = cx
-                .background_executor()
-                .spawn(async move { run_shell(&cwd, &command) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.terminal_running = false;
-                this.push_terminal(lines, cx);
-            });
-        })
-        .detach();
     }
 
-    // ── Browser ────────────────────────────────────────────────────────
+    /// Drop the rendered diff + tree so a source change paints a fresh load.
+    fn clear_diff(&mut self) {
+        self.selected_file = None;
+        self.tree_cursor = None;
+        self.review = None;
+        self.review_error = None;
+        self.expanded_paths.clear();
+        self.mark_tree_dirty();
+        self.set_tree_rows(Vec::new());
+        self.diff_list.reset(0);
+    }
 
-    /// Fetch the URL composer's text in reader mode, off-thread.
-    fn open_url(&mut self, cx: &mut Context<Self>) {
-        if self.browser_loading {
-            return;
-        }
-        let raw = self.url_input.read(cx).text().trim().to_string();
-        if raw.is_empty() {
-            return;
-        }
-        self.url_input.update(cx, |input, cx| input.clear(cx));
-        self.browser_loading = true;
-        self.browser_error = None;
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { reader::read_page(&raw) })
-                .await;
-            let _ = this.update(cx, |this, cx| {
-                this.browser_loading = false;
-                match result {
-                    Ok(page) => {
-                        this.page = Some(page);
-                        this.browser_scroll.set_offset(point(px(0.), px(0.)));
-                    }
-                    Err(err) => this.browser_error = Some(err),
+    /// Open Review on the **Last Turn** git diff — what the transcript's
+    /// changed-files cards' Review buttons call, so the panel shows only the
+    /// changes that turn made rather than the whole working tree.
+    pub fn show_review_turn(&mut self, turn: Option<usize>, cx: &mut Context<Self>) {
+        self.open = true;
+        let target = turn
+            .filter(|turn| *turn > 0)
+            .map(|turn_count| Source::LastTurn { turn_count });
+        match target {
+            Some(target) => {
+                if self.source != target {
+                    self.source = target;
+                    self.clear_diff();
                 }
-                cx.notify();
-            });
-        })
-        .detach();
+            }
+            None => {
+                // No turn checkpoint yet — fall back to the working tree
+                // instead of stranding the panel on an unavailable source.
+                if matches!(self.source, Source::LastTurn { .. }) {
+                    self.source = Source::Uncommitted;
+                    self.clear_diff();
+                }
+            }
+        }
+        self.review_stale = true;
+        if !self.review_loading {
+            self.load_review(cx);
+        }
+        cx.notify();
     }
 
-    // ── keyboard ───────────────────────────────────────────────────────
+    /// The latest completed turn this session can diff (drives the menu's
+    /// `Last Turn` availability).
+    fn last_turn_source(&self) -> Option<Source> {
+        self.latest_turn
+            .filter(|turn| *turn > 0)
+            .map(|turn_count| Source::LastTurn { turn_count })
+    }
 
-    /// Enter from a pane input: terminal runs its command, browser opens
-    /// its URL. Which input owns focus decides.
-    fn on_pane_submit(
+    fn source_label(&self, source: Source) -> String {
+        match source {
+            Source::LastTurn { turn_count } if self.latest_turn == Some(turn_count) => {
+                "Last Turn".to_string()
+            }
+            Source::LastTurn { turn_count } => format!("Turn {turn_count}"),
+            Source::Uncommitted => "Uncommitted".into(),
+            Source::Unstaged => "Unstaged".into(),
+            Source::Staged => "Staged".into(),
+            Source::Committed => "Committed".into(),
+            Source::Branch => "Branch".into(),
+        }
+    }
+
+    // ── changed-files tree ─────────────────────────────────────────────
+
+    fn toggle_tree(&mut self, cx: &mut Context<Self>) {
+        self.tree_open = !self.tree_open;
+        cx.notify();
+    }
+
+    fn toggle_dir(&mut self, path: String, cx: &mut Context<Self>) {
+        if !self.expanded_paths.remove(&path) {
+            self.expanded_paths.insert(path);
+        }
+        self.mark_tree_dirty();
+        self.sync_tree_rows(cx);
+        cx.notify();
+    }
+
+    fn select_file(&mut self, file_index: usize, cx: &mut Context<Self>) {
+        self.selected_file = Some(file_index);
+        if let Some(line) = self
+            .review
+            .as_ref()
+            .and_then(|snapshot| snapshot.files.get(file_index))
+            .and_then(|file| file.diff_line)
+        {
+            self.diff_list.scroll_to(ListOffset {
+                item_ix: line,
+                offset_in_item: px(0.),
+            });
+        }
+        cx.notify();
+    }
+
+    fn on_filter_cancel(
         &mut self,
-        _: &Submit,
-        window: &mut Window,
+        _: &crate::PickerCancel,
+        _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .terminal_input
-            .read(cx)
-            .focus_handle(cx)
-            .is_focused(window)
-        {
-            self.run_command(cx);
-        } else if self.url_input.read(cx).focus_handle(cx).is_focused(window) {
-            self.open_url(cx);
+        self.close_source_menu(cx);
+        self.tree_filter.update(cx, |input, cx| input.clear(cx));
+        self.sync_tree_rows(cx);
+        cx.notify();
+    }
+
+    fn on_tree_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let key = event.keystroke.key.as_str();
+        let rows_len = self.tree_rows.len();
+        if rows_len == 0 {
+            return;
         }
+        match key {
+            "down" => {
+                let next = self.tree_cursor.map_or(0, |ix| (ix + 1).min(rows_len - 1));
+                self.move_tree_cursor(next, cx);
+            }
+            "up" => {
+                let next = self.tree_cursor.map_or(0, |ix| ix.saturating_sub(1));
+                self.move_tree_cursor(next, cx);
+            }
+            "enter" | "space" => {
+                if let Some(index) = self.tree_cursor {
+                    match self.tree_rows.get(index).cloned() {
+                        Some(review::TreeRow::Directory { path, .. }) => {
+                            self.toggle_dir(path, cx);
+                        }
+                        Some(review::TreeRow::File { file_index, .. }) => {
+                            self.select_file(file_index, cx);
+                        }
+                        None => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn move_tree_cursor(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.tree_cursor = Some(index);
+        self.tree_list.scroll_to_reveal_item(index);
+        cx.notify();
     }
 
     // ── rendering ──────────────────────────────────────────────────────
 
-    fn tab_button(
-        &self,
-        tab: SidePaneTab,
-        selected: bool,
-        theme: Theme,
-        cx: &Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let id = SharedString::from(format!("pane-tab-{:?}", tab).to_lowercase());
-        div()
-            .id(id)
-            .flex()
-            .items_center()
-            .gap_1p5()
-            .px(px(8.))
-            .h(px(26.))
-            .rounded_md()
-            .text_size(theme.ui_px(12.))
-            .font_weight(FontWeight::MEDIUM)
-            .when(selected, |b| {
-                b.bg(theme.active).text_color(theme.active_fg)
-            })
-            .when(!selected, |b| {
-                b.text_color(theme.text_2)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.bg_hover))
-            })
-            .child(icon(
-                tab.icon(),
-                13.,
-                if selected { theme.active_fg } else { theme.text_2 },
-            ))
-            .child(tab.label())
-            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                this.select_tab(tab, window, cx);
-            }))
-    }
+    fn body(&mut self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        self.sync_tree_rows(cx);
+        let truncated = self
+            .review
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.truncated);
+        let (added, removed) = self
+            .review
+            .as_ref()
+            .map(|snapshot| (snapshot.additions, snapshot.deletions))
+            .unwrap_or((0, 0));
+        let compact = self.width < px(STATS_MIN_PANE_W);
+        let tree_available = self.width >= px(TREE_MIN_PANE_W);
+        let tree_visible = tree_available && self.tree_open;
 
-    fn header(&self, theme: Theme, cx: &Context<Self>) -> impl IntoElement + use<> {
-        let mut header = div()
-            .h(px(42.))
+        // Header row: title + tree toggle + refresh + close.
+        let head = div()
+            .h(px(40.))
             .flex()
             .items_center()
             .gap_1()
-            .pl(px(8.))
+            .pl(px(12.))
             .pr(px(6.))
             .border_b_1()
-            .border_color(theme.border);
-        for tab in SidePaneTab::ALL {
-            header = header.child(self.tab_button(tab, Some(tab) == self.tab, theme, cx));
-        }
-        header = header
-            .child(div().flex_1())
+            .border_color(theme.border)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_size(theme.ui_px(12.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child("Review"),
+            )
+            .children(tree_available.then(|| {
+                div()
+                    .id("review-tree-toggle")
+                    .p_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_tree(cx)))
+                    .child(icon(
+                        "icons/folder.svg",
+                        14.,
+                        if self.tree_open {
+                            theme.text
+                        } else {
+                            theme.text_3
+                        },
+                    ))
+            }))
+            .child(
+                div()
+                    .id("review-refresh")
+                    .p_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.refresh_review(cx);
+                    }))
+                    .child(if self.review_loading {
+                        spinner("review-spinner", theme)
+                    } else {
+                        icon("icons/refresh.svg", 13., theme.text_3).into_any_element()
+                    }),
+            )
             .child(
                 div()
                     .id("pane-close")
@@ -520,341 +634,985 @@ impl SidePane {
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.close(cx)))
                     .child(icon("icons/x.svg", 14., theme.text_3)),
             );
-        header
-    }
 
-    /// The "Open tab" card grid — the pane's picker state (screenshot
-    /// parity: heading, hint line, three tab cards).
-    fn empty_state(&self, theme: Theme, cx: &Context<Self>) -> impl IntoElement + use<> {
-        let mut cards = div().flex().gap_2().mt_1();
-        for tab in SidePaneTab::ALL {
-            cards = cards.child(
+        // Toolbar: the source filter chip + live ±stats + refresh.
+        let toolbar = div()
+            .h(px(40.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .px(px(10.))
+            .border_b_1()
+            .border_color(theme.border)
+            .child(
                 div()
-                    .id(SharedString::from(format!("pane-card-{:?}", tab).to_lowercase()))
-                    .w(px(116.))
-                    .h(px(84.))
-                    .rounded_lg()
+                    .id("review-source")
+                    .h(px(28.))
+                    .px(px(8.))
+                    .rounded(px(6.))
                     .border_1()
-                    .border_color(theme.border)
+                    .border_color(if self.source_menu_open {
+                        theme.border_strong
+                    } else {
+                        theme.border
+                    })
                     .bg(theme.bg_raised)
                     .flex()
-                    .flex_col()
                     .items_center()
-                    .justify_center()
-                    .gap_2()
+                    .gap(px(6.))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.bg_hover))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.select_tab(tab, window, cx);
-                    }))
-                    .child(icon(tab.icon(), 16., theme.text_2))
+                    .on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_source_menu(cx)),
+                    )
+                    .child(icon("icons/file-diff.svg", 12., theme.text_3))
                     .child(
                         div()
-                            .text_size(theme.ui_px(12.5))
+                            .max_w(px(120.))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_size(theme.ui_px(12.))
                             .font_weight(FontWeight::MEDIUM)
-                            .child(tab.label()),
-                    ),
-            );
-        }
-        div()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .child(
-                div()
-                    .text_size(theme.ui_px(17.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.text)
-                    .child("Open tab"),
-            )
-            .child(
-                div()
-                    .text_size(theme.ui_px(12.5))
-                    .text_color(theme.text_3)
-                    .child("Choose a tab to open in the side pane."),
-            )
-            .child(cards)
-    }
-
-    fn body(&mut self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
-        match self.tab {
-            None => self.empty_state(theme, cx).into_any_element(),
-            Some(SidePaneTab::Review) => self.review_body(theme, cx),
-            Some(SidePaneTab::Terminal) => self.terminal_body(theme, cx),
-            Some(SidePaneTab::Browser) => self.browser_body(theme, cx),
-        }
-    }
-
-    // ── Review body ──
-
-    fn review_body(&mut self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
-        let (added, removed) = self
-            .review
-            .as_ref()
-            .map(|r| (r.added, r.removed))
-            .unwrap_or((0, 0));
-        // Header row: title + refresh + live ±stats.
-        let head = div()
-            .h(px(36.))
-            .flex()
-            .items_center()
-            .gap_2()
-            .px(px(12.))
-            .border_b_1()
-            .border_color(theme.border)
-            .child(
-                div()
-                    .text_size(theme.ui_px(12.5))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child("Review"),
+                            .text_color(theme.text)
+                            .child(self.source_label(self.source)),
+                    )
+                    .child(icon("icons/chevron-down.svg", 10., theme.text_3)),
             )
             .child(div().flex_1())
-            .children((added > 0 || removed > 0).then(|| {
+            .when(truncated, |row| {
+                row.child(
+                    div()
+                        .text_size(theme.ui_px(11.))
+                        .text_color(theme.warn)
+                        .child("partial"),
+                )
+            })
+            .children((!compact).then(|| {
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_size(theme.ui_px(11.5))
-                    .child(
-                        div()
-                            .text_color(theme.add_green)
-                            .child(format!("+{added}")),
-                    )
-                    .child(
-                        div()
-                            .text_color(theme.del_red)
-                            .child(format!("-{removed}")),
-                    )
-            }))
-            .child(if self.review_loading {
-                spinner("review-spinner", theme).into_any_element()
-            } else {
-                div()
-                    .id("review-refresh")
-                    .p_1()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.bg_hover))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.refresh_review(cx);
-                    }))
-                    .child(icon("icons/refresh.svg", 13., theme.text_3))
-                    .into_any_element()
-            });
-
-        let list: AnyElement = if self.review_loading && self.review.is_none() {
-            centered_note(theme, "Loading diff…").into_any_element()
-        } else if let Some(review) = &self.review {
-            if let Some(error) = &review.error {
-                centered_note(theme, &friendly_git_error(error)).into_any_element()
-            } else if review.files.is_empty() {
-                centered_note(theme, "No local changes").into_any_element()
-            } else {
-                let files = review.files.clone();
-                div()
-                    .id("review-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.review_scroll)
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .p(px(10.))
-                    .children(files.into_iter().map(|file| render_diff_file(file, theme)))
-                    .into_any_element()
-            }
-        } else {
-            centered_note(theme, "No local changes").into_any_element()
-        };
-
-        div().flex_1().min_h_0().flex().flex_col().child(head).child(list).into_any_element()
-    }
-
-    // ── Terminal body ──
-
-    fn terminal_body(&mut self, theme: Theme, _cx: &mut Context<Self>) -> AnyElement {
-        let mono = theme::code_font_family();
-        let lines = self.terminal_lines.clone();
-        let mut out = div()
-            .id("terminal-scroll")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.terminal_scroll)
-            .flex()
-            .flex_col()
-            .px(px(12.))
-            .py(px(10.))
-            .font_family(mono.clone())
-            .text_size(theme.ui_px(11.5))
-            .line_height(theme.ui_px(17.));
-        for line in lines {
-            out = out.child(render_term_line(line, theme));
-        }
-        let cwd = self
-            .workspace
-            .as_deref()
-            .map(workspace_label)
-            .unwrap_or_else(|| "~".into());
-
-        // Input row: prompt glyph + one-line composer + optional spinner.
-        let mut input_row = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .px(px(12.))
-            .py(px(8.))
-            .border_t_1()
-            .border_color(theme.border)
-            .child(
-                div()
-                    .font_family(mono)
                     .text_size(theme.ui_px(12.))
-                    .text_color(theme.accent)
-                    .child("❯"),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .bg(theme.bg_composer)
-                    .border_1()
-                    .border_color(theme.border)
-                    .rounded_md()
-                    .px(px(8.))
-                    .py(px(5.))
-                    .child(self.terminal_input.clone()),
-            );
-        if self.terminal_running {
-            input_row = input_row.child(spinner("terminal-spinner", theme));
-        }
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(div().text_color(theme.add_green).child(format!("+{added}")))
+                    .child(div().text_color(theme.del_red).child(format!("-{removed}")))
+            }));
+
+        let content = self.render_content(theme, tree_visible, cx);
 
         div()
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
-            // cwd hint under the pane header
-            .child(
-                div()
-                    .px(px(12.))
-                    .pt(px(6.))
-                    .text_size(theme.ui_px(11.))
-                    .text_color(theme.text_3)
-                    .font_family(theme::code_font_family())
-                    .child(cwd),
-            )
-            .child(out)
-            .child(input_row)
-            .into_any_element()
-    }
-
-    // ── Browser body ──
-
-    fn browser_body(&mut self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
-        // URL row: composer + go button.
-        let url_row = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .px(px(12.))
-            .py(px(8.))
-            .border_b_1()
-            .border_color(theme.border)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .bg(theme.bg_composer)
-                    .border_1()
-                    .border_color(theme.border)
-                    .rounded_md()
-                    .px(px(8.))
-                    .py(px(5.))
-                    .child(self.url_input.clone()),
-            )
-            .child(if self.browser_loading {
-                spinner("browser-spinner", theme).into_any_element()
-            } else {
-                div()
-                    .id("browser-go")
-                    .p_1()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.bg_hover))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.open_url(cx)))
-                    .child(icon("icons/arrow-right.svg", 14., theme.text_2))
-                    .into_any_element()
-            });
-
-        let content: AnyElement = if self.browser_loading && self.page.is_none() {
-            centered_note(theme, "Loading…").into_any_element()
-        } else if let Some(error) = &self.browser_error {
-            centered_note(theme, error).into_any_element()
-        } else if let Some(page) = self.page.as_ref() {
-            let title = page.title.clone();
-            let lines = page.lines.clone();
-            let mut body = div()
-                .id("browser-scroll")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .track_scroll(&self.browser_scroll)
-                .px(px(14.))
-                .py(px(12.))
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .text_size(theme.ui_px(15.))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.text)
-                        .pb_1()
-                        .child(title),
-                )
-                // Source URL, so a reader pass is never anonymous.
-                .child(
-                    div()
-                        .font_family(theme::code_font_family())
-                        .text_size(theme.ui_px(10.5))
-                        .text_color(theme.text_3)
-                        .pb_1()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .child(page.url.clone()),
-                );
-            for line in lines {
-                if line.is_empty() {
-                    continue;
-                }
-                body = body.child(
-                    div()
-                        .text_size(theme.ui_px(12.5))
-                        .line_height(theme.ui_px(19.))
-                        .text_color(theme.text_2)
-                        .child(line),
-                );
-            }
-            body.into_any_element()
-        } else {
-            centered_note(theme, "Enter a URL to read it here.").into_any_element()
-        };
-
-        div()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .child(url_row)
+            .child(head)
+            .child(toolbar)
             .child(content)
             .into_any_element()
+    }
+
+    fn render_content(
+        &mut self,
+        theme: Theme,
+        tree_visible: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let diff = if self.review_loading && self.review.is_none() {
+            centered_message(theme, "Loading changes…", None).into_any_element()
+        } else if let Some(error) = self.review_error.as_deref() {
+            centered_message(theme, "Changes unavailable", Some(error)).into_any_element()
+        } else if let Some(snapshot) = self.review.clone() {
+            if snapshot.files.is_empty() {
+                let empty = self.source.empty_description();
+                centered_message(theme, "No changes", Some(empty.as_str())).into_any_element()
+            } else {
+                self.render_diff(snapshot, theme, cx)
+            }
+        } else {
+            centered_message(theme, "No changes", None).into_any_element()
+        };
+
+        let mut content = div()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .flex()
+            .flex_row()
+            .child(diff);
+        if tree_visible && self.review.is_some() && self.review_error.is_none() {
+            content = content.child(self.render_tree(theme, cx));
+        }
+        content.into_any_element()
+    }
+
+    fn render_diff(
+        &self,
+        snapshot: Arc<Snapshot>,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let entity = cx.entity().downgrade();
+        let list_el = gpui::list(self.diff_list.clone(), move |index, _window, cx| {
+            entity
+                .upgrade()
+                .map(|entity| entity.update(cx, |this, cx| this.render_diff_line(index, cx)))
+                .unwrap_or_else(|| div().into_any_element())
+        })
+        .size_full();
+
+        let nerd = nerd_font_family(cx);
+        let dark = theme.mode == ThemeMode::Dark;
+        let sticky = self.render_sticky_header(&snapshot, theme, nerd.as_ref(), dark);
+        div()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .relative()
+            .overflow_hidden()
+            .child(list_el)
+            .children(sticky)
+            .into_any_element()
+    }
+
+    fn render_sticky_header(
+        &self,
+        snapshot: &Snapshot,
+        theme: Theme,
+        nerd: Option<&SharedString>,
+        dark: bool,
+    ) -> Option<AnyElement> {
+        let scroll_top = self.diff_list.logical_scroll_top();
+        let (header_index, next_header_index) = snapshot.file_headers_around(scroll_top.item_ix)?;
+        let needs_sticky = header_index < scroll_top.item_ix
+            || (header_index == scroll_top.item_ix && scroll_top.offset_in_item > px(0.));
+        if !needs_sticky {
+            return None;
+        }
+        let line = snapshot.lines.get(header_index)?;
+        let file = snapshot.files.get(line.file_index)?;
+        let top_offset = next_header_index
+            .and_then(|next_header_index| {
+                let bounds = self.diff_list.bounds_for_item(next_header_index)?;
+                let viewport = self.diff_list.viewport_bounds();
+                let y_in_viewport = bounds.origin.y - viewport.origin.y;
+                (y_in_viewport < bounds.size.height).then_some(y_in_viewport - bounds.size.height)
+            })
+            .unwrap_or(px(0.));
+        Some(
+            div()
+                .absolute()
+                .top(top_offset)
+                .left_0()
+                .w_full()
+                .child(render_file_header(file, theme, nerd, dark))
+                .into_any_element(),
+        )
+    }
+
+    fn render_diff_line(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(snapshot) = self.review.as_ref() else {
+            return div().into_any_element();
+        };
+        let Some(line) = snapshot.lines.get(index) else {
+            return div().into_any_element();
+        };
+        let Some(file) = snapshot.files.get(line.file_index) else {
+            return div().into_any_element();
+        };
+        let theme = *theme::get(cx);
+        match &line.kind {
+            LineKind::FileHeader => {
+                let nerd = nerd_font_family(cx);
+                let dark = theme.mode == ThemeMode::Dark;
+                render_file_header(file, theme, nerd.as_ref(), dark)
+            }
+            LineKind::Gap(gap) => self.render_gap(index, gap.clone(), theme, cx),
+            LineKind::HunkHeader => render_hunk_header(&line.content, theme),
+            LineKind::Meta => render_meta(&line.content, theme),
+            LineKind::Context | LineKind::Addition | LineKind::Deletion => {
+                render_code_row(line, theme)
+            }
+        }
+    }
+
+    fn render_gap(
+        &self,
+        index: usize,
+        gap: review::Gap,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let chunked = gap.count() > review::DEFAULT_EXPANSION_LINE_COUNT as u32;
+        let directions: &[ExpansionDirection] = match (gap.position, chunked) {
+            (GapPosition::Leading, _) => &[ExpansionDirection::End],
+            (GapPosition::Trailing, _) => &[ExpansionDirection::Start],
+            (GapPosition::Between, false) => &[ExpansionDirection::Both],
+            (GapPosition::Between, true) => &[ExpansionDirection::Start, ExpansionDirection::End],
+        };
+        let expandable = gap.is_expandable();
+        let two = directions.len() > 1;
+        let mut gutter = div()
+            .w(px(46.))
+            .h_full()
+            .flex_none()
+            .flex()
+            .when(two, |gutter| gutter.flex_col())
+            .border_r_1()
+            .border_color(theme.border)
+            .bg(theme.overlay);
+        if expandable {
+            for (button_index, direction) in directions.iter().copied().enumerate() {
+                gutter = gutter.child(
+                    div()
+                        .id(gpui::ElementId::Name(
+                            format!("review-gap-{}-{index}-{button_index}", gap.id).into(),
+                        ))
+                        .flex_1()
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when(two && button_index == 0, |button| {
+                            button
+                                .h(px(16.))
+                                .flex_none()
+                                .border_b_1()
+                                .border_color(theme.border)
+                        })
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.overlay_strong))
+                        .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                            let direction = if event.modifiers().shift {
+                                ExpansionDirection::All
+                            } else {
+                                direction
+                            };
+                            this.expand_gap(index, direction, cx);
+                        }))
+                        .child(icon(gap_icon(direction), 10., theme.text_3)),
+                );
+            }
+        }
+        let label = div()
+            .id(gpui::ElementId::Name(
+                format!("review-gap-label-{}", gap.id).into(),
+            ))
+            .flex_1()
+            .h_full()
+            .min_w_0()
+            .px(px(12.))
+            .flex()
+            .items_center()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_size(theme.ui_px(11.5))
+            .text_color(theme.text_3)
+            .bg(theme.overlay)
+            .when(expandable, |label| {
+                label
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.overlay_strong))
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                        let direction = if event.modifiers().shift {
+                            ExpansionDirection::All
+                        } else {
+                            ExpansionDirection::Both
+                        };
+                        this.expand_gap(index, direction, cx);
+                    }))
+            })
+            .child(format!("{} unmodified lines", gap.count()));
+
+        div()
+            .h(px(REVIEW_GAP_HEIGHT))
+            .w_full()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .child(gutter)
+            .child(label)
+            .into_any_element()
+    }
+
+    fn expand_gap(
+        &mut self,
+        line_index: usize,
+        direction: ExpansionDirection,
+        cx: &mut Context<Self>,
+    ) {
+        let expansion = self
+            .review
+            .as_mut()
+            .and_then(|snapshot| Arc::make_mut(snapshot).expand_gap(line_index, direction));
+        if let Some(expansion) = expansion {
+            self.diff_list
+                .splice(line_index..line_index + 1, expansion.replacement_count);
+            cx.notify();
+        }
+    }
+
+    fn render_tree(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let entity = cx.entity().downgrade();
+        let tree_el = gpui::list(self.tree_list.clone(), move |index, _window, cx| {
+            entity
+                .upgrade()
+                .map(|entity| entity.update(cx, |this, cx| this.render_tree_row(index, cx)))
+                .unwrap_or_else(|| div().into_any_element())
+        })
+        .size_full()
+        .py(px(4.));
+
+        let column_w = (f32::from(self.width) * 0.42).clamp(TREE_MIN_COL_W, TREE_MAX_COL_W);
+        let filter_row = div()
+            .h(px(40.))
+            .flex_none()
+            .px(px(10.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .border_b_1()
+            .border_color(theme.border)
+            .child(icon("icons/search.svg", 13., theme.text_3))
+            .child(self.tree_filter.clone());
+
+        div()
+            .w(px(column_w))
+            .flex_none()
+            .h_full()
+            .min_h_0()
+            .border_l_1()
+            .border_color(theme.border)
+            .flex()
+            .flex_col()
+            .child(filter_row)
+            .child(
+                div()
+                    .id("review-tree")
+                    .track_focus(&self.tree_focus)
+                    .key_context("ReviewDiffTree")
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                        this.on_tree_key_down(event, cx)
+                    }))
+                    .child(tree_el),
+            )
+            .into_any_element()
+    }
+
+    fn render_tree_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(row) = self.tree_rows.get(index).cloned() else {
+            return div().h(px(30.)).into_any_element();
+        };
+        let Some(snapshot) = self.review.as_ref() else {
+            return div().h(px(30.)).into_any_element();
+        };
+        let theme = *theme::get(cx);
+        let cursor = self.tree_cursor == Some(index);
+        match row {
+            review::TreeRow::Directory {
+                path,
+                name,
+                depth,
+                expanded,
+            } => div()
+                .w_full()
+                .h(px(30.))
+                .px(px(6.))
+                .flex()
+                .items_center()
+                .child(
+                    div()
+                        .id(gpui::ElementId::Name(format!("review-dir-{path}").into()))
+                        .h(px(26.))
+                        .flex_1()
+                        .min_w_0()
+                        .pl(px(7. + depth as f32 * 14.))
+                        .pr(px(7.))
+                        .rounded(px(5.))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .cursor_pointer()
+                        .when(cursor, |row| row.bg(theme.overlay_strong))
+                        .when(!cursor, |row| row.hover(|row| row.bg(theme.overlay)))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            window.focus(&this.tree_focus);
+                            this.tree_cursor = Some(index);
+                            this.toggle_dir(path.clone(), cx);
+                        }))
+                        .child(icon(
+                            if expanded {
+                                "icons/chevron-down.svg"
+                            } else {
+                                "icons/chevron-right.svg"
+                            },
+                            10.,
+                            theme.text_3,
+                        ))
+                        .child(icon("icons/folder.svg", 13., theme.text_3))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_size(theme.ui_px(12.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text_2)
+                                .child(name),
+                        ),
+                )
+                .into_any_element(),
+            review::TreeRow::File { file_index, depth } => {
+                let Some(file) = snapshot.files.get(file_index) else {
+                    return div().h(px(30.)).into_any_element();
+                };
+                let name = file
+                    .path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&file.path)
+                    .to_owned();
+                let selected = self.selected_file == Some(file_index);
+                let (status, status_color) = match file.status {
+                    review::FileStatus::Added => ("A", theme.add_green),
+                    review::FileStatus::Deleted => ("D", theme.del_red),
+                    review::FileStatus::Binary => ("B", theme.warn),
+                    review::FileStatus::Modified => ("M", theme.warn),
+                };
+                let nerd = nerd_font_family(cx);
+                let dark = theme.mode == ThemeMode::Dark;
+                let fallback = icon("icons/file.svg", 13., theme.text_3).into_any_element();
+                let glyph = file_glyph(&file.path, dark, nerd.as_ref(), 13., fallback);
+                div()
+                    .w_full()
+                    .h(px(30.))
+                    .px(px(6.))
+                    .flex()
+                    .items_center()
+                    .child(
+                        div()
+                            .id(gpui::ElementId::Name(
+                                format!("review-file-{file_index}").into(),
+                            ))
+                            .h(px(26.))
+                            .flex_1()
+                            .min_w_0()
+                            .pl(px(23. + depth as f32 * 14.))
+                            .pr(px(7.))
+                            .rounded(px(5.))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .cursor_pointer()
+                            .when(selected && cursor, |row| row.bg(theme.overlay_strong))
+                            .when(selected ^ cursor, |row| row.bg(theme.overlay))
+                            .when(!selected && !cursor, |row| {
+                                row.hover(|row| row.bg(theme.overlay))
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                window.focus(&this.tree_focus);
+                                this.tree_cursor = Some(index);
+                                this.select_file(file_index, cx);
+                            }))
+                            .child(glyph)
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_size(theme.ui_px(12.5))
+                                    .text_color(if selected { theme.text } else { theme.text_2 })
+                                    .child(name),
+                            )
+                            .child(
+                                div()
+                                    .w(px(18.))
+                                    .h(px(18.))
+                                    .flex_none()
+                                    .rounded(px(4.))
+                                    .border_1()
+                                    .border_color(status_color.opacity(0.65))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_size(theme.ui_px(11.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(status_color)
+                                    .child(status),
+                            ),
+                    )
+                    .into_any_element()
+            }
+        }
+    }
+
+    /// The source filter dropdown, painted over the pane body.
+    fn source_menu(&self, theme: Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.source_menu_open {
+            return None;
+        }
+        let mut menu = div()
+            .id("review-source-menu")
+            .absolute()
+            .top(px(84.))
+            .left(px(10.))
+            .w(px(200.))
+            .py(px(4.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.menu_bg)
+            .shadow(theme.popover_shadow())
+            .flex()
+            .flex_col()
+            .occlude()
+            .on_mouse_down_out(
+                cx.listener(|this, _: &MouseDownEvent, _, cx| this.dismiss_source_menu(cx)),
+            );
+
+        let last_turn = self.last_turn_source();
+        menu = menu.child(source_row(
+            "Last Turn",
+            last_turn.is_some(),
+            last_turn.is_some() && last_turn == Some(self.source),
+            last_turn,
+            theme,
+            cx,
+        ));
+        menu = menu.child(separator(theme));
+        for choice in [Source::Uncommitted, Source::Unstaged, Source::Staged] {
+            menu = menu.child(source_row(
+                &self.source_label(choice),
+                true,
+                choice == self.source,
+                Some(choice),
+                theme,
+                cx,
+            ));
+        }
+        menu = menu.child(separator(theme));
+        for choice in [Source::Committed, Source::Branch] {
+            menu = menu.child(source_row(
+                &self.source_label(choice),
+                true,
+                choice == self.source,
+                Some(choice),
+                theme,
+                cx,
+            ));
+        }
+        Some(menu.into_any_element())
+    }
+}
+
+fn source_row(
+    label: &str,
+    enabled: bool,
+    selected: bool,
+    choice: Option<Source>,
+    theme: Theme,
+    cx: &mut Context<SidePane>,
+) -> AnyElement {
+    let row = div()
+        .id(gpui::ElementId::Name(
+            format!("review-source-{label}").into(),
+        ))
+        .h(px(28.))
+        .mx(px(4.))
+        .px(px(8.))
+        .rounded(px(6.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .text_size(theme.ui_px(12.))
+        .when(enabled, |row| row.cursor_pointer())
+        .when(selected, |row| row.bg(theme.active))
+        .when(enabled && !selected, |row| {
+            row.hover(|s| s.bg(theme.overlay))
+        })
+        .when(enabled && choice.is_some(), |row| {
+            row.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                if let Some(choice) = choice {
+                    this.set_source(choice, cx);
+                }
+            }))
+        })
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_color(if !enabled {
+                    theme.text_3
+                } else if selected {
+                    theme.active_fg
+                } else {
+                    theme.text_2
+                })
+                .child(label.to_string()),
+        )
+        .when(!enabled, |row| {
+            row.child(
+                div()
+                    .flex_none()
+                    .text_size(theme.ui_px(10.))
+                    .text_color(theme.text_3)
+                    .child("no turns yet"),
+            )
+        })
+        .when(selected, |row| {
+            row.child(icon("icons/check.svg", 11., theme.accent))
+        });
+    row.into_any_element()
+}
+
+fn separator(theme: Theme) -> AnyElement {
+    div()
+        .h(px(1.))
+        .my(px(4.))
+        .mx(px(8.))
+        .bg(theme.border)
+        .into_any_element()
+}
+
+// ── diff row rendering ─────────────────────────────────────────────────────
+
+/// Waku's sticky/normal file header: icon, path, +additions, -deletions.
+fn render_file_header(
+    file: &review::File,
+    theme: Theme,
+    nerd: Option<&SharedString>,
+    dark: bool,
+) -> AnyElement {
+    let fallback = icon("icons/file.svg", 13., theme.text_3).into_any_element();
+    let glyph = file_glyph(&file.path, dark, nerd, 13., fallback);
+    div()
+        .w_full()
+        .min_w_0()
+        .h(px(REVIEW_FILE_HEADER_HEIGHT))
+        .px(px(12.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .border_b_1()
+        .border_color(theme.border)
+        .bg(theme.bg_raised)
+        .child(glyph)
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .font_family(theme::code_font_family())
+                .text_size(theme.ui_px(12.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text_2)
+                .child(file.path.clone()),
+        )
+        .child(
+            div()
+                .text_size(theme.ui_px(12.))
+                .text_color(theme.add_green)
+                .child(format!("+{}", file.additions)),
+        )
+        .child(
+            div()
+                .text_size(theme.ui_px(12.))
+                .text_color(theme.del_red)
+                .child(format!("-{}", file.deletions)),
+        )
+        .into_any_element()
+}
+
+fn render_hunk_header(content: &str, theme: Theme) -> AnyElement {
+    let gutter_w = diff_gutter_width();
+    div()
+        .min_h(px(REVIEW_HUNK_HEIGHT))
+        .w_full()
+        .min_w_0()
+        .flex()
+        .font_family(theme::code_font_family())
+        .text_size(theme.code_px(DIFF_TEXT_SIZE))
+        .line_height(theme.code_px(16.))
+        .text_color(theme.text_3)
+        .child(
+            div()
+                .w(px(gutter_w))
+                .min_h(px(REVIEW_HUNK_HEIGHT))
+                .flex_none()
+                .border_r_1()
+                .border_color(theme.border)
+                .bg(theme.overlay),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .px(px(12.))
+                .py(px(4.))
+                .overflow_hidden()
+                .whitespace_normal()
+                .bg(theme.overlay)
+                .child(content.to_string()),
+        )
+        .into_any_element()
+}
+
+fn render_meta(content: &str, theme: Theme) -> AnyElement {
+    let gutter_w = diff_gutter_width();
+    div()
+        .min_h(px(REVIEW_HUNK_HEIGHT))
+        .w_full()
+        .min_w_0()
+        .flex()
+        .font_family(theme::code_font_family())
+        .text_size(theme.code_px(DIFF_TEXT_SIZE))
+        .line_height(theme.code_px(16.))
+        .text_color(theme.text_3)
+        .child(
+            div()
+                .w(px(gutter_w))
+                .min_h(px(REVIEW_HUNK_HEIGHT))
+                .flex_none(),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .py(px(4.))
+                .pr(px(10.))
+                .overflow_hidden()
+                .whitespace_normal()
+                .child(content.to_string()),
+        )
+        .into_any_element()
+}
+
+fn diff_gutter_width() -> f32 {
+    (DIFF_TEXT_SIZE * 3. + 14.).round()
+}
+
+fn diff_row_height() -> f32 {
+    (DIFF_TEXT_SIZE * 1.5).round()
+}
+
+/// One context/addition/deletion row: a single line-number gutter (Waku shows
+/// the new number, falling back to the old one) and syntax-coloured code.
+fn render_code_row(line: &review::Line, theme: Theme) -> AnyElement {
+    let row_height = diff_row_height();
+    let (body_bg, gutter_bg, edge, number_color) = match line.kind {
+        LineKind::Addition => (
+            Some(theme.add_green.opacity(body_wash(theme))),
+            Some(theme.add_green.opacity(gutter_wash(theme))),
+            Some(theme.add_green),
+            theme.add_green,
+        ),
+        LineKind::Deletion => (
+            Some(theme.del_red.opacity(body_wash(theme))),
+            Some(theme.del_red.opacity(gutter_wash(theme))),
+            Some(theme.del_red),
+            theme.del_red,
+        ),
+        _ => (None, None, None, theme.text_3),
+    };
+    let shown_line = line.new_line.or(line.old_line);
+    let number = shown_line.map(|n| n.to_string()).unwrap_or_default();
+    let content = code_text(line, theme);
+    div()
+        .w_full()
+        .min_w_0()
+        .min_h(px(row_height))
+        .flex()
+        .font_family(theme::code_font_family())
+        .text_size(theme.code_px(DIFF_TEXT_SIZE))
+        .line_height(theme.code_px(16.))
+        .when_some(edge, |row, edge| row.border_l_2().border_color(edge))
+        .child(
+            div()
+                .w(px(diff_gutter_width()))
+                .min_h(px(row_height))
+                .flex_none()
+                .pr(px(9.))
+                .flex()
+                .justify_end()
+                .border_r_1()
+                .border_color(theme.border)
+                .text_color(number_color)
+                .when_some(gutter_bg, |gutter, bg| gutter.bg(bg))
+                .child(number),
+        )
+        .child(
+            div()
+                .min_h(px(row_height))
+                .min_w_0()
+                .flex_1()
+                .pl(px(12.))
+                .pr(px(10.))
+                .overflow_hidden()
+                .whitespace_normal()
+                .when_some(body_bg, |body, bg| body.bg(bg))
+                .child(content),
+        )
+        .into_any_element()
+}
+
+fn body_wash(theme: Theme) -> f32 {
+    if theme.mode == ThemeMode::Dark {
+        0.20
+    } else {
+        0.12
+    }
+}
+
+fn gutter_wash(theme: Theme) -> f32 {
+    if theme.mode == ThemeMode::Dark {
+        0.15
+    } else {
+        0.09
+    }
+}
+
+/// Build syntax-colored text for one diff line.
+fn code_text(line: &review::Line, theme: Theme) -> StyledText {
+    let base = theme.text_2;
+    let font = mono_font();
+    let mut runs: Vec<TextRun> = Vec::new();
+    let mut offset = 0usize;
+    for token in &line.tokens {
+        let start = token.range.start.min(line.content.len());
+        let end = token.range.end.min(line.content.len());
+        if start > offset {
+            runs.push(run(start - offset, base, &font));
+        }
+        if end > start {
+            runs.push(run(end - start, token_color(token.class, theme), &font));
+        }
+        offset = offset.max(end);
+    }
+    if offset < line.content.len() {
+        runs.push(run(line.content.len() - offset, base, &font));
+    }
+    if runs.is_empty() {
+        runs.push(run(line.content.len(), base, &font));
+    }
+    StyledText::new(line.content.clone()).with_runs(runs)
+}
+
+fn run(len: usize, color: Hsla, font: &Font) -> TextRun {
+    TextRun {
+        len,
+        font: font.clone(),
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    }
+}
+
+fn mono_font() -> Font {
+    Font {
+        family: theme::code_font_family(),
+        features: FontFeatures::default(),
+        fallbacks: None,
+        weight: FontWeight::NORMAL,
+        style: FontStyle::Normal,
+    }
+}
+
+fn token_color(class: TokenClass, theme: Theme) -> Hsla {
+    match class {
+        TokenClass::Keyword => theme.accent,
+        TokenClass::Literal => theme.accent,
+        TokenClass::String => theme.ok_green,
+        TokenClass::Comment => theme.text_3,
+        TokenClass::Number => theme.warn,
+        TokenClass::Type => theme.text,
+        TokenClass::Function => theme.text,
+        TokenClass::Meta => theme.crit,
+        TokenClass::Added => theme.add_green,
+        TokenClass::Removed => theme.del_red,
+    }
+}
+
+fn gap_icon(direction: ExpansionDirection) -> &'static str {
+    match direction {
+        // A leading gap reveals context below it; a trailing gap above.
+        ExpansionDirection::Start | ExpansionDirection::Both | ExpansionDirection::All => {
+            "icons/chevron-down.svg"
+        }
+        ExpansionDirection::End => "icons/chevron-up.svg",
+    }
+}
+
+// ── shared helpers ─────────────────────────────────────────────────────────
+
+fn spinner(id: &'static str, theme: Theme) -> AnyElement {
+    gpui::svg()
+        .path("icons/loader.svg")
+        .size(px(13.))
+        .text_color(theme.text_3)
+        .with_animation(
+            id,
+            Animation::new(Duration::from_millis(900)).repeat(),
+            |svg, delta| {
+                svg.with_transformation(Transformation::rotate(radians(
+                    delta * std::f32::consts::TAU,
+                )))
+            },
+        )
+        .into_any_element()
+}
+
+fn centered_message(theme: Theme, title: &str, detail: Option<&str>) -> AnyElement {
+    let mut column = div()
+        .flex_1()
+        .min_h_0()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .px(px(16.))
+        .pb(px(32.))
+        .child(
+            div()
+                .text_size(theme.ui_px(13.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child(title.to_string()),
+        );
+    if let Some(detail) = detail {
+        column = column.child(
+            div()
+                .mt(px(6.))
+                .max_w(px(300.))
+                .text_align(TextAlign::Center)
+                .text_size(theme.ui_px(12.))
+                .line_height(theme.ui_px(17.))
+                .text_color(theme.text_3)
+                .child(detail.to_string()),
+        );
+    }
+    column.into_any_element()
+}
+
+impl Source {
+    /// Reader-facing empty-state copy for each source.
+    fn empty_description(self) -> String {
+        match self {
+            Source::LastTurn { .. } => "This turn didn't change any files.".into(),
+            Source::Uncommitted => "The working tree matches HEAD.".into(),
+            Source::Unstaged => "Everything is staged.".into(),
+            Source::Staged => "Nothing is staged.".into(),
+            Source::Committed => "No commits on this branch beyond its base.".into(),
+            Source::Branch => "This branch matches its base branch.".into(),
+        }
     }
 }
 
@@ -867,6 +1625,7 @@ impl Render for SidePane {
         div()
             .id("side-pane")
             .relative()
+            .flex_none()
             .w(self.width)
             .h_full()
             .bg(theme.bg_main)
@@ -875,11 +1634,6 @@ impl Render for SidePane {
             .flex()
             .flex_col()
             .min_h_0()
-            // Enter from a pane input is handled here, before the app
-            // root's prompt-submit sees it.
-            .on_action(cx.listener(Self::on_pane_submit))
-            // Resize handle: drag the pane's left edge. The drag-move
-            // listener lives on the app root so the drag tracks beyond it.
             .child(
                 div()
                     .id("side-pane-resize-handle")
@@ -892,8 +1646,9 @@ impl Render for SidePane {
                     .hover(|style| style.bg(theme.accent.opacity(0.4)))
                     .on_drag(SidePaneResize, |_, _, _, cx| cx.new(|_| DragGhost)),
             )
-            .child(self.header(theme, cx))
             .child(self.body(theme, cx))
+            .children(self.source_menu(theme, cx))
+            .on_action(cx.listener(Self::on_filter_cancel))
             .into_any_element()
     }
 }
@@ -904,540 +1659,5 @@ struct DragGhost;
 impl Render for DragGhost {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
-    }
-}
-
-// ── shared render helpers ──────────────────────────────────────────────────
-
-fn spinner(id: &'static str, theme: Theme) -> impl IntoElement + use<> {
-    gpui::svg()
-        .path("icons/loader.svg")
-        .size(px(13.))
-        .text_color(theme.text_3)
-        .with_animation(
-            id,
-            Animation::new(std::time::Duration::from_millis(900)).repeat(),
-            |svg, delta| {
-                svg.with_transformation(Transformation::rotate(radians(
-                    delta * std::f32::consts::TAU,
-                )))
-            },
-        )
-}
-
-/// A centered dim note filling the pane body (loading / empty / errors).
-fn centered_note(theme: Theme, text: &str) -> impl IntoElement + use<> {
-    div()
-        .flex_1()
-        .min_h_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .px(px(16.))
-        .child(
-            div()
-                .text_size(theme.ui_px(12.5))
-                .text_color(theme.text_3)
-                .text_align(TextAlign::Center)
-                .child(text.to_string()),
-        )
-}
-
-fn render_term_line(line: TermLine, theme: Theme) -> impl IntoElement + use<> {
-    let (color, glyph) = match line.kind {
-        TermKind::Command => (theme.text, Some("❯ ".to_string())),
-        TermKind::Output => (theme.text_2, None),
-        TermKind::Error => (theme.del_red, None),
-        TermKind::Note => (theme.text_3, None),
-    };
-    div()
-        .flex()
-        .when(line.kind == TermKind::Command, |row| {
-            row.child(
-                div()
-                    .text_color(theme.accent)
-                    .child(glyph.unwrap_or_default()),
-            )
-        })
-        .child(
-            div()
-                .text_color(color)
-                .child(line.text),
-        )
-}
-
-fn render_diff_file(file: DiffFile, theme: Theme) -> impl IntoElement + use<> {
-    let mut lines = div().w_full().min_w_0();
-    for line in &file.lines {
-        let Some(row) = render_diff_line(line, theme) else {
-            continue;
-        };
-        lines = lines.child(row);
-    }
-    div()
-        .w_full()
-        .rounded_md()
-        .border_1()
-        .border_color(theme.border)
-        .overflow_hidden()
-        .child(
-            // File header: mono path + ±delta.
-            div()
-                .w_full()
-                .flex()
-                .items_center()
-                .gap_2()
-                .px(px(8.))
-                .py(px(5.))
-                .bg(theme.bg_raised)
-                .border_b_1()
-                .border_color(theme.border)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .font_family(theme::code_font_family())
-                        .text_size(theme.ui_px(11.5))
-                        .text_color(theme.text)
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .child(file.path.clone()),
-                )
-                .children((file.added > 0).then(|| {
-                    div()
-                        .text_size(theme.ui_px(11.))
-                        .text_color(theme.add_green)
-                        .child(format!("+{}", file.added))
-                }))
-                .children((file.removed > 0).then(|| {
-                    div()
-                        .text_size(theme.ui_px(11.))
-                        .text_color(theme.del_red)
-                        .child(format!("-{}", file.removed))
-                })),
-        )
-        .child(lines)
-}
-
-/// One diff row, Waku-style: dim old/new line-number gutters, tinted row
-/// background on added/removed lines. Meta rows never render (the file
-/// header carries the path); returns `None` to skip.
-fn render_diff_line(line: &DiffLine, theme: Theme) -> Option<AnyElement> {
-    let mono = div()
-        .w_full()
-        .min_w_0()
-        .font_family(theme::code_font_family())
-        .text_size(theme.ui_px(11.))
-        .line_height(theme.ui_px(16.));
-    match line.kind {
-        DiffKind::Meta => None,
-        DiffKind::Note => Some(
-            mono.text_color(theme.text_3)
-                .italic()
-                .px(px(8.))
-                .child(line.text.clone())
-                .into_any_element(),
-        ),
-        DiffKind::Hunk => Some(
-            mono.text_color(theme.accent.opacity(0.75))
-                .bg(theme.bg_raised)
-                .px(px(8.))
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .child(line.text.clone())
-                .into_any_element(),
-        ),
-        DiffKind::Added => Some(
-            numbered_row(&line, theme.add_green.opacity(0.12), theme.add_green, theme)
-                .into_any_element(),
-        ),
-        DiffKind::Removed => Some(
-            numbered_row(&line, theme.del_red.opacity(0.12), theme.del_red, theme)
-                .into_any_element(),
-        ),
-        DiffKind::Context => Some(
-            numbered_row(&line, gpui::Hsla::default(), theme.text_2, theme)
-                .into_any_element(),
-        ),
-    }
-}
-
-/// `[old №][new №][line text]` with a full-row tint (Waku diff viewer).
-fn numbered_row(line: &DiffLine, bg: Hsla, color: Hsla, theme: Theme) -> impl IntoElement + use<> {
-    let gutter = |no: Option<u32>| {
-        div()
-            .w(px(34.))
-            .flex_none()
-            .px(px(4.))
-            .text_align(TextAlign::Right)
-            .text_color(theme.text_3.opacity(0.7))
-            .child(no.map(|n| n.to_string()).unwrap_or_default())
-    };
-    div()
-        .w_full()
-        .min_w_0()
-        .flex()
-        .font_family(theme::code_font_family())
-        .text_size(theme.ui_px(11.))
-        .line_height(theme.ui_px(16.))
-        .when(bg != Hsla::default(), |row| row.bg(bg))
-        .child(gutter(line.old_no))
-        .child(gutter(line.new_no))
-        .child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .pr(px(8.))
-                .text_color(color)
-                .child(line.text.clone()),
-        )
-}
-
-/// Map raw git errors to reader-friendly copy.
-fn friendly_git_error(error: &str) -> String {
-    if error.contains("not a git repository") {
-        "Not a git repository".into()
-    } else if error.contains("does not have any commits yet") {
-        "No commits yet — nothing to diff against".into()
-    } else {
-        format!("git failed: {error}")
-    }
-}
-
-fn workspace_label(path: &Path) -> String {
-    crate::sessions::workspace_label(path)
-}
-
-// ── background jobs (pure functions, unit-tested) ─────────────────────────
-
-/// Run `command` through `sh -c` in `cwd` and collect its output as
-/// terminal lines. Blocking; must run on the background executor.
-fn run_shell(cwd: &Path, command: &str) -> Vec<TermLine> {
-    let mut lines = Vec::new();
-    match std::process::Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(cwd)
-        .output()
-    {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            for text in stdout.lines() {
-                lines.push(TermLine {
-                    kind: TermKind::Output,
-                    text: text.into(),
-                });
-            }
-            for text in stderr.lines() {
-                lines.push(TermLine {
-                    kind: TermKind::Error,
-                    text: text.into(),
-                });
-            }
-            if let Some(code) = output.status.code() {
-                if code != 0 {
-                    lines.push(TermLine {
-                        kind: TermKind::Note,
-                        text: format!("exit {code}"),
-                    });
-                }
-            } else {
-                lines.push(TermLine {
-                    kind: TermKind::Note,
-                    text: "terminated".into(),
-                });
-            }
-        }
-        Err(err) => lines.push(TermLine {
-            kind: TermKind::Error,
-            text: format!("failed to run: {err}"),
-        }),
-    }
-    if lines.len() > TERMINAL_MAX_LINES {
-        lines.truncate(TERMINAL_MAX_LINES);
-        lines.push(TermLine {
-            kind: TermKind::Note,
-            text: "… output truncated".into(),
-        });
-    }
-    lines
-}
-
-/// `git diff HEAD --no-color` + untracked-file listing for the workspace.
-fn git_diff(cwd: &Path) -> ReviewData {
-    let diff = match git::run_git(cwd, &["diff", "HEAD", "--no-color"]) {
-        Ok(diff) => diff,
-        Err(err) => {
-            return ReviewData {
-                error: Some(err),
-                ..Default::default()
-            };
-        }
-    };
-    let untracked: Vec<String> = match git::run_git(cwd, &["status", "--porcelain"]) {
-        Ok(status) => status
-            .lines()
-            .filter_map(|line| line.strip_prefix("?? "))
-            .map(|path| path.trim().trim_end_matches('/').to_string())
-            .filter(|path| !path.is_empty())
-            .collect(),
-        Err(_) => Vec::new(),
-    };
-    let files = with_untracked(parse_diff(&diff), untracked);
-    let added = files.iter().map(|f| f.added).sum();
-    let removed = files.iter().map(|f| f.removed).sum();
-    ReviewData {
-        files,
-        added,
-        removed,
-        error: None,
-    }
-}
-
-/// Per-file hunk cursor while parsing: `Some((old, new))` line numbers,
-/// cleared at file boundaries.
-type HunkCursor = Option<(Option<u32>, Option<u32>)>;
-
-/// Unified-diff meta prefixes that never render as diff content.
-const META_PREFIXES: [&str; 10] = [
-    "+++ ",
-    "--- ",
-    "index ",
-    "new file",
-    "deleted file",
-    "old mode",
-    "new mode",
-    "similarity ",
-    "rename ",
-    "diff --git",
-];
-
-/// Parse unified diff text into per-file records, resolving each line's
-/// old/new numbers from the hunk headers (Waku parity).
-fn parse_diff(diff: &str) -> Vec<DiffFile> {
-    let mut files: Vec<DiffFile> = Vec::new();
-    let mut current: Option<DiffFile> = None;
-    for line in diff.lines() {
-        if let Some(rest) = line.strip_prefix("diff --git ") {
-            if let Some(done) = current.take() {
-                files.push(done);
-            }
-            // `a/<path> b/<path>` — prefer the b/ side.
-            let path = rest
-                .split_once(" b/")
-                .map(|(_, b)| b.to_string())
-                .unwrap_or_else(|| rest.to_string());
-            current = Some(DiffFile {
-                path,
-                added: 0,
-                removed: 0,
-                binary: false,
-                lines: Vec::new(),
-                hunk: None,
-            });
-            continue;
-        }
-        let Some(file) = current.as_mut() else {
-            continue;
-        };
-        if line.starts_with("Binary files") {
-            file.binary = true;
-            file.lines.push(DiffLine::plain(
-                DiffKind::Note,
-                "binary file — contents not shown",
-            ));
-            continue;
-        }
-        if line.starts_with("@@") {
-            let (old_start, new_start) = hunk_starts(line);
-            file.hunk = Some((old_start, new_start));
-            file.lines.push(DiffLine::plain(DiffKind::Hunk, line));
-            continue;
-        }
-        if line.starts_with('\\') {
-            // `\ No newline at end of file`
-            file.lines.push(DiffLine::plain(DiffKind::Note, line));
-            continue;
-        }
-        if META_PREFIXES.iter().any(|p| line.starts_with(p)) {
-            file.lines.push(DiffLine::plain(DiffKind::Meta, line));
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix('+') {
-            file.added += 1;
-            let new_no = bump(&mut file.hunk, Bump::New);
-            file.lines.push(DiffLine {
-                kind: DiffKind::Added,
-                text: rest.into(),
-                old_no: None,
-                new_no,
-            });
-        } else if let Some(rest) = line.strip_prefix('-') {
-            file.removed += 1;
-            let old_no = bump(&mut file.hunk, Bump::Old);
-            file.lines.push(DiffLine {
-                kind: DiffKind::Removed,
-                text: rest.into(),
-                old_no,
-                new_no: None,
-            });
-        } else {
-            // Context line — the leading space is trimmed for display.
-            let text = line.strip_prefix(' ').unwrap_or(line);
-            let (old_no, new_no) = bump_both(&mut file.hunk);
-            file.lines.push(DiffLine {
-                kind: DiffKind::Context,
-                text: text.into(),
-                old_no,
-                new_no,
-            });
-        }
-    }
-    if let Some(done) = current.take() {
-        files.push(done);
-    }
-    files
-}
-
-/// What a line advances in the hunk cursor.
-enum Bump {
-    Old,
-    New,
-}
-
-fn bump(cursor: &mut HunkCursor, which: Bump) -> Option<u32> {
-    let (old, new) = cursor.unwrap_or((None, None));
-    let result = match which {
-        Bump::Old => old,
-        Bump::New => new,
-    };
-    *cursor = Some(match which {
-        Bump::Old => (old.map(|n| n + 1), new),
-        Bump::New => (old, new.map(|n| n + 1)),
-    });
-    result
-}
-
-fn bump_both(cursor: &mut HunkCursor) -> (Option<u32>, Option<u32>) {
-    let old = bump(cursor, Bump::Old);
-    let new = bump(cursor, Bump::New);
-    (old, new)
-}
-
-/// `@@ -1,4 +1,5 @@ fn main()` → `(Some(1), Some(1))`.
-fn hunk_starts(line: &str) -> (Option<u32>, Option<u32>) {
-    let mut old = None;
-    let mut new = None;
-    for token in line.split_whitespace().skip(1) {
-        if old.is_none() && token.starts_with('-') {
-            old = token[1..].split(',').next().and_then(|n| n.parse().ok());
-        } else if new.is_none() && token.starts_with('+') {
-            new = token[1..].split(',').next().and_then(|n| n.parse().ok());
-        }
-        if old.is_some() && new.is_some() {
-            break;
-        }
-    }
-    (old, new)
-}
-
-/// Attach untracked files (listed by `git status`) to parsed diff files.
-fn with_untracked(mut files: Vec<DiffFile>, untracked: Vec<String>) -> Vec<DiffFile> {
-    let tracked: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
-    for path in untracked {
-        if !tracked.contains(&path) {
-            files.push(DiffFile::untracked(path));
-        }
-    }
-    files
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const SAMPLE: &str = "\
-diff --git a/src/lib.rs b/src/lib.rs
-index 83db48f..bf269f4 100644
---- a/src/lib.rs
-+++ b/src/lib.rs
-@@ -1,4 +1,5 @@
- fn main() {
--    println!(\"old\");
-+    println!(\"new\");
-+    println!(\"extra\");
- }
-";
-
-    #[test]
-    fn parse_diff_splits_files_and_counts() {
-        let files = parse_diff(SAMPLE);
-        assert_eq!(files.len(), 1);
-        let file = &files[0];
-        assert_eq!(file.path, "src/lib.rs");
-        assert_eq!(file.added, 2);
-        assert_eq!(file.removed, 1);
-        assert!(matches!(file.lines[0].kind, DiffKind::Meta));
-        assert!(matches!(file.lines[3].kind, DiffKind::Hunk));
-        // Context: numbers resolved from `@@ -1,4 +1,5 @@`.
-        assert_eq!(
-            (file.lines[4].old_no, file.lines[4].new_no),
-            (Some(1), Some(1))
-        );
-        assert!(matches!(file.lines[5].kind, DiffKind::Removed));
-        assert_eq!(file.lines[5].old_no, Some(2));
-        assert_eq!(file.lines[5].new_no, None);
-        assert!(matches!(file.lines[6].kind, DiffKind::Added));
-        assert_eq!(file.lines[6].old_no, None);
-        assert_eq!(file.lines[6].new_no, Some(2));
-        // Context advances both counters — past the removal and inserts.
-        assert_eq!(
-            (file.lines[8].old_no, file.lines[8].new_no),
-            (Some(3), Some(4))
-        );
-    }
-
-    #[test]
-    fn hunk_starts_parses_offsets() {
-        let (old, new) = hunk_starts("@@ -10,3 +12,4 @@ fn main() {");
-        assert_eq!(old, Some(10));
-        assert_eq!(new, Some(12));
-        let (old, new) = hunk_starts("@@ -0,0 +1 @@");
-        assert_eq!(old, Some(0));
-        assert_eq!(new, Some(1));
-    }
-
-    #[test]
-    fn parse_diff_flags_binary() {
-        let files = parse_diff("diff --git a/img.png b/img.png\nBinary files a/img.png and b/img.png differ\n");
-        assert_eq!(files.len(), 1);
-        assert!(files[0].binary);
-    }
-
-    #[test]
-    fn untracked_files_are_appended() {
-        let files = with_untracked(parse_diff(SAMPLE), vec!["notes.md".into(), "src/lib.rs".into()]);
-        assert_eq!(files.len(), 2);
-        assert_eq!(files[1].path, "notes.md");
-    }
-
-    #[test]
-    fn run_shell_captures_stdout_stderr_and_exit() {
-        let cwd = std::env::temp_dir();
-        let lines = run_shell(&cwd, "echo out; echo err 1>&2; exit 3");
-        assert_eq!(lines[0].kind, TermKind::Output);
-        assert_eq!(lines[0].text, "out");
-        assert_eq!(lines[1].kind, TermKind::Error);
-        assert_eq!(lines[1].text, "err");
-        let last = lines.last().unwrap();
-        assert_eq!(last.kind, TermKind::Note);
-        assert_eq!(last.text, "exit 3");
-    }
-
-    #[test]
-    fn review_data_reports_error_off_repo() {
-        let data = git_diff(Path::new("/definitely/not/a/repo/orbit"));
-        assert!(data.error.is_some());
     }
 }

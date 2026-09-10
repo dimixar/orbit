@@ -355,7 +355,7 @@ impl CommandPalette {
                 "icons/panel-right.svg",
                 None,
                 PaletteCommand::ToggleSidePanel,
-                "toggle show hide right panel review terminal browser",
+                "toggle show hide right panel review git diff",
                 next(),
             ),
             PaletteItem::command(

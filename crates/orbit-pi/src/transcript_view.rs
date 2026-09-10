@@ -93,8 +93,10 @@ pub(crate) struct TranscriptView {
     pub copied_sections: CopiedSections,
     /// Rail tick currently hovered (drives the turn preview card).
     pub hovered_turn: Rc<Cell<Option<usize>>>,
-    /// Transcript row currently hovered (reveals the ghost footer).
-    pub hovered_row: Rc<Cell<Option<usize>>>,
+    /// One-time rail hint: dismissal state (per install) + when it was
+    /// first shown (drives its self-dismiss timeout).
+    pub rail_hint_dismissed: Rc<Cell<bool>>,
+    pub rail_hint_shown_at: Rc<Cell<Option<Instant>>>,
     /// Workspace of the open session — roots the Review git diff.
     pub workspace: Option<PathBuf>,
     /// Viewport height (caps the rail at 80%, like Waku).
@@ -132,7 +134,6 @@ struct RowPaint {
     tail_summary: bool,
     expanded_activities: ExpandedActivities,
     copied_at: Rc<RefCell<HashMap<usize, Instant>>>,
-    hovered_row: Rc<Cell<Option<usize>>>,
     workspace: Option<PathBuf>,
     scroller: MessageScrollerState,
     expanded_tools: ExpandedTools,
@@ -152,7 +153,8 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
     let copied = view.copied.clone();
     let copied_sections = view.copied_sections.clone();
     let hovered_turn = view.hovered_turn.clone();
-    let hovered_row = view.hovered_row.clone();
+    let rail_hint_dismissed = view.rail_hint_dismissed.clone();
+    let rail_hint_shown_at = view.rail_hint_shown_at.clone();
     let workspace = view.workspace.clone();
     let rail_scroll = view.rail_scroll.clone();
     let rail_autoscroll = view.rail_autoscroll.clone();
@@ -184,6 +186,13 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
     let show_rail = user_turns.len() >= 2
         && view.main_width >= px(NAVIGATION_RAIL_MIN_MAIN_WIDTH)
         && scroller.is_scrollable();
+    // The one-time rail hint shows while the rail is up, until the reader
+    // uses it (tick click or turn jump) or its TTL lapses. While it shows,
+    // it takes the preview card's slot so the two never stack.
+    let rail_hint_active = show_rail && !rail_hint_dismissed.get();
+    if rail_hint_active && rail_hint_shown_at.get().is_none() {
+        rail_hint_shown_at.set(Some(Instant::now()));
+    }
 
     // One prompt/response preview pair per user turn (rail hover cards).
     let turn_snippets: Vec<(String, String)> = {
@@ -334,7 +343,6 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
             tail_summary: summary_files.is_some(),
             expanded_activities: expanded_activities.clone(),
             copied_at: copied.clone(),
-            hovered_row: hovered_row.clone(),
             workspace: workspace.clone(),
             scroller: scroller.clone(),
             expanded_tools: expanded_tools.clone(),
@@ -353,6 +361,7 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
     div()
         .id(ElementId::Name("transcript-panel".into()))
         .w_full()
+        .min_w_0()
         .h_full()
         .min_h_0()
         .relative()
@@ -368,6 +377,9 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
                 rail_scroll,
                 rail_autoscroll,
                 theme,
+                rail_hint_active,
+                rail_hint_dismissed,
+                rail_hint_shown_at,
             ))
         })
 }
@@ -387,6 +399,9 @@ fn render_navigation_rail(
     rail_scroll: ScrollHandle,
     rail_autoscroll: Rc<Cell<Option<usize>>>,
     theme: Theme,
+    rail_hint_active: bool,
+    rail_hint_dismissed: Rc<Cell<bool>>,
+    rail_hint_shown_at: Rc<Cell<Option<Instant>>>,
 ) -> AnyElement {
     let pitch = px(NAVIGATION_RAIL_TURN_HEIGHT);
     let content_height = px(user_turns.len() as f32 * NAVIGATION_RAIL_TURN_HEIGHT);
@@ -446,6 +461,10 @@ fn render_navigation_rail(
         .collect();
 
     let shell_hover = hovered.clone();
+    // The ticks map consumes one clone of the hint cells; the hint card at
+    // the end of this function needs its own.
+    let tick_hint_dismissed = rail_hint_dismissed.clone();
+    let tick_hint_shown_at = rail_hint_shown_at.clone();
     let mut body = div()
         .relative()
         .w(px(NAVIGATION_RAIL_WIDTH))
@@ -468,6 +487,8 @@ fn render_navigation_rail(
                         .map(move |(user_ix, _prompt, width, color)| {
                             let scroller = scroller.clone();
                             let hover_state = hovered.clone();
+                            let tick_hint_dismissed = tick_hint_dismissed.clone();
+                            let tick_hint_shown_at = tick_hint_shown_at.clone();
                             div()
                                 .id(ElementId::NamedInteger("nav-tick".into(), user_ix as u64))
                                 .w(px(NAVIGATION_RAIL_WIDTH))
@@ -495,9 +516,17 @@ fn render_navigation_rail(
                                         }
                                     }
                                 })
-                                .on_click(move |_, _, cx| {
-                                    scroller.scroll_to_item(user_ix);
-                                    cx.refresh_windows();
+                                .on_click({
+                                    move |_, _, cx| {
+                                        // Using the rail is the lesson — dismiss the
+                                        // one-time hint (persists per install).
+                                        crate::transcript::dismiss_rail_hint_state(
+                                            &tick_hint_dismissed,
+                                            &tick_hint_shown_at,
+                                        );
+                                        scroller.scroll_to_item(user_ix);
+                                        cx.refresh_windows();
+                                    }
                                 })
                                 .child(
                                     div()
@@ -520,14 +549,24 @@ fn render_navigation_rail(
         });
 
     // Hover preview, clamped inside the rail body's vertical span (Waku
-    // clamps `previewTop` against the rail bounds).
+    // clamps `previewTop` against the rail bounds). While the one-time hint
+    // is up it owns this slot, so the two floating cards never stack.
     if let Some((pos, prompt, response)) = hover_info {
         let visible_center =
             px(pos as f32 * NAVIGATION_RAIL_TURN_HEIGHT) + pitch / 2. - scroll_offset;
         let preview_top = (visible_center - px(NAVIGATION_RAIL_PREVIEW_MAX_HEIGHT / 2.))
             .max(px(0.))
             .min((rail_height - px(NAVIGATION_RAIL_PREVIEW_MAX_HEIGHT)).max(px(0.)));
-        body = body.child(render_rail_preview(&prompt, &response, theme, preview_top));
+        body = body.child(render_rail_preview(
+            &prompt,
+            &response,
+            theme,
+            preview_top,
+            pos + 1,
+            user_turns.len(),
+        ));
+    } else if rail_hint_active {
+        body = body.child(render_rail_hint(theme, rail_hint_dismissed, rail_hint_shown_at));
     }
 
     div()
@@ -580,14 +619,16 @@ fn render_rail_fade(top: bool, theme: Theme) -> impl IntoElement {
     }
 }
 
-/// Waku's rail hover card: the turn's prompt and a short response snippet,
-/// vertically positioned by the caller (clamped to the rail's span) at
-/// Waku's 60px left offset (rail width + gap).
+/// Waku's rail hover card: the turn's number, the turn's prompt, and a
+/// short response snippet, vertically positioned by the caller (clamped to
+/// the rail's span) at Waku's 60px left offset (rail width + gap).
 fn render_rail_preview(
     prompt: &str,
     response: &str,
     theme: Theme,
     top: Pixels,
+    turn_number: usize,
+    turn_total: usize,
 ) -> impl IntoElement {
     div()
         .absolute()
@@ -606,6 +647,16 @@ fn render_rail_preview(
         .flex()
         .flex_col()
         .gap(px(7.))
+        .child(
+            div()
+                .text_size(theme.ui_px(10.5))
+                .line_height(theme.ui_px(14.))
+                .text_color(theme.text_3)
+                .child(format!(
+                    "Turn {} of {} · click to jump",
+                    turn_number, turn_total
+                )),
+        )
         .child(
             div()
                 .w_full()
@@ -628,6 +679,52 @@ fn render_rail_preview(
                     .text_color(theme.text_3)
                     .child(response.to_string()),
             )
+        })
+}
+
+/// One-time affordance hint beside the rail: teaches what the ticks are,
+/// that they jump, and the keyboard mirror — then never shows again on
+/// this install (dismissed by use, click, or TTL).
+fn render_rail_hint(
+    theme: Theme,
+    rail_hint_dismissed: Rc<Cell<bool>>,
+    rail_hint_shown_at: Rc<Cell<Option<Instant>>>,
+) -> impl IntoElement {
+    div()
+        .id(ElementId::Name("rail-hint".into()))
+        .absolute()
+        .left(px(NAVIGATION_RAIL_WIDTH + NAVIGATION_RAIL_CONTENT_GAP))
+        .top_0()
+        .w(px(216.))
+        .rounded(px(12.))
+        .border_1()
+        .border_color(theme.border_strong)
+        .bg(theme.bg_raised)
+        .shadow(theme.card_shadow())
+        .px(px(13.))
+        .py(px(10.))
+        .flex()
+        .flex_col()
+        .gap(px(3.))
+        .cursor_pointer()
+        .child(
+            div()
+                .text_size(theme.ui_px(12.5))
+                .line_height(theme.ui_px(16.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child("Jump between turns"),
+        )
+        .child(
+            div()
+                .text_size(theme.ui_px(11.5))
+                .line_height(theme.ui_px(16.))
+                .text_color(theme.text_3)
+                .child("Click a line — or press ⌘↑ ⌘↓ — to revisit any prompt."),
+        )
+        .on_click(move |_, _, cx| {
+            crate::transcript::dismiss_rail_hint_state(&rail_hint_dismissed, &rail_hint_shown_at);
+            cx.refresh_windows();
         })
 }
 
@@ -659,8 +756,6 @@ fn render_row(paint: RowPaint) -> AnyElement {
         render_assistant(message, &paint).into_any_element()
     };
 
-    let hovered_row = paint.hovered_row.clone();
-    let ix = paint.ix;
     div()
         .id(ElementId::NamedInteger(
             "transcript-row".into(),
@@ -674,13 +769,6 @@ fn render_row(paint: RowPaint) -> AnyElement {
         .when(first, |row| row.pt(px(22.)))
         .when(followup, |row| row.pt(px(FOLLOWUP_TURN_TOP_GAP)))
         .when(last, |row| row.pb(px(22.)))
-        .on_hover(move |hovering: &bool, _, cx| {
-            let next = if *hovering { Some(ix) } else { None };
-            if hovered_row.get() != next {
-                hovered_row.set(next);
-                cx.refresh_windows();
-            }
-        })
         .child(
             div()
                 .w_full()
@@ -691,12 +779,12 @@ fn render_row(paint: RowPaint) -> AnyElement {
         .into_any_element()
 }
 
-/// End-aligned user row: Waku's neutral raised bubble, ghost footer below.
-/// Attached images render as a tile grid above the text bubble.
+/// End-aligned user row: Waku's neutral raised bubble, persistent quiet
+/// footer below. Attached images render as a tile grid above the text
+/// bubble.
 fn render_user_bubble(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement {
     let theme = paint.theme;
     let ix = paint.ix;
-    let revealed = paint.hovered_row.get() == Some(ix);
     let text = message.text();
     div()
         .w_full()
@@ -755,7 +843,6 @@ fn render_user_bubble(message: &ChatMessage, paint: &RowPaint) -> impl IntoEleme
             text,
             ix,
             message.finished_at,
-            revealed,
             paint.copied,
             true,
             theme,
@@ -878,12 +965,10 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
         .child(content);
 
     if !paint.live && !message.text().is_empty() {
-        let revealed = paint.hovered_row.get() == Some(ix);
         row = row.child(render_message_footer(
             message.text(),
             ix,
             message.finished_at,
-            revealed,
             paint.copied,
             false,
             theme,
@@ -1133,7 +1218,6 @@ fn render_activity_card(
         .child(
             div()
                 .h(px(28.))
-                .h(px(28.))
                 .px(px(8.))
                 .flex()
                 .items_center()
@@ -1167,15 +1251,7 @@ fn render_activity_card(
                     row.child(pulse_dot(theme, elapsed.as_millis()))
                 })
                 .when(tool.failed, |row| {
-                    row.child(
-                        div()
-                            .flex_none()
-                            .text_size(theme.ui_px(11.))
-                            .line_height(theme.ui_px(16.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.del_red)
-                            .child("✕"),
-                    )
+                    row.child(glyph("icons/stop.svg", 12., theme.del_red))
                 })
                 .when(complete && !tool.failed, |row| {
                     row.child(glyph("icons/check.svg", 10., theme.text_3))
@@ -1196,23 +1272,75 @@ fn render_activity_card(
                         theme.text_3.opacity(0.)
                     },
                 )),
-        )
-        .when(has_detail, |row| {
-            row.on_click(move |_, _, cx| {
-                let mut open = expanded_tools.borrow_mut();
-                if !open.remove(&key) {
-                    open.insert(key);
-                }
-                drop(open);
-                scroller.remeasure_items(key.0..key.0 + 1);
-                cx.refresh_windows();
-            })
-        });
+        );
+    // A failed run carries its first error line right on the card — the
+    // fact a user scanning the turn needs, without opening the detail.
+    if tool.failed {
+        card = card.child(render_tool_error_strip(tool, theme));
+    }
+    card = card.when(has_detail, |row| {
+        row.on_click(move |_, _, cx| {
+            let mut open = expanded_tools.borrow_mut();
+            if !open.remove(&key) {
+                open.insert(key);
+            }
+            drop(open);
+            scroller.remeasure_items(key.0..key.0 + 1);
+            cx.refresh_windows();
+        })
+    });
 
     if tool_open && has_detail {
         card = card.child(render_tool_detail(tool, key, copied_sections, theme));
     }
     card.into_any_element()
+}
+
+/// First human-readable error line from a failed tool's captured output.
+fn first_error_line(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => text
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(|line| cap_chars(line, 200)),
+        Value::Array(items) => items.iter().find_map(first_error_line),
+        Value::Object(map) => map.values().find_map(first_error_line),
+        _ => None,
+    }
+}
+
+/// One-line error strip on a failed tool card: red-washed, drawn stop
+/// glyph, and the actual error text (never invented — the fallback says
+/// when nothing was captured).
+fn render_tool_error_strip(tool: &ToolCall, theme: Theme) -> impl IntoElement {
+    let snippet = tool
+        .output
+        .as_ref()
+        .and_then(first_error_line)
+        .unwrap_or_else(|| "The run failed without an error message.".to_string());
+    div()
+        .w_full()
+        .border_t_1()
+        .border_color(theme.border_strong)
+        .bg(theme.del_red.opacity(0.07))
+        .px(px(8.))
+        .py(px(4.))
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .flex_none()
+        .child(glyph("icons/stop.svg", 11., theme.del_red))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .truncate()
+                .text_size(theme.ui_px(11.))
+                .line_height(theme.ui_px(15.))
+                .text_color(theme.del_red)
+                .child(snippet),
+        )
 }
 
 /// The expandable detail card: labeled Arguments / Output sections, each with
@@ -1353,14 +1481,14 @@ fn cap_chars(text: &str, max: usize) -> String {
     }
 }
 
-/// Waku message footer: ghost copy button + `HH:MM` timestamp, revealed on
-/// row hover (and pinned while the copy feedback is showing).
+/// Message footer: persistent quiet copy button + `HH:MM` timestamp —
+/// always visible (the code-block copy button's treatment) so the
+/// affordance never depends on hover. Copy feedback pins the green check.
 #[allow(clippy::too_many_arguments)]
 fn render_message_footer(
     copy_text: String,
     ix: usize,
     finished_at: Option<i64>,
-    revealed: bool,
     copied: bool,
     align_right: bool,
     theme: Theme,
@@ -1405,7 +1533,6 @@ fn render_message_footer(
         .flex()
         .items_center()
         .gap(px(1.))
-        .opacity(if revealed || copied { 1. } else { 0. })
         .when(align_right, |row| row.justify_end());
     if align_right {
         // Waku's right-aligned footer: timestamp first, then actions.
@@ -1885,7 +2012,7 @@ fn md_id(ix: usize, salt: u64, block_ix: usize, sub: usize) -> ElementId {
 enum Block {
     Paragraph(Vec<String>),
     Heading(u8, String),
-    Code(Vec<String>),
+    Code(Option<String>, Vec<String>),
     List(Vec<ListItem>),
     Quote(Vec<String>),
     Rule,
@@ -1980,6 +2107,13 @@ fn parse_blocks(text: &str) -> Vec<Block> {
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             flush_paragraph(&mut paragraph, &mut blocks);
             let marker = &trimmed[..trimmed.len().min(3)];
+            // The fence info string's first token is the language hint
+            // (```rust, ```text, …) — it becomes the code block's chip.
+            let language = trimmed[3..]
+                .split_whitespace()
+                .next()
+                .filter(|lang| !lang.is_empty())
+                .map(str::to_string);
             let mut body = Vec::new();
             i += 1;
             while i < lines.len() && !lines[i].trim_start().starts_with(marker) {
@@ -1987,7 +2121,7 @@ fn parse_blocks(text: &str) -> Vec<Block> {
                 i += 1;
             }
             i += 1; // closing fence (or EOF)
-            blocks.push(Block::Code(body));
+            blocks.push(Block::Code(language, body));
             continue;
         }
 
@@ -2166,8 +2300,9 @@ fn render_block(
             )
             .into_any_element()
         }
-        Block::Code(lines) => {
-            render_code_block(&lines, ix, block_ix, theme, copied_sections).into_any_element()
+        Block::Code(language, lines) => {
+            render_code_block(language.as_deref(), &lines, ix, block_ix, theme, copied_sections)
+                .into_any_element()
         }
         Block::Rule => div().w_full().h(px(1.)).bg(theme.border).into_any_element(),
         Block::Quote(lines) => div()
@@ -2255,10 +2390,11 @@ fn render_list_item(
         .into_any_element()
 }
 
-/// Waku `pre`: rounded-xl bordered mono block, 13px/24px, p-4 — plus a
-/// ghost copy button pinned to the top-right (feedback via the shared
-/// detail-section map).
+/// Rounded bordered mono block (Waku `pre`): 13px/24px body under a slim
+/// header row carrying the language chip (when the fence names one) and
+/// the copy button — the same top-right slot on every code block.
 fn render_code_block(
+    language: Option<&str>,
     lines: &[String],
     ix: usize,
     block_ix: usize,
@@ -2275,16 +2411,12 @@ fn render_code_block(
             "copy-code".into(),
             (ix as u64) << 16 | block_ix as u64,
         ))
-        .absolute()
-        .top(px(6.))
-        .right(px(6.))
         .size(px(CODE_COPY_BUTTON))
         .rounded(px(6.))
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .bg(theme.bg_main.opacity(0.6))
         .hover(|style| style.bg(theme.overlay_strong))
         .child(glyph(
             if copied {
@@ -2302,36 +2434,62 @@ fn render_code_block(
                 .insert((ix, block_ix, CODE_COPY_SECTION), Instant::now());
             cx.refresh_windows();
         });
-    div()
-        .relative()
+    // Header strip: the language chip (when the fence names one) and the
+    // copy button share one row, so the affordance and its context sit in
+    // the same place on every code block.
+    let header = div()
         .w_full()
         .min_w_0()
+        .h(px(30.))
+        .px(px(10.))
+        .pt(px(4.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .when_some(
+            language.map(str::to_uppercase),
+            |row, lang| {
+                row.child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .truncate()
+                        .text_size(theme.ui_px(9.5))
+                        .line_height(theme.ui_px(13.))
+                        .text_color(theme.text_3)
+                        .child(lang),
+                )
+            },
+        )
+        .when(!language.is_some(), |row| row.child(div().flex_1()))
+        .child(copy_button);
+    div()
+        .w_full()
+        .min_w_0()
+        .rounded(px(12.))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.code_bg)
+        .overflow_hidden()
+        .child(header)
         .child(
             div()
                 .w_full()
                 .min_w_0()
-                .rounded(px(12.))
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.code_bg)
                 .px(px(16.))
-                .py(px(12.))
-                .overflow_hidden()
+                .pb(px(12.))
                 .font_family(theme::code_font_family())
                 .text_size(theme.code_px(13.))
                 .line_height(theme.code_px(24.))
                 .text_color(theme.code_text)
-                .children(lines.iter().enumerate().map(|(line_ix, line)| {
-                    // Clear the top-right copy button on the first line only.
-                    let clear = if line_ix == 0 { px(30.) } else { px(0.) };
-                    div().pr(clear).child(if line.is_empty() {
+                .children(lines.iter().map(|line| {
+                    div().child(if line.is_empty() {
                         " ".to_string()
                     } else {
                         line.clone()
                     })
                 })),
         )
-        .child(copy_button)
 }
 
 /// GFM table: outer border, semibold header, dividers, content-weighted
@@ -2864,6 +3022,20 @@ mod tests {
     }
 
     #[test]
+    fn first_error_line_picks_first_nonempty_string() {
+        assert_eq!(
+            first_error_line(&Value::String("error: file not found\n  at main.rs:1".into())),
+            Some("error: file not found".to_string())
+        );
+        // Structured results dig out the first text-bearing value.
+        assert_eq!(
+            first_error_line(&serde_json::json!({"message": {"text": "boom"}})),
+            Some("boom".to_string())
+        );
+        assert_eq!(first_error_line(&serde_json::json!(null)), None);
+    }
+
+    #[test]
     fn active_user_index_tracks_streaming_turn() {
         let messages = vec![
             ChatMessage {
@@ -3003,7 +3175,11 @@ mod tests {
         assert_eq!(blocks.len(), 3);
         assert!(matches!(&blocks[0], Block::Paragraph(lines) if lines.join(" ") == "one two"));
         assert!(matches!(&blocks[1], Block::Heading(2, title) if title == "Title"));
-        assert!(matches!(&blocks[2], Block::Code(lines) if lines == &["let a = 1;".to_string()]));
+        assert!(matches!(&blocks[2], Block::Code(Some(lang), lines) if lang == "rs"
+            && lines == &["let a = 1;".to_string()]));
+        // A bare fence carries no language; the chip is simply absent.
+        let bare = parse_blocks("```\nx\n```");
+        assert!(matches!(&bare[0], Block::Code(None, lines) if lines == &["x".to_string()]));
     }
 
     #[test]

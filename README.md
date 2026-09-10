@@ -13,7 +13,7 @@ Same product philosophy as [Waku](https://github.com/egoist/waku): the UI layer 
 - **Thinking effort** — level selection derived from each model's supported levels (`get_available_thinking_levels`)
 - **Tool activity** — bash, edit, todo, plan, search, mcp, thinking, and question rows plus approval dialogs, all rendered natively; tool rows expand into Arguments/Output detail cards with per-section copy
 - **Git diff panel** — review what the agent changed without leaving the app
-- **Side pane** — right-hand tabbed panel with **Review** (live `git diff HEAD` of the workspace, refreshed when a run settles), **Terminal** (shell runner in the workspace cwd) and **Browser** (reader-mode page fetch — no webview); toggle from the top bar, tab cards pick the pane
+- **Side pane** — right-hand **Review** panel with a live `git diff HEAD` of the workspace, refreshed when a run settles; toggle from the top bar
 - **Workbench pages** — usage, skills, plugins, models, providers, and settings views backed by pi's on-disk data
 - **Markdown rendering** — GFM and syntax-highlighted code; highlighting is paint-only so streaming code blocks never reflow
 - **Theming** — dark/light, accent, font, and density settings persisted to pi's own settings

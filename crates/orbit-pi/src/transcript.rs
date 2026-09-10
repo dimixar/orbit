@@ -9,7 +9,7 @@
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
-    path::Path,
+    path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
     time::{Duration, Instant},
@@ -441,6 +441,55 @@ type ExpandedActivities = Rc<RefCell<HashMap<(usize, usize), bool>>>;
 type ExpandedTools = Rc<RefCell<HashSet<(usize, usize)>>>;
 type CopiedSections = Rc<RefCell<HashMap<(usize, usize, u8), Instant>>>;
 
+/// How long the one-time rail hint stays up before dismissing itself.
+const RAIL_HINT_TTL: Duration = Duration::from_secs(10);
+
+/// `~/.orbit-pi/hints.json` — one-time affordance hints, per install. The
+/// rail hint shows once the conversation rail first appears, then never
+/// again (dismissed by use or timeout).
+fn hints_path() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".orbit-pi")
+        .join("hints.json")
+}
+
+fn load_rail_hint_seen() -> bool {
+    let Ok(raw) = std::fs::read_to_string(hints_path()) else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|value| value.get("rail_hint_seen").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
+}
+
+fn persist_rail_hint_seen() {
+    let path = hints_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(
+        &path,
+        serde_json::json!({ "rail_hint_seen": true }).to_string(),
+    );
+}
+
+/// Shared rail-hint dismissal for the model and the view layer (the view
+/// holds clones of the same cells). Returns true on the first call.
+pub(crate) fn dismiss_rail_hint_state(
+    dismissed: &Cell<bool>,
+    shown_at: &Cell<Option<Instant>>,
+) -> bool {
+    if dismissed.replace(true) {
+        return false;
+    }
+    shown_at.set(None);
+    persist_rail_hint_seen();
+    true
+}
+
 /// Transcript state shared between the view and the RPC event pump.
 pub struct Transcript {
     messages: Rc<RefCell<Vec<ChatMessage>>>,
@@ -466,8 +515,11 @@ pub struct Transcript {
     tool_positions: Rc<RefCell<HashMap<String, (usize, usize, usize)>>>,
     /// Rail tick currently hovered (drives the turn preview card).
     hovered_turn: Rc<Cell<Option<usize>>>,
-    /// Transcript row currently hovered (reveals the ghost footer).
-    hovered_row: Rc<Cell<Option<usize>>>,
+    /// One-time rail hint still pending (per install, persisted). Cleared
+    /// by using the rail, jumping turns, or the TTL below.
+    rail_hint_dismissed: Rc<Cell<bool>>,
+    /// When the hint first rendered — drives its self-dismiss timeout.
+    rail_hint_shown_at: Rc<Cell<Option<Instant>>>,
     /// Scroll position of the conversation-turn rail (Waku's scrollable rail).
     rail_scroll: ScrollHandle,
     /// Last turn the rail auto-scrolled to — re-fires only when it changes.
@@ -496,7 +548,8 @@ impl Transcript {
             copied_sections: Rc::new(RefCell::new(HashMap::new())),
             tool_positions: Rc::new(RefCell::new(HashMap::new())),
             hovered_turn: Rc::new(Cell::new(None)),
-            hovered_row: Rc::new(Cell::new(None)),
+            rail_hint_dismissed: Rc::new(Cell::new(load_rail_hint_seen())),
+            rail_hint_shown_at: Rc::new(Cell::new(None)),
             rail_scroll: ScrollHandle::new(),
             rail_autoscroll: Rc::new(Cell::new(None)),
             step_mark: Rc::new(Cell::new(None)),
@@ -545,7 +598,6 @@ impl Transcript {
         self.copied_sections.borrow_mut().clear();
         self.tool_positions.borrow_mut().clear();
         self.hovered_turn.set(None);
-        self.hovered_row.set(None);
         self.rail_scroll.set_offset(point(px(0.), px(0.)));
         self.rail_autoscroll.set(None);
         self.step_mark.set(None);
@@ -570,7 +622,6 @@ impl Transcript {
         self.copied_sections.borrow_mut().clear();
         self.tool_positions.borrow_mut().clear();
         self.hovered_turn.set(None);
-        self.hovered_row.set(None);
         self.rail_scroll.set_offset(point(px(0.), px(0.)));
         self.rail_autoscroll.set(None);
         self.step_mark.set(None);
@@ -1184,6 +1235,77 @@ impl Transcript {
         self.messages.borrow().is_empty()
     }
 
+    /// Mark the one-time rail hint as seen — it stops rendering and the
+    /// dismissal persists for this install. Returns true on the first call
+    /// (i.e. the UI should repaint).
+    pub fn dismiss_rail_hint(&self) -> bool {
+        dismiss_rail_hint_state(&self.rail_hint_dismissed, &self.rail_hint_shown_at)
+    }
+
+    /// Heartbeat check: self-dismiss the rail hint once its TTL elapsed.
+    /// Returns true when the dismissal just happened (repaint needed).
+    pub fn rail_hint_timed_out(&self) -> bool {
+        let Some(shown_at) = self.rail_hint_shown_at.get() else {
+            return false;
+        };
+        if self.rail_hint_dismissed.get() || shown_at.elapsed() < RAIL_HINT_TTL {
+            return false;
+        }
+        self.dismiss_rail_hint()
+    }
+
+    /// Text of the most recent assistant response (streaming partials
+    /// included), with its row index for the copy feedback — the keyboard
+    /// mirror of the footer copy button.
+    pub fn last_response_text(&self) -> Option<(usize, String)> {
+        let messages = self.messages.borrow();
+        let ix = messages
+            .iter()
+            .rposition(|message| !message.user && !message.text().trim().is_empty())?;
+        Some((ix, messages[ix].text()))
+    }
+
+    /// Pin the per-message copy feedback (green check) as if the footer
+    /// button had been clicked.
+    pub fn mark_copied(&self, ix: usize) {
+        self.copied.borrow_mut().insert(ix, Instant::now());
+    }
+
+    /// Jump the scroller to the previous (`direction < 0`) or next user
+    /// turn relative to the current viewport — the keyboard mirror of the
+    /// navigation rail's ticks. Returns `false` when there is nowhere to go.
+    pub fn jump_turn(&self, direction: i32) -> bool {
+        let target = {
+            let messages = self.messages.borrow();
+            let user_turns: Vec<usize> = messages
+                .iter()
+                .enumerate()
+                .filter(|(_, message)| message.user)
+                .map(|(ix, _)| ix)
+                .collect();
+            if user_turns.is_empty() {
+                return false;
+            }
+            let current = self.scroller.first_visible_index();
+            // The turn the viewport is reading: the newest user turn at or
+            // above the first visible row (same rule the rail uses).
+            let pos = user_turns
+                .iter()
+                .rposition(|&ix| ix <= current)
+                .unwrap_or(0);
+            let next_pos = if direction < 0 {
+                pos.saturating_sub(1)
+            } else {
+                (pos + 1).min(user_turns.len() - 1)
+            };
+            if next_pos == pos && user_turns.len() > 1 {
+                return false;
+            }
+            user_turns[next_pos]
+        };
+        self.scroller.scroll_to_item(target)
+    }
+
     /// Show the just-sent prompt immediately — pi does not echo user
     /// messages in RPC mode. A later identical echo is deduped. `images`
     /// are the attachments that rode along with the prompt.
@@ -1314,7 +1436,8 @@ impl Transcript {
                 copied: self.copied.clone(),
                 copied_sections: self.copied_sections.clone(),
                 hovered_turn: self.hovered_turn.clone(),
-                hovered_row: self.hovered_row.clone(),
+                rail_hint_dismissed: self.rail_hint_dismissed.clone(),
+                rail_hint_shown_at: self.rail_hint_shown_at.clone(),
                 workspace: workspace.map(Path::to_path_buf),
                 viewport_height,
                 main_width,
@@ -1962,6 +2085,38 @@ mod tests {
     }
 
     #[test]
+    fn rail_hint_state_dismisses_once() {
+        let dismissed = Cell::new(false);
+        let shown_at = Cell::new(None);
+        assert!(dismiss_rail_hint_state(&dismissed, &shown_at));
+        assert!(dismissed.get());
+        assert!(shown_at.get().is_none());
+        // Second dismissal is a no-op (already persisted).
+        assert!(!dismiss_rail_hint_state(&dismissed, &shown_at));
+    }
+
+    #[test]
+    fn jump_turn_walks_and_refuses_edges() {
+        let payload = json!({
+            "messages": [
+                {"role": "user", "content": "one"},
+                {"role": "assistant", "content": "a"},
+                {"role": "user", "content": "two"}
+            ]
+        });
+        let mut t = Transcript::new();
+        t.load_from(&payload);
+        // Viewport starts at the first row: previous has nowhere to go.
+        assert!(!t.jump_turn(-1));
+        // Next jumps to the second user turn.
+        assert!(t.jump_turn(1));
+        // Empty transcripts have nothing to jump to.
+        let t = Transcript::new();
+        assert!(!t.jump_turn(1));
+        assert!(!t.jump_turn(-1));
+    }
+
+    #[test]
     fn chat_message_parses_tool_stats() {
         let value = json!({
             "role": "assistant",
@@ -2115,7 +2270,6 @@ mod tests {
 #[cfg(test)]
 mod debug_tests {
     use super::*;
-    use serde_json::Value;
 
     #[test]
     #[ignore] // manual: cargo test -p orbit-pi debug_load -- --ignored --nocapture

@@ -27,6 +27,7 @@ use orbit_rpc::{CommandBody, ContextUsage, Event, PiClient};
 use serde_json::Value;
 
 use crate::branch_picker::BranchPicker;
+use crate::checkpoint;
 use crate::workspace_picker::{WorkspaceEntry, WorkspacePicker};
 use crate::command_palette::{self, CommandPalette, PaletteCommand, PaletteSnapshot};
 use crate::composer::ComposerInput;
@@ -218,7 +219,13 @@ pub struct OrbitApp {
     session_details_open: bool,
     /// The `sessionId` pi reports for the active session (its task id).
     session_id: Option<String>,
-    /// Right side pane — Review (git diff), Terminal, Browser tabs.
+    /// Current agent turn number for this session (0 = none yet).
+    turn_count: usize,
+    /// A turn's start checkpoint was captured and awaits its end.
+    turn_open: bool,
+    /// Latest turn with a captured end checkpoint (drives Review's Last Turn).
+    latest_turn: Option<usize>,
+    /// Right side pane — Review (git diff).
     sidepane: Entity<SidePane>,
 }
 
@@ -338,7 +345,7 @@ impl OrbitApp {
         // can show install commands when something is missing.
         let deps = onboarding::check_dependencies();
 
-        // Right side pane: Review / Terminal / Browser tabs.
+        // Right side pane: Review (git diff).
         let sidepane = cx.new(SidePane::new);
 
         let mut app = Self {
@@ -404,6 +411,9 @@ impl OrbitApp {
             refreshing: false,
             session_details_open: false,
             session_id: None,
+            turn_count: 0,
+            turn_open: false,
+            latest_turn: None,
             sidepane,
         };
 
@@ -512,6 +522,10 @@ impl OrbitApp {
             client.drain_events()
         };
         let copy_pending = self.transcript.prune_copy_feedback();
+        // The one-time rail hint dismisses itself once its TTL lapses.
+        if self.transcript.rail_hint_timed_out() {
+            cx.notify();
+        }
         if events.is_empty() {
             // Keep the live "Working for…" clock moving while a turn is open.
             if self.busy || self.transcript.is_streaming() || copy_pending {
@@ -559,9 +573,8 @@ impl OrbitApp {
                     self.busy = false;
                     refresh_sessions = true;
                     self.refresh_context_stats();
-                    // The run may have changed files — Review goes stale.
-                    self.sidepane
-                        .update(cx, |pane, cx| pane.mark_review_stale(cx));
+                    // Capture the turn's end checkpoint, then refresh Review.
+                    self.finish_turn(cx);
                 }
                 Event::CompactionEnd { .. } => {
                     // Post-compaction usage is unknown until the next turn;
@@ -714,7 +727,10 @@ impl OrbitApp {
                     self.adopt_session_file(PathBuf::from(file));
                 }
                 if let Some(id) = data.get("sessionId").and_then(Value::as_str) {
-                    self.session_id = Some(id.to_string());
+                    if self.session_id.as_deref() != Some(id) {
+                        self.session_id = Some(id.to_string());
+                        self.recover_latest_turn(cx);
+                    }
                 }
                 self.sync_model_selector(cx);
                 self.refresh_context_stats();
@@ -794,6 +810,7 @@ impl OrbitApp {
             }
             "switch_session" => {
                 if success {
+                    self.reset_turns();
                     self.send(CommandBody::GetMessages, "get_messages");
                     self.send(CommandBody::GetState, "get_state");
                     self.refresh_catalogs();
@@ -806,6 +823,7 @@ impl OrbitApp {
                 self.added = 0;
                 self.removed = 0;
                 self.context = None;
+                self.reset_turns();
                 *refresh_sessions = true;
                 self.send(CommandBody::GetState, "get_state");
                 self.refresh_catalogs();
@@ -891,6 +909,9 @@ impl OrbitApp {
             cx.notify();
             return;
         }
+        if !steer {
+            self.begin_turn(cx);
+        }
         // A steer never carries the queued images — hand them back.
         if steer && !attachments.is_empty() {
             self.attachments = attachments;
@@ -911,6 +932,116 @@ impl OrbitApp {
         );
         self.input.update(cx, |input, cx| input.clear(cx));
         cx.notify();
+    }
+
+    /// Start a new user turn: snapshot the workspace so Review's **Last Turn**
+    /// can diff exactly what the agent changes, then let the prompt run.
+    fn begin_turn(&mut self, cx: &mut Context<Self>) {
+        if self.turn_open {
+            return;
+        }
+        let Some(session) = self.session_id.clone() else {
+            return;
+        };
+        self.turn_count += 1;
+        self.turn_open = true;
+        let turn = self.turn_count;
+        let cwd = self
+            .current_workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        cx.spawn(async move |_this, cx| {
+            let _ = cx
+                .background_executor()
+                .spawn(async move { checkpoint::capture_turn_start(&cwd, &session, turn) })
+                .await;
+        })
+        .detach();
+    }
+
+    /// A run settled: snapshot the workspace's end state so Review's **Last
+    /// Turn** has a complete range, then mark Review stale. Without an open
+    /// turn (e.g. a settled retry) it still refreshes Review.
+    fn finish_turn(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session_id.clone() else {
+            self.turn_open = false;
+            self.sidepane
+                .update(cx, |pane, cx| pane.mark_review_stale(cx));
+            return;
+        };
+        if !self.turn_open {
+            self.sidepane
+                .update(cx, |pane, cx| pane.mark_review_stale(cx));
+            return;
+        }
+        // Close the turn synchronously so a second settle event can't start a
+        // duplicate capture while this one is still running.
+        self.turn_open = false;
+        let turn = self.turn_count;
+        let cwd = self
+            .current_workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { checkpoint::capture_turn(&cwd, &session, turn) })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                app.turn_open = false;
+                if result.is_ok() {
+                    app.latest_turn = Some(turn);
+                }
+                app.sidepane
+                    .update(cx, |pane, cx| pane.mark_review_stale(cx));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Forget turn checkpoints when the session or workspace changes.
+    fn reset_turns(&mut self) {
+        self.turn_count = 0;
+        self.turn_open = false;
+        self.latest_turn = None;
+    }
+
+    /// Recover the newest completed turn from the persisted checkpoint refs,
+    /// so Review's **Last Turn** is available immediately after a restart or
+    /// session switch. Waku persists the same fact in its session model; Orbit
+    /// keeps it in `refs/orbit/…` and reads it back here.
+    fn recover_latest_turn(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session_id.clone() else {
+            return;
+        };
+        let cwd = self
+            .current_workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        cx.spawn(async move |this, cx| {
+            let lookup_session = session.clone();
+            let latest = cx
+                .background_executor()
+                .spawn(async move { checkpoint::latest_turn(&cwd, &lookup_session) })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.session_id.as_deref() != Some(session.as_str()) {
+                    return;
+                }
+                app.latest_turn = latest;
+                if let Some(latest) = latest {
+                    // Continue numbering after the recovered turn so new refs
+                    // never clobber the persisted ones.
+                    app.turn_count = app.turn_count.max(latest);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn on_submit(&mut self, _: &crate::Submit, _: &mut Window, cx: &mut Context<Self>) {
@@ -978,6 +1109,13 @@ impl OrbitApp {
             cx.notify();
             return;
         }
+        // The Review pane's source menu is closed by Escape before the key
+        // falls through to aborting a run.
+        if self.sidepane.read(cx).is_source_menu_open() {
+            self.sidepane
+                .update(cx, |pane, cx| pane.close_source_menu(cx));
+            return;
+        }
         self.send(CommandBody::Abort, "abort");
         cx.notify();
     }
@@ -1036,6 +1174,7 @@ impl OrbitApp {
         self.added = 0;
         self.removed = 0;
         self.context = None;
+        self.reset_turns();
         self.current_workspace = Some(cwd.clone());
 
         match PiClient::spawn(&cwd, None) {
@@ -1201,6 +1340,7 @@ impl OrbitApp {
         self.added = 0;
         self.removed = 0;
         self.context = None;
+        self.reset_turns();
         match PiClient::spawn(self.current_workspace.as_ref().unwrap(), None) {
             Ok(client) => {
                 self.client = Some(client);
@@ -2356,6 +2496,41 @@ impl OrbitApp {
         cx.notify();
     }
 
+    /// `cmd-shift-c`: copy the newest assistant response — the keyboard
+    /// mirror of the message footer's copy button. Lights the same green
+    /// check in that row's footer.
+    fn on_copy_last_response(
+        &mut self,
+        _: &crate::CopyLastResponse,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((ix, text)) = self.transcript.last_response_text() else {
+            self.set_status("No response to copy yet");
+            cx.notify();
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.transcript.mark_copied(ix);
+        self.set_status("Copied latest response");
+        cx.notify();
+    }
+
+    /// `cmd-up` / `cmd-down`: jump between user turns — the keyboard mirror
+    /// of the navigation rail. Jumping is also using the rail, so it
+    /// dismisses the one-time rail hint.
+    fn on_prev_turn(&mut self, _: &crate::PrevTurn, _: &mut Window, cx: &mut Context<Self>) {
+        self.transcript.jump_turn(-1);
+        self.transcript.dismiss_rail_hint();
+        cx.notify();
+    }
+
+    fn on_next_turn(&mut self, _: &crate::NextTurn, _: &mut Window, cx: &mut Context<Self>) {
+        self.transcript.jump_turn(1);
+        self.transcript.dismiss_rail_hint();
+        cx.notify();
+    }
+
     fn on_open_session(&mut self, session: SessionInfo, cx: &mut Context<Self>) {
         self.switch_to_session(session, true, cx);
     }
@@ -2759,13 +2934,28 @@ impl OrbitApp {
         cx.notify();
     }
 
+    /// The top-bar `+N -M` chip opens Review on the working tree's
+    /// **Uncommitted** changes.
+    fn on_open_uncommitted_review(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidepane
+            .update(cx, |pane, cx| pane.show_uncommitted(cx));
+        cx.notify();
+    }
+
     /// Hands the transcript's changed-files cards a way to open the side
-    /// pane's Review tab (the pane lives in the app, the cards don't know
-    /// that). Cheap to build per frame — an `Rc` closure over the entity.
+    /// pane's Review tab on that run's **Last Turn** git diff (the pane lives
+    /// in the app, the cards don't know that). Cheap to build per frame — an
+    /// `Rc` closure over the entity and the latest captured turn.
     fn review_opener(&self, _: &Context<Self>) -> crate::transcript_view::ReviewOpener {
         let pane = self.sidepane.clone();
+        let latest = self.latest_turn;
         Rc::new(move |_window, cx| {
-            pane.update(cx, |pane, cx| pane.show_review(cx));
+            pane.update(cx, |pane, cx| pane.show_review_turn(latest, cx));
         })
     }
 
@@ -3252,6 +3442,11 @@ impl Render for OrbitApp {
         let pane_workspace = self.current_workspace.clone();
         self.sidepane
             .update(cx, |pane, cx| pane.set_workspace(pane_workspace, cx));
+        let pane_session = self.session_id.clone();
+        let pane_latest_turn = self.latest_turn;
+        self.sidepane.update(cx, |pane, cx| {
+            pane.set_turn_context(pane_session, pane_latest_turn, cx)
+        });
         let main_width = viewport.width
             - if self.sidebar_visible && !self.settings_open {
                 self.sidebar_width
@@ -3328,15 +3523,31 @@ impl Render for OrbitApp {
         top_controls = top_controls
             .child(
                 div()
-                    .text_size(theme.ui_px(12.))
-                    .text_color(theme.add_green)
-                    .child(format!("+{}", self.added)),
-            )
-            .child(
-                div()
-                    .text_size(theme.ui_px(12.))
-                    .text_color(theme.del_red)
-                    .child(format!("-{}", self.removed)),
+                    .id("top-diff-stats")
+                    .h(px(26.))
+                    .px(px(8.))
+                    .rounded_md()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(Self::on_open_uncommitted_review),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.add_green)
+                            .child(format!("+{}", self.added)),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.del_red)
+                            .child(format!("-{}", self.removed)),
+                    ),
             )
             .child(
                 div()
@@ -3386,6 +3597,7 @@ impl Render for OrbitApp {
                 div()
                     .id("sidebar")
                     .relative()
+                    .flex_none()
                     .w(self.sidebar_width)
                     .h_full()
                     .bg(theme.bg_sidebar)
@@ -3548,6 +3760,11 @@ impl Render for OrbitApp {
                     .h_full()
                     .flex()
                     .flex_col()
+                    // `min_w_0` lets the center shrink below its content's
+                    // min-content width, so opening the side pane (or widening
+                    // the sidebar) reflows the transcript instead of holding
+                    // the column at a fixed width.
+                    .min_w_0()
                     .min_h_0()
                     // top bar — left controls clear the traffic lights when
                     // the sessions sidebar is hidden; the drag spacer between
@@ -3564,12 +3781,15 @@ impl Render for OrbitApp {
                             .child(
                                 div()
                                     .flex_1()
+                                    .min_w_0()
                                     .h_full()
                                     .window_control_area(WindowControlArea::Drag)
                                     .flex()
                                     .items_center()
                                     .child(
                                         div()
+                                            .min_w_0()
+                                            .truncate()
                                             .text_size(theme.ui_px(13.))
                                             .text_color(theme.text_2)
                                             .child(
@@ -3697,7 +3917,7 @@ impl Render for OrbitApp {
                     )
                     .into_any_element()
             })
-            // ── right side pane (Review / Terminal / Browser) ──
+            // ── right side pane (Review) ──
             .children(pane_visible.then(|| self.sidepane.clone().into_any_element()))
             // ── command palette (⌘P) — a full-window deferred layer above
             // every other floating surface; the entity renders its own
@@ -3744,6 +3964,9 @@ impl Render for OrbitApp {
             .on_action(cx.listener(Self::on_submit))
             .on_action(cx.listener(Self::on_abort))
             .on_action(cx.listener(Self::on_refresh))
+            .on_action(cx.listener(Self::on_copy_last_response))
+            .on_action(cx.listener(Self::on_prev_turn))
+            .on_action(cx.listener(Self::on_next_turn))
             .on_action(cx.listener(Self::on_open_settings))
             .on_action(cx.listener(Self::on_toggle_command_palette))
     }

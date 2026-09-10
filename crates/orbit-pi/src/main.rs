@@ -7,17 +7,19 @@ mod app;
 mod app_icon;
 mod assets;
 mod branch_picker;
+mod checkpoint;
 mod command_palette;
 mod composer;
 mod context_meter;
 mod git;
+mod highlight;
 mod mentions;
 mod message_scroller;
 mod model_selector;
 mod model_selector_match;
 mod onboarding;
 mod platform;
-mod reader;
+mod review;
 mod sessions;
 mod sidepane;
 mod theme;
@@ -67,7 +69,10 @@ actions!(
         OpenSettings,
         ToggleCommandPalette,
         ToggleModelMenu,
-        ToggleThinkingMenu
+        ToggleThinkingMenu,
+        CopyLastResponse,
+        PrevTurn,
+        NextTurn
     ]
 );
 
@@ -117,6 +122,11 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("cmd-p", ToggleCommandPalette, None),
         KeyBinding::new("cmd-period", AbortRun, None),
+        // Transcript accelerators (work regardless of focus):
+        // copy the newest response; jump between user turns like the rail.
+        KeyBinding::new("cmd-shift-c", CopyLastResponse, None),
+        KeyBinding::new("cmd-up", PrevTurn, None),
+        KeyBinding::new("cmd-down", NextTurn, None),
         // Model picker keys — the `Picker` context rides on the popup's
         // filter input, i.e. the *same* dispatch node as `Composer`, so these
         // bindings sit at the same depth as the composer ones. gpui breaks

@@ -166,6 +166,7 @@ pub fn render_scroller(
         .id(ElementId::Name("message-scroller".into()))
         .relative()
         .w_full()
+        .min_w_0()
         .h_full()
         .min_h_0()
         .overflow_hidden()
@@ -173,6 +174,7 @@ pub fn render_scroller(
             div()
                 .id(ElementId::Name("message-scroller-viewport".into()))
                 .w_full()
+                .min_w_0()
                 .h_full()
                 .min_h_0()
                 .child(list),

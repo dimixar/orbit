@@ -42,7 +42,11 @@ crates/orbit-pi/        GPUI app — window, shell, chat, settings
   src/sessions.rs       reads ~/.pi/agent/sessions
   src/assets.rs         include_dir AssetSource (SVGs + app icon)
   src/app_icon.rs       dock icon (macOS) + Settings → About mark
-  src/file_icons.rs     devicons glyphs via embedded Symbols Nerd Font
+  src/review.rs         git diff model: sources, parsing, context gaps, changed-files tree
+  src/checkpoint.rs     per-turn git snapshot refs (refs/orbit/…) backing Review's Last Turn
+  src/highlight.rs      paint-only syntax lexer for diff lines (Waku port, 16 languages)
+  src/sidepane.rs       Review pane: virtualized diff, sticky file headers, tree, source menu
+  src/git.rs            git plumbing: branch discovery + review diff collection
   assets/icons/         HugeIcons SVGs (MIT) + provider brand marks
   assets/fonts/         SymbolsNerdFont-Regular.ttf
   assets/app-icon.png   512px app mark (from the 1024 macOS source)
@@ -67,9 +71,9 @@ The product is the GPUI app (`cargo run -p orbit-pi`). The v0.1 React/Vite/Tauri
 |---|---|---|
 | Shell | `app.rs` | Transparent titlebar, traffic lights inside the sidebar, sessions sidebar grouped by workspace (collapsible), top-bar back/forward + title + edit +/− counts, floating composer, status bar (workspace / Local / git branch from `.git/HEAD`) |
 | Sessions | `sessions.rs` | Reads `~/.pi/agent/sessions/<slug>/*.jsonl`; title = first user message; header-only files (fresh `new_session`, nothing sent yet) are drafts and **not listed** until the first user message lands (Waku drafts parity); `cmd-n` new, click to `switch_session` + `get_messages` |
-| Transcript | `transcript.rs` + `transcript_view.rs` + `message.rs` + `message_scroller.rs` | Virtualized `list()` (max 720px) with MessageScroller tail-follow: append/remeasure without blank rows, **Jump to latest** when you scroll up. Rows use Message Start/End slots (avatar + content + Copy footer). Waku turn order: **Worked for** fold → answer → files-changed card → **Copy** (+ completion time when pi provides one); live turns keep a **Working** activity cluster and close with **Working for**. Left navigation ticks jump to user turns and show a hover preview card (prompt + response snippet). Tool rows expand into detail cards with Arguments/Output sections (Output captured live via `toolCallId` from `tool_execution_end`) and per-section copy buttons; failed tools show a red ✕. Counts from edit/write args, not git; no fork |
+| Transcript | `transcript.rs` + `transcript_view.rs` + `message_scroller.rs` | Virtualized `list()` (max 720px) with MessageScroller tail-follow: append/remeasure without blank rows, **Jump to latest** when you scroll up. Rows use Message Start/End slots (avatar + content + Copy footer). Waku turn order: **Worked for** fold → answer → files-changed card → **Copy** (+ completion time when pi provides one); live turns keep a **Working** activity cluster and close with **Working for**. Left navigation ticks jump to user turns and show a hover preview card (turn number, prompt + response snippet); a one-time dismissable hint (`~/.orbit-pi/hints.json`) teaches the rail on first appearance; `cmd-shift-c` copies the latest response and `cmd-up`/`cmd-down` mirror the rail's jumps. Message footers (copy + timestamp) are persistent, not hover-gated. Code blocks carry a language chip from the fence info string. Tool rows expand into detail cards with Arguments/Output sections (Output captured live via `toolCallId` from `tool_execution_end`) and per-section copy buttons; failed tools show a drawn stop glyph and their first error line inline. Counts from edit/write args, not git; no fork |
 | Composer | `composer.rs` + `mentions.rs` | **Multi-line** input (wraps, grows to 8 rows, then scrolls). Enter submits — as a **steer** (`steer` command) while the agent is mid-turn, as a `prompt` otherwise (Waku queue/steer parity); `shift-enter` newline, `cmd-enter` submits. `/`-command + `@`-file autocomplete, image attachments (paste / drop / "+" menu → Attach image), non-image files referenced by path at the caret, "+" add menu (keyboard-driven, `AddMenu` context). Failed sends keep the prompt and attachments |
-| Side pane | `sidepane.rs` + `reader.rs` | Right panel (top-bar `panel-right` toggle, drag-resizable left edge) with Review / Terminal / Browser tabs. Empty pane = "Open tab" card grid. **Review**: `git diff HEAD --no-color` + untracked from `git status`, parsed into per-file cards with Waku-style numbered diff rows (old/new gutters resolved from hunk headers, tinted ±rows, hunk separators, no-newline notes); reloads on tab open, workspace change, and `agent_settled`. The transcript's changed-files cards' **Review** buttons open this tab via a `ReviewOpener` callback threaded from the app (replaced the old write-temp-diff-and-`open` flow). **Terminal**: `sh -c` runner in the workspace cwd on the background executor (Enter = `Submit` caught at the pane root before the app's prompt-submit; `clear` wipes the buffer). **Browser**: reader-mode fetch (`reader.rs`, `ureq` + tag-stripper) — no webview by design |
+| Side pane | `sidepane.rs` + `review.rs` + `checkpoint.rs` + `git.rs` + `highlight.rs` | Right panel (top-bar `panel-right` toggle, the top-bar `+N -M` diff-stat chip opens it on **Uncommitted**, drag-resizable left edge) showing **Review**: a source dropdown grouped like Waku — `Last Turn` (per-turn git snapshot refs under `refs/orbit/…`, captured at prompt start and `agent_settled` by `checkpoint.rs`; branch-switch-safe via a merge-tree diff base), then `Uncommitted` (`git diff <head>` + untracked via an isolated worktree commit), `Unstaged` (`<index tree>` → worktree), `Staged` (`<head>` → index tree), `Committed`/`Branch` (merge-base against `main`/`master`). `git.rs` captures `--numstat` + a full-context patch (falls back to `-U3` past the 32 MB cap) off-thread; `review.rs` parses it into a virtualized row list (file headers, hunk separators, tinted ±rows with a single new/old line-number gutter, deleted/binary handling, expandable context gaps) with a sticky file header and devicon marks; `highlight.rs` colors code-line tokens. A filterable changed-files tree (Waku indentation `7+depth*14` dirs / `23+depth*14` files, `A/M/D/B` badges, collapsible dirs, click-to-jump, keyboard cursor) sits alongside and auto-hides on narrow panes (tree ≥440 px, stats ≥380 px). Reloads on open, workspace/session change, source change, and turn settle. The transcript's changed-files cards' **Review** buttons open the pane on the latest **Last Turn** checkpoint diff via a `ReviewOpener` callback threaded from the app |
 | Catalog | `model_selector.rs` | Searchable popovers for `get_available_models` / `get_available_thinking_levels`; `set_model` / `set_thinking_level`. Two chips + a **static** "Full access" pill (not a control) |
 | Settings | `app.rs` | In-app surface (`cmd-,`): General / Appearance / Providers / About. Mostly read-only facts from the live process + a real sidebar toggle. About shows the app icon. **Not** providers CRUD |
 | RPC | `orbit-rpc` | Spawn (`--mode rpc --approve`, `PI_SKIP_VERSION_CHECK=1` — Waku parity), JSONL I/O, response correlation, typed-enough events incl. `steer`, fork family (`get_fork_messages`/`fork`/`clone`), `session_info_changed` (live auto-title) and `auto_retry_end` surfacing. UI does **not** yet answer `extension_ui_request` and has no rewind UI for fork |
@@ -140,6 +144,8 @@ These compiled and ran against the pinned version. When in doubt, check
 | `cmd-r` | Reload session list from disk | global |
 | `cmd-,` | Settings | global |
 | `cmd-p` | Command palette (sessions / commands / settings) | global |
+| `cmd-shift-c` | Copy the newest assistant response (footer copy mirror) | global |
+| `cmd-up` / `cmd-down` | Jump to previous / next user turn (rail mirror) | global |
 | `escape` / `cmd-.` | Close settings → close picker → `abort` | global / Composer |
 | `enter` / `cmd-enter` | Submit prompt | `Composer` |
 | `shift-enter` | Newline | `Composer` |
@@ -188,7 +194,7 @@ These compiled and ran against the pinned version. When in doubt, check
 - ⬜ Markdown: pulldown-cmark, one `StyledText` per block, highlight-as-paint. Lightweight headings / bullets / inline code / fenced blocks already paint.
 - ✅ Single-line composer. ⬜ multi-line, file attach → base64 images, suggestions, mentions.
 - ⬜ Tool renderers (13): bash, edit, todo, plan, search, mcp, thinking, question + approval dialogs.
-- ⬜ Diff viewer + file-change blocks; image lightbox.
+- ✅ Diff viewer (virtualized rows, sticky headers, gap expansion, highlighting) + per-turn `Last Turn` checkpoints; ⬜ file-change blocks in the transcript; image lightbox.
 
 ### P4 — Workbench (not started)
 - Usage charts, skills, plugins, models, providers CRUD, settings persistence. Today's settings surface is a placeholder shell over live facts.
@@ -206,6 +212,9 @@ These compiled and ran against the pinned version. When in doubt, check
 | Transcript + streaming + veil | `src/app/transcript_view.rs`, `src/app/streaming.rs`, `src/md/veil.rs` |
 | Markdown renderer / highlight | `src/md/render.rs`, `src/md/highlight.rs`, `src/md/parser.rs` |
 | pi RPC transport (adapt to raw protocol) | `crates/waku-core/src/driver/pi.rs` |
+| Review diff sources, parsing, sticky headers, changed-files tree | `src/review_diff.rs`, `src/app/right_panel.rs`, `crates/waku-core/src/workspace.rs` (`resolve_diff_range`) |
+| Per-turn checkpoints (Last Turn) | `crates/waku-core/src/checkpoint.rs` |
+| Diff syntax highlighting | `src/md/highlight.rs` |
 | Theme/chrome/sidebar/sessions | `src/theme.rs`, `src/app/window_chrome.rs`, `src/app/sidebar.rs`, `src/app/sessions.rs` |
 | Usage/charts | `src/app/usage_page.rs`, `src/app/usage_meter.rs` |
 
