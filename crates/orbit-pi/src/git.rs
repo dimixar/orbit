@@ -128,6 +128,12 @@ pub fn push(cwd: &Path) -> Result<String, String> {
     }
 }
 
+/// Fast-forward the current branch from its upstream.
+pub fn pull(cwd: &Path) -> Result<String, String> {
+    run_git(cwd, &["pull", "--ff-only"])?;
+    Ok("Pulled".into())
+}
+
 fn read_head_branch(cwd: &Path) -> Option<String> {
     let head = std::fs::read_to_string(cwd.join(".git/HEAD")).ok()?;
     let head = head.trim();
@@ -755,6 +761,11 @@ pub fn ahead_behind(cwd: &Path) -> Option<(usize, usize)> {
     let ahead = parts.next()?.parse().ok()?;
     let behind = parts.next()?.parse().ok()?;
     Some((ahead, behind))
+}
+
+/// Whether the repository has at least one commit (HEAD resolves).
+pub fn has_commits(cwd: &Path) -> bool {
+    run_git(cwd, &["rev-parse", "--verify", "HEAD"]).is_ok()
 }
 
 #[cfg(test)]

@@ -369,7 +369,7 @@ impl CommandPalette {
             ),
             PaletteItem::command(
                 "Open Git",
-                "icons/branch.svg",
+                "icons/git-commit.svg",
                 None,
                 PaletteCommand::OpenGit,
                 "git commit push branch history graph changes",

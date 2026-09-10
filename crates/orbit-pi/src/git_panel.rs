@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    div, hsla, prelude::*, px, AnyElement, ClickEvent, Context, Entity, FontWeight, Hsla,
-    MouseDownEvent, Render, Window,
+    div, hsla, prelude::*, px, radians, Animation, AnimationExt, AnyElement, ClickEvent, Context,
+    Entity, FontWeight, Hsla, MouseDownEvent, Render, Transformation, Window,
 };
 
 use crate::app::{icon, nerd_font_family};
@@ -26,6 +26,10 @@ use crate::theme::{self, Theme, ThemeMode};
 /// Callback the app installs so a changed-file row can open its diff in the
 /// Review pane.
 pub type OpenFile = std::rc::Rc<dyn Fn(String, &mut Window, &mut gpui::App)>;
+
+/// Callback the app installs so the panel's Back button also leaves the Git
+/// page (the app owns that flag, not the panel).
+pub type Close = std::rc::Rc<dyn Fn(&mut Window, &mut gpui::App)>;
 
 const HISTORY_PAGE: usize = 40;
 const GRAPH_PAGE: usize = 60;
@@ -45,6 +49,7 @@ enum GitAction {
     Commit,
     CommitAndPush,
     Push,
+    Pull,
 }
 
 /// What to do once the user answers the "stage unstaged changes?" prompt.
@@ -91,6 +96,8 @@ pub struct GitPanel {
     // ── header ──
     branch: Option<String>,
     ahead_behind: Option<(usize, usize)>,
+    /// Whether HEAD resolves (drives "Publish branch" on a fresh branch).
+    has_commits: bool,
     branches: Vec<String>,
     branch_menu_open: bool,
     branch_operation: bool,
@@ -99,6 +106,8 @@ pub struct GitPanel {
     status: Option<(String, Instant)>,
     /// Opens a changed file's diff in the Review pane (installed by the app).
     on_open_file: Option<OpenFile>,
+    /// Leaves the Git page entirely (installed by the app).
+    on_close: Option<Close>,
 }
 
 impl GitPanel {
@@ -132,11 +141,13 @@ impl GitPanel {
             graph_error: None,
             branch: None,
             ahead_behind: None,
+            has_commits: false,
             branches: Vec::new(),
             branch_menu_open: false,
             branch_operation: false,
             status: None,
             on_open_file: None,
+            on_close: None,
         }
     }
 
@@ -178,6 +189,11 @@ impl GitPanel {
     /// Install the callback that opens a changed file's diff in Review.
     pub fn set_open_file(&mut self, open: OpenFile) {
         self.on_open_file = Some(open);
+    }
+
+    /// Install the callback that leaves the Git page (Back button).
+    pub fn set_on_close(&mut self, close: Close) {
+        self.on_close = Some(close);
     }
 
     fn cwd(&self) -> Option<PathBuf> {
@@ -233,13 +249,15 @@ impl GitPanel {
                     git::current_branch(&cwd),
                     git::ahead_behind(&cwd),
                     git::list_branches(&cwd).unwrap_or_default(),
+                    git::has_commits(&cwd),
                 ))
             },
             |panel, result, cx| {
-                if let Ok((branch, ahead_behind, branches)) = result {
+                if let Ok((branch, ahead_behind, branches, has_commits)) = result {
                     panel.branch = branch;
                     panel.ahead_behind = ahead_behind;
                     panel.branches = branches;
+                    panel.has_commits = has_commits;
                 }
                 cx.notify();
             },
@@ -377,7 +395,7 @@ impl GitPanel {
         if message.trim().is_empty() {
             self.request_generate(PendingAfterStage::Commit(action), cx);
         } else {
-            self.run_commit(action, message, cx);
+            self.run_git_action(action, Some(message), cx);
         }
     }
 
@@ -486,7 +504,7 @@ impl GitPanel {
                             .update(cx, |input, cx| input.replace_range(0..len, &message, cx));
                         panel.set_status("Commit message ready");
                         if let Some(action) = action {
-                            panel.run_commit(action, message, cx);
+                            panel.run_git_action(action, Some(message), cx);
                             return;
                         }
                     }
@@ -498,7 +516,14 @@ impl GitPanel {
         .detach();
     }
 
-    fn run_commit(&mut self, action: GitAction, message: String, cx: &mut Context<Self>) {
+    /// Run a commit-bar Git action off-thread. `message` is only used by the
+    /// commit actions; push/pull ignore it and never touch the message input.
+    fn run_git_action(
+        &mut self,
+        action: GitAction,
+        message: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(cwd) = self.cwd() else { return };
         self.pending = Some(action);
         cx.notify();
@@ -507,11 +532,13 @@ impl GitPanel {
             let result = cx
                 .background_executor()
                 .spawn(async move {
+                    let message = message.unwrap_or_default();
                     match action {
                         GitAction::Commit => git::commit(&cwd, &message, include_unstaged),
                         GitAction::CommitAndPush => git::commit(&cwd, &message, include_unstaged)
                             .and_then(|_| git::push(&cwd)),
                         GitAction::Push => git::push(&cwd),
+                        GitAction::Pull => git::pull(&cwd),
                     }
                 })
                 .await;
@@ -520,7 +547,9 @@ impl GitPanel {
                 match result {
                     Ok(note) => {
                         panel.set_status(note);
-                        panel.message.update(cx, |input, cx| input.clear(cx));
+                        if matches!(action, GitAction::Commit | GitAction::CommitAndPush) {
+                            panel.message.update(cx, |input, cx| input.clear(cx));
+                        }
                     }
                     Err(err) => panel.set_status(format!("Git error: {err}")),
                 }
@@ -580,7 +609,16 @@ impl GitPanel {
                     .gap(px(6.))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.bg_hover))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.hide(cx)))
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        // Close the panel here (we already hold it), then tell
+                        // the app to leave the Git page. Calling back into the
+                        // panel from that callback would double-borrow it.
+                        this.open = false;
+                        cx.notify();
+                        if let Some(on_close) = this.on_close.clone() {
+                            on_close(window, cx);
+                        }
+                    }))
                     .child(icon("icons/arrow-left.svg", 14., theme.text_2))
                     .child(
                         div()
@@ -591,10 +629,17 @@ impl GitPanel {
             )
             .child(
                 div()
-                    .text_size(theme.ui_px(15.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child("Git"),
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(icon("icons/git-commit.svg", 15., theme.text_2))
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(15.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child("Git"),
+                    ),
             )
             .child(div().flex_1())
             .child(
@@ -686,9 +731,9 @@ impl GitPanel {
 
     fn tab_bar(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
         let tabs = [
-            (GitTab::Changes, "Changes"),
-            (GitTab::History, "History"),
-            (GitTab::Graph, "Graph"),
+            (GitTab::Changes, "icons/git-compare.svg", "Changes"),
+            (GitTab::History, "icons/clock.svg", "History"),
+            (GitTab::Graph, "icons/git-fork.svg", "Graph"),
         ];
         div()
             .h(px(38.))
@@ -699,7 +744,7 @@ impl GitPanel {
             .gap_1()
             .border_b_1()
             .border_color(theme.border)
-            .children(tabs.map(|(tab, label)| {
+            .children(tabs.map(|(tab, tab_icon, label)| {
                 let selected = self.tab == tab;
                 div()
                     .id(gpui::ElementId::Name(format!("git-tab-{label}").into()))
@@ -708,6 +753,7 @@ impl GitPanel {
                     .rounded_md()
                     .flex()
                     .items_center()
+                    .gap(px(6.))
                     .cursor_pointer()
                     .text_size(theme.ui_px(12.5))
                     .font_weight(if selected {
@@ -730,6 +776,11 @@ impl GitPanel {
                         this.refresh_all(cx);
                         cx.notify();
                     }))
+                    .child(icon(
+                        tab_icon,
+                        13.,
+                        if selected { theme.text } else { theme.text_3 },
+                    ))
                     .child(label.to_string())
             }))
             // right-aligned status text
@@ -768,7 +819,15 @@ impl GitPanel {
 
     fn commit_bar(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
         let busy = self.pending.is_some() || self.generating;
-        let commit_enabled = !busy && (!self.staged.is_empty() || self.include_unstaged);
+        let has_changes = !self.staged.is_empty() || !self.unstaged.is_empty();
+        let can_commit = !busy
+            && (!self.staged.is_empty() || (self.include_unstaged && !self.unstaged.is_empty()));
+        let (ahead, has_upstream) = match self.ahead_behind {
+            Some((ahead, _)) => (ahead, true),
+            None => (0, false),
+        };
+        let behind = self.ahead_behind.map(|(_, behind)| behind).unwrap_or(0);
+        let actions = bar_actions(has_changes, ahead, has_upstream, self.has_commits, behind);
         div()
             .flex_none()
             .px(px(16.))
@@ -841,15 +900,11 @@ impl GitPanel {
                                 button.hover(|s| s.bg(theme.bg_hover))
                             })
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.generate(cx)))
-                            .child(icon(
-                                if self.generating {
-                                    "icons/loader.svg"
-                                } else {
-                                    "icons/spark.svg"
-                                },
-                                12.,
-                                theme.accent,
-                            ))
+                            .child(if self.generating {
+                                spinner("git-generate-spinner", 12., theme)
+                            } else {
+                                icon("icons/magic-wand.svg", 12., theme.accent).into_any_element()
+                            })
                             .child(if self.generating {
                                 "Generating…"
                             } else {
@@ -863,73 +918,127 @@ impl GitPanel {
                     .flex_wrap()
                     .items_center()
                     .gap(px(10.))
-                    .child(
-                        check_box(self.include_unstaged, theme).on_click(cx.listener(
-                            |this, _: &ClickEvent, _, cx| {
-                                this.include_unstaged = !this.include_unstaged;
-                                cx.notify();
-                            },
-                        )),
-                    )
-                    .child(
-                        div()
-                            .text_size(theme.ui_px(12.))
-                            .text_color(theme.text_2)
-                            .child("Include unstaged changes"),
-                    )
-                    .children(self.include_unstaged.then(|| {
-                        let (additions, deletions) = self.unstaged_stats();
+                    .children((!self.unstaged.is_empty()).then(|| {
                         div()
                             .flex()
                             .items_center()
-                            .gap_2()
-                            .text_size(theme.ui_px(11.5))
+                            .gap(px(8.))
                             .child(
-                                div()
-                                    .text_color(theme.add_green)
-                                    .child(format!("+{additions}")),
+                                check_box(self.include_unstaged, theme).on_click(cx.listener(
+                                    |this, _: &ClickEvent, _, cx| {
+                                        this.include_unstaged = !this.include_unstaged;
+                                        cx.notify();
+                                    },
+                                )),
                             )
                             .child(
                                 div()
-                                    .text_color(theme.del_red)
-                                    .child(format!("-{deletions}")),
+                                    .text_size(theme.ui_px(12.))
+                                    .text_color(theme.text_2)
+                                    .child("Include unstaged changes"),
                             )
+                            .children(self.include_unstaged.then(|| {
+                                let (additions, deletions) = self.unstaged_stats();
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_size(theme.ui_px(11.5))
+                                    .child(
+                                        div()
+                                            .text_color(theme.add_green)
+                                            .child(format!("+{additions}")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_color(theme.del_red)
+                                            .child(format!("-{deletions}")),
+                                    )
+                            }))
                     }))
                     .child(div().flex_1())
-                    .child(action_button(
-                        "git-push",
-                        "Push",
-                        false,
-                        busy,
-                        theme,
-                        cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.on_commit(GitAction::Push, cx)
-                        }),
-                    ))
-                    .child(action_button(
-                        "git-commit-push",
-                        "Commit and push",
-                        false,
-                        busy,
-                        theme,
-                        cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.on_commit(GitAction::CommitAndPush, cx)
-                        }),
-                    ))
-                    .child(action_button(
-                        "git-commit",
-                        if self.generating {
-                            "Generating…"
-                        } else {
-                            "Commit"
-                        },
-                        true,
-                        !commit_enabled,
-                        theme,
-                        cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.on_commit(GitAction::Commit, cx)
-                        }),
-                    )),
+                    .child(match actions {
+                        BarActions::Commit => div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(action_button(
+                                "git-commit-push",
+                                "Commit and push",
+                                Some(
+                                    icon("icons/cloud-upload.svg", 13., theme.text_2)
+                                        .into_any_element(),
+                                ),
+                                false,
+                                !can_commit,
+                                theme,
+                                cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.on_commit(GitAction::CommitAndPush, cx)
+                                }),
+                            ))
+                            .child(action_button(
+                                "git-commit",
+                                if self.generating {
+                                    "Generating…"
+                                } else {
+                                    "Commit"
+                                },
+                                Some(if self.generating {
+                                    spinner("git-commit-spinner", 13., theme)
+                                } else {
+                                    icon("icons/git-commit.svg", 13., theme.send_fg)
+                                        .into_any_element()
+                                }),
+                                true,
+                                !can_commit,
+                                theme,
+                                cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.on_commit(GitAction::Commit, cx)
+                                }),
+                            ))
+                            .into_any_element(),
+                        BarActions::Push { publish } => action_button(
+                            "git-push",
+                            if publish { "Publish branch" } else { "Push" },
+                            Some(icon("icons/upload.svg", 13., theme.send_fg).into_any_element()),
+                            true,
+                            busy,
+                            theme,
+                            cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.run_git_action(GitAction::Push, None, cx)
+                            }),
+                        ),
+                        BarActions::Pull { behind } => div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_size(theme.ui_px(11.5))
+                                    .text_color(theme.text_3)
+                                    .child(format!("{behind} behind")),
+                            )
+                            .child(action_button(
+                                "git-pull",
+                                "Pull",
+                                Some(
+                                    icon("icons/arrow-down.svg", 13., theme.text_2)
+                                        .into_any_element(),
+                                ),
+                                false,
+                                busy,
+                                theme,
+                                cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.run_git_action(GitAction::Pull, None, cx)
+                                }),
+                            ))
+                            .into_any_element(),
+                        BarActions::UpToDate => div()
+                            .text_size(theme.ui_px(11.5))
+                            .text_color(theme.text_3)
+                            .child("Up to date")
+                            .into_any_element(),
+                    }),
             )
             .into_any_element()
     }
@@ -1069,7 +1178,7 @@ impl GitPanel {
         if staged {
             actions = actions.child(row_button(
                 "unstage",
-                "icons/chevron-down.svg",
+                "icons/minus.svg",
                 theme,
                 cx.listener(move |this, _: &ClickEvent, _, cx| this.unstage(row_path.clone(), cx)),
             ));
@@ -1375,6 +1484,7 @@ impl GitPanel {
                     .child(action_button(
                         "git-prompt-cancel",
                         "Cancel",
+                        None,
                         false,
                         false,
                         theme,
@@ -1384,6 +1494,7 @@ impl GitPanel {
                         action_button(
                             "git-prompt-staged",
                             "Use staged",
+                            None,
                             false,
                             false,
                             theme,
@@ -1395,6 +1506,7 @@ impl GitPanel {
                     .child(action_button(
                         "git-prompt-stage-all",
                         "Stage all and generate",
+                        Some(icon("icons/magic-wand.svg", 13., theme.send_fg).into_any_element()),
                         true,
                         false,
                         theme,
@@ -1457,6 +1569,40 @@ impl Render for GitPanel {
     }
 }
 
+/// What the commit bar offers for the current repository state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BarActions {
+    /// Working tree has changes: Commit / Commit and push.
+    Commit,
+    /// Working tree is clean but there is something to send: Push (or the
+    /// first-time Publish branch).
+    Push { publish: bool },
+    /// Clean and strictly behind the upstream: Pull.
+    Pull { behind: usize },
+    /// Clean and in sync: a quiet status label.
+    UpToDate,
+}
+
+fn bar_actions(
+    has_changes: bool,
+    ahead: usize,
+    has_upstream: bool,
+    has_commits: bool,
+    behind: usize,
+) -> BarActions {
+    if has_changes {
+        BarActions::Commit
+    } else if ahead > 0 || (!has_upstream && has_commits) {
+        BarActions::Push {
+            publish: !has_upstream,
+        }
+    } else if behind > 0 {
+        BarActions::Pull { behind }
+    } else {
+        BarActions::UpToDate
+    }
+}
+
 // ── shared bits ────────────────────────────────────────────────────────────
 
 fn status_color(badge: char, theme: Theme) -> Hsla {
@@ -1490,9 +1636,28 @@ fn check_box(checked: bool, theme: Theme) -> gpui::Stateful<gpui::Div> {
         })
 }
 
+/// A rotating loader for in-flight buttons (matches the Review pane spinner).
+fn spinner(id: &'static str, size: f32, theme: Theme) -> AnyElement {
+    gpui::svg()
+        .path("icons/loader.svg")
+        .size(px(size))
+        .text_color(theme.accent)
+        .with_animation(
+            id,
+            Animation::new(Duration::from_millis(900)).repeat(),
+            |svg, delta| {
+                svg.with_transformation(Transformation::rotate(radians(
+                    delta * std::f32::consts::TAU,
+                )))
+            },
+        )
+        .into_any_element()
+}
+
 fn action_button(
     id: &'static str,
     label: &str,
+    leading: Option<AnyElement>,
     primary: bool,
     disabled: bool,
     theme: Theme,
@@ -1506,6 +1671,7 @@ fn action_button(
         .flex()
         .items_center()
         .justify_center()
+        .gap(px(5.))
         .text_size(theme.ui_px(12.))
         .font_weight(FontWeight::MEDIUM);
     if primary {
@@ -1526,6 +1692,9 @@ fn action_button(
         } else {
             button.hover(|s| s.bg(theme.bg_hover))
         };
+    }
+    if let Some(leading) = leading {
+        button = button.child(leading);
     }
     button.child(label.to_string()).into_any_element()
 }
@@ -1818,4 +1987,35 @@ fn empty_note(theme: Theme, title: &str, detail: Option<&str>) -> AnyElement {
         );
     }
     column.into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bar_actions_follow_git_state() {
+        // Uncommitted changes → commit actions (regardless of unpushed commits).
+        assert_eq!(bar_actions(true, 0, true, true, 0), BarActions::Commit);
+        assert_eq!(bar_actions(true, 3, true, true, 0), BarActions::Commit);
+        // Clean with unpushed commits → Push.
+        assert_eq!(
+            bar_actions(false, 2, true, true, 0),
+            BarActions::Push { publish: false }
+        );
+        // Clean, no upstream, has commits → Publish branch.
+        assert_eq!(
+            bar_actions(false, 0, false, true, 0),
+            BarActions::Push { publish: true }
+        );
+        // Clean, in sync → up to date.
+        assert_eq!(bar_actions(false, 0, true, true, 0), BarActions::UpToDate);
+        // Clean, behind → Pull with the behind count.
+        assert_eq!(
+            bar_actions(false, 0, true, true, 4),
+            BarActions::Pull { behind: 4 }
+        );
+        // Empty repo (no commits, no upstream) is not a publish.
+        assert_eq!(bar_actions(false, 0, false, false, 0), BarActions::UpToDate);
+    }
 }

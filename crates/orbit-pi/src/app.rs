@@ -433,6 +433,17 @@ impl OrbitApp {
                 review_sidepane.update(cx, |pane, cx| pane.show_file(path, cx));
             }));
         });
+        // The Git page's Back button leaves the page. The panel closes itself
+        // first, so this only clears the app flag (never re-enters the panel).
+        let app_weak = cx.entity().downgrade();
+        app.git_panel.update(cx, |panel, _| {
+            panel.set_on_close(Rc::new(move |_window, cx| {
+                let _ = app_weak.update(cx, |app, cx| {
+                    app.git_open = false;
+                    cx.notify();
+                });
+            }));
+        });
 
         if app.client.is_some() {
             app.send(CommandBody::GetState, "get_state");
