@@ -461,7 +461,11 @@ fn load_rail_hint_seen() -> bool {
     };
     serde_json::from_str::<serde_json::Value>(&raw)
         .ok()
-        .and_then(|value| value.get("rail_hint_seen").and_then(serde_json::Value::as_bool))
+        .and_then(|value| {
+            value
+                .get("rail_hint_seen")
+                .and_then(serde_json::Value::as_bool)
+        })
         .unwrap_or(false)
 }
 

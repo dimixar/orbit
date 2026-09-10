@@ -139,7 +139,11 @@ impl WorkspacePicker {
             .filter(|entry| {
                 needle.is_empty()
                     || entry.name.to_lowercase().contains(&needle)
-                    || entry.path.to_string_lossy().to_lowercase().contains(&needle)
+                    || entry
+                        .path
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .contains(&needle)
             })
             .cloned()
             .collect()
@@ -290,7 +294,11 @@ impl Render for WorkspacePicker {
                                     } else {
                                         FontWeight::NORMAL
                                     })
-                                    .text_color(if highlighted { theme.text } else { theme.text_2 })
+                                    .text_color(if highlighted {
+                                        theme.text
+                                    } else {
+                                        theme.text_2
+                                    })
                                     .child(entry.name.clone()),
                             )
                             .child(

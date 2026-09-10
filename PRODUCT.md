@@ -4,7 +4,9 @@
 
 ## Platform
 
-desktop (native, GPU-rendered; macOS first, Windows/Linux later)
+adaptive
+
+A native desktop surface (macOS first, Windows/Linux later) drawn with GPUI — Zed's GPU-composited, keyboard-first workbench language. No webview, no DOM. The `adaptive` value marks it as one cross-platform native codebase rather than a web app.
 
 ## Users
 

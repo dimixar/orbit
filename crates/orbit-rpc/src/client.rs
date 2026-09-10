@@ -35,7 +35,7 @@ pub const PI_BIN_ENV: &str = "PI_BIN";
 /// Cap on retained stderr lines (dropped oldest first).
 const STDERR_RING_CAP: usize = 200;
 
-/// Common install locations probed for `pi` when it isn't on `PATH`. `pi` is
+/// Absolute install locations probed for `pi` when it isn't on `PATH`. `pi` is
 /// a Node script installed via Homebrew, so the launcher and `node` both live
 /// under these `bin` dirs. A bundled `.app` is launched with a minimal PATH
 /// (`/usr/bin:/bin:/usr/sbin:/sbin`), so we probe these to keep packaged
@@ -46,6 +46,20 @@ const PI_SEARCH_DIRS: &[&str] = &[
     "/opt/local/bin",
     "/usr/bin",
     "/bin",
+];
+/// Home-relative install dirs probed for `pi` when it isn't on `PATH` or in
+/// [`PI_SEARCH_DIRS`]. `pi` ships via npm/pnpm/bun-style installs that put the
+/// shim under the user's home (e.g. `~/.local/bin/pi`), which a bundled `.app`
+/// never sees on its minimal PATH. Mirrors the onboarding dependency probe.
+const HOME_SEARCH_DIRS: &[&str] = &[
+    ".local/bin",
+    ".volta/bin",
+    ".local/share/mise/shims",
+    ".asdf/shims",
+    "Library/pnpm/bin",
+    ".bun/bin",
+    ".npm-global/bin",
+    ".yarn/bin",
 ];
 /// Dirs prepended to the child's PATH so `node` (and `pi`) resolve from a
 /// bundled app launch.
@@ -81,8 +95,9 @@ impl PiClient {
             .env("PI_SKIP_VERSION_CHECK", "1")
             // Augment PATH with Homebrew-style dirs so `node` (required by
             // pi's `#!/usr/bin/env node` shebang) resolves when launched from
-            // a bundled `.app`.
-            .env("PATH", augmented_path())
+            // a bundled `.app`. The resolved pi's own dir is included too, so
+            // nvm/volta/mise installs find the `node` sitting beside it.
+            .env("PATH", augmented_path(Path::new(&bin).parent()))
             .current_dir(workspace_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -155,6 +170,12 @@ impl PiClient {
     pub fn drain_stderr(&self) -> Vec<String> {
         let mut ring = self.stderr_ring.lock().unwrap();
         ring.drain(..).collect()
+    }
+
+    /// The most recent stderr lines (newest last), without draining them.
+    pub fn recent_stderr(&self, limit: usize) -> Vec<String> {
+        let ring = self.stderr_ring.lock().unwrap();
+        ring.iter().rev().take(limit).rev().cloned().collect()
     }
 
     pub fn child_pid(&self) -> u32 {
@@ -295,8 +316,9 @@ pub fn pi_binary() -> String {
 /// Resolve the `pi` executable to spawn.
 ///
 /// `PI_BIN` (if set) wins. Otherwise we look for `pi` on `PATH`, then in the
-/// common Homebrew/install dirs, and finally fall back to the bare name so
-/// any spawn error still names something meaningful.
+/// common Homebrew/install dirs, then in the user's home install dirs (npm,
+/// pnpm, bun, volta, mise, …), and finally fall back to the bare name so any
+/// spawn error still names something meaningful.
 fn resolve_pi_bin() -> String {
     if let Ok(bin) = std::env::var(PI_BIN_ENV) {
         if !bin.is_empty() {
@@ -313,7 +335,22 @@ fn resolve_pi_bin() -> String {
             return candidate.to_string_lossy().into_owned();
         }
     }
+    if let Some(home) = home_dir() {
+        for sub in HOME_SEARCH_DIRS {
+            let candidate = home.join(sub).join(name);
+            if candidate.is_file() {
+                return candidate.to_string_lossy().into_owned();
+            }
+        }
+    }
     name.to_string()
+}
+
+/// The user's home directory (`HOME`, falling back to `USERPROFILE`).
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
 }
 
 /// Walk `PATH` and return the first executable named `name` found on it.
@@ -328,10 +365,16 @@ fn find_on_path(name: &str) -> Option<String> {
     None
 }
 
-/// The PATH handed to the child: common install dirs prepended to whatever
-/// PATH the parent process has.
-fn augmented_path() -> OsString {
-    let mut dirs: Vec<PathBuf> = PATH_EXTRA_DIRS.iter().map(PathBuf::from).collect();
+/// The PATH handed to the child: the resolved binary's dir plus common install
+/// dirs prepended to whatever PATH the parent process has.
+fn augmented_path(bin_dir: Option<&Path>) -> OsString {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = bin_dir {
+        if !dir.as_os_str().is_empty() {
+            dirs.push(dir.to_path_buf());
+        }
+    }
+    dirs.extend(PATH_EXTRA_DIRS.iter().map(PathBuf::from));
     if let Some(path) = std::env::var_os("PATH") {
         dirs.extend(std::env::split_paths(&path));
     }

@@ -238,7 +238,10 @@ mod tests {
         let node = deps.iter().find(|d| d.name == "Node.js").unwrap();
         assert_eq!(node.bin, "node");
         // With node on PATH, the probe must resolve it.
-        assert!(locate("node").is_some(), "expected to find node on this machine");
+        assert!(
+            locate("node").is_some(),
+            "expected to find node on this machine"
+        );
     }
 
     #[test]

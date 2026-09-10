@@ -1,11 +1,13 @@
-//! The **Git page** — a full main-area surface (like Settings) with three
-//! tabs and a commit bar.
+//! The **Git page** — a full main-area surface (like Settings) with three tabs
+//! and a commit bar.
 //!
 //! - **Changes**: staged/unstaged file lists with per-file stage, unstage, and
 //!   discard; the commit bar combines the branch, a conventional-commit input,
 //!   a one-shot generate button, and Commit / Commit and push / Push.
-//! - **History**: the branch's commit log with refs, author, and relative time.
-//! - **Graph**: an all-branches lane graph over the same commit metadata.
+//! - **History**: the current branch's commit log with refs, author, and
+//!   relative time.
+//! - **Graph**: every local branch drawn as a lane graph over the same commit
+//!   metadata, laid out by [`crate::git::layout_graph`].
 //!
 //! All Git I/O runs on the background executor; the page paints cached state
 //! and is owned by [`crate::app::OrbitApp`].
@@ -14,13 +16,14 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    div, hsla, prelude::*, px, radians, Animation, AnimationExt, AnyElement, ClickEvent, Context,
-    Entity, FontWeight, Hsla, MouseDownEvent, Render, Transformation, Window,
+    canvas, div, fill, hsla, img, point, prelude::*, px, radians, size, Animation, AnimationExt,
+    AnyElement, Background, Bounds, ClickEvent, Context, Entity, FontWeight, Hsla, MouseDownEvent,
+    ObjectFit, PathBuilder, Pixels, Render, Transformation, Window,
 };
 
 use crate::app::{icon, nerd_font_family};
 use crate::commit_message;
-use crate::git::{self, CommitEntry, GraphRow, RefKind, StatusRow};
+use crate::git::{self, CommitEntry, RefKind, StatusRow};
 use crate::theme::{self, Theme, ThemeMode};
 
 /// Callback the app installs so a changed-file row can open its diff in the
@@ -32,9 +35,6 @@ pub type OpenFile = std::rc::Rc<dyn Fn(String, &mut Window, &mut gpui::App)>;
 pub type Close = std::rc::Rc<dyn Fn(&mut Window, &mut gpui::App)>;
 
 const HISTORY_PAGE: usize = 40;
-const GRAPH_PAGE: usize = 60;
-const LANE_WIDTH: f32 = 14.;
-const ROW_HEIGHT: f32 = 30.;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GitTab {
@@ -88,8 +88,8 @@ pub struct GitPanel {
     history_loading: bool,
     history_error: Option<String>,
 
-    // ── graph ──
-    graph: Vec<GraphRow>,
+    // ── graph (all local branches) ──
+    graph: Vec<git::GraphRow>,
     graph_loading: bool,
     graph_error: Option<String>,
 
@@ -104,6 +104,9 @@ pub struct GitPanel {
 
     /// One-line feedback (success/failure) with a short TTL.
     status: Option<(String, Instant)>,
+    /// `origin` mapped to a commit-permalink base (GitHub/GitLab/Bitbucket),
+    /// when the repo has one. `None` hides every commit link.
+    remote_web: Option<git::RemoteWeb>,
     /// Opens a changed file's diff in the Review pane (installed by the app).
     on_open_file: Option<OpenFile>,
     /// Leaves the Git page entirely (installed by the app).
@@ -146,6 +149,7 @@ impl GitPanel {
             branch_menu_open: false,
             branch_operation: false,
             status: None,
+            remote_web: None,
             on_open_file: None,
             on_close: None,
         }
@@ -177,6 +181,7 @@ impl GitPanel {
             self.unstaged.clear();
             self.history.clear();
             self.graph.clear();
+            self.remote_web = None;
             self.status = None;
             if self.open {
                 self.refresh_all(cx);
@@ -250,14 +255,16 @@ impl GitPanel {
                     git::ahead_behind(&cwd),
                     git::list_branches(&cwd).unwrap_or_default(),
                     git::has_commits(&cwd),
+                    git::remote_web(&cwd),
                 ))
             },
             |panel, result, cx| {
-                if let Ok((branch, ahead_behind, branches, has_commits)) = result {
+                if let Ok((branch, ahead_behind, branches, has_commits, remote_web)) = result {
                     panel.branch = branch;
                     panel.ahead_behind = ahead_behind;
                     panel.branches = branches;
                     panel.has_commits = has_commits;
+                    panel.remote_web = remote_web;
                 }
                 cx.notify();
             },
@@ -285,16 +292,21 @@ impl GitPanel {
         );
     }
 
+    /// Fetch the all-branches graph. Grows the window by a page each call, the
+    /// same way History does, so "Load more" deepens the graph.
     fn refresh_graph(&mut self, cx: &mut Context<Self>) {
         let Some(cwd) = self.cwd() else {
             return;
         };
         self.graph_loading = true;
         self.graph_error = None;
-        let limit = self.graph.len().max(GRAPH_PAGE) + GRAPH_PAGE;
+        let limit = self.graph.len().max(HISTORY_PAGE) + HISTORY_PAGE;
         self.spawn_data(
             cx,
-            move || git::graph(&cwd, limit),
+            move || {
+                let commits = git::graph_history(&cwd, limit)?;
+                Ok(git::layout_graph(&commits))
+            },
             |panel, result, cx| {
                 panel.graph_loading = false;
                 match result {
@@ -1311,9 +1323,24 @@ impl GitPanel {
         if self.history.is_empty() && self.history_loading {
             return empty_note(theme, "Reading history…", None);
         }
+        if self.history.is_empty() {
+            return empty_note(
+                theme,
+                "No commits yet",
+                Some("Commits on this branch will show up here."),
+            );
+        }
         let mut list = div().flex().flex_col().py(px(6.));
-        for commit in &self.history {
-            list = list.child(commit_row(commit, theme));
+        let total = self.history.len();
+        for (ix, commit) in self.history.iter().enumerate() {
+            let url = self
+                .remote_web
+                .as_ref()
+                .map(|remote| remote.commit_url(&commit.hash));
+            list = list.child(commit_row(commit, url.as_deref(), theme));
+            if ix + 1 < total {
+                list = list.child(commit_separator(theme));
+            }
         }
         list = list.child(load_more(
             theme,
@@ -1334,11 +1361,26 @@ impl GitPanel {
             return empty_note(theme, "Graph unavailable", Some(error));
         }
         if self.graph.is_empty() && self.graph_loading {
-            return empty_note(theme, "Reading graph…", None);
+            return empty_note(theme, "Reading history…", None);
+        }
+        if self.graph.is_empty() {
+            return empty_note(
+                theme,
+                "No commits yet",
+                Some("Commits across your local branches will show up here."),
+            );
         }
         let mut list = div().flex().flex_col().py(px(6.));
-        for row in &self.graph {
-            list = list.child(graph_row(row, theme));
+        let total = self.graph.len();
+        for (ix, row) in self.graph.iter().enumerate() {
+            let url = self
+                .remote_web
+                .as_ref()
+                .map(|remote| remote.commit_url(&row.commit.hash));
+            list = list.child(graph_row(row, url.as_deref(), theme));
+            if ix + 1 < total {
+                list = list.child(commit_separator(theme));
+            }
         }
         list = list.child(load_more(
             theme,
@@ -1741,189 +1783,435 @@ fn ref_badge(name: &str, kind: RefKind, theme: Theme) -> AnyElement {
         .into_any_element()
 }
 
-fn commit_row(commit: &CommitEntry, theme: Theme) -> AnyElement {
+// ── Graph tab drawing ──────────────────────────────────────────────────────
+
+/// Horizontal pitch of one lane, padding around the gutter, and the fixed
+/// height that keeps every row's lanes aligned.
+const LANE_WIDTH: f32 = 14.;
+const LANE_PADDING: f32 = 8.;
+const GRAPH_STROKE: f32 = 2.;
+const GRAPH_NODE_RADIUS: f32 = 4.5;
+const GRAPH_ROW_HEIGHT: f32 = 38.;
+
+/// One row in the Graph list: the lane drawing on the left, then the same
+/// subject, refs, author meta, and short hash as a History row.
+fn graph_row(row: &git::GraphRow, url: Option<&str>, theme: Theme) -> AnyElement {
+    let commit = &row.commit;
+    let target = url.map(str::to_string);
+    let linked = target.is_some();
+
+    let meta = div()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .text_size(theme.ui_px(11.))
+        .child(author_avatar(&commit.author, &commit.author_email, theme))
+        .child(div().text_color(theme.text_2).child(commit.author.clone()))
+        .child(
+            div()
+                .size(px(3.))
+                .rounded_full()
+                .bg(theme.text_3.opacity(0.7)),
+        )
+        .child(
+            div()
+                .text_color(theme.text_3)
+                .child(commit.relative.clone()),
+        );
+
+    div()
+        .id(gpui::ElementId::Name(
+            format!("git-graph-{}", commit.short).into(),
+        ))
+        .mx(px(12.))
+        .px(px(8.))
+        .py(px(6.))
+        .rounded_md()
+        .flex()
+        .items_center()
+        .gap(px(10.))
+        .when(linked, |row| {
+            row.cursor_pointer()
+                .hover(|s| s.bg(theme.bg_hover))
+                .on_click(move |_, _, cx| {
+                    if let Some(target) = target.clone() {
+                        cx.open_url(&target);
+                    }
+                })
+        })
+        .child(graph_gutter(row, theme))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(3.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .min_w_0()
+                        .children(
+                            commit
+                                .refs
+                                .iter()
+                                .map(|label| ref_badge(&label.name, label.kind, theme)),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_size(theme.ui_px(12.5))
+                                .text_color(theme.text)
+                                .child(commit.subject.clone()),
+                        ),
+                )
+                .child(meta),
+        )
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .child(
+                    div()
+                        .font_family(theme::code_font_family())
+                        .text_size(theme.ui_px(11.))
+                        .text_color(theme.text_3)
+                        .child(commit.short.clone()),
+                )
+                .when(linked, |s| {
+                    s.child(icon("icons/arrow-up-right.svg", 12., theme.text_3))
+                }),
+        )
+        .into_any_element()
+}
+
+/// The lane drawing for one row: a canvas sized to the row's widest lane, with
+/// a fixed height so lines meet cleanly across rows.
+fn graph_gutter(row: &git::GraphRow, theme: Theme) -> AnyElement {
+    let lanes = row.lane_count.max(1);
+    let width = LANE_PADDING * 2. + LANE_WIDTH * lanes as f32;
+    let row = row.clone();
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| paint_graph(window, bounds, &row, theme),
+    )
+    .flex_none()
+    .w(px(width))
+    .h(px(GRAPH_ROW_HEIGHT))
+    .into_any_element()
+}
+
+/// Draw one row's lanes: pass-through verticals, the node's incoming edge, the
+/// node-to-parent edges, and the node disc itself.
+fn paint_graph(window: &mut Window, bounds: Bounds<Pixels>, row: &git::GraphRow, theme: Theme) {
+    let stroke = px(GRAPH_STROKE);
+    let lane_x = |lane: usize| -> Pixels {
+        bounds.origin.x + px(LANE_PADDING + LANE_WIDTH * lane as f32 + LANE_WIDTH / 2.)
+    };
+    let top = bounds.origin.y;
+    let mid = bounds.origin.y + bounds.size.height / 2.;
+    let bottom = bounds.origin.y + bounds.size.height;
+    let node_x = lane_x(row.node_lane);
+
+    for &lane in &row.verticals {
+        let x = lane_x(lane);
+        if let Ok(path) = graph_line(point(x, top), point(x, bottom), stroke) {
+            window.paint_path(path, Background::from(lane_color(lane, theme).to_rgb()));
+        }
+    }
+    if row.node_has_incoming {
+        if let Ok(path) = graph_line(point(node_x, top), point(node_x, mid), stroke) {
+            window.paint_path(
+                path,
+                Background::from(lane_color(row.node_lane, theme).to_rgb()),
+            );
+        }
+    }
+    for &lane in &row.parents {
+        if let Ok(path) = graph_line(point(node_x, mid), point(lane_x(lane), bottom), stroke) {
+            window.paint_path(path, Background::from(lane_color(lane, theme).to_rgb()));
+        }
+    }
+
+    let center = point(node_x, mid);
+    let origin = point(
+        center.x - px(GRAPH_NODE_RADIUS),
+        center.y - px(GRAPH_NODE_RADIUS),
+    );
+    let size = size(px(GRAPH_NODE_RADIUS * 2.), px(GRAPH_NODE_RADIUS * 2.));
+    window.paint_quad(
+        fill(
+            Bounds::new(origin, size),
+            Background::from(lane_color(row.node_lane, theme).to_rgb()),
+        )
+        .corner_radii(px(GRAPH_NODE_RADIUS)),
+    );
+}
+
+/// A stroked line between two points, or an error when the geometry is invalid.
+fn graph_line(
+    from: gpui::Point<Pixels>,
+    to: gpui::Point<Pixels>,
+    stroke: Pixels,
+) -> anyhow::Result<gpui::Path<Pixels>> {
+    let mut builder = PathBuilder::stroke(stroke);
+    builder.move_to(from);
+    builder.line_to(to);
+    builder.build()
+}
+
+/// A stable color per lane column, so a branch keeps its hue down the graph.
+fn lane_color(lane: usize, theme: Theme) -> Hsla {
+    const HUES: [f32; 8] = [202., 274., 158., 44., 330., 14., 96., 236.];
+    let (saturation, lightness) = match theme.mode {
+        ThemeMode::Dark => (0.60, 0.62),
+        ThemeMode::Light => (0.60, 0.46),
+    };
+    hsla(HUES[lane % HUES.len()] / 360., saturation, lightness, 1.)
+}
+
+/// One row in the History list: an author monogram, the subject with its ref
+/// badges, an author · relative-time meta line, and the short hash with an
+/// external-link mark when the commit can be opened on the remote.
+fn commit_row(commit: &CommitEntry, url: Option<&str>, theme: Theme) -> AnyElement {
+    let target = url.map(str::to_string);
+    let linked = target.is_some();
+
+    let meta = div()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .text_size(theme.ui_px(11.))
+        .child(author_avatar(&commit.author, &commit.author_email, theme))
+        .child(div().text_color(theme.text_2).child(commit.author.clone()))
+        .child(
+            div()
+                .size(px(3.))
+                .rounded_full()
+                .bg(theme.text_3.opacity(0.7)),
+        )
+        .child(
+            div()
+                .text_color(theme.text_3)
+                .child(commit.relative.clone()),
+        );
+
     div()
         .id(gpui::ElementId::Name(
             format!("git-commit-{}", commit.short).into(),
         ))
         .mx(px(12.))
         .px(px(8.))
-        .py(px(7.))
-        .rounded_md()
-        .flex()
-        .flex_col()
-        .gap(px(3.))
-        .hover(|s| s.bg(theme.bg_hover))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .min_w_0()
-                .children(
-                    commit
-                        .refs
-                        .iter()
-                        .map(|label| ref_badge(&label.name, label.kind, theme)),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_size(theme.ui_px(12.5))
-                        .text_color(theme.text)
-                        .child(commit.subject.clone()),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.))
-                .text_size(theme.ui_px(11.))
-                .text_color(theme.text_3)
-                .child(
-                    div()
-                        .font_family(theme::code_font_family())
-                        .child(commit.short.clone()),
-                )
-                .child(div().child(commit.author.clone()))
-                .child(div().child(commit.relative.clone())),
-        )
-        .into_any_element()
-}
-
-fn graph_row(row: &GraphRow, theme: Theme) -> AnyElement {
-    let lane_count = row.lane_count.max(1);
-    let mut graph = div()
-        .relative()
-        .w(px(lane_count as f32 * LANE_WIDTH))
-        .h(px(ROW_HEIGHT))
-        .flex_none();
-    for lane in 0..lane_count {
-        let before = row.before.get(lane).copied().unwrap_or(false);
-        let after = row.after.get(lane).copied().unwrap_or(false);
-        if !before && !after {
-            continue;
-        }
-        let color = lane_color(lane, theme);
-        let x = lane as f32 * LANE_WIDTH + LANE_WIDTH / 2.;
-        let (top, height) = match (before, after) {
-            (true, true) => (px(0.), px(ROW_HEIGHT)),
-            (true, false) => (px(0.), px(ROW_HEIGHT / 2.)),
-            (false, true) => (px(ROW_HEIGHT / 2.), px(ROW_HEIGHT / 2.)),
-            (false, false) => continue,
-        };
-        graph = graph.child(
-            div()
-                .absolute()
-                .left(px(x - 1.))
-                .top(top)
-                .w(px(2.))
-                .h(height)
-                .bg(color.opacity(0.8)),
-        );
-    }
-    for (from, to) in &row.links {
-        let color = lane_color(*from, theme);
-        let left = (*from).min(*to) as f32 * LANE_WIDTH + LANE_WIDTH / 2.;
-        let width = ((*from).max(*to) - (*from).min(*to)) as f32 * LANE_WIDTH;
-        graph = graph.child(
-            div()
-                .absolute()
-                .left(px(left))
-                .top(px(ROW_HEIGHT / 2. - 1.))
-                .w(px(width))
-                .h(px(2.))
-                .bg(color.opacity(0.7)),
-        );
-    }
-    let node_color = lane_color(row.lane, theme);
-    graph = graph.child(
-        div()
-            .absolute()
-            .left(px(row.lane as f32 * LANE_WIDTH + LANE_WIDTH / 2. - 4.5))
-            .top(px(ROW_HEIGHT / 2. - 4.5))
-            .size(px(9.))
-            .rounded_full()
-            .bg(node_color)
-            .border_2()
-            .border_color(theme.bg_main),
-    );
-
-    div()
-        .id(gpui::ElementId::Name(
-            format!("git-graph-{}", row.short).into(),
-        ))
-        .mx(px(12.))
-        .h(px(ROW_HEIGHT + 6.))
-        .px(px(8.))
+        .py(px(9.))
         .rounded_md()
         .flex()
         .items_center()
-        .gap(px(8.))
-        .hover(|s| s.bg(theme.bg_hover))
-        .child(graph)
+        .gap(px(10.))
+        .when(linked, |row| {
+            row.cursor_pointer()
+                .hover(|s| s.bg(theme.bg_hover))
+                .on_click(move |_, _, cx| {
+                    if let Some(target) = target.clone() {
+                        cx.open_url(&target);
+                    }
+                })
+        })
+        .child(history_marker(theme))
         .child(
             div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(3.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .min_w_0()
+                        .children(
+                            commit
+                                .refs
+                                .iter()
+                                .map(|label| ref_badge(&label.name, label.kind, theme)),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_size(theme.ui_px(12.5))
+                                .text_color(theme.text)
+                                .child(commit.subject.clone()),
+                        ),
+                )
+                .child(meta),
+        )
+        .child(
+            div()
+                .flex_none()
                 .flex()
                 .items_center()
-                .gap(px(6.))
-                .flex_none()
-                .children(
-                    row.refs
-                        .iter()
-                        .map(|label| ref_badge(&label.name, label.kind, theme)),
-                ),
-        )
-        .child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_size(theme.ui_px(12.5))
-                .text_color(theme.text)
-                .child(row.subject.clone()),
-        )
-        .child(
-            div()
-                .flex_none()
-                .font_family(theme::code_font_family())
-                .text_size(theme.ui_px(11.))
-                .text_color(theme.text_3)
-                .child(row.short.clone()),
-        )
-        .child(
-            div()
-                .flex_none()
-                .text_size(theme.ui_px(11.))
-                .text_color(theme.text_3)
-                .child(row.relative.clone()),
+                .gap(px(5.))
+                .child(
+                    div()
+                        .font_family(theme::code_font_family())
+                        .text_size(theme.ui_px(11.))
+                        .text_color(theme.text_3)
+                        .child(commit.short.clone()),
+                )
+                .when(linked, |s| {
+                    s.child(icon("icons/arrow-up-right.svg", 12., theme.text_3))
+                }),
         )
         .into_any_element()
 }
 
-fn lane_color(index: usize, theme: Theme) -> Hsla {
-    match index % 6 {
-        0 => theme.accent,
-        1 => theme.ok_green,
-        2 => theme.warn,
-        3 => theme.crit,
-        // Two extra hues keep a busy graph legible; both are darkened for the
-        // light palette so they clear the background.
-        4 => match theme.mode {
-            ThemeMode::Dark => hsla(205. / 360., 0.5, 0.62, 1.),
-            ThemeMode::Light => hsla(205. / 360., 0.6, 0.4, 1.),
-        },
-        5 => match theme.mode {
-            ThemeMode::Dark => hsla(280. / 360., 0.42, 0.66, 1.),
-            ThemeMode::Light => hsla(280. / 360., 0.5, 0.45, 1.),
-        },
-        _ => theme.text_2,
+/// Diameter of a row's leading git marker. The separator inset below is
+/// derived from it so the two stay aligned.
+const HISTORY_LEADING: f32 = 26.;
+
+/// Diameter of the small author avatar in the meta line.
+const AUTHOR_AVATAR: f32 = 14.;
+
+/// The far-left marker for a commit row: a git-commit glyph, not a person —
+/// identity lives in the small avatar beside the author name.
+fn history_marker(theme: Theme) -> AnyElement {
+    div()
+        .flex_none()
+        .size(px(HISTORY_LEADING))
+        .rounded_full()
+        .bg(theme.bg_raised)
+        .border_1()
+        .border_color(theme.border)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(icon("icons/git-commit.svg", 14., theme.text_3))
+        .into_any_element()
+}
+
+/// A small round avatar shown before the author name: the real GitHub photo
+/// when the author name is a GitHub handle, with the monogram as its fallback
+/// (while loading, for accounts with no photo, or for real names that aren't
+/// handles). Never leaves a blank slot.
+fn author_avatar(name: &str, email: &str, theme: Theme) -> AnyElement {
+    avatar_image(github_avatar_url(name), name, email, theme)
+}
+
+/// A small round avatar from an explicit URL (a GitHub event carries the exact
+/// one), falling back to the monogram. `name`/`email` seed the fallback.
+fn avatar_image(url: Option<String>, name: &str, email: &str, theme: Theme) -> AnyElement {
+    match url {
+        Some(url) => {
+            let name = name.to_string();
+            let email = email.to_string();
+            img(url)
+                .size(px(AUTHOR_AVATAR))
+                .rounded_full()
+                .object_fit(ObjectFit::Cover)
+                .with_loading({
+                    let (name, email) = (name.clone(), email.clone());
+                    move || monogram_chip(&name, &email, theme)
+                })
+                .with_fallback(move || monogram_chip(&name, &email, theme))
+                .into_any_element()
+        }
+        None => monogram_chip(name, email, theme),
     }
+}
+
+/// The GitHub avatar URL for a commit author whose name looks like a handle.
+/// Real names ("Ada Lovelace") return `None` and fall back to the monogram
+/// rather than 404-ing. GitHub usernames are alphanumeric or single hyphens.
+fn github_avatar_url(author: &str) -> Option<String> {
+    let handle = author.trim();
+    let valid = !handle.is_empty()
+        && handle.len() <= 39
+        && !handle.starts_with('-')
+        && !handle.ends_with('-')
+        && !handle.contains("--")
+        && handle
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-');
+    valid.then(|| format!("https://avatars.githubusercontent.com/{handle}?size=48"))
+}
+
+/// A tiny initials chip — the avatar fallback. The tint is a stable function
+/// of the author's email so the same person keeps their color across sessions;
+/// saturation stays low so identity doesn't read as confetti.
+fn monogram_chip(name: &str, email: &str, theme: Theme) -> AnyElement {
+    let (saturation, lightness) = match theme.mode {
+        ThemeMode::Dark => (0.40, 0.34),
+        ThemeMode::Light => (0.46, 0.34),
+    };
+    div()
+        .flex_none()
+        .size(px(AUTHOR_AVATAR))
+        .rounded_full()
+        .bg(hsla(avatar_hue(email, name), saturation, lightness, 1.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(theme.ui_px(7.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(hsla(0., 0., 0.985, 1.))
+        .child(initials_for(name))
+        .into_any_element()
+}
+
+/// Up to two initials from an author name.
+fn initials_for(name: &str) -> String {
+    let pick = |word: &str| word.chars().next().map(|c| c.to_uppercase().to_string());
+    let mut words = name.split_whitespace();
+    let first = words.next().unwrap_or("");
+    let last = words.last();
+    match (pick(first), last.and_then(pick)) {
+        (Some(a), Some(b)) => format!("{a}{b}"),
+        (Some(a), None) => {
+            let mut chars = first.chars();
+            chars.next();
+            match chars.next() {
+                Some(b) => format!("{a}{}", b.to_uppercase()),
+                None => a,
+            }
+        }
+        _ => "?".to_string(),
+    }
+}
+
+/// A stable hue in `0..1` derived from the author's email (falling back to the
+/// name). FNV-1a keeps it cheap and stable across runs.
+fn avatar_hue(email: &str, name: &str) -> f32 {
+    const HUES: [f32; 8] = [14., 44., 96., 158., 202., 236., 274., 330.];
+    let seed = if email.trim().is_empty() { name } else { email };
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in seed.trim().to_ascii_lowercase().bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    HUES[(hash % HUES.len() as u64) as usize] / 360.
+}
+
+/// A hairline between History rows, inset to the row content the way a commit
+/// list separates entries without boxing each one.
+fn commit_separator(theme: Theme) -> AnyElement {
+    // 12 (row margin) + 8 (row padding) + leading marker + 10 (row gap).
+    div()
+        .ml(px(12. + 8. + HISTORY_LEADING + 10.))
+        .mr(px(20.))
+        .h(px(1.))
+        .bg(theme.border)
+        .into_any_element()
 }
 
 fn load_more(

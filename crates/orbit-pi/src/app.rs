@@ -16,7 +16,8 @@ use std::{
 
 use base64::Engine as _;
 use gpui::{
-    anchored, deferred, div, img, list, point, prelude::*, px, radians, svg, uniform_list,
+    anchored, deferred, div, img, linear_color_stop, linear_gradient, list, point, prelude::*, px,
+    radians, relative, svg, uniform_list,
     AnchoredPositionMode, Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Corner,
     CursorStyle, DragMoveEvent, ElementId, Entity, ExternalPaths, FocusHandle, Focusable,
     FontWeight, Hsla, ImageSource, IntoElement, ListAlignment, ListState, MouseButton,
@@ -28,11 +29,10 @@ use serde_json::Value;
 
 use crate::branch_picker::BranchPicker;
 use crate::checkpoint;
-use crate::git_panel::GitPanel;
-use crate::workspace_picker::{WorkspaceEntry, WorkspacePicker};
 use crate::command_palette::{self, CommandPalette, PaletteCommand, PaletteSnapshot};
 use crate::composer::ComposerInput;
 use crate::context_meter::{self, ContextPopup};
+use crate::git_panel::GitPanel;
 use crate::mentions::{self, AcEntry, SharedAutocomplete, SlashCommand, Trigger, TriggerKind};
 use crate::model_selector::{
     provider_icon, thinking_display, thinking_icon, ModelSelector, PickerKind,
@@ -44,6 +44,7 @@ use crate::sessions::{self, SessionInfo};
 use crate::sidepane::{SidePane, SidePaneResize};
 use crate::theme::{self, Theme, ThemeId, ThemeMode};
 use crate::transcript::{self, Transcript};
+use crate::workspace_picker::{WorkspaceEntry, WorkspacePicker};
 
 const SIDEBAR_DEFAULT_W: f32 = 248.;
 const SIDEBAR_MIN_W: f32 = 200.;
@@ -99,6 +100,8 @@ struct ParkedSession {
 
 pub struct OrbitApp {
     client: Option<PiClient>,
+    /// Live state of the active pi process, surfaced in Settings → Runtime.
+    runtime: RuntimeStatus,
     /// Sessions with a live pi process, keyed by session-file path. The
     /// active session lives in `client`/`transcript` above; this map holds
     /// the background ones (see `ParkedSession`).
@@ -333,6 +336,12 @@ impl OrbitApp {
             Ok(client) => (Some(client), String::new()),
             Err(err) => (None, format!("pi spawn failed: {err}")),
         };
+        let runtime = RuntimeStatus {
+            started_at: client.as_ref().map(|_| Instant::now()),
+            alive: client.is_some(),
+            exited: false,
+            error: (!connect_error.is_empty()).then(|| connect_error.clone()),
+        };
 
         let theme_sub = cx.observe_global::<Theme>(|this, cx| {
             this.input.update(cx, |_, cx| cx.notify());
@@ -357,6 +366,7 @@ impl OrbitApp {
 
         let mut app = Self {
             client,
+            runtime,
             sidebar_width: px(SIDEBAR_DEFAULT_W),
             lives: HashMap::new(),
             transcript: Transcript::new(),
@@ -497,6 +507,83 @@ impl OrbitApp {
         self.send(CommandBody::GetSessionStats, "get_session_stats");
     }
 
+    // ── runtime (Settings → Runtime) ───────────────────────────────────
+
+    /// Make `client` the active pi process, resetting uptime / exit state.
+    fn adopt_client(&mut self, client: PiClient) {
+        self.runtime = RuntimeStatus {
+            started_at: Some(Instant::now()),
+            alive: true,
+            exited: false,
+            error: None,
+        };
+        self.client = Some(client);
+    }
+
+    /// Tear down the active pi process (dropping `PiClient` kills the child).
+    fn drop_client(&mut self) {
+        self.client = None;
+        self.runtime = RuntimeStatus::default();
+    }
+
+    fn runtime_state(&self) -> RuntimeState {
+        if self.client.is_none() {
+            if self.runtime.error.is_some() {
+                RuntimeState::Failed
+            } else {
+                RuntimeState::Stopped
+            }
+        } else if self.runtime.exited || !self.runtime.alive {
+            RuntimeState::Exited
+        } else {
+            RuntimeState::Running
+        }
+    }
+
+    /// Spawn the pi process (Start button). No-op while one is running.
+    fn runtime_start(&mut self, cx: &mut Context<Self>) {
+        if self.client.is_some() {
+            return;
+        }
+        let cwd = self
+            .current_workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        match PiClient::spawn(&cwd, None) {
+            Ok(client) => {
+                self.adopt_client(client);
+                self.send(CommandBody::GetState, "get_state");
+                self.refresh_catalogs();
+                self.set_status("pi process started");
+            }
+            Err(err) => {
+                let message = format!("pi spawn failed: {err}");
+                self.client = None;
+                self.runtime.error = Some(message.clone());
+                self.set_status(message);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Stop the pi process (Stop button).
+    fn runtime_stop(&mut self, cx: &mut Context<Self>) {
+        if self.client.is_none() {
+            return;
+        }
+        self.drop_client();
+        self.busy = false;
+        self.set_status("pi process stopped");
+        cx.notify();
+    }
+
+    /// Stop then start the pi process (Restart button).
+    fn runtime_restart(&mut self, cx: &mut Context<Self>) {
+        self.drop_client();
+        self.runtime_start(cx);
+    }
+
     /// Register the active client under the session file pi reports. The
     /// startup process has no known path until pi's first state/stats
     /// response; a `new_session` re-keys it the same way (the handler clears
@@ -535,6 +622,10 @@ impl OrbitApp {
             cx.notify();
         }
         self.tick_background(cx);
+        // Keep the Runtime panel's liveness fresh (try_wait is cheap).
+        if let Some(client) = self.client.as_mut() {
+            self.runtime.alive = client.is_alive();
+        }
         // Images pasted in the composer become message attachments.
         self.drain_pasted_images(cx);
         // A drag that left the window clears gpui's active drag without any
@@ -611,7 +702,9 @@ impl OrbitApp {
                 }
                 Event::ProcessExited => {
                     self.busy = false;
-                    self.set_status("pi process exited — restart the app");
+                    self.runtime.alive = false;
+                    self.runtime.exited = true;
+                    self.set_status("pi process exited — restart from Settings → Runtime");
                 }
                 Event::MessageEnd { value } => {
                     // Real edit stats from finalized tool calls.
@@ -1114,7 +1207,8 @@ impl OrbitApp {
             return;
         }
         if self.git_open && self.git_panel.read(cx).has_modal() {
-            self.git_panel.update(cx, |panel, cx| panel.dismiss_modal(cx));
+            self.git_panel
+                .update(cx, |panel, cx| panel.dismiss_modal(cx));
             return;
         }
         if self.git_open {
@@ -1215,14 +1309,16 @@ impl OrbitApp {
 
         match PiClient::spawn(&cwd, None) {
             Ok(client) => {
-                self.client = Some(client);
+                self.adopt_client(client);
                 self.send(CommandBody::NewSession, "new_session");
                 self.refresh_catalogs();
                 self.set_status("New session");
             }
             Err(err) => {
+                let message = format!("pi spawn failed: {err}");
                 self.client = None;
-                self.set_status(format!("pi spawn failed: {err}"));
+                self.runtime.error = Some(message.clone());
+                self.set_status(message);
             }
         }
         self.input.read(cx).focus(window);
@@ -1368,7 +1464,7 @@ impl OrbitApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.client.take();
+        self.drop_client();
         self.transcript.clear();
         self.current_title = None;
         self.current_workspace = Some(folder);
@@ -1379,13 +1475,16 @@ impl OrbitApp {
         self.reset_turns();
         match PiClient::spawn(self.current_workspace.as_ref().unwrap(), None) {
             Ok(client) => {
-                self.client = Some(client);
+                self.adopt_client(client);
                 self.send(CommandBody::GetState, "get_state");
                 self.refresh_catalogs();
                 self.set_status("New task started");
             }
             Err(err) => {
-                self.set_status(format!("pi spawn failed: {err}"));
+                let message = format!("pi spawn failed: {err}");
+                self.client = None;
+                self.runtime.error = Some(message.clone());
+                self.set_status(message);
             }
         }
         // Ready to type: the empty state is gone, so put the caret in the
@@ -2620,7 +2719,7 @@ impl OrbitApp {
             // Resume a background run. The parked transcript is already up
             // to date (its events drain every tick); anything buffered in
             // the process channel streams in from the next tick on.
-            self.client = Some(parked.client);
+            self.adopt_client(parked.client);
             self.transcript = parked.transcript;
             self.busy = parked.busy;
             self.added = parked.added;
@@ -2639,7 +2738,7 @@ impl OrbitApp {
             });
             match spawned {
                 Ok(client) => {
-                    self.client = Some(client);
+                    self.adopt_client(client);
                     self.send(
                         CommandBody::SwitchSession {
                             session_path: session.path.to_string_lossy().into_owned(),
@@ -2652,8 +2751,10 @@ impl OrbitApp {
                     // session's own.
                 }
                 Err(err) => {
+                    let message = format!("pi spawn failed: {err}");
                     self.client = None;
-                    self.set_status(format!("pi spawn failed: {err}"));
+                    self.runtime.error = Some(message.clone());
+                    self.set_status(message);
                 }
             }
         }
@@ -2709,6 +2810,12 @@ impl OrbitApp {
         self.session_details_open = false;
         self.git_panel.update(cx, |panel, cx| panel.show(cx));
         cx.notify();
+    }
+
+    /// Top-bar GitHub affordance: same destination as the session-details
+    /// **Commit or push** row.
+    fn on_open_git_click(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.open_git(cx);
     }
 
     /// Close the Git page and return to the chat.
@@ -3379,9 +3486,32 @@ struct SessionMenu {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsSection {
     General,
+    Runtime,
     Appearance,
     Providers,
     About,
+}
+
+/// Live state of the active pi agent process, for Settings → Runtime.
+#[derive(Default)]
+struct RuntimeStatus {
+    /// When the active process was adopted (drives the uptime readout).
+    started_at: Option<Instant>,
+    /// Whether the process is still running.
+    alive: bool,
+    /// Whether it exited on its own (as opposed to being stopped here).
+    exited: bool,
+    /// The last spawn failure, if any.
+    error: Option<String>,
+}
+
+/// The runtime panel's headline state.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RuntimeState {
+    Running,
+    Exited,
+    Stopped,
+    Failed,
 }
 
 /// Which dropdown is open on the settings surface.
@@ -3598,6 +3728,25 @@ impl Render for OrbitApp {
                         "icons/panel-right.svg",
                         16.,
                         if pane_visible {
+                            theme.text
+                        } else {
+                            theme.text_2
+                        },
+                    )),
+            )
+            // GitHub affordance: opens the full-page Git surface.
+            .child(
+                div()
+                    .id("open-git-github")
+                    .p_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_open_git_click))
+                    .child(icon(
+                        "icons/github.svg",
+                        16.,
+                        if self.git_open {
                             theme.text
                         } else {
                             theme.text_2
@@ -4263,7 +4412,54 @@ impl OrbitApp {
     /// Fading dot-grid backdrop for the new-task page. GPUI tints the SVG
     /// alpha mask with a theme color, so the art must be explicit circles
     /// (patterns/masks do not survive the renderer).
-    fn new_task_background(theme: Theme) -> impl IntoElement + use<> {
+    /// The configured dithered background image, absolutely filling its
+    /// parent. Painted once at the window root, behind every column.
+    fn dither_backdrop(theme: Theme) -> Option<AnyElement> {
+        Self::backdrop_image(crate::dither::background(), theme)
+    }
+
+    /// Wrap a dithered image so it fills its parent and nothing else, then
+    /// drop it into the page: a bottom gradient to `bg_main` so the picture
+    /// fades out under the composer instead of ending on a hard edge.
+    ///
+    /// The wrapper clips: gpui's `ObjectFit::Cover` scales the image up and
+    /// centers it, returning bounds *larger* than the element whenever the
+    /// ratios differ — a 16:9 image in a narrower main area painted its
+    /// overflow over the sessions sidebar until this clip was added.
+    fn backdrop_image(
+        image: Option<std::sync::Arc<gpui::RenderImage>>,
+        theme: Theme,
+    ) -> Option<AnyElement> {
+        image.map(|image| {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .overflow_hidden()
+                .child(img(image).size_full().object_fit(ObjectFit::Cover))
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        // Proportional, so the drop stays put as the window
+                        // resizes instead of turning into a band.
+                        .h(relative(0.55))
+                        .bg(linear_gradient(
+                            180.,
+                            linear_color_stop(theme.bg_main.opacity(0.), 0.),
+                            linear_color_stop(theme.bg_main, 1.),
+                        )),
+                )
+                .into_any_element()
+        })
+    }
+
+    /// The default new-task dot grid.
+    fn dot_backdrop(theme: Theme) -> impl IntoElement + use<> {
         let dot_color = match theme.mode {
             ThemeMode::Light => theme.text_3.opacity(0.75),
             ThemeMode::Dark => theme.text_3.opacity(0.65),
@@ -4282,8 +4478,9 @@ impl OrbitApp {
             )
     }
 
-    /// New-task empty state — minimal onboarding over the dot grid: one
-    /// headline, a ghost workspace row, and the composer below for input.
+    /// New-task empty state — minimal onboarding over the backdrop (the
+    /// configured dithered image, or the dot grid): one headline, a ghost
+    /// workspace row, and the composer below for input.
     ///
     /// `main_width` comes from the caller (window minus sidebar/pane) because
     /// the field below gets a definite width: `w_full().max_w(_)` chains
@@ -4307,13 +4504,18 @@ impl OrbitApp {
         let path_label = cwd.to_string_lossy().into_owned();
         let picker_open = self.workspace_picker.is_some();
 
+        // This page owns the backdrop: the configured dithered image, or the
+        // default dot grid. The chat page deliberately has neither.
+        let backdrop = Self::dither_backdrop(theme);
+        let dithered = backdrop.is_some();
         div()
             .flex_1()
             .min_h_0()
             .w_full()
             .relative()
             .overflow_hidden()
-            .child(Self::new_task_background(theme))
+            .when(!dithered, |page| page.child(Self::dot_backdrop(theme)))
+            .children(backdrop)
             .child(
                 div()
                     .relative()
@@ -4425,9 +4627,7 @@ impl OrbitApp {
                                                     .on_mouse_up(
                                                         MouseButton::Left,
                                                         cx.listener(|app, _, window, cx| {
-                                                            app.toggle_workspace_picker(
-                                                                window, cx,
-                                                            );
+                                                            app.toggle_workspace_picker(window, cx);
                                                         }),
                                                     )
                                                     .child(
@@ -4455,9 +4655,7 @@ impl OrbitApp {
                                                             .child(
                                                                 div()
                                                                     .text_size(theme.ui_px(13.))
-                                                                    .font_weight(
-                                                                        FontWeight::MEDIUM,
-                                                                    )
+                                                                    .font_weight(FontWeight::MEDIUM)
                                                                     .text_color(theme.text)
                                                                     .truncate()
                                                                     .child(folder_name),
@@ -4552,7 +4750,7 @@ impl OrbitApp {
             .w_full()
             .relative()
             .overflow_hidden()
-            .child(Self::new_task_background(theme))
+            .child(Self::dot_backdrop(theme))
             .child(
                 div()
                     .relative()
@@ -5079,8 +5277,13 @@ impl OrbitApp {
     fn render_settings(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let this = cx.entity();
         let theme = *theme::get(cx);
-        let sections: [(SettingsSection, &'static str, &'static str); 4] = [
+        let sections: [(SettingsSection, &'static str, &'static str); 5] = [
             (SettingsSection::General, "icons/settings.svg", "General"),
+            (
+                SettingsSection::Runtime,
+                "icons/server-stack.svg",
+                "Runtime",
+            ),
             (
                 SettingsSection::Appearance,
                 "icons/contrast.svg",
@@ -5213,6 +5416,10 @@ impl OrbitApp {
                 "General",
                 "How Orbit connects to the pi agent and stores your data.",
             ),
+            SettingsSection::Runtime => (
+                "Runtime",
+                "The pi agent process Orbit spawns — stdio transport, no host or port.",
+            ),
             SettingsSection::Appearance => ("Appearance", "Window, layout, and color preferences."),
             SettingsSection::Providers => (
                 "Providers",
@@ -5282,6 +5489,7 @@ impl OrbitApp {
                     None,
                 ),
             ],
+            SettingsSection::Runtime => self.runtime_rows(theme, this.clone(), cx),
             SettingsSection::Appearance => vec![
                 self.card(
                     theme,
@@ -5289,6 +5497,7 @@ impl OrbitApp {
                     "Pick a Zed-compatible palette for the workbench.",
                     Some(self.theme_select(theme, this.clone(), cx)),
                 ),
+                self.background_card(theme, this.clone(), cx),
                 self.card(
                     theme,
                     "Language",
@@ -5525,6 +5734,387 @@ impl OrbitApp {
                     }),
             )
             .into_any_element()
+    }
+
+    // ── Settings → Runtime ─────────────────────────────────────────────
+
+    /// The Runtime section: the live pi process, its details, and
+    /// start/stop/restart controls. Orbit has no socket server — the
+    /// transport is stdio, so there is no host or port to report.
+    fn runtime_rows(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        _cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let state = self.runtime_state();
+        let (state_label, state_color) = match state {
+            RuntimeState::Running => ("Running", theme.ok_green),
+            RuntimeState::Exited => ("Exited", theme.crit),
+            RuntimeState::Stopped => ("Stopped", theme.text_3),
+            RuntimeState::Failed => ("Failed to start", theme.crit),
+        };
+        let running = state == RuntimeState::Running;
+        let has_client = self.client.is_some();
+
+        let description = match state {
+            RuntimeState::Running => {
+                "Spawned as a child process — newline-delimited JSON over stdio."
+            }
+            RuntimeState::Exited => "The process exited on its own. Restart to reconnect.",
+            RuntimeState::Stopped => "No pi process is running — start it to use the agent.",
+            RuntimeState::Failed => "The last start failed. See the error below.",
+        };
+
+        let mut controls = div().flex().items_center().gap_2();
+        if has_client {
+            controls = controls
+                .child(self.runtime_button(
+                    "runtime-restart",
+                    "Restart",
+                    false,
+                    theme,
+                    this.clone(),
+                    OrbitApp::runtime_restart,
+                ))
+                .child(self.runtime_button(
+                    "runtime-stop",
+                    "Stop",
+                    false,
+                    theme,
+                    this.clone(),
+                    OrbitApp::runtime_stop,
+                ));
+        } else {
+            controls = controls.child(self.runtime_button(
+                "runtime-start",
+                "Start",
+                true,
+                theme,
+                this.clone(),
+                OrbitApp::runtime_start,
+            ));
+        }
+
+        let mut rows = vec![self.card(
+            theme,
+            "Active process",
+            description,
+            Some(controls.into_any_element()),
+        )];
+
+        let pid = self
+            .client
+            .as_ref()
+            .map(|client| client.child_pid().to_string())
+            .unwrap_or_else(|| "—".to_string());
+        let uptime = if running {
+            self.runtime
+                .started_at
+                .map(|started| format_uptime(started.elapsed()))
+                .unwrap_or_else(|| "—".to_string())
+        } else {
+            "—".to_string()
+        };
+        let workspace = self
+            .current_workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+
+        let status = div()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .child(div().size(px(7.)).rounded_full().bg(state_color))
+            .child(
+                div()
+                    .text_size(theme.ui_px(12.5))
+                    .text_color(theme.text)
+                    .child(state_label),
+            )
+            .into_any_element();
+
+        let mut details = div()
+            .bg(theme.bg_composer)
+            .border_1()
+            .border_color(theme.border)
+            .rounded_lg()
+            .px(px(14.))
+            .py(px(12.))
+            .flex()
+            .flex_col()
+            .gap(px(9.))
+            .child(self.runtime_detail(theme, "Status", status))
+            .child(self.runtime_detail(theme, "Process ID", runtime_text(theme, pid)))
+            .child(self.runtime_detail(
+                theme,
+                "Binary",
+                runtime_path(theme, orbit_rpc::pi_binary()),
+            ))
+            .child(self.runtime_detail(theme, "Uptime", runtime_text(theme, uptime)))
+            .child(self.runtime_detail(
+                theme,
+                "Transport",
+                runtime_text(
+                    theme,
+                    "stdio — newline-delimited JSON (no host or port)".to_string(),
+                ),
+            ))
+            .child(self.runtime_detail(theme, "Workspace", runtime_path(theme, workspace)))
+            .child(self.runtime_detail(
+                theme,
+                "Session store",
+                runtime_path(
+                    theme,
+                    sessions::sessions_dir().to_string_lossy().into_owned(),
+                ),
+            ));
+        if let Some(error) = &self.runtime.error {
+            details = details.child(self.runtime_detail(
+                theme,
+                "Last error",
+                runtime_error(theme, error.clone()),
+            ));
+        }
+        rows.push(details.into_any_element());
+
+        // Background sessions — each owns its own pi process.
+        if !self.lives.is_empty() {
+            let count = self.lives.len();
+            let noun = if count == 1 { "session" } else { "sessions" };
+            let mut card = div()
+                .bg(theme.bg_composer)
+                .border_1()
+                .border_color(theme.border)
+                .rounded_lg()
+                .px(px(14.))
+                .py(px(12.))
+                .flex()
+                .flex_col()
+                .gap(px(9.))
+                .child(
+                    div()
+                        .text_size(theme.ui_px(12.))
+                        .text_color(theme.text_2)
+                        .child(format!(
+                            "{count} background {noun} running in their own pi processes"
+                        )),
+                );
+            for (path, parked) in &self.lives {
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.to_string_lossy().into_owned());
+                card = card.child(self.runtime_detail(
+                    theme,
+                    &name,
+                    runtime_text(
+                        theme,
+                        format!(
+                            "pid {} · {}",
+                            parked.client.child_pid(),
+                            if parked.busy { "busy" } else { "idle" }
+                        ),
+                    ),
+                ));
+            }
+            rows.push(card.into_any_element());
+        }
+
+        // Recent stderr — visible failures for "if any issue, show status".
+        let stderr = self
+            .client
+            .as_ref()
+            .map(|client| client.recent_stderr(8))
+            .unwrap_or_default();
+        let body: AnyElement = if stderr.is_empty() {
+            div()
+                .text_size(theme.ui_px(12.))
+                .text_color(theme.text_3)
+                .child("No output from the pi process.")
+                .into_any_element()
+        } else {
+            let mut block = div().flex().flex_col().gap(px(2.));
+            for line in &stderr {
+                block = block.child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .font_family(theme::code_font_family())
+                        .text_size(theme.code_px(11.5))
+                        .text_color(theme.code_text)
+                        .child(line.clone()),
+                );
+            }
+            div()
+                .bg(theme.code_bg)
+                .border_1()
+                .border_color(theme.border)
+                .rounded_md()
+                .px(px(10.))
+                .py(px(8.))
+                .child(block)
+                .into_any_element()
+        };
+        rows.push(
+            div()
+                .bg(theme.bg_composer)
+                .border_1()
+                .border_color(theme.border)
+                .rounded_lg()
+                .px(px(14.))
+                .py(px(12.))
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .text_size(theme.ui_px(13.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child("Recent stderr"),
+                )
+                .child(body)
+                .into_any_element(),
+        );
+
+        rows
+    }
+
+    /// One label/value row inside a Runtime card.
+    fn runtime_detail(&self, theme: Theme, label: &str, value: AnyElement) -> AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(
+                div()
+                    .w(px(110.))
+                    .flex_none()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(theme.ui_px(12.))
+                    .text_color(theme.text_3)
+                    .child(label.to_string()),
+            )
+            .child(div().flex_1().min_w_0().child(value))
+            .into_any_element()
+    }
+
+    /// A Runtime action button (Start / Stop / Restart).
+    fn runtime_button(
+        &self,
+        id: &'static str,
+        label: &str,
+        primary: bool,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        action: fn(&mut OrbitApp, &mut Context<OrbitApp>),
+    ) -> AnyElement {
+        let mut button = div()
+            .id(id)
+            .h(px(28.))
+            .px(px(12.))
+            .rounded_md()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(6.))
+            .cursor_pointer()
+            .text_size(theme.ui_px(12.))
+            .font_weight(FontWeight::MEDIUM);
+        if primary {
+            button = button
+                .bg(theme.send_bg)
+                .text_color(theme.send_fg)
+                .hover(|s| s.bg(theme.send_bg_hover));
+        } else {
+            button = button
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.bg_raised)
+                .text_color(theme.text_2)
+                .hover(|s| s.bg(theme.bg_hover));
+        }
+        button
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                this.update(cx, |app, cx| action(app, cx));
+            })
+            .child(label.to_string())
+            .into_any_element()
+    }
+
+    /// Appearance → "Background image": pick an image for the dithered
+    /// page backdrop, or reset to the dot grid.
+    fn background_card(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        _cx: &Context<Self>,
+    ) -> AnyElement {
+        let label = crate::dither::configured_label();
+        let mut controls = div().flex().items_center().gap_2().child(self.runtime_button(
+            "background-choose",
+            if label.is_some() {
+                "Replace…"
+            } else {
+                "Choose image…"
+            },
+            false,
+            theme,
+            this.clone(),
+            OrbitApp::background_choose,
+        ));
+        if label.is_some() {
+            controls = controls.child(self.runtime_button(
+                "background-reset",
+                "Reset",
+                false,
+                theme,
+                this,
+                OrbitApp::background_reset,
+            ));
+        }
+        self.card_with_path(
+            theme,
+            "Background image",
+            "A dithered image behind the new-task and chat pages.",
+            label.as_deref(),
+            Some(controls.into_any_element()),
+        )
+    }
+
+    /// Pick the background image (native dialog), copy + process it, and
+    /// warm the dither cache so the first paint of the new-task page is
+    /// costless.
+    fn background_choose(&mut self, cx: &mut Context<Self>) {
+        let picked = rfd::FileDialog::new()
+            .set_title("Choose a background image")
+            .add_filter("Images", &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff"])
+            .pick_file();
+        let Some(path) = picked else {
+            return;
+        };
+        match crate::dither::choose_file(&path) {
+            Ok(label) => {
+                crate::dither::background();
+                self.set_status(format!("Background set to {label}"));
+            }
+            Err(err) => self.set_status(err),
+        }
+        cx.notify();
+    }
+
+    /// Drop the background (the dot grid returns) and forget the cache.
+    fn background_reset(&mut self, cx: &mut Context<Self>) {
+        crate::dither::clear_all();
+        crate::dither::background();
+        self.set_status("Background reset");
+        cx.notify();
     }
 
     /// The real sidebar toggle, wired to the same state as the top bar.
@@ -6954,6 +7544,51 @@ fn empty_sessions_state(theme: Theme) -> impl IntoElement + use<> {
         )
 }
 
+/// A Runtime detail value in the UI text color.
+fn runtime_text(theme: Theme, text: String) -> AnyElement {
+    div()
+        .min_w_0()
+        .truncate()
+        .text_size(theme.ui_px(12.5))
+        .text_color(theme.text)
+        .child(text)
+        .into_any_element()
+}
+
+/// A Runtime detail value rendered as a path (monospace, dimmed).
+fn runtime_path(theme: Theme, text: String) -> AnyElement {
+    div()
+        .min_w_0()
+        .truncate()
+        .font_family(theme::code_font_family())
+        .text_size(theme.code_px(11.5))
+        .text_color(theme.text_2)
+        .child(text)
+        .into_any_element()
+}
+
+/// A Runtime error value (critical color).
+fn runtime_error(theme: Theme, text: String) -> AnyElement {
+    div()
+        .min_w_0()
+        .truncate()
+        .text_size(theme.ui_px(12.))
+        .text_color(theme.crit)
+        .child(text)
+        .into_any_element()
+}
+
+/// "42s" / "3m 12s" / "2h 5m" / "4d 3h" for the Runtime uptime readout.
+fn format_uptime(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    match seconds {
+        s if s < 60 => format!("{s}s"),
+        s if s < 3_600 => format!("{}m {}s", s / 60, s % 60),
+        s if s < 86_400 => format!("{}h {}m", s / 3_600, (s % 3_600) / 60),
+        s => format!("{}d {}h", s / 86_400, (s % 86_400) / 3_600),
+    }
+}
+
 #[cfg(test)]
 mod devicons_tests {
     use super::*;
@@ -7305,5 +7940,86 @@ mod popup_layout_tests {
             .px(px(4.))
             .py(px(4.))
         }
+    }
+}
+
+#[cfg(test)]
+mod backdrop_layout_tests {
+    use super::*;
+    use gpui::size;
+
+    fn solid_image(width: u32, height: u32) -> std::sync::Arc<gpui::RenderImage> {
+        let buffer = image::RgbaImage::from_pixel(
+            width,
+            height,
+            image::Rgba([120, 120, 120, 255]),
+        );
+        std::sync::Arc::new(gpui::RenderImage::new(vec![image::Frame::new(buffer)]))
+    }
+
+    /// gpui's `ObjectFit::Cover` scales the image up and centers it, so the
+    /// painted bounds overflow the element whenever the ratios differ (a 16:9
+    /// image in a narrower main area). Without a clip on the wrapper, that
+    /// overflow painted over the sessions sidebar. This documents the gpui
+    /// behavior the wrapper's `overflow_hidden` guards against.
+    #[test]
+    fn cover_bounds_overflow_the_element_on_a_ratio_mismatch() {
+        let element = gpui::bounds(
+            point(px(240.), px(0.)),
+            size(px(1000.), px(700.)),
+        );
+        let painted = ObjectFit::Cover.get_bounds(
+            element,
+            size(gpui::DevicePixels(1600), gpui::DevicePixels(900)),
+        );
+        assert!(
+            painted.origin.x < element.origin.x,
+            "cover must overflow left (painted {:?} vs element {:?})",
+            painted.origin.x,
+            element.origin.x
+        );
+        assert!(painted.size.width > element.size.width);
+    }
+
+    /// The backdrop wrapper fills the main area exactly — it must never claim
+    /// the sidebar's column, however the image inside it is fitted.
+    #[gpui::test]
+    fn backdrop_wrapper_stays_inside_the_main_area(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let _ = cx.draw(
+            point(px(0.), px(0.)),
+            size(px(1240.), px(700.)),
+            |_, _| {
+                div()
+                    .size_full()
+                    .flex()
+                    .child(
+                        div()
+                            .id("backdrop-test-sidebar")
+                            .debug_selector(|| "backdrop-test-sidebar".to_string())
+                            .flex_none()
+                            .w(px(240.))
+                            .h_full(),
+                    )
+                    .child(
+                        div()
+                            .id("backdrop-test-main")
+                            .debug_selector(|| "backdrop-test-main".to_string())
+                            .flex_1()
+                            .h_full()
+                            .relative()
+                            .children(OrbitApp::backdrop_image(
+                                Some(solid_image(1600, 900)),
+                                Theme::for_id(ThemeId::Orbit),
+                            )),
+                    )
+            },
+        );
+        let sidebar = cx.debug_bounds("backdrop-test-sidebar").expect("sidebar");
+        let main = cx.debug_bounds("backdrop-test-main").expect("main");
+        assert_eq!(sidebar.origin.x, px(0.));
+        assert_eq!(sidebar.size.width, px(240.));
+        assert_eq!(main.origin.x, px(240.), "main starts after the sidebar");
+        assert_eq!(main.size.width, px(1000.));
     }
 }

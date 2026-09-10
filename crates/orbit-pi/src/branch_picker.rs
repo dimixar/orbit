@@ -300,7 +300,9 @@ impl Render for BranchPicker {
                     .gap(px(8.))
                     .cursor_pointer()
                     .when(selected || highlighted, |row| row.bg(theme.active))
-                    .when(!selected && !highlighted, |row| row.hover(|s| s.bg(theme.overlay)))
+                    .when(!selected && !highlighted, |row| {
+                        row.hover(|s| s.bg(theme.overlay))
+                    })
                     .on_hover({
                         let this = this.clone();
                         move |hovering, _, cx| {
@@ -338,7 +340,9 @@ impl Render for BranchPicker {
                             })
                             .child(branch_label),
                     )
-                    .when(selected, |row| row.child(icon("icons/check.svg", 11., theme.accent))),
+                    .when(selected, |row| {
+                        row.child(icon("icons/check.svg", 11., theme.accent))
+                    }),
             );
         }
 
@@ -415,10 +419,7 @@ impl Render for BranchPicker {
                             .gap(px(8.))
                             .cursor_pointer()
                             .hover(|s| s.bg(theme.overlay))
-                            .on_mouse_up(
-                                gpui::MouseButton::Left,
-                                cx.listener(Self::begin_create),
-                            )
+                            .on_mouse_up(gpui::MouseButton::Left, cx.listener(Self::begin_create))
                             .child(icon("icons/plus.svg", 12., theme.text_2))
                             .child(
                                 div()

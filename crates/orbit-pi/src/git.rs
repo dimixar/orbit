@@ -570,33 +570,14 @@ pub struct CommitEntry {
     pub hash: String,
     pub short: String,
     pub author: String,
+    pub author_email: String,
     pub relative: String,
     pub subject: String,
     pub refs: Vec<RefLabel>,
-}
-
-/// One commit for the Graph list, with its lane layout.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GraphRow {
-    pub hash: String,
-    pub short: String,
-    pub author: String,
-    pub relative: String,
-    pub subject: String,
-    pub refs: Vec<RefLabel>,
-    /// The lane this commit's node sits on.
-    pub lane: usize,
-    pub lane_count: usize,
-    /// Lanes carrying a line into this row.
-    pub before: Vec<bool>,
-    /// Lanes carrying a line out of this row.
-    pub after: Vec<bool>,
-    /// Merge/branch links from this commit's lane to a parent's lane.
-    pub links: Vec<(usize, usize)>,
 }
 
 pub fn history(cwd: &Path, limit: usize, skip: usize) -> Result<Vec<CommitEntry>, String> {
-    let format = "%H%x1f%h%x1f%an%x1f%ar%x1f%s%x1f%D";
+    let format = "%H%x1f%h%x1f%an%x1f%ae%x1f%ar%x1f%s%x1f%D";
     let out = run_git(
         cwd,
         &[
@@ -619,6 +600,7 @@ pub fn history(cwd: &Path, limit: usize, skip: usize) -> Result<Vec<CommitEntry>
             }
             let short = fields.next()?.to_string();
             let author = fields.next()?.to_string();
+            let author_email = fields.next()?.to_string();
             let relative = fields.next()?.to_string();
             let subject = fields.next()?.to_string();
             let refs = parse_refs(fields.next().unwrap_or(""));
@@ -626,98 +608,13 @@ pub fn history(cwd: &Path, limit: usize, skip: usize) -> Result<Vec<CommitEntry>
                 hash,
                 short,
                 author,
+                author_email,
                 relative,
                 subject,
                 refs,
             })
         })
         .collect())
-}
-
-pub fn graph(cwd: &Path, limit: usize) -> Result<Vec<GraphRow>, String> {
-    let format = "%H%x1f%h%x1f%P%x1f%an%x1f%ar%x1f%s%x1f%D";
-    let out = run_git(
-        cwd,
-        &[
-            "-c",
-            "core.quotePath=false",
-            "log",
-            "--all",
-            "--date-order",
-            &format!("--max-count={limit}"),
-            &format!("--format={format}"),
-        ],
-    )?;
-    let mut active: Vec<Option<String>> = Vec::new();
-    let mut rows = Vec::new();
-    for line in out.lines() {
-        let mut fields = line.split('\u{1f}');
-        let hash = fields.next().unwrap_or("").to_string();
-        if hash.is_empty() {
-            continue;
-        }
-        let short = fields.next().unwrap_or("").to_string();
-        let parents = fields
-            .next()
-            .unwrap_or("")
-            .split_whitespace()
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-        let author = fields.next().unwrap_or("").to_string();
-        let relative = fields.next().unwrap_or("").to_string();
-        let subject = fields.next().unwrap_or("").to_string();
-        let refs = parse_refs(fields.next().unwrap_or(""));
-
-        let lane = active
-            .iter()
-            .position(|candidate| candidate.as_deref() == Some(hash.as_str()))
-            .unwrap_or_else(|| {
-                if let Some(slot) = active.iter().position(Option::is_none) {
-                    slot
-                } else {
-                    active.push(None);
-                    active.len() - 1
-                }
-            });
-        let before = active.iter().map(Option::is_some).collect::<Vec<_>>();
-
-        active[lane] = parents.first().cloned();
-        let mut links = Vec::new();
-        for parent in parents.iter().skip(1) {
-            let slot = if let Some(existing) = active
-                .iter()
-                .position(|h| h.as_deref() == Some(parent.as_str()))
-            {
-                existing
-            } else if let Some(empty) = active.iter().position(Option::is_none) {
-                empty
-            } else {
-                active.push(None);
-                active.len() - 1
-            };
-            active[slot] = Some(parent.clone());
-            links.push((lane, slot));
-        }
-        while active.last().is_some_and(Option::is_none) {
-            active.pop();
-        }
-        let after = active.iter().map(Option::is_some).collect::<Vec<_>>();
-        let lane_count = before.len().max(after.len()).max(lane + 1);
-        rows.push(GraphRow {
-            hash,
-            short,
-            author,
-            relative,
-            subject,
-            refs,
-            lane,
-            lane_count,
-            before,
-            after,
-            links,
-        });
-    }
-    Ok(rows)
 }
 
 fn parse_refs(decor: &str) -> Vec<RefLabel> {
@@ -748,6 +645,269 @@ fn parse_refs(decor: &str) -> Vec<RefLabel> {
             }
         })
         .collect()
+}
+
+// ── Git panel: the all-branches graph ──────────────────────────────────────
+
+/// One commit for the Graph tab: the History fields plus parent hashes, so the
+/// UI can lay out branch lanes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphCommit {
+    pub hash: String,
+    pub short: String,
+    pub author: String,
+    pub author_email: String,
+    pub relative: String,
+    pub subject: String,
+    pub parents: Vec<String>,
+    pub refs: Vec<RefLabel>,
+}
+
+/// Every local branch's commits, newest first, each with its parents. Unlike
+/// [`history`] (the current branch only), the Graph tab shows all local
+/// branches so merges and parallel work get their own lanes. Internal refs
+/// (remotes, tags, checkpoints) are deliberately excluded.
+pub fn graph_history(cwd: &Path, limit: usize) -> Result<Vec<GraphCommit>, String> {
+    let format = "%H%x1f%h%x1f%an%x1f%ae%x1f%ar%x1f%s%x1f%P%x1f%D";
+    let out = run_git(
+        cwd,
+        &[
+            "-c",
+            "core.quotePath=false",
+            "log",
+            "--branches",
+            "--date-order",
+            &format!("--max-count={limit}"),
+            &format!("--format={format}"),
+        ],
+    )?;
+    Ok(out.lines().filter_map(parse_graph_commit).collect())
+}
+
+fn parse_graph_commit(line: &str) -> Option<GraphCommit> {
+    let mut fields = line.split('\u{1f}');
+    let hash = fields.next()?.to_string();
+    if hash.is_empty() {
+        return None;
+    }
+    let short = fields.next()?.to_string();
+    let author = fields.next()?.to_string();
+    let author_email = fields.next()?.to_string();
+    let relative = fields.next()?.to_string();
+    let subject = fields.next()?.to_string();
+    let parents = fields
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let refs = parse_refs(fields.next().unwrap_or(""));
+    Some(GraphCommit {
+        hash,
+        short,
+        author,
+        author_email,
+        relative,
+        subject,
+        parents,
+        refs,
+    })
+}
+
+/// A laid-out Graph row: the commit plus the lane geometry for one line of the
+/// drawing. Lanes are zero-based columns; the renderer maps them to x pixels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphRow {
+    pub commit: GraphCommit,
+    /// Column the commit's node sits in.
+    pub node_lane: usize,
+    /// Total columns this row occupies (at least `node_lane + 1`).
+    pub lane_count: usize,
+    /// Columns with a line spanning the full row height (every lane that
+    /// merely passes the commit by).
+    pub verticals: Vec<usize>,
+    /// Whether a line enters the node from the row above (false for a branch
+    /// tip that starts here).
+    pub node_has_incoming: bool,
+    /// Columns each parent connects to, drawn from the node to the row below.
+    pub parents: Vec<usize>,
+}
+
+/// Lay out [`GraphCommit`]s (newest first, as `git log` returns them) into
+/// per-row lane geometry.
+///
+/// A lane holds the hash of the commit it is still waiting to print. A commit
+/// claims the lane that already expects it, or takes a new one when it is a
+/// branch tip. Each parent then reuses the node's lane when it is free and
+/// otherwise takes the nearest free column to the right, which keeps branch
+/// lines vertical wherever possible. Parents that fall outside the fetched
+/// window are ignored so an old root doesn't trail a line into nothing.
+pub fn layout_graph(commits: &[GraphCommit]) -> Vec<GraphRow> {
+    use std::collections::HashSet;
+
+    let known: HashSet<&str> = commits.iter().map(|commit| commit.hash.as_str()).collect();
+    // lane -> hash of the commit still expected in it (None = free column).
+    let mut lanes: Vec<Option<String>> = Vec::new();
+    let mut rows = Vec::with_capacity(commits.len());
+
+    for commit in commits {
+        let node_lane = match lanes
+            .iter()
+            .position(|lane| lane.as_deref() == Some(commit.hash.as_str()))
+        {
+            Some(lane) => lane,
+            None => {
+                lanes.push(None);
+                lanes.len() - 1
+            }
+        };
+        let top = lanes.clone();
+        let incoming = top[node_lane].is_some();
+        lanes[node_lane] = None;
+
+        let visible: Vec<&String> = commit
+            .parents
+            .iter()
+            .filter(|parent| known.contains(parent.as_str()))
+            .collect();
+        let mut parents = Vec::with_capacity(visible.len());
+        for (ix, parent) in visible.iter().enumerate() {
+            if let Some(lane) = lanes
+                .iter()
+                .position(|slot| slot.as_deref() == Some(parent.as_str()))
+            {
+                parents.push(lane);
+                continue;
+            }
+            let lane = if ix == 0 && lanes[node_lane].is_none() {
+                node_lane
+            } else {
+                match lanes
+                    .iter()
+                    .enumerate()
+                    .skip(node_lane + 1)
+                    .find(|(_, slot)| slot.is_none())
+                    .map(|(lane, _)| lane)
+                {
+                    Some(lane) => lane,
+                    None => {
+                        lanes.push(None);
+                        lanes.len() - 1
+                    }
+                }
+            };
+            lanes[lane] = Some(parent.to_string());
+            parents.push(lane);
+        }
+
+        // Only lanes that were already active above this row pass through;
+        // a lane born here grows out of the node instead (see `parents`).
+        let verticals = (0..lanes.len())
+            .filter(|&lane| lane != node_lane && top.get(lane).is_some_and(|slot| slot.is_some()))
+            .collect();
+        // Drop trailing free columns, but never the node's own column, so the
+        // node can't fall outside the gutter.
+        while lanes.len() > node_lane + 1 && lanes.last() == Some(&None) {
+            lanes.pop();
+        }
+        let lane_count = lanes
+            .len()
+            .max(node_lane + 1)
+            .max(parents.iter().map(|lane| lane + 1).max().unwrap_or(0));
+
+        rows.push(GraphRow {
+            commit: commit.clone(),
+            node_lane,
+            lane_count,
+            verticals,
+            node_has_incoming: incoming,
+            parents,
+        });
+    }
+    rows
+}
+
+/// A hosted forge whose commit permalink shape is known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Forge {
+    Github,
+    Gitlab,
+    Bitbucket,
+}
+
+/// The `origin` remote mapped to an HTTPS web base, when it points at a forge
+/// we can build a commit permalink for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteWeb {
+    pub base: String,
+    pub forge: Forge,
+    /// Repository owner (the segment before the repo name).
+    pub owner: String,
+    /// Repository name (the last path segment).
+    pub name: String,
+}
+
+impl RemoteWeb {
+    /// The browser URL for one commit on this remote.
+    pub fn commit_url(&self, hash: &str) -> String {
+        match self.forge {
+            Forge::Github => format!("{}/commit/{hash}", self.base),
+            Forge::Gitlab => format!("{}/-/commit/{hash}", self.base),
+            Forge::Bitbucket => format!("{}/commits/{hash}", self.base),
+        }
+    }
+}
+
+/// Resolve `origin` to a web base. Handles the three remote URL shapes users
+/// actually have: `git@host:owner/repo.git`, `https://host/owner/repo(.git)`,
+/// and `ssh://git@host[:port]/owner/repo(.git)`. Only known forges qualify;
+/// self-hosted or local remotes get `None` rather than a link that may 404.
+pub fn remote_web(cwd: &Path) -> Option<RemoteWeb> {
+    let raw = run_git(cwd, &["remote", "get-url", "origin"]).ok()?;
+    let (host, path) = normalize_remote(&raw)?;
+    let forge = match host.as_str() {
+        "github.com" | "www.github.com" => Forge::Github,
+        "gitlab.com" | "www.gitlab.com" => Forge::Gitlab,
+        "bitbucket.org" | "www.bitbucket.org" => Forge::Bitbucket,
+        _ => return None,
+    };
+    let (owner, name) = path.rsplit_once('/')?;
+    Some(RemoteWeb {
+        base: format!("https://{host}/{path}"),
+        forge,
+        owner: owner.to_string(),
+        name: name.to_string(),
+    })
+}
+
+/// Turn a Git remote URL into `(host, path)`, where `path` is the cleaned
+/// repository path (`owner/repo`). Strips credentials, a port, a trailing
+/// slash, and a `.git` suffix.
+fn normalize_remote(raw: &str) -> Option<(String, String)> {
+    let raw = raw.trim().trim_end_matches('/');
+    if raw.is_empty() {
+        return None;
+    }
+    let (host, path) = if let Some((_, rest)) = raw.split_once("://") {
+        // scheme://[user[:token]@]host[:port]/path
+        let rest = rest
+            .rsplit_once('@')
+            .map(|(_, after)| after)
+            .unwrap_or(rest);
+        let (hostport, path) = rest.split_once('/')?;
+        let host = hostport.split(':').next()?;
+        (host.to_string(), path.to_string())
+    } else {
+        // scp-like: [user@]host:path
+        let after_user = raw.rsplit_once('@').map(|(_, after)| after).unwrap_or(raw);
+        let (host, path) = after_user.split_once(':')?;
+        (host.to_string(), path.to_string())
+    };
+    let path = path.trim_matches('/').trim_end_matches(".git");
+    if host.is_empty() || path.is_empty() {
+        return None;
+    }
+    Some((host, path.to_string()))
 }
 
 /// `(ahead, behind)` relative to the branch's upstream, or `None`.
@@ -825,18 +985,132 @@ mod tests {
     }
 
     #[test]
-    fn history_and_graph_include_the_baseline_commit() {
+    fn remote_urls_normalize_to_host_and_path() {
+        // scp-like, https, ssh with port, trailing slash, credentials.
+        assert_eq!(
+            normalize_remote("git@github.com:orbit/pi.git"),
+            Some(("github.com".into(), "orbit/pi".into()))
+        );
+        assert_eq!(
+            normalize_remote("https://github.com/orbit/pi.git"),
+            Some(("github.com".into(), "orbit/pi".into()))
+        );
+        assert_eq!(
+            normalize_remote("ssh://git@github.com:22/orbit/pi.git"),
+            Some(("github.com".into(), "orbit/pi".into()))
+        );
+        assert_eq!(
+            normalize_remote("https://user:token@github.com/orbit/pi/"),
+            Some(("github.com".into(), "orbit/pi".into()))
+        );
+        // Local paths and unknown hosts yield no base.
+        assert_eq!(normalize_remote("/tmp/not-a-remote"), None);
+        assert_eq!(normalize_remote("file:///tmp/repo"), None);
+    }
+
+    #[test]
+    fn commit_urls_follow_the_forge() {
+        let github = RemoteWeb {
+            base: "https://github.com/orbit/pi".into(),
+            forge: Forge::Github,
+            owner: "orbit".into(),
+            name: "pi".into(),
+        };
+        let gitlab = RemoteWeb {
+            base: "https://gitlab.com/orbit/pi".into(),
+            forge: Forge::Gitlab,
+            owner: "orbit".into(),
+            name: "pi".into(),
+        };
+        let bitbucket = RemoteWeb {
+            base: "https://bitbucket.org/orbit/pi".into(),
+            forge: Forge::Bitbucket,
+            owner: "orbit".into(),
+            name: "pi".into(),
+        };
+        assert_eq!(
+            github.commit_url("abc123"),
+            "https://github.com/orbit/pi/commit/abc123"
+        );
+        assert_eq!(
+            gitlab.commit_url("abc123"),
+            "https://gitlab.com/orbit/pi/-/commit/abc123"
+        );
+        assert_eq!(
+            bitbucket.commit_url("abc123"),
+            "https://bitbucket.org/orbit/pi/commits/abc123"
+        );
+    }
+
+    #[test]
+    fn history_includes_the_baseline_commit() {
         let root = repository();
         let history = history(&root, 20, 0).unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].subject, "baseline");
         assert!(!history[0].short.is_empty());
-
-        let graph = graph(&root, 20).unwrap();
-        assert_eq!(graph.len(), 1);
-        assert_eq!(graph[0].lane, 0);
-        assert_eq!(graph[0].lane_count, 1);
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn graph_history_spans_branches_and_lays_out_the_merge() {
+        let root = repository();
+        git_ok(&root, &["switch", "-c", "feature"]);
+        fs::write(root.join("src/lib.rs"), "fn feature() {}\n").unwrap();
+        git_ok(&root, &["commit", "--quiet", "-am", "feature work"]);
+        git_ok(&root, &["switch", "main"]);
+        git_ok(
+            &root,
+            &[
+                "merge",
+                "--no-ff",
+                "--quiet",
+                "-m",
+                "merge feature",
+                "feature",
+            ],
+        );
+
+        let commits = graph_history(&root, 50).unwrap();
+        assert_eq!(commits.len(), 3, "all local branches are reachable");
+        assert!(commits.iter().any(|c| c.subject == "merge feature"));
+
+        let rows = layout_graph(&commits);
+        assert_eq!(rows.len(), commits.len());
+
+        let merge = rows
+            .iter()
+            .find(|row| row.commit.subject == "merge feature")
+            .unwrap();
+        // The merge forks: two parents, each on its own lane.
+        assert_eq!(merge.parents.len(), 2);
+        assert_ne!(merge.parents[0], merge.parents[1]);
+
+        for row in &rows {
+            assert!(row.node_lane < row.lane_count, "{:?}", row.commit.subject);
+            assert!(row.verticals.iter().all(|lane| *lane < row.lane_count));
+            assert!(row.parents.iter().all(|lane| *lane < row.lane_count));
+        }
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn layout_graph_ignores_parents_outside_the_window() {
+        // A truncated window: the newest commit's parent is not in the list.
+        let commits = vec![GraphCommit {
+            hash: "a".into(),
+            short: "a".into(),
+            author: "Orbit".into(),
+            author_email: "orbit@example.com".into(),
+            relative: "now".into(),
+            subject: "head".into(),
+            parents: vec!["missing".into()],
+            refs: Vec::new(),
+        }];
+        let rows = layout_graph(&commits);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].parents.is_empty());
+        assert_eq!(rows[0].lane_count, 1);
     }
 
     fn summary(data: &ReviewDiff) -> (usize, u64, u64) {

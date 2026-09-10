@@ -20,10 +20,10 @@ use std::{
 };
 
 use gpui::{
-    div, img, linear_color_stop, linear_gradient, list, point, prelude::*, px, relative, svg, AnyElement,
-    App, ClipboardItem, ElementId, Font, FontFeatures, FontStyle, FontWeight, Hsla, ImageSource,
-    InteractiveText, ObjectFit, Pixels, ScrollHandle, SharedString, StrikethroughStyle, StyledText,
-    TextRun, UnderlineStyle, Window,
+    div, img, linear_color_stop, linear_gradient, list, point, prelude::*, px, relative, svg,
+    AnyElement, App, ClipboardItem, ElementId, Font, FontFeatures, FontStyle, FontWeight, Hsla,
+    ImageSource, InteractiveText, ObjectFit, Pixels, ScrollHandle, SharedString,
+    StrikethroughStyle, StyledText, TextRun, UnderlineStyle, Window,
 };
 
 use std::ops::Range;
@@ -34,7 +34,7 @@ use serde_json::Value;
 
 use crate::message_scroller::{self, MessageScrollerState};
 use crate::theme::{self, Theme};
-use crate::transcript::{changed_files, ChatMessage, Step, ToolCall};
+use crate::transcript::{ChatMessage, Step, ToolCall};
 
 /// Opens the changed-files Review in the side pane (see `sidepane.rs`) —
 /// handed down from the app so the transcript's Review buttons can point
@@ -125,20 +125,13 @@ struct RowPaint {
     live: bool,
     live_elapsed: Option<Duration>,
     fold_open: bool,
-    files_open: bool,
     copied: bool,
     expanded_turns: Rc<RefCell<HashSet<usize>>>,
-    expanded_files: Rc<RefCell<HashSet<usize>>>,
-    /// End-of-task summary row is shown — the last message's own
-    /// changed-files card is then subsumed by it.
-    tail_summary: bool,
     expanded_activities: ExpandedActivities,
     copied_at: Rc<RefCell<HashMap<usize, Instant>>>,
-    workspace: Option<PathBuf>,
     scroller: MessageScrollerState,
     expanded_tools: ExpandedTools,
     copied_sections: CopiedSections,
-    review_changes: Option<ReviewOpener>,
 }
 
 pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl IntoElement + use<> {
@@ -222,7 +215,6 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
             None
         };
         let fold_open = expanded_turns.borrow().contains(&ix);
-        let files_open = expanded_files.borrow().contains(&ix);
         let copied_now = copied
             .borrow()
             .get(&ix)
@@ -295,10 +287,7 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
                                 let text = files
                                     .iter()
                                     .map(|(path, _, _)| {
-                                        workspace_relative_path(
-                                            path,
-                                            workspace.as_deref(),
-                                        )
+                                        workspace_relative_path(path, workspace.as_deref())
                                     })
                                     .collect::<Vec<_>>()
                                     .join("\n");
@@ -336,18 +325,13 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
             live,
             live_elapsed,
             fold_open,
-            files_open,
             copied: copied_now,
             expanded_turns: expanded_turns.clone(),
-            expanded_files: expanded_files.clone(),
-            tail_summary: summary_files.is_some(),
             expanded_activities: expanded_activities.clone(),
             copied_at: copied.clone(),
-            workspace: workspace.clone(),
             scroller: scroller.clone(),
             expanded_tools: expanded_tools.clone(),
             copied_sections: copied_sections.clone(),
-            review_changes: review_changes.clone(),
         })
         .into_any_element()
     })
@@ -566,7 +550,11 @@ fn render_navigation_rail(
             user_turns.len(),
         ));
     } else if rail_hint_active {
-        body = body.child(render_rail_hint(theme, rail_hint_dismissed, rail_hint_shown_at));
+        body = body.child(render_rail_hint(
+            theme,
+            rail_hint_dismissed,
+            rail_hint_shown_at,
+        ));
     }
 
     div()
@@ -926,28 +914,8 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
         }
     }
 
-    let files = changed_files(message);
-    // The end-of-task summary card (shown after the last row) aggregates
-    // every turn's files — the final turn's own card would just duplicate it.
-    let tail_covers = paint.tail_summary && ix + 1 == paint.row_count;
-    if !files.is_empty() && !tail_covers {
-        content = content.child(
-            div()
-                .w_full()
-                .min_w_0()
-                .pt(px(8.))
-                .child(render_changed_files(
-                    &files,
-                    theme,
-                    ix,
-                    paint.workspace.as_deref(),
-                    paint.files_open,
-                    paint.expanded_files.clone(),
-                    paint.scroller.clone(),
-                    paint.review_changes.clone(),
-                )),
-        );
-    }
+    // Changed files render ONLY in the end-of-task summary card pinned
+    // after the last row (once the run settles) — not per message.
 
     if paint.live {
         content = content.child(render_working_indicator(
@@ -1934,11 +1902,7 @@ fn inline_runs(
         runs.push(TextRun {
             len,
             font,
-            color: if span.code {
-                theme.accent
-            } else {
-                base_color
-            },
+            color: if span.code { theme.accent } else { base_color },
             background_color: span.code.then_some(theme.inline_code_bg),
             underline: span.link.is_some().then(|| UnderlineStyle {
                 thickness: px(1.),
@@ -2300,10 +2264,15 @@ fn render_block(
             )
             .into_any_element()
         }
-        Block::Code(language, lines) => {
-            render_code_block(language.as_deref(), &lines, ix, block_ix, theme, copied_sections)
-                .into_any_element()
-        }
+        Block::Code(language, lines) => render_code_block(
+            language.as_deref(),
+            &lines,
+            ix,
+            block_ix,
+            theme,
+            copied_sections,
+        )
+        .into_any_element(),
         Block::Rule => div().w_full().h(px(1.)).bg(theme.border).into_any_element(),
         Block::Quote(lines) => div()
             .w_full()
@@ -2446,21 +2415,18 @@ fn render_code_block(
         .flex()
         .items_center()
         .gap(px(8.))
-        .when_some(
-            language.map(str::to_uppercase),
-            |row, lang| {
-                row.child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .truncate()
-                        .text_size(theme.ui_px(9.5))
-                        .line_height(theme.ui_px(13.))
-                        .text_color(theme.text_3)
-                        .child(lang),
-                )
-            },
-        )
+        .when_some(language.map(str::to_uppercase), |row, lang| {
+            row.child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_size(theme.ui_px(9.5))
+                    .line_height(theme.ui_px(13.))
+                    .text_color(theme.text_3)
+                    .child(lang),
+            )
+        })
         .when(!language.is_some(), |row| row.child(div().flex_1()))
         .child(copy_button);
     div()
@@ -3024,7 +2990,9 @@ mod tests {
     #[test]
     fn first_error_line_picks_first_nonempty_string() {
         assert_eq!(
-            first_error_line(&Value::String("error: file not found\n  at main.rs:1".into())),
+            first_error_line(&Value::String(
+                "error: file not found\n  at main.rs:1".into()
+            )),
             Some("error: file not found".to_string())
         );
         // Structured results dig out the first text-bearing value.
@@ -3175,8 +3143,10 @@ mod tests {
         assert_eq!(blocks.len(), 3);
         assert!(matches!(&blocks[0], Block::Paragraph(lines) if lines.join(" ") == "one two"));
         assert!(matches!(&blocks[1], Block::Heading(2, title) if title == "Title"));
-        assert!(matches!(&blocks[2], Block::Code(Some(lang), lines) if lang == "rs"
-            && lines == &["let a = 1;".to_string()]));
+        assert!(
+            matches!(&blocks[2], Block::Code(Some(lang), lines) if lang == "rs"
+            && lines == &["let a = 1;".to_string()])
+        );
         // A bare fence carries no language; the chip is simply absent.
         let bare = parse_blocks("```\nx\n```");
         assert!(matches!(&bare[0], Block::Code(None, lines) if lines == &["x".to_string()]));

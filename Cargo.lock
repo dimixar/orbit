@@ -3780,7 +3780,9 @@ dependencies = [
  "chrono",
  "cocoa 0.26.0",
  "devicons",
+ "futures",
  "gpui",
+ "image",
  "include_dir",
  "objc2",
  "objc2-app-kit",
@@ -3790,6 +3792,7 @@ dependencies = [
  "serde_json",
  "unicode-segmentation",
  "url",
+ "zed-reqwest",
 ]
 
 [[package]]
@@ -7186,6 +7189,7 @@ dependencies = [
  "base64",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",

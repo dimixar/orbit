@@ -12,9 +12,11 @@ mod command_palette;
 mod commit_message;
 mod composer;
 mod context_meter;
+mod dither;
 mod git;
 mod git_panel;
 mod highlight;
+mod http;
 mod mentions;
 mod message_scroller;
 mod model_selector;
@@ -150,77 +152,81 @@ fn bind_keys(cx: &mut App) {
 }
 
 fn main() {
-    Application::new()
-        .with_assets(assets::Assets)
-        .run(|cx: &mut App| {
-            bind_keys(cx);
-            theme::init(cx);
-            // Bundle Zed's UI/mono faces so `.ZedSans`/`.ZedMono` resolve to
-            // real fonts (IBM Plex Sans / Lilex) without OS dependencies.
-            assets::register_zed_fonts(cx).expect("failed to register Zed fonts");
-            app_icon::set_dock_icon();
+    let mut application = Application::new().with_assets(assets::Assets);
+    // Remote author avatars need an HTTP client; without one GPUI renders
+    // nothing for `img("https://…")` and the monogram fallback shows instead.
+    if let Some(client) = http::avatar_client() {
+        application = application.with_http_client(client);
+    }
+    application.run(|cx: &mut App| {
+        bind_keys(cx);
+        theme::init(cx);
+        // Bundle Zed's UI/mono faces so `.ZedSans`/`.ZedMono` resolve to
+        // real fonts (IBM Plex Sans / Lilex) without OS dependencies.
+        assets::register_zed_fonts(cx).expect("failed to register Zed fonts");
+        app_icon::set_dock_icon();
 
-            // Open maximized: full width of the screen, filling the visible
-            // frame (Waku-style workbench). The computed bounds are the
-            // restore size macOS returns to when the window is un-zoomed,
-            // sized relative to the display so it always fits even on
-            // small/scaled screens.
-            let (w, h) = match cx.primary_display().map(|d| d.bounds().size) {
-                Some(s) => (
-                    (f32::from(s.width) * 0.85).min(1440.),
-                    (f32::from(s.height) * 0.9).min(920.),
-                ),
-                None => (1240., 840.),
-            };
-            let restore_bounds = Bounds::centered(None, size(px(w), px(h)), cx);
-            let _window = cx
-                .open_window(
-                    WindowOptions {
-                        window_bounds: Some(WindowBounds::Maximized(restore_bounds)),
-                        // Keep the window usable when shrunk: sidebar (min
-                        // 200px) + a readable transcript + the composer.
-                        window_min_size: Some(size(px(960.), px(640.))),
-                        titlebar: Some(TitlebarOptions {
-                            title: Some(SharedString::from("Orbit Pi")),
-                            // Transparent titlebar: the sidebar extends to the top
-                            // and the native traffic lights sit inside it (Waku-style).
-                            appears_transparent: true,
-                            traffic_light_position: Some(point(px(12.), px(13.))),
-                        }),
-                        app_id: Some("dev.orbit.pi".into()),
-                        focus: true,
-                        ..Default::default()
-                    },
-                    |window, cx| {
-                        let app: Entity<OrbitApp> = cx.new(|cx| OrbitApp::new(cx));
+        // Open maximized: full width of the screen, filling the visible
+        // frame (Waku-style workbench). The computed bounds are the
+        // restore size macOS returns to when the window is un-zoomed,
+        // sized relative to the display so it always fits even on
+        // small/scaled screens.
+        let (w, h) = match cx.primary_display().map(|d| d.bounds().size) {
+            Some(s) => (
+                (f32::from(s.width) * 0.85).min(1440.),
+                (f32::from(s.height) * 0.9).min(920.),
+            ),
+            None => (1240., 840.),
+        };
+        let restore_bounds = Bounds::centered(None, size(px(w), px(h)), cx);
+        let _window = cx
+            .open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Maximized(restore_bounds)),
+                    // Keep the window usable when shrunk: sidebar (min
+                    // 200px) + a readable transcript + the composer.
+                    window_min_size: Some(size(px(960.), px(640.))),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some(SharedString::from("Orbit Pi")),
+                        // Transparent titlebar: the sidebar extends to the top
+                        // and the native traffic lights sit inside it (Waku-style).
+                        appears_transparent: true,
+                        traffic_light_position: Some(point(px(12.), px(13.))),
+                    }),
+                    app_id: Some("dev.orbit.pi".into()),
+                    focus: true,
+                    ..Default::default()
+                },
+                |window, cx| {
+                    let app: Entity<OrbitApp> = cx.new(|cx| OrbitApp::new(cx));
 
-                        // Focus the composer so typing works immediately.
-                        app.update(cx, |app, cx| {
-                            let handle = app.input.read(cx).focus_handle(cx);
-                            window.focus(&handle);
-                        });
+                    // Focus the composer so typing works immediately.
+                    app.update(cx, |app, cx| {
+                        let handle = app.input.read(cx).focus_handle(cx);
+                        window.focus(&handle);
+                    });
 
-                        // Heartbeat: drain pi events into the UI.
-                        let heartbeat = app.clone();
-                        window
-                            .spawn(cx, async move |cx: &mut AsyncWindowContext| loop {
-                                Timer::after(Duration::from_millis(90)).await;
-                                heartbeat
-                                    .update(cx, |app: &mut OrbitApp, cx| app.tick(cx))
-                                    .ok();
-                            })
-                            .detach();
+                    // Heartbeat: drain pi events into the UI.
+                    let heartbeat = app.clone();
+                    window
+                        .spawn(cx, async move |cx: &mut AsyncWindowContext| loop {
+                            Timer::after(Duration::from_millis(90)).await;
+                            heartbeat
+                                .update(cx, |app: &mut OrbitApp, cx| app.tick(cx))
+                                .ok();
+                        })
+                        .detach();
 
-                        // Detect installed editors/terminals for the header
-                        // "open in" control (off-thread; icons load once).
-                        app.update(cx, |app, cx| app.detect_open_in_apps(cx));
+                    // Detect installed editors/terminals for the header
+                    // "open in" control (off-thread; icons load once).
+                    app.update(cx, |app, cx| app.detect_open_in_apps(cx));
 
-                        app
-                    },
-                )
-                .unwrap();
+                    app
+                },
+            )
+            .unwrap();
 
-            cx.activate(true);
-            cx.on_action(|_: &Quit, cx| cx.quit());
-        });
+        cx.activate(true);
+        cx.on_action(|_: &Quit, cx| cx.quit());
+    });
 }

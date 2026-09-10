@@ -285,9 +285,7 @@ impl ModelSelector {
 
         if self.kind == PickerKind::Thinking {
             for level in self.levels.iter().filter(|level| {
-                matches(level)
-                    || matches(&thinking_display(level))
-                    || matches(thinking_hint(level))
+                matches(level) || matches(&thinking_display(level)) || matches(thinking_hint(level))
             }) {
                 let selected = level.eq_ignore_ascii_case(&self.current_level);
                 rows.push(Row::Level {
@@ -668,7 +666,11 @@ fn label_column<P: IntoElement, S: IntoElement>(
                 } else {
                     FontWeight::NORMAL
                 })
-                .text_color(if selected { theme.active_fg } else { theme.text_2 })
+                .text_color(if selected {
+                    theme.active_fg
+                } else {
+                    theme.text_2
+                })
                 .child(primary),
         )
         .child(

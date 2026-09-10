@@ -23,10 +23,7 @@ pub(crate) fn is_model_selected(
         return false;
     }
 
-    let keys = [
-        normalize_key(&model.id),
-        normalize_key(&model.name),
-    ];
+    let keys = [normalize_key(&model.id), normalize_key(&model.name)];
     for current in [current_model_id, current_model] {
         if current.is_empty() {
             continue;
@@ -76,7 +73,12 @@ mod tests {
     #[test]
     fn matches_by_name_when_id_empty() {
         let model = entry("glm-5.3-flash:cloud", "glm-5.3-flash:cloud", "ollama");
-        assert!(is_model_selected(&model, "glm-5.3-flash:cloud", "", "ollama"));
+        assert!(is_model_selected(
+            &model,
+            "glm-5.3-flash:cloud",
+            "",
+            "ollama"
+        ));
     }
 
     #[test]
@@ -88,22 +90,12 @@ mod tests {
             "glm-5.3-flash:cloud",
             "ollama",
         ));
-        assert!(is_model_selected(
-            &model,
-            "GLM 5.3 Flash",
-            "",
-            "ollama",
-        ));
+        assert!(is_model_selected(&model, "GLM 5.3 Flash", "", "ollama",));
     }
 
     #[test]
     fn rejects_different_provider() {
         let model = entry("gpt-4", "GPT-4", "openai");
-        assert!(!is_model_selected(
-            &model,
-            "GPT-4",
-            "gpt-4",
-            "anthropic",
-        ));
+        assert!(!is_model_selected(&model, "GPT-4", "gpt-4", "anthropic",));
     }
 }

@@ -94,6 +94,8 @@ The product is the GPUI app (`cargo run -p orbit-pi`). The v0.1 React/Vite/Tauri
 
 ## GPUI 0.2.2 API notes (learned on this repo — save re-deriving them)
 
+> **Reference: Zed.** Use Zed source code as a reference when a task concerns GPUI implementation — layout and styling idioms, focus and key dispatch, virtualized lists, menus and popovers, window and platform behavior — or when an in-house `src/ui` primitive needs a proven native precedent. Zed is the canonical GPUI codebase; read its crates rather than `gpui-component`, and read the gpui revision pinned in `Cargo.toml` so the APIs match what Waku builds against.
+
 These compiled and ran against the pinned version. When in doubt, check
 `~/.cargo/registry/src/.../gpui-0.2.2/` (source is the docs) and `examples/` inside it.
 
