@@ -286,6 +286,12 @@ impl Drop for PiClient {
     }
 }
 
+/// The resolved `pi` executable path, for one-shot subprocesses (e.g. the
+/// commit-message generator) that do not go through [`PiClient`].
+pub fn pi_binary() -> String {
+    resolve_pi_bin()
+}
+
 /// Resolve the `pi` executable to spawn.
 ///
 /// `PI_BIN` (if set) wins. Otherwise we look for `pi` on `PATH`, then in the
@@ -329,6 +335,5 @@ fn augmented_path() -> OsString {
     if let Some(path) = std::env::var_os("PATH") {
         dirs.extend(std::env::split_paths(&path));
     }
-    std::env::join_paths(dirs)
-        .unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
+    std::env::join_paths(dirs).unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
 }

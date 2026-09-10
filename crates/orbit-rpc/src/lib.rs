@@ -12,5 +12,5 @@
 pub mod client;
 pub mod types;
 
-pub use client::{PiClient, PI_BIN_ENV};
+pub use client::{pi_binary, PiClient, PI_BIN_ENV};
 pub use types::{AssistantMessageEvent, Command, CommandBody, ContextUsage, Event};

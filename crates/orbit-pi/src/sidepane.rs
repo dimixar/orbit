@@ -91,6 +91,8 @@ pub struct SidePane {
     expanded_paths: HashSet<String>,
     /// File whose diff is highlighted.
     selected_file: Option<usize>,
+    /// A file to select once the next snapshot loads (Git page → Review).
+    pending_select: Option<String>,
     /// Cached visible tree rows (kept in step with `tree_list`).
     tree_rows: Vec<review::TreeRow>,
     /// Keyboard cursor within the tree.
@@ -128,6 +130,7 @@ impl SidePane {
             tree_list: ListState::new(0, ListAlignment::Top, px(200.)),
             expanded_paths: HashSet::new(),
             selected_file: None,
+            pending_select: None,
             tree_rows: Vec::new(),
             tree_cursor: None,
             tree_focus: cx.focus_handle(),
@@ -253,6 +256,22 @@ impl SidePane {
         cx.notify();
     }
 
+    /// Open Review on the working tree and select `path` — the Git page's
+    /// changed-file rows call this so a row opens its diff.
+    pub fn show_file(&mut self, path: String, cx: &mut Context<Self>) {
+        self.open = true;
+        if self.source != Source::Uncommitted {
+            self.source = Source::Uncommitted;
+            self.clear_diff();
+        }
+        self.pending_select = Some(path);
+        self.review_stale = true;
+        if !self.review_loading {
+            self.load_review(cx);
+        }
+        cx.notify();
+    }
+
     /// Open the pane on Review — wired to the transcript's changed-files
     /// cards' "Review" buttons and the command palette (Waku parity).
     pub fn show_review(&mut self, cx: &mut Context<Self>) {
@@ -332,10 +351,24 @@ impl SidePane {
         } else {
             self.expanded_paths = directories;
         }
-        self.selected_file = previous_path
+        let pending = self.pending_select.take();
+        self.selected_file = pending
             .as_deref()
             .and_then(|path| snapshot.files.iter().position(|file| file.path == path))
+            .or_else(|| {
+                previous_path
+                    .as_deref()
+                    .and_then(|path| snapshot.files.iter().position(|file| file.path == path))
+            })
             .or_else(|| (!snapshot.files.is_empty()).then_some(0));
+        if let Some(index) = self.selected_file {
+            if let Some(line) = snapshot.files.get(index).and_then(|file| file.diff_line) {
+                self.diff_list.scroll_to(ListOffset {
+                    item_ix: line,
+                    offset_in_item: px(0.),
+                });
+            }
+        }
         self.tree_cursor = None;
         self.diff_list.reset(snapshot.lines.len());
         self.review = Some(Arc::new(snapshot));

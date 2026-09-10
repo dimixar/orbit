@@ -28,6 +28,7 @@ use serde_json::Value;
 
 use crate::branch_picker::BranchPicker;
 use crate::checkpoint;
+use crate::git_panel::GitPanel;
 use crate::workspace_picker::{WorkspaceEntry, WorkspacePicker};
 use crate::command_palette::{self, CommandPalette, PaletteCommand, PaletteSnapshot};
 use crate::composer::ComposerInput;
@@ -227,6 +228,10 @@ pub struct OrbitApp {
     latest_turn: Option<usize>,
     /// Right side pane — Review (git diff).
     sidepane: Entity<SidePane>,
+    /// Whether the Git page replaces the chat area.
+    git_open: bool,
+    /// The full-page Git panel (tabs + commit bar).
+    git_panel: Entity<GitPanel>,
 }
 
 /// An image queued to ride along with the next prompt.
@@ -347,6 +352,8 @@ impl OrbitApp {
 
         // Right side pane: Review (git diff).
         let sidepane = cx.new(SidePane::new);
+        // Full-page Git panel (Changes / History / Graph).
+        let git_panel = cx.new(GitPanel::new);
 
         let mut app = Self {
             client,
@@ -415,7 +422,17 @@ impl OrbitApp {
             turn_open: false,
             latest_turn: None,
             sidepane,
+            git_open: false,
+            git_panel: git_panel.clone(),
         };
+
+        // A changed-file row on the Git page opens its diff in Review.
+        let review_sidepane = app.sidepane.clone();
+        app.git_panel.update(cx, |panel, _| {
+            panel.set_open_file(Rc::new(move |path, _window, cx| {
+                review_sidepane.update(cx, |pane, cx| pane.show_file(path, cx));
+            }));
+        });
 
         if app.client.is_some() {
             app.send(CommandBody::GetState, "get_state");
@@ -1085,6 +1102,14 @@ impl OrbitApp {
             self.close_add_menu(window, cx);
             return;
         }
+        if self.git_open && self.git_panel.read(cx).has_modal() {
+            self.git_panel.update(cx, |panel, cx| panel.dismiss_modal(cx));
+            return;
+        }
+        if self.git_open {
+            self.close_git(cx);
+            return;
+        }
         if self.settings_open {
             // Escape closes an open dropdown first, then leaves settings.
             if self.settings_select.take().is_some() {
@@ -1579,6 +1604,10 @@ impl OrbitApp {
             }
             PaletteCommand::ReviewChanges => {
                 self.sidepane.update(cx, |pane, cx| pane.show_review(cx));
+            }
+            PaletteCommand::OpenGit => {
+                self.command_palette = None;
+                self.open_git(cx);
             }
             PaletteCommand::ChooseModel => self.toggle_picker(PickerKind::Model, window, cx),
             PaletteCommand::ChooseThinking => self.toggle_picker(PickerKind::Thinking, window, cx),
@@ -2663,41 +2692,19 @@ impl OrbitApp {
         cx.notify();
     }
 
-    /// Stage, commit, and push the workspace's changes (the details popover's
-    /// "Commit or push" row). Runs off the main thread.
-    fn commit_and_push(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(cwd) = self
-            .current_workspace
-            .clone()
-            .or_else(|| std::env::current_dir().ok())
-        else {
-            self.set_status("No workspace");
-            cx.notify();
-            return;
-        };
-        if self.branch_operation_pending {
-            return;
-        }
-        self.branch_operation_pending = true;
+    /// Open the full-page Git panel (Changes / History / Graph) and load it.
+    fn open_git(&mut self, cx: &mut Context<Self>) {
+        self.git_open = true;
         self.session_details_open = false;
+        self.git_panel.update(cx, |panel, cx| panel.show(cx));
         cx.notify();
+    }
 
-        let message = format!("orbit: {}", chrono::Local::now().format("%Y-%m-%d %H:%M"));
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { crate::git::commit_and_push(&cwd, &message) })
-                .await;
-            let _ = this.update(cx, |app, cx| {
-                app.branch_operation_pending = false;
-                match result {
-                    Ok(msg) => app.set_status(msg),
-                    Err(err) => app.set_status(format!("Commit or push failed: {err}")),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+    /// Close the Git page and return to the chat.
+    fn close_git(&mut self, cx: &mut Context<Self>) {
+        self.git_open = false;
+        self.git_panel.update(cx, |panel, cx| panel.hide(cx));
+        cx.notify();
     }
 
     /// The top-bar info popover: active session's environment + identifiers.
@@ -2799,9 +2806,9 @@ impl OrbitApp {
                     .hover(|s| s.bg(theme.bg_hover))
                     .on_click({
                         let this = this.clone();
-                        move |_, window, cx| {
+                        move |_, _window, cx| {
                             this.update(cx, |app, cx| {
-                                app.commit_and_push(window, cx);
+                                app.open_git(cx);
                             });
                         }
                     })
@@ -3447,6 +3454,12 @@ impl Render for OrbitApp {
         self.sidepane.update(cx, |pane, cx| {
             pane.set_turn_context(pane_session, pane_latest_turn, cx)
         });
+        let git_workspace = self.current_workspace.clone();
+        let git_provider = self.model_provider.clone();
+        let git_model = self.model_id.clone();
+        self.git_panel.update(cx, |panel, cx| {
+            panel.set_context(git_workspace, git_provider, git_model, cx)
+        });
         let main_width = viewport.width
             - if self.sidebar_visible && !self.settings_open {
                 self.sidebar_width
@@ -3750,6 +3763,8 @@ impl Render for OrbitApp {
             // ── main ──
             .child(if self.settings_open {
                 self.render_settings(cx).into_any_element()
+            } else if self.git_open {
+                self.git_panel.clone().into_any_element()
             } else if !self.dependencies_ready() {
                 // Missing runtime pieces (pi / node): show the setup page
                 // with install commands instead of the empty composer.

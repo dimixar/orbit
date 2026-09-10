@@ -69,6 +69,7 @@ pub enum PaletteCommand {
     ToggleSidebar,
     ToggleSidePanel,
     ReviewChanges,
+    OpenGit,
     ChooseModel,
     ChooseThinking,
     AbortRun,
@@ -364,6 +365,14 @@ impl CommandPalette {
                 None,
                 PaletteCommand::ReviewChanges,
                 "review git diff changes files panel",
+                next(),
+            ),
+            PaletteItem::command(
+                "Open Git",
+                "icons/branch.svg",
+                None,
+                PaletteCommand::OpenGit,
+                "git commit push branch history graph changes",
                 next(),
             ),
         ];
