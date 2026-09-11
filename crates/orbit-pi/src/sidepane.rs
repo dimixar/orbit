@@ -1588,6 +1588,7 @@ fn gap_icon(direction: ExpansionDirection) -> &'static str {
 fn spinner(id: &'static str, theme: Theme) -> AnyElement {
     gpui::svg()
         .path("icons/loader.svg")
+        .flex_none()
         .size(px(13.))
         .text_color(theme.text_3)
         .with_animation(

@@ -13,4 +13,8 @@ pub mod client;
 pub mod types;
 
 pub use client::{pi_binary, PiClient, PI_BIN_ENV};
-pub use types::{AssistantMessageEvent, Command, CommandBody, ContextUsage, Event};
+pub use types::{
+    is_auth_event, AssistantMessageEvent, AuthErrorCode, AuthEvent, AuthMethodCapability,
+    AuthProvider, Command, CommandBody, ContextUsage, Event, MessageUsage, PendingQueue,
+    SessionState, SessionUsage,
+};

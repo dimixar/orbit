@@ -85,8 +85,18 @@ impl PiClient {
     /// so sessions created here are the same ones the CLI sees. Pass an
     /// explicit dir to isolate (tests, throwaway demos).
     pub fn spawn(workspace_dir: &Path, session_dir: Option<&Path>) -> Result<Self> {
-        let bin = resolve_pi_bin();
-        let mut command = std::process::Command::new(&bin);
+        Self::spawn_with_bin(&resolve_pi_bin(), workspace_dir, session_dir)
+    }
+
+    /// Spawn a specific executable as the RPC server. [`spawn`](Self::spawn)
+    /// resolves the real `pi`; this seam lets tests drive the transport with a
+    /// scripted server and lets callers target an alternate pi build.
+    pub fn spawn_with_bin(
+        bin: &str,
+        workspace_dir: &Path,
+        session_dir: Option<&Path>,
+    ) -> Result<Self> {
+        let mut command = std::process::Command::new(bin);
         // Waku parity: `--approve` auto-approves tool calls so the RPC
         // session never stalls on an approval dialog it cannot render, and
         // the version check is noise for a child we just spawned.
@@ -97,7 +107,7 @@ impl PiClient {
             // pi's `#!/usr/bin/env node` shebang) resolves when launched from
             // a bundled `.app`. The resolved pi's own dir is included too, so
             // nvm/volta/mise installs find the `node` sitting beside it.
-            .env("PATH", augmented_path(Path::new(&bin).parent()))
+            .env("PATH", augmented_path(Path::new(bin).parent()))
             .current_dir(workspace_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

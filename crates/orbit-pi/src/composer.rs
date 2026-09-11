@@ -30,6 +30,9 @@ pub struct ComposerInput {
     focus_handle: FocusHandle,
     content: String,
     placeholder: SharedString,
+    /// Element id used in `render`. Defaults to `composer-input`; form
+    /// fields override it so several inputs can coexist as siblings.
+    element_id: SharedString,
     /// Key context flags for this input (space separated). Defaults to
     /// `Composer`; the model picker's filter input adds a `Picker` flag so
     /// the picker's enter/escape/arrow bindings can take precedence at the
@@ -68,6 +71,7 @@ impl ComposerInput {
             focus_handle: cx_focus_handle(_cx),
             content: String::new(),
             placeholder: "Do anything…".into(),
+            element_id: "composer-input".into(),
             key_context: "Composer".into(),
             selected_range: 0..0,
             selection_reversed: false,
@@ -94,6 +98,26 @@ impl ComposerInput {
     /// Replace the key context flags for this input (space separated).
     pub fn with_key_context(mut self, context: impl Into<SharedString>) -> Self {
         self.key_context = context.into();
+        self
+    }
+
+    /// Seed the content (used by the provider editor's form fields).
+    pub fn with_text(mut self, text: impl Into<String>) -> Self {
+        self.content = text.into();
+        self.selected_range = self.content.len()..self.content.len();
+        self
+    }
+
+    /// Override the element id so sibling inputs don't collide.
+    pub fn with_element_id(mut self, id: impl Into<SharedString>) -> Self {
+        self.element_id = id.into();
+        self
+    }
+
+    /// Cap how many visual rows the editor grows to before scrolling.
+    /// Form fields pass `1` so they stay a single line.
+    pub fn with_max_lines(mut self, max_lines: usize) -> Self {
+        self.max_lines = max_lines.max(1);
         self
     }
 
@@ -128,6 +152,16 @@ impl ComposerInput {
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.content.clear();
         self.selected_range = 0..0;
+        self.scroll_offset = px(0.);
+        cx.notify();
+    }
+
+    /// Replace the whole content and place the caret at the end. Used to seed
+    /// form fields from app state (session rename, restored queue text).
+    pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.content = text.into();
+        self.selected_range = self.content.len()..self.content.len();
+        self.selection_reversed = false;
         self.scroll_offset = px(0.);
         cx.notify();
     }
@@ -386,20 +420,15 @@ impl ComposerInput {
     /// the visual row the offset sits on.
     fn position_for_offset(&self, offset: usize) -> gpui::Point<Pixels> {
         let line_height = self.last_line_height;
-        for (i, line) in self.last_lines.iter().enumerate() {
-            let start = self.last_line_starts[i];
-            let line_end = start + line.len();
-            if offset < line_end || i == self.last_lines.len() - 1 {
-                let local = (offset - start).min(line.len());
-                return line
-                    .position_for_index(local, line_height)
-                    .unwrap_or_else(|| {
-                        point(
-                            line.width(),
-                            line.wrap_boundaries().len() as f32 * line_height,
-                        )
-                    });
-            }
+        let line_lens: Vec<usize> = self.last_lines.iter().map(|line| line.len()).collect();
+        if let Some((i, local)) = line_at_offset(&self.last_line_starts, &line_lens, offset) {
+            let line = &self.last_lines[i];
+            return line.position_for_index(local, line_height).unwrap_or_else(|| {
+                point(
+                    line.width(),
+                    line.wrap_boundaries().len() as f32 * line_height,
+                )
+            });
         }
         point(px(0.), px(0.))
     }
@@ -437,7 +466,7 @@ impl ComposerInput {
             if utf8_count >= offset {
                 break;
             }
-            utf8_count += 1;
+            utf8_count += ch.len_utf8();
             utf16_offset += ch.len_utf16();
         }
         utf16_offset
@@ -585,6 +614,31 @@ impl EntityInputHandler for ComposerInput {
     }
 }
 
+/// Locate the logical line that contains byte `offset`, returning the line
+/// index and the local byte index within it. `line_starts[i]` is the byte
+/// offset of line `i`; `line_lens[i]` is its length excluding the trailing
+/// newline that `shape_text` split off.
+///
+/// A caret can sit on a newline byte, which belongs to no line's text; we
+/// attribute it to the end of the preceding line. `offset` can also be stale
+/// relative to freshly shaped lines, so the local index saturates instead of
+/// underflowing (which would panic in debug builds).
+fn line_at_offset(
+    line_starts: &[usize],
+    line_lens: &[usize],
+    offset: usize,
+) -> Option<(usize, usize)> {
+    let last = line_lens.len().checked_sub(1)?;
+    line_starts
+        .iter()
+        .zip(line_lens)
+        .enumerate()
+        .find_map(|(i, (&start, &len))| {
+            (offset <= start + len || i == last)
+                .then(|| (i, offset.saturating_sub(start).min(len)))
+        })
+}
+
 /// The painted text element for the input.
 struct TextElement {
     input: Entity<ComposerInput>,
@@ -685,11 +739,13 @@ impl Element for TextElement {
         // Byte offset and y of each logical line (`WrappedLine::len`
         // excludes the newline that `shape_text` split off).
         let mut line_starts = Vec::with_capacity(lines.len());
+        let mut line_lens = Vec::with_capacity(lines.len());
         let mut line_y = Vec::with_capacity(lines.len());
         let mut byte_acc = 0usize;
         let mut y_acc = px(0.);
         for line in &lines {
             line_starts.push(byte_acc);
+            line_lens.push(line.len());
             line_y.push(y_acc);
             byte_acc += line.len() + 1;
             y_acc += line.size(line_height).height;
@@ -708,17 +764,11 @@ impl Element for TextElement {
         let max_scroll = (content_height - visible_height).max(px(0.));
         scroll_offset = scroll_offset.min(max_scroll).max(px(0.));
         if !lines.is_empty() {
-            for (i, line) in lines.iter().enumerate() {
-                let start = line_starts[i];
-                let line_end = start + line.len();
-                if cursor < line_end || i == lines.len() - 1 {
-                    let local = (cursor - start).min(line.len());
-                    if let Some(pos) = line.position_for_index(local, line_height) {
-                        let caret_y = line_y[i] + pos.y;
-                        scroll_offset = scroll_offset.max(caret_y + line_height - visible_height);
-                        scroll_offset = scroll_offset.min(caret_y).min(max_scroll).max(px(0.));
-                    }
-                    break;
+            if let Some((i, local)) = line_at_offset(&line_starts, &line_lens, cursor) {
+                if let Some(pos) = lines[i].position_for_index(local, line_height) {
+                    let caret_y = line_y[i] + pos.y;
+                    scroll_offset = scroll_offset.max(caret_y + line_height - visible_height);
+                    scroll_offset = scroll_offset.min(caret_y).min(max_scroll).max(px(0.));
                 }
             }
         }
@@ -781,19 +831,12 @@ impl Element for TextElement {
         if !lines.is_empty() {
             if content.is_empty() {
                 caret_pos = Some(point(px(0.), px(0.)));
-            } else {
-                for (i, line) in lines.iter().enumerate() {
-                    let start = line_starts[i];
-                    let line_end = start + line.len();
-                    if cursor < line_end || i == lines.len() - 1 {
-                        let local = (cursor - start).min(line.len());
-                        let raw = line
-                            .position_for_index(local, line_height)
-                            .unwrap_or_else(|| caret_fallback(line));
-                        caret_pos = Some(point(raw.x, line_y[i] + raw.y));
-                        break;
-                    }
-                }
+            } else if let Some((i, local)) = line_at_offset(&line_starts, &line_lens, cursor) {
+                let line = &lines[i];
+                let raw = line
+                    .position_for_index(local, line_height)
+                    .unwrap_or_else(|| caret_fallback(line));
+                caret_pos = Some(point(raw.x, line_y[i] + raw.y));
             }
         }
         let caret = caret_pos.map(|caret| {
@@ -891,7 +934,7 @@ impl Render for ComposerInput {
         // Transparent: the floating composer box in app.rs provides the
         // background/border; this is just the editable (auto-growing) area.
         div()
-            .id("composer-input")
+            .id(self.element_id.clone())
             .flex_1()
             .min_w_0()
             .key_context(self.key_context.as_ref())
@@ -918,5 +961,46 @@ impl Render for ComposerInput {
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .child(TextElement { input: cx.entity() })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::line_at_offset;
+
+    /// A caret on the newline byte (`"abc\n"` at offset 3) must resolve to
+    /// the end of the preceding line, not underflow into the next line's
+    /// start (the panic this guard was added for).
+    #[test]
+    fn caret_on_newline_belongs_to_preceding_line() {
+        let starts = [0, 4];
+        let lens = [3, 0];
+        assert_eq!(line_at_offset(&starts, &lens, 3), Some((0, 3)));
+    }
+
+    #[test]
+    fn caret_positions_map_to_their_line() {
+        let starts = [0, 4, 8];
+        let lens = [3, 3, 2];
+        assert_eq!(line_at_offset(&starts, &lens, 0), Some((0, 0)));
+        assert_eq!(line_at_offset(&starts, &lens, 3), Some((0, 3)));
+        assert_eq!(line_at_offset(&starts, &lens, 4), Some((1, 0)));
+        assert_eq!(line_at_offset(&starts, &lens, 7), Some((1, 3)));
+        assert_eq!(line_at_offset(&starts, &lens, 8), Some((2, 0)));
+        assert_eq!(line_at_offset(&starts, &lens, 10), Some((2, 2)));
+    }
+
+    /// A stale offset past the shaped lines clamps to the last line instead
+    /// of panicking.
+    #[test]
+    fn stale_offset_clamps_to_last_line() {
+        let starts = [0, 4];
+        let lens = [3, 0];
+        assert_eq!(line_at_offset(&starts, &lens, 99), Some((1, 0)));
+    }
+
+    #[test]
+    fn no_lines_yields_none() {
+        assert_eq!(line_at_offset(&[], &[], 0), None);
     }
 }

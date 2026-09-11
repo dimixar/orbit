@@ -233,6 +233,7 @@ fn render_jump_button(state: MessageScrollerState, theme: Theme) -> impl IntoEle
                 .child(
                     svg()
                         .path("icons/arrow-down.svg")
+                        .flex_none()
                         .size(px(16.))
                         .text_color(theme.text),
                 ),

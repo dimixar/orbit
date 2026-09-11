@@ -6,7 +6,7 @@ Same product philosophy as [Waku](https://github.com/egoist/waku): the UI layer 
 
 ## Features
 
-- **Chat-style agent sessions** — prompt composer with model selection, thinking-effort control, steer/cancel, and streaming responses
+- **Chat-style agent sessions** — prompt composer with model selection, thinking-effort control, follow-up queueing, cancel, and streaming responses
 - **GPU-rendered transcript** — virtualized message list; 10k-message sessions scroll at frame rate; stick-to-latest streaming with coalesced commits
 - **Sessions grouped by project** — persistent sessions organized per working directory, with reopen support; cross-workspace sessions included
 - **Model catalog** — model selection from the pi runtime's own list (`get_available_models`), backed by providers on disk

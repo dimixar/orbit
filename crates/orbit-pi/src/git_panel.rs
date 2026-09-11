@@ -1682,6 +1682,7 @@ fn check_box(checked: bool, theme: Theme) -> gpui::Stateful<gpui::Div> {
 fn spinner(id: &'static str, size: f32, theme: Theme) -> AnyElement {
     gpui::svg()
         .path("icons/loader.svg")
+        .flex_none()
         .size(px(size))
         .text_color(theme.accent)
         .with_animation(

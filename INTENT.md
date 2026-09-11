@@ -65,6 +65,28 @@ Waku's gpui is a fork (`waku-webview` branch) — **their code is pattern refere
 copy-paste** for our pinned 0.2.2. Reuse the *designs*: stream veil, one-StyledText-per-block
 markdown, highlight-as-paint, coalesced ≤8.3 Hz commits, per-session process management.
 
+### D7 — Provider OAuth is an RPC capability, not client logic
+**Choice:** provider authentication is a first-class `auth.*` RPC namespace. Orbit defines the
+wire contract (`crates/orbit-rpc/docs/auth-rpc.md`), reduces the events into non-sensitive UI
+state (`crates/orbit-pi/src/auth.rs`), and opens authorization URLs with the OS. The **pi**
+process implements the server side by reusing its existing provider auth/OAuth implementations
+and its `~/.pi/agent/auth.json` credential store. Orbit never implements a provider OAuth flow,
+never reads token material, and never persists tokens.
+
+**Rationale:** credential storage and refresh already live in pi; duplicating them in Rust
+would fork the source of truth and risk token leakage into GPUI state. Login session ids,
+structured error codes, cancellation, timeout, and restart recovery make the async flow
+deterministic on the client.
+
+**Compatibility:** a pi build without `auth.*` replies "Unknown command", which Orbit treats as
+*unsupported* and falls back to the existing file/Terminal login path. Existing provider
+functionality is preserved; nothing is faked.
+
+**Interim server side:** stock pi has no `auth.*` handlers, so `contrib/pi-auth-rpc/apply.mjs`
+injects them into an installed pi by wrapping `ModelRuntime.login`/`logout`/`listCredentials`
+(reusing pi's OAuth and `auth.json`). It writes a `.orbit-orig` backup and reverts with
+`--revert`; re-run it after `pi update`. Upstreaming the handlers is the durable fix.
+
 ## The feature parity contract
 
 Everything below must behave identically in the GPUI app (against the pi CLI) as it does in the

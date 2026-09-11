@@ -6,6 +6,7 @@
 mod app;
 mod app_icon;
 mod assets;
+mod auth;
 mod branch_picker;
 mod checkpoint;
 mod command_palette;
@@ -23,6 +24,7 @@ mod model_selector;
 mod model_selector_match;
 mod onboarding;
 mod platform;
+mod providers;
 mod review;
 mod sessions;
 mod sidepane;

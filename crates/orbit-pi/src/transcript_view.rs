@@ -20,7 +20,7 @@ use std::{
 };
 
 use gpui::{
-    div, img, linear_color_stop, linear_gradient, list, point, prelude::*, px, relative, svg,
+    deferred, div, img, linear_color_stop, linear_gradient, list, point, prelude::*, px, relative, svg,
     AnyElement, App, ClipboardItem, ElementId, Font, FontFeatures, FontStyle, FontWeight, Hsla,
     ImageSource, InteractiveText, ObjectFit, Pixels, ScrollHandle, SharedString,
     StrikethroughStyle, StyledText, TextRun, UnderlineStyle, Window,
@@ -32,6 +32,9 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use serde_json::Value;
 
+use orbit_rpc::MessageUsage;
+
+use crate::context_meter::format_tokens;
 use crate::message_scroller::{self, MessageScrollerState};
 use crate::theme::{self, Theme};
 use crate::transcript::{ChatMessage, Step, ToolCall};
@@ -93,6 +96,9 @@ pub(crate) struct TranscriptView {
     pub copied_sections: CopiedSections,
     /// Rail tick currently hovered (drives the turn preview card).
     pub hovered_turn: Rc<Cell<Option<usize>>>,
+    /// Assistant row whose footer usage metric is hovered (drives the
+    /// per-message token/cost breakdown card).
+    pub hovered_usage: Rc<Cell<Option<usize>>>,
     /// One-time rail hint: dismissal state (per install) + when it was
     /// first shown (drives its self-dismiss timeout).
     pub rail_hint_dismissed: Rc<Cell<bool>>,
@@ -112,6 +118,10 @@ pub(crate) struct TranscriptView {
     /// When the settled run finished (last message's timestamp) — shown in
     /// the summary card's footer next to the copy affordance.
     pub summary_finished_at: Option<i64>,
+    /// The whole run's reported usage — carried onto the summary footer so
+    /// the copy/time/usage details are shown once, on the last element,
+    /// instead of duplicated above and below the changed-files card.
+    pub summary_usage: Option<MessageUsage>,
     /// Opens the changed-files Review in the side pane (the cards'
     /// "Review" buttons); `None` hides the buttons.
     pub review_changes: Option<ReviewOpener>,
@@ -126,12 +136,23 @@ struct RowPaint {
     live_elapsed: Option<Duration>,
     fold_open: bool,
     copied: bool,
+    /// True for the last message when the tail summary owns the footer, so
+    /// the per-message footer is not drawn a second time above it.
+    suppress_footer: bool,
     expanded_turns: Rc<RefCell<HashSet<usize>>>,
     expanded_activities: ExpandedActivities,
     copied_at: Rc<RefCell<HashMap<usize, Instant>>>,
     scroller: MessageScrollerState,
     expanded_tools: ExpandedTools,
     copied_sections: CopiedSections,
+    hovered_usage: Rc<Cell<Option<usize>>>,
+}
+
+/// The last message's own footer is suppressed when the tail summary owns
+/// the run footer (copy + time + usage), so those details render exactly once
+/// — on the last element, after the changed-files card.
+fn suppress_message_footer(has_summary: bool, ix: usize, row_count: usize) -> bool {
+    has_summary && ix + 1 == row_count
 }
 
 pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl IntoElement + use<> {
@@ -146,6 +167,7 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
     let copied = view.copied.clone();
     let copied_sections = view.copied_sections.clone();
     let hovered_turn = view.hovered_turn.clone();
+    let hovered_usage = view.hovered_usage.clone();
     let rail_hint_dismissed = view.rail_hint_dismissed.clone();
     let rail_hint_shown_at = view.rail_hint_shown_at.clone();
     let workspace = view.workspace.clone();
@@ -154,6 +176,7 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
     let scroller = view.scroller.clone();
     let summary_files = view.summary_files.clone();
     let summary_finished_at = view.summary_finished_at;
+    let summary_usage = view.summary_usage.clone();
     let review_changes = view.review_changes.clone();
 
     let (user_turns, active_turn) = {
@@ -227,9 +250,10 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
             let Some(files) = summary_files.as_ref() else {
                 return div().into_any_element();
             };
+            let theme = *theme::get(cx);
             let card = render_changed_files(
                 files,
-                *theme::get(cx),
+                theme,
                 ix,
                 workspace.as_deref(),
                 expanded_files.borrow().contains(&ix),
@@ -237,67 +261,35 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
                 scroller.clone(),
                 review_changes.clone(),
             );
-            // Waku-style footer under the summary card: copy affordance
-            // (duplicates the changed-file list) + settled timestamp.
-            let copied_now = copied
+            // One run footer, after the changed-files card (Waku turn order:
+            // answer → files card → Copy): the copy affordance copies the
+            // answer, with the settled time and the run's usage. The last
+            // message's own footer is suppressed (see `suppress_footer`) so
+            // these details are not shown twice.
+            let last_ix = row_count.saturating_sub(1);
+            let copy_text = messages
                 .borrow()
-                .get(&ix)
+                .get(last_ix)
+                .filter(|message| !message.user)
+                .map(|message| message.text())
+                .unwrap_or_default();
+            let copied_last = copied
+                .borrow()
+                .get(&last_ix)
                 .is_some_and(|at| at.elapsed() < COPY_FEEDBACK);
             let stamp = summary_finished_at
-                .map(|millis| {
-                    div()
-                        .text_size(theme.ui_px(11.5))
-                        .text_color(theme.text_3)
-                        .child(summary_time_label(millis))
-                })
-                .unwrap_or_else(|| div());
-            let footer = div()
-                .mt(px(10.))
-                .px(px(4.))
-                .flex()
-                .items_center()
-                .gap(px(12.))
-                .child(
-                    div()
-                        .id(ElementId::NamedInteger(
-                            "copy-changed-files".into(),
-                            ix as u64,
-                        ))
-                        .flex()
-                        .items_center()
-                        .cursor_pointer()
-                        .child(glyph(
-                            if copied_now {
-                                "icons/check.svg"
-                            } else {
-                                "icons/copy.svg"
-                            },
-                            13.,
-                            if copied_now {
-                                theme.ok_green
-                            } else {
-                                theme.text_3
-                            },
-                        ))
-                        .on_click({
-                            let files = files.clone();
-                            let copied = copied.clone();
-                            let workspace = workspace.clone();
-                            move |_, _, cx| {
-                                let text = files
-                                    .iter()
-                                    .map(|(path, _, _)| {
-                                        workspace_relative_path(path, workspace.as_deref())
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
-                                cx.write_to_clipboard(ClipboardItem::new_string(text));
-                                copied.borrow_mut().insert(ix, Instant::now());
-                                cx.refresh_windows();
-                            }
-                        }),
-                )
-                .child(stamp);
+                .map(|millis| footer_time_stamp(summary_time_label(millis), theme));
+            let footer = div().mt(px(10.)).px(px(4.)).child(render_message_footer(
+                copy_text,
+                last_ix,
+                stamp,
+                summary_usage.clone(),
+                copied_last,
+                false,
+                theme,
+                copied.clone(),
+                hovered_usage.clone(),
+            ));
             return div()
                 .id(ElementId::NamedInteger("transcript-row".into(), ix as u64))
                 .w_full()
@@ -326,12 +318,14 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
             live_elapsed,
             fold_open,
             copied: copied_now,
+            suppress_footer: suppress_message_footer(summary_files.is_some(), ix, row_count),
             expanded_turns: expanded_turns.clone(),
             expanded_activities: expanded_activities.clone(),
             copied_at: copied.clone(),
             scroller: scroller.clone(),
             expanded_tools: expanded_tools.clone(),
             copied_sections: copied_sections.clone(),
+            hovered_usage: hovered_usage.clone(),
         })
         .into_any_element()
     })
@@ -830,11 +824,16 @@ fn render_user_bubble(message: &ChatMessage, paint: &RowPaint) -> impl IntoEleme
         .child(render_message_footer(
             text,
             ix,
-            message.finished_at,
+            message
+                .finished_at
+                .and_then(format_time)
+                .map(|time| footer_time_stamp(time, theme)),
+            message.usage(),
             paint.copied,
             true,
             theme,
             paint.copied_at.clone(),
+            paint.hovered_usage.clone(),
         ))
 }
 
@@ -917,6 +916,13 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
     // Changed files render ONLY in the end-of-task summary card pinned
     // after the last row (once the run settles) — not per message.
 
+    // A turn that ended in a provider/agent error (e.g. an unsupported
+    // model). pi carries the message in `errorMessage`; render it so a
+    // failed turn is never an empty row.
+    if let Some(error) = &message.error {
+        content = content.child(render_assistant_error(error, theme));
+    }
+
     if paint.live {
         content = content.child(render_working_indicator(
             paint.live_elapsed.unwrap_or(Duration::ZERO),
@@ -932,19 +938,67 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
         .items_start()
         .child(content);
 
-    if !paint.live && !message.text().is_empty() {
+    if !paint.live && !paint.suppress_footer && !message.text().is_empty() {
         row = row.child(render_message_footer(
             message.text(),
             ix,
-            message.finished_at,
+            message
+                .finished_at
+                .and_then(format_time)
+                .map(|time| footer_time_stamp(time, theme)),
+            message.usage(),
             paint.copied,
             false,
             theme,
             paint.copied_at.clone(),
+            paint.hovered_usage.clone(),
         ));
     }
 
     row
+}
+
+/// A settled assistant turn that failed: the provider/agent `errorMessage`
+/// pi carries on the message, as a red card. Mirrors the app-level error
+/// banner so the failure is visible in context too.
+fn render_assistant_error(error: &str, theme: Theme) -> AnyElement {
+    div()
+        .w_full()
+        .max_w_full()
+        .min_w_0()
+        .bg(theme.crit.opacity(0.1))
+        .border_1()
+        .border_color(theme.crit.opacity(0.45))
+        .rounded_lg()
+        .px(px(12.))
+        .py(px(9.))
+        .flex()
+        .items_start()
+        .gap_2p5()
+        .child(glyph("icons/info.svg", 15., theme.crit))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .child(
+                    div()
+                        .text_size(theme.ui_px(12.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child("Agent error"),
+                )
+                .child(
+                    div()
+                        .text_size(theme.ui_px(12.5))
+                        .text_color(theme.text_2)
+                        .whitespace_normal()
+                        .child(error.to_string()),
+                ),
+        )
+        .into_any_element()
 }
 
 /// Waku reasoning row: "Thinking" while live, "Thought for <duration>" once
@@ -1392,6 +1446,7 @@ fn render_detail_section(
                             "copy-activity-section".into(),
                             ((key.0 as u64) << 16 | key.1 as u64) << 8 | section as u64,
                         ))
+                        .flex_none()
                         .size(px(18.))
                         .rounded(px(4.))
                         .flex()
@@ -1449,21 +1504,39 @@ fn cap_chars(text: &str, max: usize) -> String {
     }
 }
 
-/// Message footer: persistent quiet copy button + `HH:MM` timestamp —
-/// always visible (the code-block copy button's treatment) so the
-/// affordance never depends on hover. Copy feedback pins the green check.
+/// The quiet timestamp chip in a message/run footer.
+fn footer_time_stamp(text: String, theme: Theme) -> AnyElement {
+    div()
+        .flex_none()
+        .h(px(FOOTER_BUTTON_SIZE))
+        .px(px(4.))
+        .flex()
+        .items_center()
+        .text_size(theme.ui_px(11.5))
+        .line_height(theme.ui_px(16.))
+        .text_color(theme.text_3)
+        .child(text)
+        .into_any_element()
+}
+
+/// Message footer: persistent quiet copy button + timestamp stamp and, when
+/// pi reports usage, a compact `↑in ↓out · $cost` metric. Hovering the metric
+/// opens the full token/cache/cost breakdown.
 #[allow(clippy::too_many_arguments)]
 fn render_message_footer(
     copy_text: String,
     ix: usize,
-    finished_at: Option<i64>,
+    stamp: Option<AnyElement>,
+    usage: Option<MessageUsage>,
     copied: bool,
     align_right: bool,
     theme: Theme,
     copied_at: Rc<RefCell<HashMap<usize, Instant>>>,
+    hovered_usage: Rc<Cell<Option<usize>>>,
 ) -> impl IntoElement {
     let button = div()
         .id(ElementId::NamedInteger("copy-response".into(), ix as u64))
+        .flex_none()
         .size(px(FOOTER_BUTTON_SIZE))
         .rounded(px(8.))
         .flex()
@@ -1477,7 +1550,7 @@ fn render_message_footer(
             } else {
                 "icons/copy.svg"
             },
-            14.,
+            18.,
             if copied { theme.ok_green } else { theme.text_3 },
         ))
         .on_click(move |_, _, cx| {
@@ -1485,17 +1558,6 @@ fn render_message_footer(
             copied_at.borrow_mut().insert(ix, Instant::now());
             cx.refresh_windows();
         });
-    let time = finished_at.and_then(format_time).map(|time| {
-        div()
-            .h(px(FOOTER_BUTTON_SIZE))
-            .px(px(4.))
-            .flex()
-            .items_center()
-            .text_size(theme.ui_px(11.5))
-            .line_height(theme.ui_px(16.))
-            .text_color(theme.text_3)
-            .child(time)
-    });
     let mut footer = div()
         .h(px(FOOTER_BUTTON_SIZE))
         .flex()
@@ -1504,17 +1566,193 @@ fn render_message_footer(
         .when(align_right, |row| row.justify_end());
     if align_right {
         // Waku's right-aligned footer: timestamp first, then actions.
-        if let Some(time) = time {
-            footer = footer.child(time);
+        if let Some(stamp) = stamp {
+            footer = footer.child(stamp);
         }
         footer = footer.child(button);
     } else {
         footer = footer.child(button);
-        if let Some(time) = time {
-            footer = footer.child(time);
+        if let Some(stamp) = stamp {
+            footer = footer.child(stamp);
         }
     }
+    if let Some(metric) = usage_metric(usage, ix, theme, hovered_usage) {
+        footer = footer.child(metric);
+    }
     footer
+}
+
+/// Compact `↑in ↓out · $cost` footer metric with a hover breakdown card.
+/// `None` when the turn has no reported usage, so the footer stays clean.
+fn usage_metric(
+    usage: Option<MessageUsage>,
+    ix: usize,
+    theme: Theme,
+    hovered_usage: Rc<Cell<Option<usize>>>,
+) -> Option<AnyElement> {
+    let usage = usage?;
+    let hovered = hovered_usage.get() == Some(ix);
+    let label = {
+        let mut label = format!(
+            "↑{} ↓{}",
+            format_tokens(usage.input),
+            format_tokens(usage.output)
+        );
+        if usage.cache_read > 0 {
+            if let Some(percent) = usage.cache_read_percent() {
+                label.push_str(&format!(" · {percent:.0}% cached"));
+            }
+        }
+        if let Some(cost) = usage.cost.filter(|cost| *cost > 0.0) {
+            label.push_str(" · ");
+            label.push_str(&format_message_cost(cost));
+        }
+        label
+    };
+    let mut metric = div()
+        .id(ElementId::NamedInteger("usage-metric".into(), ix as u64))
+        .relative()
+        .ml(px(6.))
+        .h(px(FOOTER_BUTTON_SIZE))
+        .flex()
+        .items_center()
+        .text_size(theme.ui_px(11.5))
+        .line_height(theme.ui_px(16.))
+        .text_color(theme.text_3)
+        .child(label)
+        .on_hover(move |is_hovered, _, cx| {
+            let next = if *is_hovered { Some(ix) } else { None };
+            if hovered_usage.get() != next {
+                hovered_usage.set(next);
+                cx.refresh_windows();
+            }
+        });
+    if hovered {
+        metric = metric.child(
+            div()
+                .absolute()
+                .bottom_full()
+                .left_0()
+                .mb(px(6.))
+                .child(deferred(usage_breakdown_card(&usage, theme))),
+        );
+    }
+    Some(metric.into_any_element())
+}
+
+/// Hover card: the full per-turn token/cache/cost breakdown behind the
+/// compact footer metric.
+fn usage_breakdown_card(usage: &MessageUsage, theme: Theme) -> AnyElement {
+    let cost = usage
+        .cost
+        .map(format_message_cost)
+        .unwrap_or_else(|| "—".into());
+    div()
+        .w(px(224.))
+        .rounded(px(10.))
+        .border_1()
+        .border_color(theme.border_strong)
+        .bg(theme.menu_bg)
+        .shadow(theme.card_shadow())
+        .px(px(12.))
+        .py(px(10.))
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .child(
+            div()
+                .text_size(theme.ui_px(11.5))
+                .text_color(theme.text_3)
+                .child("Message usage"),
+        )
+        .child(usage_metric_row(
+            "icons/usage-input.svg",
+            "Input",
+            format_tokens(usage.input),
+            theme,
+        ))
+        .child(usage_metric_row(
+            "icons/usage-output.svg",
+            "Output",
+            format_tokens(usage.output),
+            theme,
+        ))
+        .child(usage_metric_row(
+            "icons/cache-read.svg",
+            "Cache read",
+            cache_read_label(usage),
+            theme,
+        ))
+        .child(usage_metric_row(
+            "icons/cache-write.svg",
+            "Cache write",
+            format_tokens(usage.cache_write),
+            theme,
+        ))
+        .child(div().w_full().h(px(1.)).bg(theme.border))
+        .child(usage_metric_row(
+            "icons/usage-total.svg",
+            "Total",
+            format_tokens(usage.total),
+            theme,
+        ))
+        .child(usage_metric_row("icons/usage-cost.svg", "Cost", cost, theme))
+        .into_any_element()
+}
+
+fn usage_metric_row(
+    icon_path: &'static str,
+    label: &'static str,
+    value: String,
+    theme: Theme,
+) -> impl IntoElement {
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(7.))
+        .child(glyph(icon_path, 13., theme.text_3))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .text_size(theme.ui_px(12.))
+                .text_color(theme.text_3)
+                .whitespace_nowrap()
+                .child(label),
+        )
+        .child(
+            div()
+                .text_size(theme.ui_px(12.))
+                .text_color(theme.text)
+                .whitespace_nowrap()
+                .child(value),
+        )
+}
+
+/// `40.0K · 89% hit` for the cache-read row: the token count plus the
+/// provider cache hit rate over prompt tokens (`None` when the prompt was
+/// empty, so no meaningless `0%`).
+fn cache_read_label(usage: &MessageUsage) -> String {
+    let tokens = format_tokens(usage.cache_read);
+    match usage.cache_read_percent() {
+        Some(percent) => format!("{tokens} · {percent:.0}% hit"),
+        None => tokens,
+    }
+}
+
+/// Per-message costs are usually fractions of a cent, so show four decimals
+/// below one cent rather than collapsing every row to `<$0.01`.
+fn format_message_cost(cost: f64) -> String {
+    if !cost.is_finite() || cost <= 0.0 {
+        "$0.00".into()
+    } else if cost < 0.01 {
+        format!("${cost:.4}")
+    } else if cost < 100.0 {
+        format!("${cost:.2}")
+    } else {
+        format!("${cost:.0}")
+    }
 }
 
 /// Local `HH:MM` for an epoch-millis stamp; `None` when it cannot be resolved.
@@ -1524,7 +1762,11 @@ fn format_time(millis: i64) -> Option<String> {
 }
 
 fn glyph(path: &'static str, size: f32, color: Hsla) -> impl IntoElement {
-    svg().path(path).size(px(size)).text_color(color)
+    svg()
+        .path(path)
+        .flex_none()
+        .size(px(size))
+        .text_color(color)
 }
 
 fn pulse_dot(theme: Theme, elapsed_ms: u128) -> impl IntoElement {
@@ -2380,6 +2622,7 @@ fn render_code_block(
             "copy-code".into(),
             (ix as u64) << 16 | block_ix as u64,
         ))
+        .flex_none()
         .size(px(CODE_COPY_BUTTON))
         .rounded(px(6.))
         .flex()
@@ -2932,6 +3175,19 @@ mod tests {
         assert_eq!(changed_files_title(2), "Changed 2 files");
     }
 
+    /// The run footer (copy + time + usage) lives once, on the tail summary;
+    /// the last message's own footer steps aside so the details don't repeat.
+    #[test]
+    fn tail_summary_owns_the_single_footer() {
+        // No summary: every message keeps its footer.
+        assert!(!suppress_message_footer(false, 0, 3));
+        assert!(!suppress_message_footer(false, 2, 3));
+        // Summary present: only the last message's footer is suppressed.
+        assert!(!suppress_message_footer(true, 0, 3));
+        assert!(!suppress_message_footer(true, 1, 3));
+        assert!(suppress_message_footer(true, 2, 3));
+    }
+
     #[test]
     fn workspace_relative_path_strips_workspace_prefix() {
         let root = Path::new("/Users/dev/orbit");
@@ -2943,6 +3199,16 @@ mod tests {
             workspace_relative_path("src/main.rs", Some(root)),
             "src/main.rs"
         );
+    }
+
+    #[test]
+    fn message_cost_keeps_sub_cent_precision() {
+        assert_eq!(format_message_cost(0.0), "$0.00");
+        assert_eq!(format_message_cost(0.0012), "$0.0012");
+        assert_eq!(format_message_cost(0.45), "$0.45");
+        assert_eq!(format_message_cost(12.345), "$12.35");
+        assert_eq!(format_message_cost(250.0), "$250");
+        assert_eq!(format_message_cost(f64::NAN), "$0.00");
     }
 
     #[test]
@@ -3015,6 +3281,7 @@ mod tests {
                 elapsed: None,
                 images: Vec::new(),
                 finished_at: None,
+                error: None,
             },
             ChatMessage {
                 user: false,
@@ -3025,6 +3292,7 @@ mod tests {
                 elapsed: None,
                 images: Vec::new(),
                 finished_at: None,
+                error: None,
             },
             ChatMessage {
                 user: true,
@@ -3035,6 +3303,7 @@ mod tests {
                 elapsed: None,
                 images: Vec::new(),
                 finished_at: None,
+                error: None,
             },
             ChatMessage {
                 user: false,
@@ -3045,6 +3314,7 @@ mod tests {
                 elapsed: None,
                 images: Vec::new(),
                 finished_at: None,
+                error: None,
             },
         ];
         assert_eq!(active_user_index(&messages, Some(1), None), Some(0));
@@ -3064,6 +3334,7 @@ mod tests {
                 elapsed: None,
                 images: Vec::new(),
                 finished_at: None,
+                error: None,
             },
             ChatMessage {
                 user: false,
@@ -3074,6 +3345,7 @@ mod tests {
                 elapsed: None,
                 images: Vec::new(),
                 finished_at: None,
+                error: None,
             },
             ChatMessage {
                 user: true,
@@ -3084,6 +3356,7 @@ mod tests {
                 elapsed: None,
                 images: Vec::new(),
                 finished_at: None,
+                error: None,
             },
             ChatMessage {
                 user: false,
@@ -3094,6 +3367,7 @@ mod tests {
                 elapsed: None,
                 images: Vec::new(),
                 finished_at: None,
+                error: None,
             },
         ];
         // Reader scrolled back to the first turn: the tick for turn 0 is
@@ -3208,6 +3482,7 @@ mod tests {
                 elapsed: None,
                 images: Vec::new(),
                 finished_at: None,
+                error: None,
             },
             ChatMessage {
                 user: false,
@@ -3218,6 +3493,7 @@ mod tests {
                 elapsed: None,
                 images: Vec::new(),
                 finished_at: None,
+                error: None,
             },
             ChatMessage {
                 user: true,
@@ -3228,6 +3504,7 @@ mod tests {
                 elapsed: None,
                 images: Vec::new(),
                 finished_at: None,
+                error: None,
             },
         ];
         assert!(!starts_followup_turn(&messages, 0));

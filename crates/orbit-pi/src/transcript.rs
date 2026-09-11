@@ -20,7 +20,7 @@ use gpui::{point, prelude::*, px, Image, Pixels, ScrollHandle};
 
 use crate::message_scroller::MessageScrollerState;
 use crate::transcript_view::{self, TranscriptView};
-use orbit_rpc::{AssistantMessageEvent, Event};
+use orbit_rpc::{AssistantMessageEvent, Event, MessageUsage};
 use serde_json::Value;
 
 /// One streaming step of an assistant turn: the reasoning it did, the tool
@@ -30,6 +30,8 @@ pub struct Step {
     pub thinking: String,
     pub tools: Vec<ToolCall>,
     pub text: String,
+    /// Provider-reported usage for this LLM call, when pi supplies it.
+    pub usage: Option<MessageUsage>,
 }
 
 pub struct ChatMessage {
@@ -43,6 +45,10 @@ pub struct ChatMessage {
     /// When this message was completed (epoch millis). Snapshot messages
     /// carry pi's own `timestamp`; live ones are stamped at `message_end`.
     pub finished_at: Option<i64>,
+    /// Provider/agent error that ended this assistant turn
+    /// (`stopReason: "error"` + `errorMessage`). Rendered inline so a failed
+    /// turn is never an empty row.
+    pub error: Option<String>,
 }
 
 impl ChatMessage {
@@ -65,6 +71,20 @@ impl ChatMessage {
         self.steps
             .iter()
             .any(|step| !step.thinking.is_empty() || !step.tools.is_empty())
+    }
+
+    /// Turn-level usage: the sum of every step's provider-reported usage.
+    /// `None` when no step carries usage (user turns, or providers that omit
+    /// it), so the footer can hide the metric rather than invent zeros.
+    pub fn usage(&self) -> Option<MessageUsage> {
+        let mut total: Option<MessageUsage> = None;
+        for usage in self.steps.iter().filter_map(|step| step.usage.as_ref()) {
+            match &mut total {
+                Some(total) => total.add(usage),
+                None => total = Some(usage.clone()),
+            }
+        }
+        total
     }
 }
 
@@ -120,6 +140,7 @@ impl ChatMessage {
             images: Vec::new(),
             elapsed: None,
             finished_at: None,
+            error: None,
         }
     }
 
@@ -130,12 +151,14 @@ impl ChatMessage {
         let value = value.get("message").unwrap_or(value);
         let role = value.get("role")?.as_str()?;
         let user = role == "user";
+        let error = message_error(value);
         let mut message = ChatMessage {
             user,
             steps: vec![Step::default()],
             images: Vec::new(),
             elapsed: None,
             finished_at: parse_timestamp(value.get("timestamp")),
+            error,
         };
         let step = message.steps.last_mut().expect("one step");
 
@@ -189,6 +212,7 @@ impl ChatMessage {
             }
             _ => {}
         }
+        message.steps[0].usage = MessageUsage::from_value(value.get("usage"));
         Some(message)
     }
 }
@@ -298,12 +322,17 @@ struct StepMark {
 fn merge_step(slot: &mut ChatMessage, step: ChatMessage) {
     let elapsed = step.elapsed;
     let finished_at = step.finished_at;
+    let error = step.error.clone();
     slot.steps.push(step.into_step());
     if elapsed.is_some() {
         slot.elapsed = elapsed;
     }
     if finished_at.is_some() {
         slot.finished_at = finished_at;
+    }
+    // A step that ended in an error labels the whole row.
+    if error.is_some() {
+        slot.error = error;
     }
 }
 
@@ -322,6 +351,23 @@ fn message_role(value: &Value) -> Option<&str> {
         .unwrap_or(value)
         .get("role")
         .and_then(Value::as_str)
+}
+
+/// The provider/agent error carried by a finalized assistant message, if any.
+/// pi sets `stopReason: "error"` and `errorMessage` when the LLM call fails
+/// (e.g. an unsupported model). The app raises the error banner from this and
+/// the transcript renders the same text inline.
+pub fn message_error(value: &Value) -> Option<String> {
+    let value = value.get("message").unwrap_or(value);
+    if value.get("role").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    value
+        .get("errorMessage")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .map(str::to_string)
 }
 
 fn summarize_value(value: &Value) -> String {
@@ -519,6 +565,9 @@ pub struct Transcript {
     tool_positions: Rc<RefCell<HashMap<String, (usize, usize, usize)>>>,
     /// Rail tick currently hovered (drives the turn preview card).
     hovered_turn: Rc<Cell<Option<usize>>>,
+    /// Assistant row whose footer usage metric is hovered (drives the
+    /// per-message token/cost breakdown card).
+    hovered_usage: Rc<Cell<Option<usize>>>,
     /// One-time rail hint still pending (per install, persisted). Cleared
     /// by using the rail, jumping turns, or the TTL below.
     rail_hint_dismissed: Rc<Cell<bool>>,
@@ -552,6 +601,7 @@ impl Transcript {
             copied_sections: Rc::new(RefCell::new(HashMap::new())),
             tool_positions: Rc::new(RefCell::new(HashMap::new())),
             hovered_turn: Rc::new(Cell::new(None)),
+            hovered_usage: Rc::new(Cell::new(None)),
             rail_hint_dismissed: Rc::new(Cell::new(load_rail_hint_seen())),
             rail_hint_shown_at: Rc::new(Cell::new(None)),
             rail_scroll: ScrollHandle::new(),
@@ -909,6 +959,7 @@ impl Transcript {
                 // The settled step carries the run's wall clock — keep it
                 // on the row (merge_step does this for non-stream paths).
                 let step_elapsed = final_message.elapsed.take();
+                let settled_error = final_message.error.take();
                 let mut settled_step = final_message.into_step();
                 // Re-attach results pi captured live (its settled blocks omit
                 // them).
@@ -932,6 +983,9 @@ impl Transcript {
                 }
                 if let Some(elapsed) = step_elapsed {
                     slot.elapsed = Some(elapsed);
+                }
+                if settled_error.is_some() {
+                    slot.error = settled_error;
                 }
                 if slot.finished_at.is_none() {
                     slot.finished_at = Some(now_millis());
@@ -1333,6 +1387,7 @@ impl Transcript {
             images,
             elapsed: None,
             finished_at: None,
+            error: None,
         });
         drop(messages);
         self.insert_row();
@@ -1427,6 +1482,13 @@ impl Transcript {
         } else {
             None
         };
+        // The run's whole usage rides the summary footer so the copy/time/
+        // usage details show once, on the last element.
+        let summary_usage = if summary_files.is_some() {
+            self.messages.borrow().last().and_then(|m| m.usage())
+        } else {
+            None
+        };
         transcript_view::render_transcript(
             TranscriptView {
                 messages: self.messages.clone(),
@@ -1440,6 +1502,7 @@ impl Transcript {
                 copied: self.copied.clone(),
                 copied_sections: self.copied_sections.clone(),
                 hovered_turn: self.hovered_turn.clone(),
+                hovered_usage: self.hovered_usage.clone(),
                 rail_hint_dismissed: self.rail_hint_dismissed.clone(),
                 rail_hint_shown_at: self.rail_hint_shown_at.clone(),
                 workspace: workspace.map(Path::to_path_buf),
@@ -1449,6 +1512,7 @@ impl Transcript {
                 rail_autoscroll: self.rail_autoscroll.clone(),
                 summary_files,
                 summary_finished_at,
+                summary_usage,
                 review_changes,
             },
             cx,
@@ -1460,6 +1524,39 @@ impl Transcript {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn assistant_error_message_surfaces_stop_reason_error() {
+        // The exact shape pi emits when the provider rejects the request:
+        // `stopReason: "error"` plus `errorMessage` (see agent-loop).
+        let value = json!({
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "content": [],
+                "stopReason": "error",
+                "errorMessage": "Codex error: The 'gpt-5.3-codex-spark' model is not supported when using Codex with a ChatGPT account."
+            }
+        });
+        let expected = "Codex error: The 'gpt-5.3-codex-spark' model is not supported when using Codex with a ChatGPT account.";
+        assert_eq!(message_error(&value).as_deref(), Some(expected));
+        let parsed = ChatMessage::from_value(&value).expect("assistant message");
+        assert!(!parsed.user);
+        assert_eq!(parsed.error.as_deref(), Some(expected));
+
+        // A clean assistant message carries no error.
+        let ok = json!({
+            "role": "assistant",
+            "content": [{"type": "text", "text": "hi"}],
+            "stopReason": "stop"
+        });
+        assert!(message_error(&ok).is_none());
+        assert!(ChatMessage::from_value(&ok).unwrap().error.is_none());
+
+        // User messages never surface a provider error.
+        let user = json!({"role": "user", "content": "hi", "errorMessage": "ignored"});
+        assert!(message_error(&user).is_none());
+    }
 
     #[test]
     fn real_session_payload_renders_changed_files_card() {
@@ -1883,6 +1980,51 @@ mod tests {
     }
 
     #[test]
+    fn assistant_usage_parses_and_aggregates_across_steps() {
+        let first = json!({
+            "role": "assistant",
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": {
+                "input": 100, "output": 50, "cacheRead": 20, "cacheWrite": 5,
+                "cost": {"input": 0.0003, "output": 0.00075, "cacheRead": 0,
+                    "cacheWrite": 0, "total": 0.00105}
+            }
+        });
+        let mut message = ChatMessage::from_value(&first).expect("message");
+        let usage = message.usage().expect("usage");
+        assert_eq!(usage.input, 100);
+        assert_eq!(usage.total, 175);
+        assert_eq!(usage.cost, Some(0.00105));
+
+        // A tool-loop turn merges another LLM call into the same row; the
+        // turn-level usage is the sum of its steps.
+        let second = json!({
+            "role": "assistant",
+            "content": [{"type": "text", "text": "more"}],
+            "usage": {"input": 10, "output": 2, "cacheRead": 0, "cacheWrite": 0,
+                "totalTokens": 12}
+        });
+        merge_step(&mut message, ChatMessage::from_value(&second).expect("message"));
+        let total = message.usage().expect("usage");
+        assert_eq!(total.input, 110);
+        assert_eq!(total.output, 52);
+        assert_eq!(total.total, 187);
+        assert_eq!(total.cost, Some(0.00105));
+    }
+
+    #[test]
+    fn usage_is_absent_without_provider_report() {
+        let user = json!({"role": "user", "content": "hi"});
+        assert!(ChatMessage::from_value(&user).expect("message").usage().is_none());
+
+        let no_usage = json!({"role": "assistant", "content": [{"type": "text", "text": "hi"}]});
+        assert!(ChatMessage::from_value(&no_usage)
+            .expect("message")
+            .usage()
+            .is_none());
+    }
+
+    #[test]
     fn diff_from_message_sums_edit_and_write() {
         let message = json!({
             "role": "assistant",
@@ -1969,6 +2111,7 @@ mod tests {
             images: Vec::new(),
             elapsed: None,
             finished_at: None,
+            error: None,
         };
         assert_eq!(
             changed_files(&message),

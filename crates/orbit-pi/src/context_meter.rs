@@ -7,11 +7,11 @@
 use std::rc::Rc;
 
 use gpui::{
-    canvas, deferred, div, point, prelude::*, px, relative, AnyElement, App, Background, Bounds,
-    ClickEvent, Context, Entity, Hsla, IntoElement, MouseDownEvent, PathBuilder, Pixels,
+    canvas, deferred, div, point, prelude::*, px, relative, svg, AnyElement, App, Background,
+    Bounds, ClickEvent, Context, Entity, Hsla, IntoElement, MouseDownEvent, PathBuilder, Pixels,
     SharedString, Window,
 };
-use orbit_rpc::ContextUsage;
+use orbit_rpc::{ContextUsage, SessionUsage};
 
 use crate::theme::Theme;
 
@@ -218,8 +218,13 @@ fn arc_stroke(
     builder.build()
 }
 
-/// Compact hover card: "59% context used" / "151K / 256K tokens".
-pub fn compact_card(usage: Option<&ContextUsage>, theme: Theme) -> impl IntoElement {
+/// Compact hover card: "59% context used" / "151K / 256K tokens" and, when
+/// pi reports a cost, the running session spend.
+pub fn compact_card(
+    usage: Option<&ContextUsage>,
+    session: Option<&SessionUsage>,
+    theme: Theme,
+) -> impl IntoElement {
     let (title, subtitle) = match usage {
         Some(usage) => {
             let title = format_percent(usage)
@@ -237,6 +242,7 @@ pub fn compact_card(usage: Option<&ContextUsage>, theme: Theme) -> impl IntoElem
         }
         None => ("Context usage".into(), "Waiting for the pi agent".into()),
     };
+    let cost = session.and_then(|s| s.cost).map(format_cost);
     div()
         .w_full()
         .px(px(12.))
@@ -263,11 +269,33 @@ pub fn compact_card(usage: Option<&ContextUsage>, theme: Theme) -> impl IntoElem
                 .whitespace_nowrap()
                 .child(subtitle),
         )
+        .children(cost.map(|cost| {
+            div()
+                .text_size(theme.ui_px(12.))
+                .text_color(theme.text_3)
+                .whitespace_nowrap()
+                .child(format!("{cost} spent"))
+        }))
+}
+
+/// Money label for a session cost in USD. Sub-cent amounts read `<$0.01`
+/// rather than rounding to a misleading `$0.00`.
+fn format_cost(cost: f64) -> String {
+    if !cost.is_finite() || cost <= 0.0 {
+        "$0.00".into()
+    } else if cost < 0.01 {
+        "<$0.01".into()
+    } else if cost < 100.0 {
+        format!("${cost:.2}")
+    } else {
+        format!("${cost:.0}")
+    }
 }
 
 /// Full click panel: percent, token total, segmented bar, per-slice legend.
 pub fn details_card(
     usage: Option<&ContextUsage>,
+    session: Option<&SessionUsage>,
     slices: &[ContextSlice],
     theme: Theme,
     on_close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -353,6 +381,7 @@ pub fn details_card(
         )
         .child(segmented_bar(slices, window_tokens, theme))
         .child(legend(slices, theme))
+        .children(session.map(|session| session_usage_section(session, theme)))
 }
 
 fn segmented_bar(slices: &[ContextSlice], window: u64, theme: Theme) -> impl IntoElement + use<> {
@@ -411,6 +440,110 @@ fn legend(slices: &[ContextSlice], theme: Theme) -> impl IntoElement + use<> {
         .into_any_element()
 }
 
+/// Full-session token/cost totals: a hairline divider, a section label, then
+/// one full-width label/value row per metric. A single column (rather than a
+/// two-up grid) keeps every value right-aligned and lets the cache-read
+/// hit-rate suffix (`66.7M · 89%`) render without colliding with the next
+/// column.
+pub fn session_usage_section(usage: &SessionUsage, theme: Theme) -> AnyElement {
+    let cost = usage.cost.map(format_cost).unwrap_or_else(|| "—".into());
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .child(div().w_full().h(px(1.)).bg(theme.border))
+        .child(
+            div()
+                .text_size(theme.ui_px(12.))
+                .text_color(theme.text_3)
+                .child("Session usage"),
+        )
+        .child(session_row(
+            "icons/usage-input.svg",
+            "Input",
+            format_tokens(usage.input),
+            theme,
+        ))
+        .child(session_row(
+            "icons/usage-output.svg",
+            "Output",
+            format_tokens(usage.output),
+            theme,
+        ))
+        .child(session_row(
+            "icons/cache-read.svg",
+            "Cache read",
+            cache_read_label(usage),
+            theme,
+        ))
+        .child(session_row(
+            "icons/cache-write.svg",
+            "Cache write",
+            format_tokens(usage.cache_write),
+            theme,
+        ))
+        .child(session_row(
+            "icons/usage-total.svg",
+            "Total",
+            format_tokens(usage.total),
+            theme,
+        ))
+        .child(session_row("icons/usage-cost.svg", "Cost", cost, theme))
+        .into_any_element()
+}
+
+/// `40.0K · 89%` for the session cache-read row: token count plus the
+/// provider cache hit rate over prompt tokens (`None` keeps just the count).
+fn cache_read_label(usage: &SessionUsage) -> String {
+    let tokens = format_tokens(usage.cache_read);
+    match usage.cache_read_percent() {
+        Some(percent) => format!("{tokens} · {percent:.0}%"),
+        None => tokens,
+    }
+}
+
+/// One full-width label/value row: a muted metric icon, the label, then the
+/// value pinned right. The label flexes so the value edge stays aligned
+/// regardless of label or value length.
+fn session_row(
+    icon_path: &'static str,
+    label: &'static str,
+    value: String,
+    theme: Theme,
+) -> impl IntoElement {
+    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(px(7.))
+        .child(glyph(icon_path, 13., theme.text_3))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .text_size(theme.ui_px(12.))
+                .text_color(theme.text_3)
+                .whitespace_nowrap()
+                .child(label),
+        )
+        .child(
+            div()
+                .text_size(theme.ui_px(12.))
+                .text_color(theme.text)
+                .whitespace_nowrap()
+                .child(value),
+        )
+}
+
+/// Inline stroke icon at a fixed size, tinted with `currentColor`.
+fn glyph(path: &'static str, size: f32, color: Hsla) -> impl IntoElement {
+    svg()
+        .path(path)
+        .flex_none()
+        .size(px(size))
+        .text_color(color)
+}
+
 /// Sit the card fully above the ring, right-aligned with it.
 ///
 /// `bottom: 100%` pins the card's bottom edge to the ring's top. `right: 0`
@@ -427,10 +560,20 @@ fn popup_above_ring(width: f32, child: impl IntoElement) -> AnyElement {
         .into_any_element()
 }
 
+/// Data the context meter renders, all sourced from one `get_session_stats`
+/// response plus the local transcript estimate.
+pub struct ContextMeterData<'a> {
+    /// Point-in-time context-window snapshot.
+    pub usage: Option<&'a ContextUsage>,
+    /// Cumulative session token/cost totals.
+    pub session: Option<&'a SessionUsage>,
+    /// chars/4 estimate over the loaded transcript.
+    pub conversation_est: u64,
+}
+
 /// Ring chip + optional hover/details popover, anchored above the control.
 pub fn context_control<V: 'static>(
-    usage: Option<&ContextUsage>,
-    conversation_est: u64,
+    data: ContextMeterData<'_>,
     popup: ContextPopup,
     entity: &Entity<V>,
     theme: Theme,
@@ -438,10 +581,12 @@ pub fn context_control<V: 'static>(
     on_click: impl Fn(&mut V, &mut Window, &mut Context<V>) + 'static,
     on_close: impl Fn(&mut V, &mut Window, &mut Context<V>) + 'static,
 ) -> impl IntoElement {
+    let usage = data.usage;
+    let session = data.session;
     let fraction = usage.and_then(ContextUsage::fraction).unwrap_or(0.0);
     let fill = fill_color(Some(fraction), &theme);
     let slices = usage
-        .map(|u| usage_slices(u, conversation_est, &theme))
+        .map(|u| usage_slices(u, data.conversation_est, &theme))
         .unwrap_or_default();
     let this = entity.clone();
     let this_click = entity.clone();
@@ -451,7 +596,7 @@ pub fn context_control<V: 'static>(
 
     let popup_el: Option<AnyElement> = match popup {
         ContextPopup::None => None,
-        ContextPopup::Hover => Some(popup_above_ring(HOVER_W, compact_card(usage, theme))),
+        ContextPopup::Hover => Some(popup_above_ring(HOVER_W, compact_card(usage, session, theme))),
         ContextPopup::Details => {
             let close = this_close.clone();
             let outside = this_outside;
@@ -461,6 +606,7 @@ pub fn context_control<V: 'static>(
                 PANEL_W,
                 details_card(
                     usage,
+                    session,
                     &slices,
                     theme,
                     move |_, window, cx| {
@@ -558,6 +704,37 @@ mod tests {
     fn percent_sub_one() {
         let u = usage(Some(400), 200_000, Some(0.2));
         assert_eq!(format_percent(&u), Some("<1%".into()));
+    }
+
+    #[test]
+    fn cost_labels_sub_cent_and_scales() {
+        assert_eq!(format_cost(0.0), "$0.00");
+        assert_eq!(format_cost(0.004), "<$0.01");
+        assert_eq!(format_cost(0.45), "$0.45");
+        assert_eq!(format_cost(12.345), "$12.35");
+        assert_eq!(format_cost(250.0), "$250");
+        assert_eq!(format_cost(f64::NAN), "$0.00");
+    }
+
+    #[test]
+    fn session_cache_read_label_appends_hit_rate() {
+        let mut usage = SessionUsage {
+            input: 50_000,
+            output: 0,
+            cache_read: 40_000,
+            cache_write: 0,
+            total: 90_000,
+            cost: None,
+        };
+        assert_eq!(cache_read_label(&usage), "40K · 44%");
+
+        // A real cache miss reads `0%`, not `None` — the prompt had tokens.
+        usage.cache_read = 0;
+        assert_eq!(cache_read_label(&usage), "0 · 0%");
+
+        // No prompt tokens at all: just the count, no invented percentage.
+        usage.input = 0;
+        assert_eq!(cache_read_label(&usage), "0");
     }
 
     #[test]

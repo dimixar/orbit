@@ -24,14 +24,15 @@ use gpui::{
     MouseDownEvent, MouseUpEvent, ObjectFit, Pixels, Render, SharedString,
     StatefulInteractiveElement, Subscription, TextAlign, Transformation, Window, WindowControlArea,
 };
-use orbit_rpc::{CommandBody, ContextUsage, Event, PiClient};
+use orbit_rpc::{CommandBody, ContextUsage, Event, PendingQueue, PiClient, SessionState, SessionUsage};
 use serde_json::Value;
 
 use crate::branch_picker::BranchPicker;
+use crate::auth::{AuthEffect, AuthManager, AuthSupport, LoginPhase, ProviderStatus};
 use crate::checkpoint;
 use crate::command_palette::{self, CommandPalette, PaletteCommand, PaletteSnapshot};
 use crate::composer::ComposerInput;
-use crate::context_meter::{self, ContextPopup};
+use crate::context_meter::{self, ContextMeterData, ContextPopup};
 use crate::git_panel::GitPanel;
 use crate::mentions::{self, AcEntry, SharedAutocomplete, SlashCommand, Trigger, TriggerKind};
 use crate::model_selector::{
@@ -40,6 +41,7 @@ use crate::model_selector::{
 use crate::model_selector_match::is_model_selected;
 use crate::onboarding::{self, Dependency};
 use crate::platform::{self, ExternalApp};
+use crate::providers::{self, CustomProvider};
 use crate::sessions::{self, SessionInfo};
 use crate::sidepane::{SidePane, SidePaneResize};
 use crate::theme::{self, Theme, ThemeId, ThemeMode};
@@ -120,6 +122,36 @@ pub struct OrbitApp {
     model_provider: String,
     thinking_label: String,
     busy: bool,
+    /// Pending steering + follow-up messages reported by pi's `queue_update`
+    /// (and echoed by `clear_queue`). While the agent runs, messages sent from
+    /// the composer are queued as follow-ups and shown here until delivered.
+    queue: PendingQueue,
+    /// A `clear_queue` was sent as part of Escape; restore the returned text
+    /// into the composer when the response arrives (docs' interactive-Esc).
+    restore_queue_on_clear: bool,
+    /// Settings → Agent: `set_follow_up_mode` value.
+    follow_up_mode: String,
+    /// Settings → Agent: `set_auto_compaction` value (read back from state).
+    auto_compaction: bool,
+    /// Settings → Agent: `set_auto_retry` value. pi's `get_state` does not
+    /// expose this, so it reflects the last value Orbit sent.
+    auto_retry: bool,
+    /// Display name pi reports for the session (`get_state.sessionName`).
+    session_name: Option<String>,
+    /// pi is compacting right now (`get_state` / `compaction_*`).
+    is_compacting: bool,
+    /// pi is inside an automatic-retry delay (`auto_retry_*`). pi doesn't
+    /// expose this in `get_state`, so it's event-driven.
+    retrying: bool,
+    /// The most recent command / protocol / extension error. Shown as a
+    /// dismissible red banner until cleared — a failure is never dropped
+    /// (docs: #error-handling).
+    error: Option<String>,
+    /// Text of the last optimistic follow-up. Cleared once pi confirms it in
+    /// `queue_update`; restored to the composer if the command fails.
+    pending_follow_up: Option<String>,
+    /// The Agent section's session rename field.
+    session_name_input: Entity<ComposerInput>,
     status: String,
     /// When the current `status` message was set; the status bar shows it
     /// for [`STATUS_MESSAGE_TTL`] and then lets it lapse.
@@ -170,6 +202,10 @@ pub struct OrbitApp {
     /// Live context-window usage from `get_session_stats`. `None` when pi
     /// hasn't advertised a window (no model) or the command isn't supported.
     context: Option<ContextUsage>,
+    /// Cumulative session token/cost totals from the same `get_session_stats`
+    /// response. Unlike `context`, this spans the whole session (all turns,
+    /// tools, and compaction summaries), so the popup can show cost + cache.
+    session_usage: Option<SessionUsage>,
     /// Hover compact card vs click-to-open breakdown for the context ring.
     context_popup: ContextPopup,
     /// Shared `/`-command and `@`-file menu state between the composer
@@ -235,6 +271,46 @@ pub struct OrbitApp {
     git_open: bool,
     /// The full-page Git panel (tabs + commit bar).
     git_panel: Entity<GitPanel>,
+    /// Custom providers read from `~/.pi/agent/models.json` (cached; reloaded
+    /// when the Providers page opens, on Refresh, and after a save/remove).
+    custom_providers: Vec<CustomProvider>,
+    /// Parse/read error from models.json, surfaced on the Providers page
+    /// instead of silently overwriting a hand-edited file.
+    custom_providers_error: Option<String>,
+    /// Credentials read from `~/.pi/agent/auth.json` (cached alongside the
+    /// custom providers).
+    provider_auth: HashMap<String, providers::ProviderAuth>,
+    /// Parse/read error from auth.json.
+    provider_auth_error: Option<String>,
+    /// Non-sensitive provider-authentication state driven by the `auth.*`
+    /// RPC namespace. When pi doesn't advertise those commands this stays
+    /// unsupported and the page keeps the Terminal login fallback.
+    auth: AuthManager,
+    /// True once a credential changed and pi needs a restart to load it
+    /// (pi reads auth.json only at startup). Only used on the file-based
+    /// fallback path; RPC logins take effect live.
+    provider_auth_dirty: bool,
+    /// Built-in catalog size per provider (from pi's bundled model data),
+    /// loaded off-thread so unconfigured providers show a real count.
+    provider_catalog_counts: HashMap<String, usize>,
+    /// Authoritative provider metadata introspected from pi-ai (empty when
+    /// unavailable — then the curated table is used instead).
+    provider_metadata: Vec<providers::DynamicProvider>,
+    /// The metadata load was kicked off (success or not) — avoids re-spawning
+    /// on every reload.
+    provider_metadata_loaded: bool,
+    /// The open API-key editor, if any.
+    provider_key_editor: Option<ProviderKeyEditor>,
+    /// The open provider editor (add or edit), if any.
+    provider_editor: Option<ProviderEditor>,
+    /// Provider id awaiting inline remove confirmation.
+    provider_remove_confirm: Option<String>,
+    /// Refresh button spin state on the Providers page.
+    providers_refreshing: bool,
+    /// Search filter for the provider grid.
+    provider_filter: Entity<ComposerInput>,
+    /// Re-render the grid as the filter is typed.
+    _provider_filter_sub: Subscription,
 }
 
 /// An image queued to ride along with the next prompt.
@@ -328,6 +404,24 @@ impl OrbitApp {
                 .with_placeholder("Filter…")
                 .with_key_context("Composer Picker")
         });
+        let provider_filter = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("provider-filter")
+                .with_placeholder("Search providers…")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+        });
+        let provider_filter_sub = cx.observe(&provider_filter, |_, _, cx| cx.notify());
+
+        // Settings → Agent: rename field. Default `Composer` key context keeps
+        // real text editing (selection, clipboard, arrows); Enter routes to the
+        // app's Submit, which no-ops on the empty main composer.
+        let session_name_input = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("session-name-input")
+                .with_placeholder("Session name…")
+                .with_max_lines(1)
+        });
 
         // Spawn pi rooted at the repo; sessions live in the real
         // ~/.pi/agent/sessions so they are shared with the CLI.
@@ -379,6 +473,17 @@ impl OrbitApp {
             model_provider: String::new(),
             thinking_label: "…".into(),
             busy: false,
+            queue: PendingQueue::default(),
+            restore_queue_on_clear: false,
+            follow_up_mode: "one-at-a-time".into(),
+            auto_compaction: true,
+            auto_retry: true,
+            session_name: None,
+            is_compacting: false,
+            retrying: false,
+            error: None,
+            pending_follow_up: None,
+            session_name_input,
             status: connect_error.clone(),
             status_at: (!connect_error.is_empty()).then(Instant::now),
             current_title: None,
@@ -403,6 +508,7 @@ impl OrbitApp {
             current_session_path: None,
             menu_dismissed_at: None,
             context: None,
+            session_usage: None,
             context_popup: ContextPopup::None,
             autocomplete,
             autocomplete_dismissed: false,
@@ -434,6 +540,21 @@ impl OrbitApp {
             sidepane,
             git_open: false,
             git_panel: git_panel.clone(),
+            custom_providers: Vec::new(),
+            custom_providers_error: None,
+            provider_auth: HashMap::new(),
+            provider_auth_error: None,
+            auth: AuthManager::new(),
+            provider_auth_dirty: false,
+            provider_catalog_counts: HashMap::new(),
+            provider_metadata: Vec::new(),
+            provider_metadata_loaded: false,
+            provider_key_editor: None,
+            provider_editor: None,
+            provider_remove_confirm: None,
+            providers_refreshing: false,
+            provider_filter: provider_filter.clone(),
+            _provider_filter_sub: provider_filter_sub,
         };
 
         // A changed-file row on the Git page opens its diff in Review.
@@ -463,6 +584,7 @@ impl OrbitApp {
                 "get_available_thinking_levels",
             );
             app.send(CommandBody::GetCommands, "get_commands");
+            app.probe_auth();
         }
         app
     }
@@ -475,6 +597,60 @@ impl OrbitApp {
         self.status_at = Some(Instant::now());
     }
 
+    /// Record a command / protocol / extension error. Unlike the transient
+    /// status line, errors persist (in a red banner) until dismissed or
+    /// superseded, so a failure is never silently lost.
+    fn set_error(&mut self, message: impl Into<String>) {
+        self.error = Some(message.into());
+    }
+
+    /// Dismiss the current error banner.
+    fn dismiss_error(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.error = None;
+        cx.notify();
+    }
+
+    /// A successful command clears the banner it previously raised (e.g. a
+    /// retried `set_model`), so a fixed error doesn't linger.
+    fn clear_error_for(&mut self, command: &str) {
+        if let Some(error) = &self.error {
+            if error.starts_with(&humanize_command(command)) {
+                self.error = None;
+            }
+        }
+    }
+
+    /// Surface a failed command's `error` — the docs' `success: false`
+    /// contract. A `parse` command is pi's response to unparseable input.
+    fn on_command_failure(
+        &mut self,
+        command: &str,
+        error: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        if command == "parse" {
+            self.set_error(format!(
+                "Protocol error: {}",
+                error.unwrap_or("pi could not parse the request")
+            ));
+            return;
+        }
+        // A rejected follow-up/steer never entered pi's queue: drop the
+        // optimistic chip and hand the text back so nothing is lost.
+        if matches!(command, "follow_up" | "steer") {
+            if let Some(text) = self.pending_follow_up.take() {
+                if let Some(pos) = self.queue.follow_up.iter().position(|t| *t == text) {
+                    self.queue.follow_up.remove(pos);
+                }
+                if self.input.read(cx).text().trim().is_empty() {
+                    self.input.update(cx, |input, cx| input.set_text(text, cx));
+                }
+            }
+        }
+        let detail = error.unwrap_or("pi reported an unspecified error");
+        self.set_error(format!("{}: {detail}", humanize_command(command)));
+    }
+
     /// Send a command to pi. Returns `false` when the write failed (or
     /// there is no process) so callers can keep the user's input intact.
     fn send(&mut self, body: CommandBody, label: &str) -> bool {
@@ -485,7 +661,7 @@ impl OrbitApp {
         match client.send(body) {
             Ok(_) => true,
             Err(err) => {
-                self.set_status(format!("send failed ({label}): {err}"));
+                self.set_error(format!("Failed to send {label}: {err}"));
                 false
             }
         }
@@ -518,12 +694,119 @@ impl OrbitApp {
             error: None,
         };
         self.client = Some(client);
+        // Re-probe provider-auth capabilities against the new process and
+        // reconcile any login the restart interrupted.
+        self.probe_auth();
     }
 
     /// Tear down the active pi process (dropping `PiClient` kills the child).
     fn drop_client(&mut self) {
         self.client = None;
         self.runtime = RuntimeStatus::default();
+        // A login in flight dies with its process; remember the provider so
+        // the next `auth.list` can reconcile a completion that happened while
+        // Orbit was reconnecting.
+        self.auth.on_disconnect();
+    }
+
+    // ── provider authentication (auth.* RPC) ───────────────────────────
+
+    /// Ask pi for provider auth capabilities. Harmless on a pi that doesn't
+    /// implement `auth.*`: the failed `auth.list` response marks auth
+    /// unsupported and the Providers page keeps the file/Terminal fallback.
+    fn probe_auth(&mut self) {
+        let wanted = self.auth.on_reconnect();
+        self.send(CommandBody::AuthList, "auth.list");
+        for provider in wanted {
+            self.send(CommandBody::AuthStatus { provider }, "auth.status");
+        }
+    }
+
+    /// Refresh capabilities and per-provider status against the *current*
+    /// process without clearing what the card already knows. Used when the
+    /// Providers page opens and on Refresh.
+    fn refresh_auth(&mut self) {
+        if self.auth.support() == AuthSupport::Unsupported {
+            return;
+        }
+        self.send(CommandBody::AuthList, "auth.list");
+        if self.auth.is_busy() {
+            // A login is mid-flight; don't disturb it with status refreshes.
+            return;
+        }
+        let providers: Vec<String> = self
+            .auth
+            .providers()
+            .iter()
+            .map(|provider| provider.id.clone())
+            .collect();
+        for provider in providers {
+            self.send(CommandBody::AuthStatus { provider }, "auth.status");
+        }
+    }
+
+    /// Perform the side effects the [`AuthManager`] emitted. The manager does
+    /// no I/O; opening the browser and sending cancels happen here.
+    fn handle_auth_effects(&mut self, effects: Vec<AuthEffect>, cx: &mut Context<Self>) {
+        if effects.is_empty() {
+            return;
+        }
+        for effect in effects {
+            match effect {
+                AuthEffect::OpenUrl(url) => {
+                    if let Err(err) = platform::open_url(&url) {
+                        self.set_status(format!("Could not open the browser: {err}"));
+                    }
+                }
+                AuthEffect::CancelLogin(session_id) => {
+                    self.send(
+                        CommandBody::AuthCancel { session_id },
+                        "auth.cancel",
+                    );
+                }
+                AuthEffect::RefreshProviders => {
+                    // The login/logout already took effect in pi; no restart
+                    // banner is needed on the RPC path.
+                    self.provider_auth_dirty = false;
+                    self.send(CommandBody::AuthList, "auth.list");
+                    self.refresh_catalogs();
+                    self.reload_custom_providers(cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Start a provider login through the RPC namespace. `method` comes from
+    /// the provider's discovered capability, never a hardcoded flow.
+    fn auth_start_login(&mut self, provider: String, name: String, method: String, cx: &mut Context<Self>) {
+        match self.auth.support() {
+            AuthSupport::Unsupported => {
+                // pi has no auth RPC: hand the login to the Terminal the way
+                // the page has always done.
+                self.provider_oauth_login(provider, name, cx);
+                return;
+            }
+            _ => {}
+        }
+        let session_id = self.auth.start_login(&provider, &method);
+        self.send(
+            CommandBody::AuthLogin {
+                provider,
+                method,
+                session_id: Some(session_id),
+            },
+            "auth.login",
+        );
+        cx.notify();
+    }
+
+    /// Cancel the active login and tell pi to tear its flow down.
+    fn auth_cancel_login(&mut self, cx: &mut Context<Self>) {
+        if let Some(session_id) = self.auth.cancel_login() {
+            self.send(CommandBody::AuthCancel { session_id }, "auth.cancel");
+        }
+        cx.notify();
     }
 
     fn runtime_state(&self) -> RuntimeState {
@@ -622,6 +905,13 @@ impl OrbitApp {
             cx.notify();
         }
         self.tick_background(cx);
+        // Expire a stalled login and auto-cancel it with pi.
+        let had_login = self.auth.login().is_some();
+        let auth_effects = self.auth.poll(Instant::now());
+        self.handle_auth_effects(auth_effects, cx);
+        if had_login || self.auth.login().is_some() {
+            cx.notify();
+        }
         // Keep the Runtime panel's liveness fresh (try_wait is cheap).
         if let Some(client) = self.client.as_mut() {
             self.runtime.alive = client.is_alive();
@@ -678,35 +968,120 @@ impl OrbitApp {
                     }
                     refresh_sessions = true;
                 }
+                Event::Auth(event) => {
+                    let effects = self.auth.on_event(event.clone());
+                    self.handle_auth_effects(effects, cx);
+                }
+                Event::AutoRetryStart { value } => {
+                    self.retrying = true;
+                    let attempt = value.get("attempt").and_then(Value::as_u64).unwrap_or(1);
+                    let max = value.get("maxAttempts").and_then(Value::as_u64);
+                    let error = value
+                        .get("errorMessage")
+                        .and_then(Value::as_str)
+                        .unwrap_or("transient error");
+                    let attempt_label = match max {
+                        Some(max) => format!("{attempt}/{max}"),
+                        None => attempt.to_string(),
+                    };
+                    self.set_status(format!("retrying ({attempt_label}) — {error}"));
+                }
                 Event::AutoRetryEnd { value } => {
+                    self.retrying = false;
                     let success = value.get("success").and_then(|v| v.as_bool());
                     if success == Some(false) {
                         let error = value
                             .get("finalError")
                             .and_then(|v| v.as_str())
                             .unwrap_or("pi exhausted its automatic retries");
-                        self.set_status(format!("retry failed: {error}"));
+                        self.set_error(format!("Automatic retry failed: {error}"));
                     }
+                }
+                Event::QueueUpdate { value } => {
+                    self.queue = PendingQueue::from_value(value);
+                    // pi confirmed the optimistic follow-up; stop tracking it.
+                    let confirmed = self
+                        .pending_follow_up
+                        .as_ref()
+                        .is_some_and(|pending| self.queue.follow_up.iter().any(|t| t == pending));
+                    if confirmed {
+                        self.pending_follow_up = None;
+                    }
+                }
+                Event::ExtensionError { value } => {
+                    let path = value
+                        .get("extensionPath")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    let name = Path::new(path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or("extension");
+                    let hook = value
+                        .get("event")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    let error = value
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown error");
+                    self.set_error(format!("Extension {name} failed on {hook}: {error}"));
                 }
                 Event::AgentSettled => {
                     self.busy = false;
+                    self.retrying = false;
+                    self.pending_follow_up = None;
+                    // A settled run has no queued continuation left; clear the
+                    // bar even if the final `queue_update` was missed.
+                    self.queue = PendingQueue::default();
                     refresh_sessions = true;
                     self.refresh_context_stats();
                     // Capture the turn's end checkpoint, then refresh Review.
                     self.finish_turn(cx);
                 }
-                Event::CompactionEnd { .. } => {
+                Event::CompactionStart { .. } => {
+                    self.is_compacting = true;
+                    self.set_status("Compacting context…");
+                }
+                Event::CompactionEnd { value } => {
+                    self.is_compacting = false;
+                    // A failed compaction carries `errorMessage` (docs).
+                    if let Some(error) = value.get("errorMessage").and_then(Value::as_str) {
+                        self.set_error(format!("Compaction failed: {error}"));
+                    } else if value.get("aborted").and_then(Value::as_bool) == Some(true) {
+                        self.set_status("Compaction aborted");
+                    }
                     // Post-compaction usage is unknown until the next turn;
                     // refresh so the meter can show an empty/unknown state.
                     self.refresh_context_stats();
                 }
                 Event::ProcessExited => {
                     self.busy = false;
+                    self.retrying = false;
+                    self.pending_follow_up = None;
+                    self.queue = PendingQueue::default();
                     self.runtime.alive = false;
                     self.runtime.exited = true;
-                    self.set_status("pi process exited — restart from Settings → Runtime");
+                    self.auth.on_disconnect();
+                    self.set_error("pi process exited — restart it from Settings → Runtime");
                 }
                 Event::MessageEnd { value } => {
+                    // A failed LLM call ends the assistant message with
+                    // `stopReason: "error"` + `errorMessage` (e.g. an
+                    // unsupported model). Surface it in the banner; the
+                    // transcript renders the same text inline.
+                    if let Some(error) = transcript::message_error(value) {
+                        self.set_error(format!("Agent error: {error}"));
+                    } else if self
+                        .error
+                        .as_deref()
+                        .is_some_and(|error| error.starts_with("Agent error:"))
+                    {
+                        // The next attempt produced a message — clear the
+                        // stale agent-error banner.
+                        self.error = None;
+                    }
                     // Real edit stats from finalized tool calls.
                     let (a, r) = transcript::diff_from_message(value);
                     self.added += a;
@@ -716,9 +1091,17 @@ impl OrbitApp {
                     command,
                     success,
                     data,
-                    ..
+                    error,
+                    id: _,
                 } => {
-                    self.on_response(command, *success, data.as_ref(), &mut refresh_sessions, cx);
+                    self.on_response(
+                        command,
+                        *success,
+                        data.as_ref(),
+                        error.as_deref(),
+                        &mut refresh_sessions,
+                        cx,
+                    );
                 }
                 _ => {}
             }
@@ -799,9 +1182,41 @@ impl OrbitApp {
         command: &str,
         success: bool,
         data: Option<&serde_json::Value>,
+        error: Option<&str>,
         refresh_sessions: &mut bool,
         cx: &mut Context<Self>,
     ) {
+        // Provider-auth commands are handled here so success/failure and the
+        // no-payload replies (`auth.cancel`) never fall through the
+        // data-required branch below.
+        if command.starts_with("auth.") {
+            self.on_auth_response(command, success, data, error, cx);
+            return;
+        }
+        // Error handling (docs #error-handling): a failed command carries an
+        // `error` string. Surface it, unwind command-specific optimistic
+        // state, and stop — success paths below assume `data` is valid.
+        if !success {
+            self.on_command_failure(command, error, cx);
+            match command {
+                "compact" => {
+                    self.is_compacting = false;
+                    self.refresh_context_stats();
+                }
+                // These changed local UI optimistically; re-read pi's state.
+                "set_model"
+                | "cycle_model"
+                | "set_thinking_level"
+                | "cycle_thinking_level"
+                | "set_session_name" => {
+                    self.send(CommandBody::GetState, "get_state");
+                }
+                _ => {}
+            }
+            return;
+        }
+        // A successful retry clears the banner it raised earlier.
+        self.clear_error_for(command);
         // Commands whose replies carry no payload (e.g. `set_thinking_level`
         // answers `{"success":true}` with no `data`). They still need their
         // follow-up state refresh, so they are matched BEFORE the
@@ -816,6 +1231,26 @@ impl OrbitApp {
                 return;
             }
             "cycle_model" | "set_thinking_level" | "cycle_thinking_level" => {
+                self.send(CommandBody::GetState, "get_state");
+                return;
+            }
+            // Agent-control commands answer with no payload; nothing more to do.
+            "set_steering_mode"
+            | "set_follow_up_mode"
+            | "set_auto_compaction"
+            | "set_auto_retry"
+            | "abort_retry"
+            | "set_session_name"
+            | "steer"
+            | "follow_up" => {
+                return;
+            }
+            // `compact` also has a result payload on success; clearing the
+            // compacting state belongs before the data gate.
+            "compact" => {
+                self.is_compacting = false;
+                self.set_status("Context compacted");
+                self.refresh_context_stats();
                 self.send(CommandBody::GetState, "get_state");
                 return;
             }
@@ -852,6 +1287,27 @@ impl OrbitApp {
                         self.session_id = Some(id.to_string());
                         self.recover_latest_turn(cx);
                     }
+                }
+                // Agent control surface: streaming/compaction state, queue
+                // modes, auto-compaction, and the session display name.
+                let state = SessionState::from_value(data);
+                self.busy = state.is_streaming || state.is_compacting;
+                self.is_compacting = state.is_compacting;
+                self.follow_up_mode = state.follow_up_mode;
+                self.auto_compaction = state.auto_compaction_enabled;
+                match &state.session_name {
+                    Some(name) if self.session_name.as_deref() != Some(name.as_str()) => {
+                        self.session_name = Some(name.clone());
+                        let name = name.clone();
+                        self.session_name_input
+                            .update(cx, |input, cx| input.set_text(name, cx));
+                    }
+                    None if self.session_name.is_some() => {
+                        self.session_name = None;
+                        self.session_name_input
+                            .update(cx, |input, cx| input.set_text(String::new(), cx));
+                    }
+                    _ => {}
                 }
                 self.sync_model_selector(cx);
                 self.refresh_context_stats();
@@ -925,6 +1381,7 @@ impl OrbitApp {
             }
             "get_session_stats" => {
                 self.context = ContextUsage::from_stats(data);
+                self.session_usage = SessionUsage::from_stats(data);
                 if let Some(file) = data.get("sessionFile").and_then(Value::as_str) {
                     self.adopt_session_file(PathBuf::from(file));
                 }
@@ -932,6 +1389,7 @@ impl OrbitApp {
             "switch_session" => {
                 if success {
                     self.reset_turns();
+                    self.reset_queue();
                     self.send(CommandBody::GetMessages, "get_messages");
                     self.send(CommandBody::GetState, "get_state");
                     self.refresh_catalogs();
@@ -944,15 +1402,78 @@ impl OrbitApp {
                 self.added = 0;
                 self.removed = 0;
                 self.context = None;
+                self.session_usage = None;
                 self.reset_turns();
+                self.reset_queue();
                 *refresh_sessions = true;
                 self.send(CommandBody::GetState, "get_state");
                 self.refresh_catalogs();
+            }
+            // `clear_queue` echoes the text it dropped so Escape can put it
+            // back in the composer (docs' interactive-Esc behavior).
+            "clear_queue" => {
+                let queue = PendingQueue::from_value(data);
+                if self.restore_queue_on_clear {
+                    self.restore_queue_on_clear = false;
+                    if let Some(text) = queue.restore_text() {
+                        self.input.update(cx, |input, cx| input.set_text(text, cx));
+                    }
+                }
+                // `queue_update` mirrors the same fact; this keeps the row
+                // correct even if the event is missed.
+                self.queue = queue;
             }
             _ => {
                 let _ = success;
             }
         }
+    }
+
+    /// Apply a provider-auth command response to the [`AuthManager`] and act
+    /// on any effects it returns.
+    fn on_auth_response(
+        &mut self,
+        command: &str,
+        success: bool,
+        data: Option<&serde_json::Value>,
+        error: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            "auth.list" => {
+                let before = self.auth.support();
+                self.auth.on_list_response(success, data, error);
+                if self.auth.support() != before
+                    && self.auth.support() == AuthSupport::Unsupported
+                {
+                    self.set_status(
+                        "This pi build has no auth RPC — provider sign-in uses Terminal",
+                    );
+                }
+            }
+            "auth.status" => self.auth.on_status_response(success, data),
+            "auth.login" => {
+                self.auth.on_login_response(success, data, error);
+                // Acknowledgement can arrive after a `started` event; make
+                // sure the card reflects the manager either way.
+            }
+            "auth.logout" => {
+                if let Some(provider) = data
+                    .and_then(|data| data.get("provider"))
+                    .and_then(serde_json::Value::as_str)
+                {
+                    self.auth.on_logout_response(success, provider);
+                } else if success {
+                    // Some servers answer without echoing the provider; the
+                    // UI already refreshed via `auth_credentials_changed`.
+                }
+            }
+            "auth.cancel" => {
+                // Nothing to reconcile: the event stream confirms cancellation.
+            }
+            _ => {}
+        }
+        cx.notify();
     }
 
     // ── actions ────────────────────────────────────────────────────────────
@@ -987,8 +1508,8 @@ impl OrbitApp {
         }
         // Collect any paste that raced the submit tick.
         self.drain_pasted_images(cx);
-        // Attached images ride prompts; the steer body carries no image
-        // field, so they stay queued when the message steers a live run.
+        // pi's `follow_up` and `prompt` carry images, so attachments ride
+        // whatever we send.
         let attachments = std::mem::take(&mut self.attachments);
         let images = if attachments.is_empty() {
             None
@@ -1000,47 +1521,43 @@ impl OrbitApp {
                     .collect::<Vec<_>>(),
             )
         };
-        // Waku behavior: while the agent is mid-turn a follow-up message is
-        // a *steer* (injected into the running turn), not a new prompt.
-        let steer = self.busy || self.transcript.is_streaming();
-        let sent = if steer {
-            if !attachments.is_empty() {
-                self.set_status("attachments can't ride a steer — kept for the next prompt");
+        // While the agent is running, the message is queued as a follow-up:
+        // it is delivered only once the current task finishes. The queued bar
+        // above the composer shows it until then; pi emits the user message
+        // into the transcript when it is actually delivered.
+        let running = self.busy || self.transcript.is_streaming();
+        if running {
+            let body = CommandBody::FollowUp {
+                message: text.clone(),
+                images,
+            };
+            if !self.send(body, "follow_up") {
+                // Keep the prompt and attachments so nothing is lost.
+                self.attachments = attachments;
+                cx.notify();
+                return;
             }
-            self.send(
-                CommandBody::Steer {
-                    message: text.clone(),
-                },
-                "steer",
-            )
-        } else {
-            self.send(
-                CommandBody::Prompt {
-                    message: text.clone(),
-                    images,
-                    streaming_behavior: None,
-                },
-                "prompt",
-            )
+            // Show it immediately; the next `queue_update` reconciles the list.
+            self.queue.follow_up.push(text.clone());
+            self.pending_follow_up = Some(text);
+            self.input.update(cx, |input, cx| input.clear(cx));
+            cx.notify();
+            return;
+        }
+        // Not running: a normal prompt starts a new turn.
+        let body = CommandBody::Prompt {
+            message: text.clone(),
+            images,
+            streaming_behavior: None,
         };
-        if !sent {
+        if !self.send(body, "prompt") {
             // Keep the prompt and the queued attachments so the user can
             // retry (pi offline, broken pipe, …) instead of losing work.
             self.attachments = attachments;
             cx.notify();
             return;
         }
-        if !steer {
-            self.begin_turn(cx);
-        }
-        // A steer never carries the queued images — hand them back.
-        if steer && !attachments.is_empty() {
-            self.attachments = attachments;
-            self.transcript.append_user_message(&text, Vec::new());
-            self.input.update(cx, |input, cx| input.clear(cx));
-            cx.notify();
-            return;
-        }
+        self.begin_turn(cx);
         // Show the prompt immediately — pi does not echo it back in RPC mode.
         // The decoded previews ride along so the chat window shows what was
         // attached (pi echoes/snapshots carry image blocks for reloads).
@@ -1128,6 +1645,13 @@ impl OrbitApp {
         self.turn_count = 0;
         self.turn_open = false;
         self.latest_turn = None;
+    }
+
+    /// Forget the queued-message mirror — the queue belongs to the previous
+    /// session/process. The next `queue_update`/`get_state` re-establishes it.
+    fn reset_queue(&mut self) {
+        self.queue = PendingQueue::default();
+        self.restore_queue_on_clear = false;
     }
 
     /// Recover the newest completed turn from the persisted checkpoint refs,
@@ -1246,6 +1770,13 @@ impl OrbitApp {
                 .update(cx, |pane, cx| pane.close_source_menu(cx));
             return;
         }
+        // Interactive Esc: drop the pending queue first so its text can be
+        // restored to the composer when the `clear_queue` response lands
+        // (docs), then abort the run.
+        if !self.queue.is_empty() {
+            self.restore_queue_on_clear = true;
+            self.send(CommandBody::ClearQueue, "clear_queue");
+        }
         self.send(CommandBody::Abort, "abort");
         cx.notify();
     }
@@ -1305,6 +1836,7 @@ impl OrbitApp {
         self.removed = 0;
         self.context = None;
         self.reset_turns();
+        self.reset_queue();
         self.current_workspace = Some(cwd.clone());
 
         match PiClient::spawn(&cwd, None) {
@@ -1472,7 +2004,9 @@ impl OrbitApp {
         self.added = 0;
         self.removed = 0;
         self.context = None;
+        self.session_usage = None;
         self.reset_turns();
+        self.reset_queue();
         match PiClient::spawn(self.current_workspace.as_ref().unwrap(), None) {
             Ok(client) => {
                 self.adopt_client(client);
@@ -1731,8 +2265,7 @@ impl OrbitApp {
             }
             PaletteCommand::OpenSettings(section) => {
                 self.settings_open = true;
-                self.settings_section = section;
-                cx.notify();
+                self.set_settings_section(section, cx);
             }
         }
     }
@@ -2713,6 +3246,9 @@ impl OrbitApp {
         self.added = 0;
         self.removed = 0;
         self.transcript = Transcript::new();
+        // The queue belongs to the session we just left; the target's state
+        // re-establishes it from `get_state`/`queue_update`.
+        self.reset_queue();
 
         // ── activate the target ──
         if let Some(parked) = self.lives.remove(&session.path) {
@@ -3092,8 +3628,7 @@ impl OrbitApp {
 
     fn open_settings(&mut self, cx: &mut Context<Self>) {
         self.settings_open = true;
-        self.settings_section = SettingsSection::General;
-        cx.notify();
+        self.set_settings_section(SettingsSection::General, cx);
     }
 
     fn on_open_settings(
@@ -3110,6 +3645,8 @@ impl OrbitApp {
         // while settings is open, so clicking it again should go back.
         if self.settings_open {
             self.settings_open = false;
+            self.provider_editor = None;
+            self.provider_key_editor = None;
         } else {
             self.open_settings(cx);
             return;
@@ -3119,7 +3656,472 @@ impl OrbitApp {
 
     fn on_settings_back(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = false;
+        self.provider_editor = None;
+        self.provider_key_editor = None;
         self.input.read(cx).focus(window);
+        cx.notify();
+    }
+
+    // ── providers (Settings → Providers) ───────────────────────────────
+
+    /// Switch sections, loading models.json when Providers is shown so CLI
+    /// edits appear without a restart.
+    fn set_settings_section(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+        self.settings_section = section;
+        self.provider_remove_confirm = None;
+        self.provider_editor = None;
+        self.provider_key_editor = None;
+        if section == SettingsSection::Providers {
+            self.reload_custom_providers(cx);
+            self.refresh_auth();
+        }
+        cx.notify();
+    }
+
+    /// Re-read `~/.pi/agent/models.json` and `~/.pi/agent/auth.json`. Read
+    /// errors are kept, not fatal, so a broken file can be seen and fixed
+    /// rather than overwritten.
+    fn reload_custom_providers(&mut self, cx: &mut Context<Self>) {
+        match providers::read_custom() {
+            Ok(list) => {
+                self.custom_providers = list;
+                self.custom_providers_error = None;
+            }
+            Err(err) => {
+                self.custom_providers = Vec::new();
+                self.custom_providers_error = Some(err);
+            }
+        }
+        match providers::read_auth() {
+            Ok(auth) => {
+                self.provider_auth = auth;
+                self.provider_auth_error = None;
+            }
+            Err(err) => {
+                self.provider_auth = HashMap::new();
+                self.provider_auth_error = Some(err);
+            }
+        }
+        self.ensure_provider_metadata(cx);
+        cx.notify();
+    }
+
+    /// Load pi's built-in catalog sizes and authoritative provider metadata
+    /// once, off the UI thread (node introspection + ~600 KB of JSON parsing
+    /// would otherwise hitch the first Providers render).
+    fn ensure_provider_metadata(&mut self, cx: &mut Context<Self>) {
+        if self.provider_metadata_loaded {
+            return;
+        }
+        self.provider_metadata_loaded = true;
+        cx.spawn(async move |this, cx| {
+            let (counts, metadata) = cx
+                .background_executor()
+                .spawn(async {
+                    let counts = providers::builtin_catalog_counts().clone();
+                    let metadata = providers::dynamic_providers()
+                        .map(<[providers::DynamicProvider]>::to_vec)
+                        .unwrap_or_default();
+                    (counts, metadata)
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                app.provider_catalog_counts = counts;
+                app.provider_metadata = metadata;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Refresh: re-query the running agent's catalog and re-read both files.
+    fn provider_refresh(&mut self, cx: &mut Context<Self>) {
+        self.providers_refreshing = true;
+        self.refresh_catalogs();
+        self.reload_custom_providers(cx);
+        self.refresh_auth();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(700))
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                app.providers_refreshing = false;
+                cx.notify();
+            });
+        })
+        .detach();
+        self.set_status("Refreshed provider catalog");
+        cx.notify();
+    }
+
+    /// Restart pi so a newly written credential is loaded. pi reads
+    /// `auth.json` only at startup, so this is the "use it" step. Resumes the
+    /// active session on the fresh process when one exists.
+    fn provider_apply_credentials(&mut self, cx: &mut Context<Self>) {
+        // Never yank the process out from under a live turn.
+        if self.busy || self.transcript.is_streaming() {
+            self.set_status("Finish the current turn, then Restart pi to load credentials");
+            cx.notify();
+            return;
+        }
+        let resume = self
+            .current_session_path
+            .clone()
+            .and_then(|path| self.sessions.iter().find(|s| s.path == path).cloned());
+        self.drop_client();
+        self.current_session_path = None;
+        if let Some(session) = resume {
+            self.switch_to_session(session, false, cx);
+        } else {
+            self.runtime_start(cx);
+        }
+        self.provider_auth_dirty = false;
+        self.reload_custom_providers(cx);
+        self.set_status("pi restarted — credentials loaded");
+        cx.notify();
+    }
+
+    /// Open the API-key editor for a provider.
+    fn provider_key_open(
+        &mut self,
+        provider_id: String,
+        provider_name: String,
+        oauth: bool,
+        note: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("provider-key-input")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+                .with_placeholder("sk-…")
+        });
+        let focus = key.read(cx).focus_handle(cx);
+        window.focus(&focus);
+        self.provider_key_editor = Some(ProviderKeyEditor {
+            provider_id,
+            provider_name,
+            oauth,
+            note,
+            key,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    /// Save the API key, then flag that pi needs a restart to load it.
+    fn provider_key_save(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.provider_key_editor.as_ref() else {
+            return;
+        };
+        let id = editor.provider_id.clone();
+        let name = editor.provider_name.clone();
+        let key = editor.key.read(cx).text();
+        match providers::write_api_key(&id, &key) {
+            Ok(()) => {
+                self.provider_key_editor = None;
+                self.provider_auth_dirty = true;
+                self.reload_custom_providers(cx);
+                self.set_status(format!("API key saved for {name} — Restart pi to use it"));
+            }
+            Err(err) => {
+                if let Some(editor) = self.provider_key_editor.as_mut() {
+                    editor.error = Some(err);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Sign in with OAuth by handing `pi /login <id>` to the user's terminal.
+    fn provider_oauth_login(&mut self, id: String, name: String, cx: &mut Context<Self>) {
+        // The id reaches a shell script; only builtin ids are ever passed, but
+        // validate anyway so a hand-edited file can never inject a command.
+        if !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        {
+            self.set_status(format!("Refusing to run login for invalid provider id {id}"));
+            cx.notify();
+            return;
+        }
+        let command = format!("pi /login {id}");
+        match platform::open_terminal_command(&command) {
+            Ok(()) => {
+                self.provider_auth_dirty = true;
+                self.set_status(format!(
+                    "Finish signing in to {name} in Terminal, then Restart pi"
+                ));
+            }
+            Err(err) => {
+                self.set_status(format!("Could not open Terminal: {err} — run `{command}`"));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Sign out. With auth RPC available pi owns the credential store and
+    /// removes it live; otherwise fall back to dropping the auth.json entry
+    /// (env credentials are outside Orbit's reach and left alone).
+    fn provider_sign_out(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.auth.support() == AuthSupport::Supported {
+            self.auth.on_logout_response(true, &id);
+            self.send(
+                CommandBody::AuthLogout { provider: id.clone() },
+                "auth.logout",
+            );
+            self.set_status(format!("Signing out of {id}…"));
+            cx.notify();
+            return;
+        }
+        match providers::remove_auth(&id) {
+            Ok(()) => {
+                self.provider_auth_dirty = true;
+                self.reload_custom_providers(cx);
+                self.set_status(format!("Signed out of {id} — Restart pi to apply"));
+            }
+            Err(err) => {
+                self.provider_auth_error = Some(err);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Open the editor for an existing provider id, or a blank add form.
+    fn provider_editor_open(
+        &mut self,
+        provider_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let existing = provider_id
+            .as_ref()
+            .and_then(|id| self.custom_providers.iter().find(|provider| &provider.id == id));
+        let in_catalog = provider_id.as_ref().is_some_and(|id| {
+            self.available_models
+                .iter()
+                .any(|model| &model.provider == id)
+        });
+        let id_text = provider_id.clone().unwrap_or_default();
+        let name_text = existing
+            .and_then(|provider| provider.name.clone())
+            .unwrap_or_default();
+        let base_url_text = existing
+            .map(|provider| provider.base_url.clone())
+            .unwrap_or_default();
+        let api = existing
+            .map(|provider| provider.api.clone())
+            .filter(|api| !api.is_empty())
+            .unwrap_or_else(|| {
+                if in_catalog {
+                    // Built-in: no override unless the user picks one.
+                    String::new()
+                } else {
+                    "openai-completions".to_string()
+                }
+            });
+        let models_text = existing
+            .map(|provider| provider.model_ids.join(", "))
+            .unwrap_or_default();
+        let had_api_key = existing.is_some_and(|provider| provider.has_api_key);
+
+        let id_input = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("provider-editor-id")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+                .with_placeholder("my-gateway")
+                .with_text(id_text)
+        });
+        let name_input = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("provider-editor-name")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+                .with_placeholder("Optional display name")
+                .with_text(name_text)
+        });
+        let base_url_input = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("provider-editor-base-url")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+                .with_placeholder("https://api.example.com/v1")
+                .with_text(base_url_text)
+        });
+        let api_key_input = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("provider-editor-api-key")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+                .with_placeholder(if had_api_key { "••••••••" } else { "sk-…" })
+        });
+        let models_input = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("provider-editor-models")
+                .with_key_context("Composer Picker")
+                .with_max_lines(4)
+                .with_placeholder("model-id, model-id-2")
+                .with_text(models_text)
+        });
+
+        let focus = if provider_id.is_some() {
+            name_input.read(cx).focus_handle(cx)
+        } else {
+            id_input.read(cx).focus_handle(cx)
+        };
+        window.focus(&focus);
+        self.provider_editor = Some(ProviderEditor {
+            original_id: provider_id,
+            in_catalog,
+            id: id_input,
+            name: name_input,
+            base_url: base_url_input,
+            api_key: api_key_input,
+            models: models_input,
+            api,
+            had_api_key,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    fn provider_editor_cancel(
+        &mut self,
+        _: &crate::PickerCancel,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let closed = self.provider_editor.take().is_some()
+            | self.provider_key_editor.take().is_some();
+        if closed {
+            cx.notify();
+        }
+    }
+
+    fn provider_editor_confirm(
+        &mut self,
+        _: &crate::PickerConfirm,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.provider_key_editor.is_some() {
+            self.provider_key_save(window, cx);
+        } else {
+            self.provider_save(window, cx);
+        }
+    }
+
+    /// Dismiss when the scrim (outside the card) is pressed.
+    fn provider_editor_scrim(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let closed = self.provider_editor.take().is_some()
+            | self.provider_key_editor.take().is_some();
+        if closed {
+            cx.notify();
+        }
+    }
+
+    /// Validate and write the editor's values to models.json.
+    fn provider_save(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.provider_editor.as_ref() else {
+            return;
+        };
+        let id = editor.id.read(cx).text().trim().to_string();
+        let name = editor.name.read(cx).text().trim().to_string();
+        let base_url = editor.base_url.read(cx).text().trim().to_string();
+        let api_key = editor.api_key.read(cx).text();
+        let api = editor.api.clone();
+        let in_catalog = editor.in_catalog;
+        let models: Vec<String> = editor
+            .models
+            .read(cx)
+            .text()
+            .split(['\n', ','])
+            .map(|model| model.trim().to_string())
+            .filter(|model| !model.is_empty())
+            .collect();
+
+        let error = if id.is_empty() {
+            Some("Provider id is required.".to_string())
+        } else if !id
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphanumeric())
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        {
+            Some(
+                "Id must start with a letter or number — letters, numbers, dots, dashes and underscores only."
+                    .to_string(),
+            )
+        } else if !(base_url.is_empty()
+            || base_url.starts_with("http://")
+            || base_url.starts_with("https://"))
+        {
+            Some("Base URL must start with http:// or https://.".to_string())
+        } else if base_url.is_empty() && !in_catalog {
+            Some("Base URL is required for a custom provider.".to_string())
+        } else if models.is_empty() && !in_catalog {
+            Some("Add at least one model id.".to_string())
+        } else {
+            None
+        };
+
+        if let Some(error) = error {
+            if let Some(editor) = self.provider_editor.as_mut() {
+                editor.error = Some(error);
+            }
+            cx.notify();
+            return;
+        }
+
+        let key = (!api_key.trim().is_empty()).then_some(api_key.trim());
+        match providers::write_provider(
+            &id,
+            (!name.is_empty()).then_some(name.as_str()),
+            &base_url,
+            &api,
+            key,
+            &models,
+        ) {
+            Ok(()) => {
+                self.provider_editor = None;
+                self.reload_custom_providers(cx);
+                self.refresh_catalogs();
+                self.set_status(format!(
+                    "Saved {id} — restart pi if it doesn't appear in the catalog"
+                ));
+            }
+            Err(err) => {
+                if let Some(editor) = self.provider_editor.as_mut() {
+                    editor.error = Some(err);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Remove a provider entry from models.json.
+    fn provider_remove(&mut self, id: String, cx: &mut Context<Self>) {
+        match providers::remove_provider(&id) {
+            Ok(()) => {
+                self.provider_remove_confirm = None;
+                self.reload_custom_providers(cx);
+                self.refresh_catalogs();
+                self.set_status(format!("Removed provider {id}"));
+            }
+            Err(err) => {
+                self.custom_providers_error = Some(err);
+            }
+        }
         cx.notify();
     }
 
@@ -3487,9 +4489,200 @@ struct SessionMenu {
 pub(crate) enum SettingsSection {
     General,
     Runtime,
+    Agent,
     Appearance,
     Providers,
     About,
+}
+
+/// The provider editor's open state. Inputs are `ComposerInput` entities so
+/// they get real text editing (selection, IME, clipboard) for free.
+struct ProviderEditor {
+    /// Existing provider id, or `None` when adding a new one.
+    original_id: Option<String>,
+    /// Present in the live catalog — a built-in, or a custom provider pi has
+    /// already loaded. Allows saving with an empty model list (an override).
+    in_catalog: bool,
+    id: Entity<ComposerInput>,
+    name: Entity<ComposerInput>,
+    base_url: Entity<ComposerInput>,
+    api_key: Entity<ComposerInput>,
+    models: Entity<ComposerInput>,
+    /// Selected API family (chips above the fields).
+    api: String,
+    /// A key is already stored in models.json (placeholder + hint).
+    had_api_key: bool,
+    error: Option<String>,
+}
+
+/// The API-key editor's open state (one field, provider-scoped).
+struct ProviderKeyEditor {
+    provider_id: String,
+    provider_name: String,
+    /// Supports OAuth too, so the modal can offer the sign-in path as well.
+    oauth: bool,
+    note: &'static str,
+    key: Entity<ComposerInput>,
+    error: Option<String>,
+}
+
+/// API families pi can speak for a custom endpoint, shown as chips.
+const PROVIDER_APIS: [&str; 9] = [
+    "openai-completions",
+    "openai-responses",
+    "anthropic-messages",
+    "google-generative-ai",
+    "mistral-conversations",
+    "amazon-bedrock",
+    "azure-openai-responses",
+    "openai-codex-responses",
+    "google-vertex",
+];
+
+/// One row of the Providers grid — the built-in catalog merged with the live
+/// model catalog, models.json, and auth.json.
+struct ProviderView {
+    id: String,
+    name: String,
+    /// Has models in the live catalog (pi is serving it right now).
+    active: bool,
+    model_count: usize,
+    /// Built-in catalog size from pi's bundled data (0 when unknown).
+    catalog_count: usize,
+    /// Has an entry in models.json (custom, or a built-in override).
+    custom: bool,
+    has_api_key: bool,
+    base_url: String,
+    api: String,
+    /// pi ships this provider (vs. a models.json-only custom endpoint).
+    builtin: bool,
+    /// `/login <id>` offers a subscription/OAuth flow.
+    oauth: bool,
+    /// Storing an API key in auth.json works for this provider.
+    api_key: bool,
+    /// Environment variables pi reads for this provider's key.
+    env_names: Vec<String>,
+    /// The one that is actually set in this process, if any.
+    env_var: Option<String>,
+    note: &'static str,
+    /// Credential in auth.json, if any.
+    auth: Option<providers::ProviderAuth>,
+    /// Live credential facts from the `auth.*` RPC namespace, when pi
+    /// supports it. Preferred over the on-disk `auth` snapshot.
+    live_status: Option<ProviderStatus>,
+    /// The provider's env var is set in this process's environment.
+    env_authed: bool,
+}
+
+impl ProviderView {
+    /// Any credential present (RPC status, auth.json, or environment).
+    fn connected(&self) -> bool {
+        self.live_status
+            .as_ref()
+            .is_some_and(|status| status.authenticated)
+            || self.auth.is_some()
+            || self.env_authed
+    }
+
+    /// The credential kind to display: live RPC status wins over the file.
+    fn credential_kind(&self) -> Option<&str> {
+        if let Some(status) = &self.live_status {
+            if status.authenticated {
+                return Some(status.credential.as_str());
+            }
+        }
+        self.auth.map(|auth| match auth.kind {
+            providers::AuthKind::OAuth => "oauth",
+            providers::AuthKind::ApiKey => "api_key",
+        })
+    }
+}
+
+/// Render an epoch-millisecond expiry as a short local date/time.
+fn format_epoch_ms(ms: i64) -> String {
+    use chrono::{Local, TimeZone};
+    match Local.timestamp_millis_opt(ms).single() {
+        Some(datetime) => datetime.format("%b %-d %H:%M").to_string(),
+        None => "—".to_string(),
+    }
+}
+
+/// Human label for a discovered auth method. pi's own label wins; otherwise a
+/// sensible default keyed off the method id (never off a provider id).
+fn method_label(id: &str, label: &str, connected: bool) -> String {
+    if !label.is_empty() && label != id {
+        return label.to_string();
+    }
+    match id {
+        "browser" | "oauth" => {
+            if connected {
+                "Reconnect".to_string()
+            } else {
+                "Sign in".to_string()
+            }
+        }
+        "device_code" => "Use device code".to_string(),
+        other => {
+            let mut chars = other.replace(['_', '-'], " ").chars().collect::<Vec<_>>();
+            if let Some(first) = chars.first_mut() {
+                first.make_ascii_uppercase();
+            }
+            chars.into_iter().collect()
+        }
+    }
+}
+
+/// A provider-card button action, dispatched through one handler so the card
+/// can build buttons without a closure per action.
+#[derive(Clone)]
+enum ProviderAction {
+    SignIn {
+        id: String,
+        name: String,
+    },
+    /// Start a login through the `auth.*` RPC namespace using a discovered
+    /// method id (`browser`, `device_code`, …).
+    AuthStart {
+        id: String,
+        name: String,
+        method: String,
+    },
+    /// Cancel the active login for a provider.
+    AuthCancel,
+    /// Dismiss a finished login card.
+    AuthDismiss,
+    /// Open a device-code / verification URL in the browser.
+    AuthOpenUrl(String),
+    /// Copy a value (device code) to the clipboard.
+    AuthCopy(String),
+    EditKey {
+        id: String,
+        name: String,
+        oauth: bool,
+        note: &'static str,
+    },
+    SignOut {
+        id: String,
+    },
+    Configure {
+        id: String,
+    },
+    Remove {
+        id: String,
+    },
+    ConfirmRemove {
+        id: String,
+    },
+    CancelRemove,
+    SaveKey,
+    Restart,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProviderButtonStyle {
+    Primary,
+    Ghost,
+    Danger,
 }
 
 /// Live state of the active pi agent process, for Settings → Runtime.
@@ -4016,6 +5209,12 @@ impl Render for OrbitApp {
                                     // above the composer box (same deferred
                                     // + anchored pattern as the chip pickers)
                                     .children(self.autocomplete_popup(cx))
+                                    // Command/protocol failures, above the
+                                    // queue and composer.
+                                    .children(self.error_banner(theme, cx))
+                                    // Queued follow-ups wait here (sticky above
+                                    // the composer) until the task finishes.
+                                    .children(self.queue_bar(cx))
                                     // composer box — the picker popups are
                                     // anchored above their own chips
                                     .child(
@@ -4857,6 +6056,7 @@ impl OrbitApp {
                                             .child(if self.refreshing {
                                                 gpui::svg()
                                                     .path("icons/loader.svg")
+                                                    .flex_none()
                                                     .size(px(13.))
                                                     .text_color(theme.text_2)
                                                     .with_animation(
@@ -5094,8 +6294,11 @@ impl OrbitApp {
         let entity = cx.entity();
         let theme = *theme::get(cx);
         context_meter::context_control(
-            self.context.as_ref(),
-            self.transcript.estimated_tokens(),
+            ContextMeterData {
+                usage: self.context.as_ref(),
+                session: self.session_usage.as_ref(),
+                conversation_est: self.transcript.estimated_tokens(),
+            },
             self.context_popup,
             &entity,
             theme,
@@ -5265,6 +6468,168 @@ impl OrbitApp {
                 ))
         }
     }
+
+    /// The pending queue pi is holding, shown as a bar directly above the
+    /// composer. While a task is running, messages sent from the composer are
+    /// queued as follow-ups here and delivered once the task finishes;
+    /// `queue_update` mirrors the list live.
+    fn queue_bar(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if self.queue.is_empty() {
+            return None;
+        }
+        let theme = *theme::get(cx);
+        let mut chips = div().flex().flex_wrap().gap(px(6.));
+        for text in &self.queue.steering {
+            chips = chips.child(queue_chip("Steer", text, false, theme));
+        }
+        for text in &self.queue.follow_up {
+            chips = chips.child(queue_chip("Follow-up", text, true, theme));
+        }
+        Some(
+            div()
+                .w_full()
+                .mb(px(8.))
+                .px(px(10.))
+                .py(px(8.))
+                .rounded_lg()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.bg_raised)
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(theme.ui_px(11.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text_3)
+                                .child(format!(
+                                    "Queued — sends after the current task finishes ({})",
+                                    self.queue.len()
+                                )),
+                        )
+                        .child(
+                            div()
+                                .id("clear-queue")
+                                .px(px(6.))
+                                .py(px(1.))
+                                .rounded(px(5.))
+                                .text_size(theme.ui_px(11.))
+                                .text_color(theme.text_2)
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme.overlay).text_color(theme.text))
+                                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_clear_queue))
+                                .child("Clear"),
+                        ),
+                )
+                .child(chips)
+                .into_any_element(),
+        )
+    }
+
+    /// The dismissible error banner: a command / protocol / extension failure
+    /// surfaced per the docs' error contract. Persists until dismissed.
+    fn error_banner(&self, theme: Theme, cx: &Context<Self>) -> Option<AnyElement> {
+        let message = self.error.as_ref()?;
+        Some(
+            div()
+                .w_full()
+                .mb(px(8.))
+                .bg(theme.crit.opacity(0.1))
+                .border_1()
+                .border_color(theme.crit.opacity(0.45))
+                .rounded_lg()
+                .px(px(12.))
+                .py(px(9.))
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(icon("icons/info.svg", 15., theme.crit))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(theme.ui_px(12.))
+                        .text_color(theme.text)
+                        .child(message.clone()),
+                )
+                .child(
+                    div()
+                        .id("dismiss-error")
+                        .size(px(20.))
+                        .rounded_md()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .text_size(theme.ui_px(13.))
+                        .text_color(theme.text_2)
+                        .hover(|s| s.bg(theme.overlay).text_color(theme.text))
+                        .on_mouse_up(MouseButton::Left, cx.listener(Self::dismiss_error))
+                        .child("×"),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Discard the pending queue without aborting the run. The composer text
+    /// stays untouched (unlike Escape, which restores queued text).
+    fn on_clear_queue(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.restore_queue_on_clear = false;
+        self.send(CommandBody::ClearQueue, "clear_queue");
+        cx.notify();
+    }
+}
+
+/// Turn a wire command name into a short human label, e.g. `set_model` →
+/// `Set model failed`.
+fn humanize_command(command: &str) -> String {
+    let spaced = command.replace(['_', '.'], " ");
+    let mut chars = spaced.chars();
+    let label = match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => "Command".to_string(),
+    };
+    format!("{label} failed")
+}
+
+/// One queued-message chip: a kind tag plus the message text.
+fn queue_chip(kind: &str, text: &str, follow: bool, theme: Theme) -> AnyElement {
+    div()
+        .max_w(px(300.))
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .px(px(8.))
+        .py(px(4.))
+        .rounded(px(6.))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.bg_raised)
+        .child(
+            div()
+                .flex_none()
+                .text_size(theme.ui_px(10.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(if follow { theme.text_3 } else { theme.accent })
+                .child(kind.to_string()),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(theme.ui_px(11.5))
+                .text_color(theme.text_2)
+                .child(text.to_string()),
+        )
+        .into_any_element()
 }
 
 impl OrbitApp {
@@ -5277,13 +6642,14 @@ impl OrbitApp {
     fn render_settings(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let this = cx.entity();
         let theme = *theme::get(cx);
-        let sections: [(SettingsSection, &'static str, &'static str); 5] = [
+        let sections: [(SettingsSection, &'static str, &'static str); 6] = [
             (SettingsSection::General, "icons/settings.svg", "General"),
             (
                 SettingsSection::Runtime,
                 "icons/server-stack.svg",
                 "Runtime",
             ),
+            (SettingsSection::Agent, "icons/spark.svg", "Agent"),
             (
                 SettingsSection::Appearance,
                 "icons/contrast.svg",
@@ -5295,8 +6661,10 @@ impl OrbitApp {
 
         div()
             .flex_1()
+            .min_w_0()
             .min_h_0()
             .flex()
+            .relative()
             .bg(theme.bg_main)
             .font_family(theme::ui_font_family())
             // ── nav column ──
@@ -5365,8 +6733,7 @@ impl OrbitApp {
                                     .when(!selected, |row| row.hover(|s| s.bg(theme.bg_hover)))
                                     .on_mouse_up(MouseButton::Left, move |_, _, cx| {
                                         this.update(cx, |app, cx| {
-                                            app.settings_section = section;
-                                            cx.notify();
+                                            app.set_settings_section(section, cx);
                                         });
                                     })
                                     .child(icon(
@@ -5386,28 +6753,58 @@ impl OrbitApp {
                             })),
                     ),
             )
-            // ── content column (scrolls) ──
+            // ── content column: fixed header + scrolling body ──
             .child(
                 div()
-                    .id("settings-content")
                     .flex_1()
+                    .min_w_0()
                     .min_h_0()
-                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    // The title (and, on Providers, the search/toolbar) stay
+                    // pinned; gpui has no sticky positioning, so they live
+                    // outside the scroll container.
                     .child(
                         div()
                             .w_full()
-                            .max_w(px(680.))
-                            .mx_auto()
-                            .px(px(12.))
+                            .flex_shrink_0()
+                            .px(px(24.))
                             .pt(px(44.))
                             .pb(px(12.))
+                            .when(self.settings_section == SettingsSection::Providers, |header| {
+                                header.border_b_1().border_color(theme.border)
+                            })
                             .flex()
                             .flex_col()
                             .gap_3()
                             .child(self.settings_header(theme))
-                            .children(self.settings_rows(&this, theme, cx)),
+                            .children(
+                                (self.settings_section == SettingsSection::Providers)
+                                    .then(|| self.provider_toolbar(theme, this.clone(), cx)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("settings-content")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .px(px(24.))
+                                    .pb(px(12.))
+                                    .flex()
+                                    .flex_col()
+                                    .gap_3()
+                                    .children(self.error_banner(theme, cx))
+                                    .children(self.settings_rows(&this, theme, cx)),
+                            ),
                     ),
             )
+            // ── provider editor modals (models.json + API key) ──
+            .children(self.provider_editor_layer(theme, this.clone(), cx))
+            .children(self.provider_key_layer(theme, this, cx))
     }
 
     fn settings_header(&self, theme: Theme) -> impl IntoElement + use<> {
@@ -5420,10 +6817,14 @@ impl OrbitApp {
                 "Runtime",
                 "The pi agent process Orbit spawns — stdio transport, no host or port.",
             ),
+            SettingsSection::Agent => (
+                "Agent",
+                "How pi queues your messages, compacts context, and retries errors.",
+            ),
             SettingsSection::Appearance => ("Appearance", "Window, layout, and color preferences."),
             SettingsSection::Providers => (
                 "Providers",
-                "Models and providers advertised by the running pi agent.",
+                "The live catalog plus custom providers from ~/.pi/agent/models.json.",
             ),
             SettingsSection::About => ("About", "Versions and the rendering stack."),
         };
@@ -5490,6 +6891,7 @@ impl OrbitApp {
                 ),
             ],
             SettingsSection::Runtime => self.runtime_rows(theme, this.clone(), cx),
+            SettingsSection::Agent => self.agent_rows(theme, this.clone(), cx),
             SettingsSection::Appearance => vec![
                 self.card(
                     theme,
@@ -5551,7 +6953,7 @@ impl OrbitApp {
                     None,
                 ),
             ],
-            SettingsSection::Providers => self.provider_rows(theme),
+            SettingsSection::Providers => self.provider_rows(theme, this.clone(), cx),
             SettingsSection::About => vec![
                 self.card(
                     theme,
@@ -5587,61 +6989,1813 @@ impl OrbitApp {
         }
     }
 
-    /// Providers from the live pi catalog, deduplicated in catalog order.
-    fn provider_rows(&self, theme: Theme) -> Vec<AnyElement> {
-        if self.available_models.is_empty() {
-            return vec![self.card(
-                theme,
-                "No models in the catalog",
-                if self.client.is_some() {
-                    "The running pi agent hasn't advertised any models yet."
-                } else {
-                    "The pi agent is not running — restart Orbit to reconnect."
-                },
-                None,
-            )];
-        }
-        let mut providers: Vec<(String, usize)> = Vec::new();
-        for model in &self.available_models {
-            match providers.iter_mut().find(|(p, _)| *p == model.provider) {
-                Some((_, count)) => *count += 1,
-                None => providers.push((model.provider.clone(), 1)),
-            }
-        }
-        providers
-            .into_iter()
-            .map(|(provider, count)| {
+    /// The sticky provider header: the search field plus the
+    /// count / Refresh / Add toolbar. Rendered outside the scroll container
+    /// so it stays put while the grid scrolls (gpui 0.2.2 has no
+    /// `position: sticky`).
+    fn provider_toolbar(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        _cx: &Context<Self>,
+    ) -> AnyElement {
+        let all = self.provider_views();
+        let active = all.iter().filter(|view| view.active).count();
+        let connected = all.iter().filter(|view| view.connected()).count();
+
+        let search = div()
+            .w_full()
+            .h(px(34.))
+            .px(px(10.))
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_main)
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_size(theme.ui_px(13.))
+            .child(icon("icons/search.svg", 14., theme.text_3))
+            .child(self.provider_filter.clone());
+
+        let refresh_icon: AnyElement = if self.providers_refreshing {
+            gpui::svg()
+                .path("icons/loader.svg")
+                .flex_none()
+                .size(px(13.))
+                .text_color(theme.text_2)
+                .with_animation(
+                    "providers-refresh-spin",
+                    Animation::new(Duration::from_millis(900)).repeat(),
+                    |svg, delta| {
+                        svg.with_transformation(Transformation::rotate(radians(
+                            delta * std::f32::consts::TAU,
+                        )))
+                    },
+                )
+                .into_any_element()
+        } else {
+            icon("icons/refresh.svg", 13., theme.text_2).into_any_element()
+        };
+        let refresh_button = div()
+            .id("providers-refresh")
+            .h(px(30.))
+            .px(px(12.))
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_raised)
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .cursor_pointer()
+            .when(self.providers_refreshing, |button| button.opacity(0.6))
+            .hover(|style| style.bg(theme.bg_hover))
+            .on_mouse_up(MouseButton::Left, {
+                let this = this.clone();
+                move |_, _, cx| {
+                    this.update(cx, |app, cx| app.provider_refresh(cx));
+                }
+            })
+            .child(refresh_icon)
+            .child(
                 div()
-                    .bg(theme.bg_composer)
+                    .text_size(theme.ui_px(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_2)
+                    .child("Refresh"),
+            );
+
+        let add_button = div()
+            .id("providers-add")
+            .h(px(30.))
+            .px(px(12.))
+            .rounded_md()
+            .bg(theme.send_bg)
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.send_bg_hover))
+            .on_mouse_up(MouseButton::Left, {
+                let this = this.clone();
+                move |_, window, cx| {
+                    this.update(cx, |app, cx| app.provider_editor_open(None, window, cx));
+                }
+            })
+            .child(icon("icons/plus.svg", 13., theme.send_fg))
+            .child(
+                div()
+                    .text_size(theme.ui_px(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.send_fg)
+                    .child("Add provider"),
+            );
+
+        let toolbar = div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(theme.ui_px(12.))
+                    .text_color(theme.text_3)
+                    .child(format!(
+                        "{} providers · {} active · {} connected",
+                        all.len(),
+                        active,
+                        connected
+                    )),
+            )
+            .child(refresh_button)
+            .child(add_button);
+
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(search)
+            .child(toolbar)
+            .into_any_element()
+    }
+
+    /// The Providers page: every provider pi ships with (plus models.json-only
+    /// endpoints) as a 3-column grid, each with real auth status and actions.
+    fn provider_rows(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let all = self.provider_views();
+        let needle = self.provider_filter.read(cx).text().trim().to_lowercase();
+
+        let mut views: Vec<&ProviderView> = all
+            .iter()
+            .filter(|view| {
+                needle.is_empty()
+                    || view.name.to_lowercase().contains(&needle)
+                    || view.id.to_lowercase().contains(&needle)
+                    || view
+                        .env_names
+                        .iter()
+                        .any(|name| name.to_lowercase().contains(&needle))
+            })
+            .collect();
+        let rank = |view: &ProviderView| -> u8 {
+            if view.active {
+                0
+            } else if view.connected() {
+                1
+            } else if view.custom {
+                2
+            } else {
+                3
+            }
+        };
+        views.sort_by(|a, b| {
+            rank(a)
+                .cmp(&rank(b))
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+
+        let mut rows: Vec<AnyElement> = Vec::new();
+
+        // ── credential-changed banner ──
+        if self.provider_auth_dirty {
+            rows.push(
+                div()
+                    .w_full()
+                    .bg(theme.accent.opacity(0.1))
                     .border_1()
-                    .border_color(theme.border)
+                    .border_color(theme.accent.opacity(0.35))
                     .rounded_lg()
                     .px(px(14.))
                     .py(px(10.))
                     .flex()
                     .items_center()
                     .gap_2p5()
-                    .child(icon_dyn(provider_icon(&provider), 14., theme.text_2))
+                    .child(icon("icons/info.svg", 15., theme.accent))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_size(theme.ui_px(12.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child("Credentials changed"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(theme.ui_px(11.5))
+                                    .text_color(theme.text_2)
+                                    .child(
+                                        "pi reads auth.json at startup — restart it to load the new credentials.",
+                                    ),
+                            ),
+                    )
+                    .child(self.provider_button(
+                        "providers-apply".into(),
+                        "Restart pi",
+                        ProviderButtonStyle::Primary,
+                        theme,
+                        this.clone(),
+                        ProviderAction::Restart,
+                    ))
+                    .into_any_element(),
+            );
+        }
+
+        if let Some(error) = &self.custom_providers_error {
+            rows.push(self.provider_error_card(theme, "models.json could not be read", error));
+        }
+        if let Some(error) = &self.provider_auth_error {
+            rows.push(self.provider_error_card(theme, "auth.json could not be read", error));
+        }
+
+        // ── grid ──
+        if views.is_empty() {
+            rows.push(
+                div()
+                    .w_full()
+                    .bg(theme.bg_composer)
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded_lg()
+                    .px(px(14.))
+                    .py(px(40.))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .child(icon("icons/search.svg", 26., theme.text_3))
                     .child(
                         div()
                             .text_size(theme.ui_px(13.))
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child(provider.clone()),
+                            .child("No providers match"),
                     )
-                    .child(div().flex_1())
                     .child(
                         div()
                             .text_size(theme.ui_px(12.))
                             .text_color(theme.text_2)
-                            .child(format!(
-                                "{} model{}",
-                                count,
-                                if count == 1 { "" } else { "s" }
-                            )),
+                            .child("Try a different search."),
                     )
-                    .into_any_element()
+                    .into_any_element(),
+            );
+        } else {
+            let cards: Vec<AnyElement> = views
+                .iter()
+                .map(|view| self.provider_card(view, theme, this.clone()))
+                .collect();
+            rows.push(
+                div()
+                    .w_full()
+                    .grid()
+                    .grid_cols(3)
+                    .gap_3()
+                    .children(cards)
+                    .into_any_element(),
+            );
+        }
+
+        rows
+    }
+
+    /// A red note card for a config read error.
+    fn provider_error_card(&self, theme: Theme, title: &str, error: &str) -> AnyElement {
+        div()
+            .w_full()
+            .bg(theme.crit.opacity(0.08))
+            .border_1()
+            .border_color(theme.crit.opacity(0.35))
+            .rounded_lg()
+            .px(px(14.))
+            .py(px(12.))
+            .flex()
+            .items_start()
+            .gap_2p5()
+            .child(icon("icons/info.svg", 15., theme.crit))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(title.to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.text_2)
+                            .child(error.to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(11.5))
+                            .text_color(theme.text_3)
+                            .child("Fix or remove the file before editing providers here."),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// Every provider pi ships with, merged with the live catalog, models.json,
+    /// and auth.json. Built-ins come first so nothing is hidden behind auth.
+    fn provider_views(&self) -> Vec<ProviderView> {
+        let mut views: Vec<ProviderView> = Vec::new();
+        // Prefer pi's own provider metadata (introspected from pi-ai). Fall
+        // back to the curated table when node/pi-ai aren't reachable.
+        if !self.provider_metadata.is_empty() {
+            for provider in &self.provider_metadata {
+                views.push(self.provider_view_for(
+                    &provider.id,
+                    Some(provider.name.clone()),
+                    provider.oauth,
+                    provider.api_key,
+                    &provider.env_vars,
+                    providers::provider_note(&provider.id),
+                    true,
+                ));
+            }
+        } else {
+            for builtin in providers::BUILTIN_PROVIDERS {
+                let env_vars: Vec<String> = if builtin.env_var.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![builtin.env_var.to_string()]
+                };
+                views.push(self.provider_view_for(
+                    builtin.id,
+                    Some(builtin.name.to_string()),
+                    builtin.oauth,
+                    builtin.api_key,
+                    &env_vars,
+                    builtin.note,
+                    true,
+                ));
+            }
+        }
+        // Providers pi ships but neither source knows yet — discovered from
+        // pi's bundled catalog data, so a new pi release lists its providers
+        // without an Orbit change.
+        for id in self.provider_catalog_counts.keys() {
+            if !views.iter().any(|view| &view.id == id) {
+                views.push(self.provider_view_for(
+                    id,
+                    None,
+                    false,
+                    true,
+                    &[],
+                    providers::provider_note(id),
+                    true,
+                ));
+            }
+        }
+        // Catalog providers that aren't built-ins (extension providers, or
+        // custom endpoints pi has already loaded).
+        for model in &self.available_models {
+            if !views.iter().any(|view| view.id == model.provider) {
+                views.push(self.provider_view_for(
+                    &model.provider,
+                    None,
+                    false,
+                    true,
+                    &[],
+                    "",
+                    false,
+                ));
+            }
+        }
+        // models.json providers pi hasn't loaded yet.
+        for provider in &self.custom_providers {
+            if !views.iter().any(|view| view.id == provider.id) {
+                views.push(self.provider_view_for(
+                    &provider.id,
+                    None,
+                    false,
+                    true,
+                    &[],
+                    "",
+                    false,
+                ));
+            }
+        }
+        // Providers the running pi advertises through `auth.list` but no other
+        // source knows about still get a card and capability-driven buttons.
+        for capability in self.auth.providers() {
+            if !views.iter().any(|view| view.id == capability.id) {
+                views.push(self.provider_view_for(
+                    &capability.id,
+                    Some(capability.name.clone()),
+                    capability.supports_oauth(),
+                    capability.supports_api_key(),
+                    &[],
+                    providers::provider_note(&capability.id),
+                    true,
+                ));
+            }
+        }
+        views
+    }
+
+    /// Build one grid row from all sources.
+    #[allow(clippy::too_many_arguments)]
+    fn provider_view_for(
+        &self,
+        id: &str,
+        name: Option<String>,
+        oauth: bool,
+        api_key: bool,
+        env_names: &[String],
+        note: &'static str,
+        builtin: bool,
+    ) -> ProviderView {
+        let custom = self
+            .custom_providers
+            .iter()
+            .find(|provider| provider.id == id);
+        let live_count = self
+            .available_models
+            .iter()
+            .filter(|model| model.provider == id)
+            .count();
+        let catalog_count = self
+            .provider_catalog_counts
+            .get(id)
+            .copied()
+            .unwrap_or(0);
+        let custom_count = custom.map(|provider| provider.model_ids.len()).unwrap_or(0);
+        let env_hit = env_names
+            .iter()
+            .find(|name| std::env::var_os(name.as_str()).is_some())
+            .cloned();
+        ProviderView {
+            id: id.to_string(),
+            name: custom
+                .and_then(|provider| provider.name.clone())
+                .or(name)
+                .unwrap_or_else(|| providers::provider_display_name(id)),
+            active: live_count > 0,
+            model_count: if live_count > 0 {
+                live_count
+            } else if catalog_count > 0 {
+                catalog_count
+            } else {
+                custom_count
+            },
+            catalog_count,
+            custom: custom.is_some(),
+            has_api_key: custom.is_some_and(|provider| provider.has_api_key),
+            base_url: custom
+                .map(|provider| provider.base_url.clone())
+                .unwrap_or_default(),
+            api: custom
+                .map(|provider| provider.api.clone())
+                .unwrap_or_default(),
+            builtin,
+            oauth,
+            api_key,
+            env_names: env_names.to_vec(),
+            env_authed: env_hit.is_some(),
+            env_var: env_hit,
+            note,
+            auth: self.provider_auth.get(id).copied(),
+            live_status: self.auth.status(id).cloned(),
+        }
+    }
+
+    /// The live auth block shown on a card while a login is Connecting,
+    /// waiting on a device code, or showing a Success/Error/Cancelled result.
+    /// `None` means the provider has no session and the card renders its
+    /// normal Connect / Disconnect actions.
+    fn provider_auth_section(
+        &self,
+        view: &ProviderView,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+    ) -> Option<AnyElement> {
+        let session = self.auth.login_for(&view.id)?;
+        let (headline, detail, tint) = match session.phase {
+            LoginPhase::Connecting => (
+                "Connecting…",
+                "Asking pi to start the sign-in flow.".to_string(),
+                theme.warn,
+            ),
+            LoginPhase::AwaitingBrowser => (
+                "Waiting for your browser…",
+                "Finish signing in there, then return to Orbit.".to_string(),
+                theme.accent,
+            ),
+            LoginPhase::AwaitingDeviceCode => (
+                "Enter this device code",
+                "Approve the request in your browser to continue.".to_string(),
+                theme.accent,
+            ),
+            LoginPhase::Succeeded => (
+                "Connected",
+                "pi saved the credential to auth.json.".to_string(),
+                theme.ok_green,
+            ),
+            LoginPhase::Error => (
+                "Sign-in failed",
+                session
+                    .error
+                    .as_ref()
+                    .map(|(_, message)| message.clone())
+                    .filter(|message| !message.is_empty())
+                    .unwrap_or_else(|| "The sign-in did not complete.".to_string()),
+                theme.crit,
+            ),
+            LoginPhase::Cancelled => (
+                "Cancelled",
+                session
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "The sign-in was cancelled.".to_string()),
+                theme.text_3,
+            ),
+        };
+
+        let mut body = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().size(px(7.)).rounded_full().bg(tint))
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(tint)
+                            .child(headline),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(theme.ui_px(11.5))
+                    .text_color(theme.text_2)
+                    .child(detail),
+            );
+
+        if let Some(device) = &session.device_code {
+            body = body.child(
+                div()
+                    .w_full()
+                    .px_3()
+                    .py_2p5()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.bg_main)
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(10.5))
+                            .text_color(theme.text_3)
+                            .child("Device code"),
+                    )
+                    .child(
+                        div()
+                            .font_family(theme::code_font_family())
+                            .text_size(theme.code_px(16.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child(device.user_code.clone()),
+                    )
+                    .child(
+                        div()
+                            .font_family(theme::code_font_family())
+                            .text_size(theme.code_px(10.5))
+                            .text_color(theme.text_3)
+                            .truncate()
+                            .child(device.verification_uri.clone()),
+                    ),
+            );
+        }
+        if session.device_code.is_none() {
+            if let Some(url) = &session.url {
+                body = body.child(
+                    div()
+                        .truncate()
+                        .font_family(theme::code_font_family())
+                        .text_size(theme.code_px(10.5))
+                        .text_color(theme.text_3)
+                        .child(url.clone()),
+                );
+            }
+        }
+
+        let id = view.id.clone();
+        let name = view.name.clone();
+        let method = session.method.clone();
+        let mut buttons = div().flex().flex_wrap().items_center().gap_2();
+        match session.phase {
+            LoginPhase::Connecting | LoginPhase::AwaitingBrowser | LoginPhase::AwaitingDeviceCode => {
+                if let Some(device) = &session.device_code {
+                    let open = device
+                        .verification_uri_complete
+                        .clone()
+                        .unwrap_or_else(|| device.verification_uri.clone());
+                    buttons = buttons
+                        .child(self.provider_button(
+                            format!("provider-auth-open-{}", view.id),
+                            "Open page",
+                            ProviderButtonStyle::Primary,
+                            theme,
+                            this.clone(),
+                            ProviderAction::AuthOpenUrl(open),
+                        ))
+                        .child(self.provider_button(
+                            format!("provider-auth-copy-{}", view.id),
+                            "Copy code",
+                            ProviderButtonStyle::Ghost,
+                            theme,
+                            this.clone(),
+                            ProviderAction::AuthCopy(device.user_code.clone()),
+                        ));
+                }
+                buttons = buttons.child(self.provider_button(
+                    format!("provider-auth-cancel-{}", view.id),
+                    "Cancel",
+                    ProviderButtonStyle::Ghost,
+                    theme,
+                    this.clone(),
+                    ProviderAction::AuthCancel,
+                ));
+            }
+            LoginPhase::Succeeded => {
+                buttons = buttons.child(self.provider_button(
+                    format!("provider-auth-done-{}", view.id),
+                    "Done",
+                    ProviderButtonStyle::Primary,
+                    theme,
+                    this.clone(),
+                    ProviderAction::AuthDismiss,
+                ));
+            }
+            LoginPhase::Error | LoginPhase::Cancelled => {
+                buttons = buttons
+                    .child(self.provider_button(
+                        format!("provider-auth-retry-{}", view.id),
+                        "Try again",
+                        ProviderButtonStyle::Primary,
+                        theme,
+                        this.clone(),
+                        ProviderAction::AuthStart {
+                            id: id.clone(),
+                            name: name.clone(),
+                            method: method.clone(),
+                        },
+                    ))
+                    .child(self.provider_button(
+                        format!("provider-auth-dismiss-{}", view.id),
+                        "Dismiss",
+                        ProviderButtonStyle::Ghost,
+                        theme,
+                        this.clone(),
+                        ProviderAction::AuthDismiss,
+                    ));
+            }
+        }
+        body = body.child(buttons);
+        Some(body.into_any_element())
+    }
+
+    /// One large provider card: huge brand mark, status, auth facts, actions.
+    fn provider_card(
+        &self,
+        view: &ProviderView,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+    ) -> AnyElement {
+        let confirming = self.provider_remove_confirm.as_deref() == Some(view.id.as_str());
+        let session = self.auth.login_for(&view.id);
+        let (status_label, status_color) = if let Some(session) = session {
+            match session.phase {
+                LoginPhase::Connecting => ("Connecting", theme.warn),
+                LoginPhase::AwaitingBrowser | LoginPhase::AwaitingDeviceCode => {
+                    ("Connecting", theme.accent)
+                }
+                LoginPhase::Succeeded => ("Connected", theme.ok_green),
+                LoginPhase::Error => ("Sign-in failed", theme.crit),
+                LoginPhase::Cancelled => ("Cancelled", theme.text_3),
+            }
+        } else if view.active {
+            ("Active", theme.ok_green)
+        } else if view.connected() {
+            ("Connected", theme.accent)
+        } else if view.custom {
+            ("Not loaded", theme.warn)
+        } else {
+            ("Not configured", theme.text_3)
+        };
+
+        let tile = div()
+            .size(px(52.))
+            .flex_none()
+            .rounded(px(14.))
+            .bg(theme.bg_raised)
+            .border_1()
+            .border_color(theme.border)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(icon_dyn(
+                provider_icon(&view.id),
+                30.,
+                if view.active || view.connected() {
+                    theme.text
+                } else {
+                    theme.text_2
+                },
+            ));
+
+        let status_pill = div()
+            .h(px(22.))
+            .px(px(8.))
+            .rounded_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .bg(status_color.opacity(0.12))
+            .child(div().size(px(6.)).rounded_full().bg(status_color))
+            .child(
+                div()
+                    .text_size(theme.ui_px(11.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(status_color)
+                    .child(status_label),
+            );
+
+        let header = div()
+            .flex()
+            .items_start()
+            .gap_3()
+            .child(tile)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(14.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .truncate()
+                            .child(view.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .font_family(theme::code_font_family())
+                            .text_size(theme.code_px(10.5))
+                            .text_color(theme.text_3)
+                            .truncate()
+                            .child(view.id.clone()),
+                    ),
+            );
+
+        // Status and source badges share a row under the name so the name
+        // column keeps the card's full width (a right-aligned pill in the
+        // header squeezes it on narrow columns).
+        let mut badges = div().flex().flex_wrap().items_center().gap_1p5().child(status_pill);
+        if view.oauth {
+            badges = badges.child(self.provider_badge(
+                "OAuth",
+                theme.accent,
+                theme.accent.opacity(0.12),
+                theme,
+            ));
+        }
+        if view.api_key {
+            badges = badges.child(self.provider_badge(
+                "API key",
+                theme.text_3,
+                theme.overlay_strong,
+                theme,
+            ));
+        }
+        badges = badges.child(self.provider_badge(
+            if view.custom {
+                "Custom"
+            } else if view.builtin {
+                "Built-in"
+            } else {
+                "Provider"
+            },
+            if view.custom { theme.accent } else { theme.text_3 },
+            if view.custom {
+                theme.accent.opacity(0.12)
+            } else {
+                theme.overlay_strong
+            },
+            theme,
+        ));
+
+        // Active providers show what pi is serving; unconfigured built-ins show
+        // their full built-in catalog size (pi's RPC never reports those).
+        let count_label = if !view.active && view.catalog_count > 0 {
+            format!("{} in catalog", view.catalog_count)
+        } else {
+            format!(
+                "{} model{}",
+                view.model_count,
+                if view.model_count == 1 { "" } else { "s" }
+            )
+        };
+        let mut facts = div()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .text_size(theme.ui_px(11.5))
+            .text_color(theme.text_3)
+            .child(count_label);
+        if let Some(kind) = view.credential_kind() {
+            facts = facts
+                .child(div().size(px(3.)).rounded_full().bg(theme.text_3))
+                .child(match kind {
+                    "oauth" => "OAuth (auth.json)".to_string(),
+                    "api_key" => "API key (auth.json)".to_string(),
+                    other => other.to_string(),
+                });
+            if let Some(status) = &view.live_status {
+                if let Some(account) = &status.account {
+                    facts = facts
+                        .child(div().size(px(3.)).rounded_full().bg(theme.text_3))
+                        .child(account.clone());
+                }
+                if let Some(expires_at) = status.expires_at {
+                    facts = facts
+                        .child(div().size(px(3.)).rounded_full().bg(theme.text_3))
+                        .child(format!("expires {}", format_epoch_ms(expires_at)));
+                }
+            }
+        } else if let Some(env_var) = &view.env_var {
+            facts = facts
+                .child(div().size(px(3.)).rounded_full().bg(theme.text_3))
+                .child(format!("via {env_var}"));
+        }
+        if view.has_api_key {
+            facts = facts
+                .child(div().size(px(3.)).rounded_full().bg(theme.text_3))
+                .child("models.json key");
+        }
+
+        let endpoint = if view.base_url.is_empty() {
+            if view.note.is_empty() {
+                "pi default endpoint".to_string()
+            } else {
+                view.note.to_string()
+            }
+        } else if view.api.is_empty() {
+            view.base_url.clone()
+        } else {
+            format!("{} · {}", view.base_url, view.api)
+        };
+        let base_url = div()
+            .truncate()
+            .font_family(theme::code_font_family())
+            .text_size(theme.code_px(10.5))
+            .text_color(theme.text_3)
+            .child(endpoint);
+
+        let actions: AnyElement = if confirming {
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(theme.ui_px(11.5))
+                        .text_color(theme.crit)
+                        .child("Remove this provider?"),
+                )
+                .child(self.provider_button(
+                    format!("provider-remove-confirm-{}", view.id),
+                    "Remove",
+                    ProviderButtonStyle::Danger,
+                    theme,
+                    this.clone(),
+                    ProviderAction::ConfirmRemove {
+                        id: view.id.clone(),
+                    },
+                ))
+                .child(self.provider_button(
+                    format!("provider-remove-cancel-{}", view.id),
+                    "Cancel",
+                    ProviderButtonStyle::Ghost,
+                    theme,
+                    this.clone(),
+                    ProviderAction::CancelRemove,
+                ))
+                .into_any_element()
+        } else if let Some(section) = self.provider_auth_section(view, theme, this.clone()) {
+            section
+        } else {
+            // Methods come from pi's `auth.list` capability discovery — the
+            // UI never hardcodes provider ids or assumes a login flow.
+            let capability = if self.auth.support() == AuthSupport::Supported {
+                self.auth.provider(&view.id)
+            } else {
+                None
+            };
+            let mut primary = div().flex().flex_wrap().items_center().gap_2();
+            if let Some(capability) = capability {
+                for method in &capability.methods {
+                    if method.id == "api_key" {
+                        let update = view.credential_kind() == Some("api_key");
+                        primary = primary.child(self.provider_button(
+                            format!("provider-key-{}", view.id),
+                            if update { "Update key" } else { "Add API key" },
+                            ProviderButtonStyle::Ghost,
+                            theme,
+                            this.clone(),
+                            ProviderAction::EditKey {
+                                id: view.id.clone(),
+                                name: view.name.clone(),
+                                oauth: view.oauth,
+                                note: view.note,
+                            },
+                        ));
+                    } else {
+                        let label = method_label(&method.id, &method.label, view.connected());
+                        primary = primary.child(self.provider_button(
+                            format!("provider-auth-{}-{}", method.id, view.id),
+                            &label,
+                            ProviderButtonStyle::Primary,
+                            theme,
+                            this.clone(),
+                            ProviderAction::AuthStart {
+                                id: view.id.clone(),
+                                name: view.name.clone(),
+                                method: method.id.clone(),
+                            },
+                        ));
+                    }
+                }
+                if capability.methods.is_empty() {
+                    primary = primary.child(
+                        div()
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text_3)
+                            .child("No sign-in methods available"),
+                    );
+                }
+            } else {
+                // File-based fallback for a pi without the auth RPC.
+                if view.oauth {
+                    let reconnect = view.credential_kind() == Some("oauth");
+                    primary = primary.child(self.provider_button(
+                        format!("provider-signin-{}", view.id),
+                        if reconnect { "Reconnect" } else { "Sign in" },
+                        ProviderButtonStyle::Primary,
+                        theme,
+                        this.clone(),
+                        ProviderAction::SignIn {
+                            id: view.id.clone(),
+                            name: view.name.clone(),
+                        },
+                    ));
+                }
+                if view.api_key {
+                    let update = view.credential_kind() == Some("api_key");
+                    primary = primary.child(self.provider_button(
+                        format!("provider-key-{}", view.id),
+                        if update { "Update key" } else { "Add API key" },
+                        if view.oauth && !view.connected() {
+                            ProviderButtonStyle::Ghost
+                        } else {
+                            ProviderButtonStyle::Primary
+                        },
+                        theme,
+                        this.clone(),
+                        ProviderAction::EditKey {
+                            id: view.id.clone(),
+                            name: view.name.clone(),
+                            oauth: view.oauth,
+                            note: view.note,
+                        },
+                    ));
+                }
+            }
+            let connected = view.auth.is_some()
+                || view
+                    .live_status
+                    .as_ref()
+                    .is_some_and(|status| status.authenticated);
+            // Secondary actions: Configure/Remove only exist when there is a
+            // models.json entry to edit; Sign out only when a credential is
+            // stored. Built-ins with neither show just the auth button.
+            let mut secondary = div().flex().flex_wrap().items_center().gap_1p5();
+            if view.custom {
+                secondary = secondary.child(self.provider_button(
+                    format!("provider-configure-{}", view.id),
+                    "Configure",
+                    ProviderButtonStyle::Ghost,
+                    theme,
+                    this.clone(),
+                    ProviderAction::Configure {
+                        id: view.id.clone(),
+                    },
+                ));
+            }
+            if connected {
+                secondary = secondary.child(self.provider_button(
+                    format!("provider-signout-{}", view.id),
+                    "Disconnect",
+                    ProviderButtonStyle::Ghost,
+                    theme,
+                    this.clone(),
+                    ProviderAction::SignOut {
+                        id: view.id.clone(),
+                    },
+                ));
+            }
+            if view.custom {
+                secondary = secondary.child(self.provider_button(
+                    format!("provider-remove-{}", view.id),
+                    "Remove",
+                    ProviderButtonStyle::Danger,
+                    theme,
+                    this.clone(),
+                    ProviderAction::Remove {
+                        id: view.id.clone(),
+                    },
+                ));
+            }
+            let mut actions = div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(primary);
+            if view.custom || connected {
+                actions = actions.child(secondary);
+            }
+            actions.into_any_element()
+        };
+
+        div()
+            .w_full()
+            .min_w_0()
+            .bg(theme.bg_composer)
+            .border_1()
+            .border_color(theme.border)
+            .rounded_lg()
+            .p(px(14.))
+            .flex()
+            .flex_col()
+            .gap_2p5()
+            .child(header)
+            .child(badges)
+            .child(facts)
+            .child(base_url)
+            .child(div().h(px(1.)).w_full().bg(theme.border))
+            .child(actions)
+            .into_any_element()
+    }
+
+    /// A small status/source pill on a provider card.
+    fn provider_badge(&self, label: &str, fg: Hsla, bg: Hsla, theme: Theme) -> AnyElement {
+        div()
+            .h(px(20.))
+            .px(px(7.))
+            .rounded(px(6.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .bg(bg)
+            .child(
+                div()
+                    .text_size(theme.ui_px(10.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(fg)
+                    .child(label.to_string()),
+            )
+            .into_any_element()
+    }
+
+    /// A provider-card action button. One closure per card would be a lot of
+    /// near-identical code, so every button routes through
+    /// [`Self::apply_provider_action`]. The glyph is derived from the action.
+    fn provider_button(
+        &self,
+        id: String,
+        label: &str,
+        style: ProviderButtonStyle,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        action: ProviderAction,
+    ) -> AnyElement {
+        let icon_path = Self::provider_action_icon(&action);
+        let mut button = div()
+            .id(ElementId::Name(id.into()))
+            .h(px(28.))
+            .px(px(10.))
+            .rounded_md()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap_1p5()
+            .cursor_pointer()
+            .text_size(theme.ui_px(11.5))
+            .font_weight(FontWeight::MEDIUM);
+        button = match style {
+            ProviderButtonStyle::Primary => button
+                .bg(theme.send_bg)
+                .text_color(theme.send_fg)
+                .hover(|style| style.bg(theme.send_bg_hover)),
+            ProviderButtonStyle::Ghost => button
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.bg_raised)
+                .text_color(theme.text_2)
+                .hover(|style| style.bg(theme.bg_hover)),
+            ProviderButtonStyle::Danger => button
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.bg_raised)
+                .text_color(theme.crit)
+                .hover(|style| {
+                    style
+                        .border_color(theme.crit.opacity(0.6))
+                        .bg(theme.crit.opacity(0.08))
+                }),
+        };
+        let icon_color = match style {
+            ProviderButtonStyle::Primary => theme.send_fg,
+            ProviderButtonStyle::Danger => theme.crit,
+            ProviderButtonStyle::Ghost => theme.text_2,
+        };
+        button
+            .when_some(icon_path, |button, path| {
+                button.child(icon(path, 12., icon_color))
             })
-            .collect()
+            .child(div().child(label.to_string()))
+            .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                let action = action.clone();
+                this.update(cx, |app, cx| app.apply_provider_action(action, window, cx));
+            })
+            .into_any_element()
+    }
+
+    /// The glyph for a provider action (none for plain text buttons).
+    fn provider_action_icon(action: &ProviderAction) -> Option<&'static str> {
+        match action {
+            ProviderAction::SignIn { .. } | ProviderAction::AuthStart { .. } => {
+                Some("icons/lock.svg")
+            }
+            ProviderAction::AuthOpenUrl(_) => Some("icons/arrow-up-right.svg"),
+            ProviderAction::AuthCopy(_) => Some("icons/copy.svg"),
+            ProviderAction::AuthCancel => Some("icons/x.svg"),
+            ProviderAction::AuthDismiss => Some("icons/check.svg"),
+            ProviderAction::EditKey { .. } => Some("icons/at-sign.svg"),
+            ProviderAction::SignOut { .. } => Some("icons/stop.svg"),
+            ProviderAction::Configure { .. } => Some("icons/settings.svg"),
+            ProviderAction::Remove { .. } | ProviderAction::ConfirmRemove { .. } => {
+                Some("icons/trash.svg")
+            }
+            ProviderAction::Restart => Some("icons/refresh.svg"),
+            ProviderAction::CancelRemove | ProviderAction::SaveKey => None,
+        }
+    }
+
+    /// Single dispatch point for every provider-card button.
+    fn apply_provider_action(
+        &mut self,
+        action: ProviderAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            ProviderAction::SignIn { id, name } => {
+                // Signing in from the key modal replaces it.
+                self.provider_key_editor = None;
+                self.provider_oauth_login(id, name, cx);
+            }
+            ProviderAction::AuthStart { id, name, method } => {
+                self.provider_key_editor = None;
+                self.auth_start_login(id, name, method, cx);
+            }
+            ProviderAction::AuthCancel => self.auth_cancel_login(cx),
+            ProviderAction::AuthDismiss => {
+                self.auth.dismiss_result();
+                cx.notify();
+            }
+            ProviderAction::AuthOpenUrl(url) => {
+                if let Err(err) = platform::open_url(&url) {
+                    self.set_status(format!("Could not open the browser: {err}"));
+                }
+            }
+            ProviderAction::AuthCopy(value) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(value));
+                self.set_status("Copied to clipboard");
+            }
+            ProviderAction::EditKey {
+                id,
+                name,
+                oauth,
+                note,
+            } => self.provider_key_open(id, name, oauth, note, window, cx),
+            ProviderAction::SignOut { id } => self.provider_sign_out(id, cx),
+            ProviderAction::Configure { id } => self.provider_editor_open(Some(id), window, cx),
+            ProviderAction::Remove { id } => {
+                self.provider_remove_confirm = Some(id);
+                cx.notify();
+            }
+            ProviderAction::ConfirmRemove { id } => self.provider_remove(id, cx),
+            ProviderAction::CancelRemove => {
+                self.provider_remove_confirm = None;
+                cx.notify();
+            }
+            ProviderAction::SaveKey => self.provider_key_save(window, cx),
+            ProviderAction::Restart => self.provider_apply_credentials(cx),
+        }
+    }
+
+    /// The API-key modal, or `None` when closed.
+    fn provider_key_layer(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let editor = self.provider_key_editor.as_ref()?;
+
+        let mut body = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1p5()
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text_2)
+                            .child("API key"),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .px_2p5()
+                            .py_1p5()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.bg_main)
+                            .text_size(theme.ui_px(13.))
+                            .child(editor.key.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text_3)
+                            .child("A literal key, `$ENV_VAR`, or `!command` — stored in auth.json (0600)."),
+                    ),
+            );
+        if !editor.note.is_empty() {
+            body = body.child(
+                div()
+                    .text_size(theme.ui_px(11.))
+                    .text_color(theme.text_3)
+                    .child(editor.note.to_string()),
+            );
+        }
+        if editor.oauth {
+            let id = editor.provider_id.clone();
+            let name = editor.provider_name.clone();
+            let this_signin = this.clone();
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text_3)
+                            .child("Prefer a subscription? Sign in with OAuth instead."),
+                    )
+                    .child(self.provider_button(
+                        format!("provider-key-signin-{id}"),
+                        "Sign in",
+                        ProviderButtonStyle::Ghost,
+                        theme,
+                        this_signin,
+                        ProviderAction::SignIn { id, name },
+                    )),
+            );
+        }
+        if let Some(error) = &editor.error {
+            body = body.child(
+                div()
+                    .px(px(10.))
+                    .py(px(8.))
+                    .rounded_md()
+                    .bg(theme.crit.opacity(0.1))
+                    .text_size(theme.ui_px(11.5))
+                    .text_color(theme.crit)
+                    .child(error.clone()),
+            );
+        }
+
+        let cancel = div()
+            .id("provider-key-close")
+            .h(px(32.))
+            .px(px(14.))
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_raised)
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.bg_hover))
+            .on_mouse_up(MouseButton::Left, {
+                let this = this.clone();
+                move |_, _, cx| {
+                    this.update(cx, |app, cx| {
+                        app.provider_key_editor = None;
+                        cx.notify();
+                    });
+                }
+            })
+            .child(
+                div()
+                    .text_size(theme.ui_px(12.))
+                    .text_color(theme.text_2)
+                    .child("Cancel"),
+            );
+        let save = self.provider_button(
+            "provider-key-save".into(),
+            "Save key",
+            ProviderButtonStyle::Primary,
+            theme,
+            this.clone(),
+            ProviderAction::SaveKey,
+        );
+
+        let card = div()
+            .w_full()
+            .max_w(px(460.))
+            .rounded(px(14.))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.menu_bg)
+            .shadow(theme.popover_shadow())
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .occlude()
+            .font_family(theme::ui_font_family())
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_action(cx.listener(Self::provider_editor_cancel))
+            .on_action(cx.listener(Self::provider_editor_confirm))
+            .child(
+                div()
+                    .px(px(18.))
+                    .py(px(14.))
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(15.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(format!("API key — {}", editor.provider_name)),
+                    )
+                    .child(
+                        div()
+                            .font_family(theme::code_font_family())
+                            .text_size(theme.code_px(11.))
+                            .text_color(theme.text_3)
+                            .child(editor.provider_id.clone()),
+                    ),
+            )
+            .child(div().px(px(18.)).py(px(16.)).child(body))
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(18.))
+                    .py(px(12.))
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap_2()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(cancel)
+                    .child(save),
+            );
+
+        let scrim = match theme.mode {
+            ThemeMode::Dark => Hsla {
+                h: 0.,
+                s: 0.,
+                l: 0.,
+                a: 0.42,
+            },
+            ThemeMode::Light => Hsla {
+                h: 0.,
+                s: 0.,
+                l: 0.,
+                a: 0.22,
+            },
+        };
+        Some(
+            div()
+                .id("provider-key-layer")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .bg(scrim)
+                .px(px(24.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_mouse_down(MouseButton::Left, cx.listener(Self::provider_editor_scrim))
+                .child(card)
+                .into_any_element(),
+        )
+    }
+
+    /// The provider editor modal (add / configure), or `None` when closed.
+    fn provider_editor_layer(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let editor = self.provider_editor.as_ref()?;
+        let editing = editor.original_id.is_some();
+        let is_custom_entry = editor.original_id.as_ref().is_some_and(|id| {
+            self.custom_providers
+                .iter()
+                .any(|provider| &provider.id == id)
+        });
+        let subtitle = if editing && editor.in_catalog && !is_custom_entry {
+            "Built-in provider — entries here override pi's defaults. Sign in with `pi /login`."
+        } else {
+            "Saved to ~/.pi/agent/models.json — shared with the pi CLI."
+        };
+
+        let field = |label: &str, hint: Option<&str>, input: Entity<ComposerInput>| -> AnyElement {
+            let mut column = div()
+                .flex()
+                .flex_col()
+                .gap_1p5()
+                .child(
+                    div()
+                        .text_size(theme.ui_px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_2)
+                        .child(label.to_string()),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .px_2p5()
+                        .py_1p5()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.bg_main)
+                        .text_size(theme.ui_px(13.))
+                        .child(input),
+                );
+            if let Some(hint) = hint {
+                column = column.child(
+                    div()
+                        .text_size(theme.ui_px(11.))
+                        .text_color(theme.text_3)
+                        .child(hint.to_string()),
+                );
+            }
+            column.into_any_element()
+        };
+
+        // API family chips.
+        let mut api_chips = div().flex().flex_wrap().gap_1p5();
+        for api in PROVIDER_APIS {
+            let selected = editor.api == api;
+            let this = this.clone();
+            api_chips = api_chips.child(
+                div()
+                    .id(ElementId::Name(format!("provider-api-{api}").into()))
+                    .px(px(8.))
+                    .py(px(3.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(if selected {
+                        theme.accent.opacity(0.5)
+                    } else {
+                        theme.border
+                    })
+                    .bg(if selected {
+                        theme.accent.opacity(0.12)
+                    } else {
+                        theme.bg_raised
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.bg_hover))
+                    .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                        this.update(cx, |app, cx| {
+                            if let Some(editor) = app.provider_editor.as_mut() {
+                                editor.api = api.to_string();
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .child(
+                        div()
+                            .font_family(theme::code_font_family())
+                            .text_size(theme.code_px(10.5))
+                            .text_color(if selected { theme.accent } else { theme.text_3 })
+                            .child(api),
+                    ),
+            );
+        }
+
+        // Identity: editable only when adding.
+        let identity: AnyElement = if editing {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1p5()
+                .child(
+                    div()
+                        .text_size(theme.ui_px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_2)
+                        .child("Provider id"),
+                )
+                .child(
+                    div()
+                        .font_family(theme::code_font_family())
+                        .text_size(theme.code_px(12.))
+                        .text_color(theme.text)
+                        .child(editor.original_id.clone().unwrap_or_default()),
+                )
+                .into_any_element()
+        } else {
+            field(
+                "Provider id",
+                Some("The key pi addresses the provider by — models become <id>/<model>."),
+                editor.id.clone(),
+            )
+        };
+
+        let api_key_hint = if editor.had_api_key {
+            "A key is stored in models.json — leave blank to keep it."
+        } else {
+            "Optional. `$ENV_VAR`, `!command`, or a literal key."
+        };
+
+        let body = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_3p5()
+            .child(identity)
+            .child(field("Display name", Some("Optional."), editor.name.clone()))
+            .child(field(
+                "Base URL",
+                Some("Required for custom endpoints. Empty keeps pi's default."),
+                editor.base_url.clone(),
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1p5()
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text_2)
+                            .child("API type"),
+                    )
+                    .child(api_chips),
+            )
+            .child(field("API key", Some(api_key_hint), editor.api_key.clone()))
+            .child(field(
+                "Models",
+                Some(if editor.in_catalog {
+                    "Comma-separated ids. Empty keeps pi's built-in models for this provider."
+                } else {
+                    "Comma-separated ids. At least one is required for a custom provider."
+                }),
+                editor.models.clone(),
+            ));
+
+        let mut card = div()
+            .w_full()
+            .max_w(px(520.))
+            .max_h(px(560.))
+            .rounded(px(14.))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.menu_bg)
+            .shadow(theme.popover_shadow())
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .occlude()
+            .font_family(theme::ui_font_family())
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_action(cx.listener(Self::provider_editor_cancel))
+            .on_action(cx.listener(Self::provider_editor_confirm))
+            .child(
+                div()
+                    .px(px(18.))
+                    .py(px(14.))
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(15.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(if editing {
+                                "Configure provider"
+                            } else {
+                                "Add provider"
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(11.5))
+                            .text_color(theme.text_3)
+                            .child(subtitle),
+                    ),
+            )
+            .child(
+                div()
+                    .id("provider-editor-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(px(18.))
+                    .py(px(16.))
+                    .child(body),
+            );
+
+        if let Some(error) = &editor.error {
+            card = card.child(
+                div()
+                    .mx(px(18.))
+                    .mb(px(4.))
+                    .px(px(10.))
+                    .py(px(8.))
+                    .rounded_md()
+                    .bg(theme.crit.opacity(0.1))
+                    .text_size(theme.ui_px(11.5))
+                    .text_color(theme.crit)
+                    .child(error.clone()),
+            );
+        }
+
+        let cancel = {
+            let this = this.clone();
+            div()
+                .id("provider-editor-cancel")
+                .h(px(32.))
+                .px(px(14.))
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.bg_raised)
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg_hover))
+                .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                    this.update(cx, |app, cx| {
+                        app.provider_editor = None;
+                        cx.notify();
+                    });
+                })
+                .child(
+                    div()
+                        .text_size(theme.ui_px(12.))
+                        .text_color(theme.text_2)
+                        .child("Cancel"),
+                )
+        };
+        let save = {
+            let this = this.clone();
+            div()
+                .id("provider-editor-save")
+                .h(px(32.))
+                .px(px(16.))
+                .rounded_md()
+                .bg(theme.send_bg)
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.send_bg_hover))
+                .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                    this.update(cx, |app, cx| app.provider_save(window, cx));
+                })
+                .child(
+                    div()
+                        .text_size(theme.ui_px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.send_fg)
+                        .child(if editing { "Save changes" } else { "Add provider" }),
+                )
+        };
+        card = card.child(
+            div()
+                .flex_none()
+                .px(px(18.))
+                .py(px(12.))
+                .flex()
+                .items_center()
+                .justify_end()
+                .gap_2()
+                .border_t_1()
+                .border_color(theme.border)
+                .child(cancel)
+                .child(save),
+        );
+
+        let scrim = match theme.mode {
+            ThemeMode::Dark => Hsla {
+                h: 0.,
+                s: 0.,
+                l: 0.,
+                a: 0.42,
+            },
+            ThemeMode::Light => Hsla {
+                h: 0.,
+                s: 0.,
+                l: 0.,
+                a: 0.22,
+            },
+        };
+        Some(
+            div()
+                .id("provider-editor-layer")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .bg(scrim)
+                .px(px(24.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_mouse_down(MouseButton::Left, cx.listener(Self::provider_editor_scrim))
+                .child(card)
+                .into_any_element(),
+        )
     }
 
     /// A setting card: title + description on the left, optional control on
@@ -5983,6 +9137,285 @@ impl OrbitApp {
         );
 
         rows
+    }
+
+    // ── Settings → Agent ───────────────────────────────────────────────
+
+    /// The Agent section: queue delivery modes, auto-compaction, auto-retry,
+    /// manual compaction, and the session name. Every control sends a real pi
+    /// RPC command.
+    fn agent_rows(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        _cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let name_control = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .w(px(200.))
+                    .h(px(28.))
+                    .px(px(8.))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.bg_raised)
+                    .flex()
+                    .items_center()
+                    .child(self.session_name_input.clone()),
+            )
+            .child(self.runtime_button(
+                "session-rename-save",
+                "Rename",
+                false,
+                theme,
+                this.clone(),
+                Self::rename_session,
+            ))
+            .into_any_element();
+
+        let mut rows = vec![
+            self.card(
+                theme,
+                "Follow-up messages",
+                "Messages sent while the agent is running wait in the queue above the composer and are delivered once the current task finishes. All delivers the whole queue at once; One at a time delivers one per run.",
+                Some(self.follow_up_mode_toggle(theme, this.clone())),
+            ),
+            self.card(
+                theme,
+                "Auto-compaction",
+                "Compact conversation context automatically when it nears the model's window.",
+                Some(self.settings_toggle(
+                    "auto-compaction-toggle",
+                    self.auto_compaction,
+                    theme,
+                    this.clone(),
+                    Self::toggle_auto_compaction,
+                )),
+            ),
+            self.card(
+                theme,
+                "Auto-retry",
+                "Retry automatically on transient errors (overloaded, rate limit, 5xx). pi does not report this setting back, so the switch reflects the last value Orbit sent.",
+                Some(self.settings_toggle(
+                    "auto-retry-toggle",
+                    self.auto_retry,
+                    theme,
+                    this.clone(),
+                    Self::toggle_auto_retry,
+                )),
+            ),
+            self.card(
+                theme,
+                "Compact now",
+                if self.is_compacting {
+                    "pi is compacting this session's context…"
+                } else {
+                    "Manually compact the conversation to free up context window."
+                },
+                Some(self.runtime_button(
+                    "compact-now",
+                    if self.is_compacting {
+                        "Compacting…"
+                    } else {
+                        "Compact"
+                    },
+                    false,
+                    theme,
+                    this.clone(),
+                    Self::compact_now,
+                )),
+            ),
+            self.card(
+                theme,
+                "Session name",
+                "The display name pi stores with this session; shown in session listings.",
+                Some(name_control),
+            ),
+        ];
+
+        if self.retrying {
+            rows.insert(
+                0,
+                self.card(
+                    theme,
+                    "Retrying",
+                    "pi is waiting out a transient provider error before retrying.",
+                    Some(self.runtime_button(
+                        "abort-retry",
+                        "Abort retry",
+                        false,
+                        theme,
+                        this.clone(),
+                        Self::abort_retry,
+                    )),
+                ),
+            );
+        }
+
+        if self.client.is_none() {
+            rows.insert(
+                0,
+                self.card(
+                    theme,
+                    "pi is not connected",
+                    "Start the runtime from Settings → Runtime to change agent behavior.",
+                    None,
+                ),
+            );
+        }
+        rows
+    }
+
+    /// Two-button segmented control for the follow-up delivery mode.
+    fn follow_up_mode_toggle(&self, theme: Theme, this: Entity<OrbitApp>) -> AnyElement {
+        let all = self.follow_up_mode == "all";
+        let (one_id, all_id) = ("follow-up-mode-one", "follow-up-mode-all");
+        let button = |label: &'static str,
+                      value_all: bool,
+                      id: &'static str,
+                      this: Entity<OrbitApp>| {
+            let active = all == value_all;
+            div()
+                .id(id)
+                .h(px(28.))
+                .px(px(10.))
+                .rounded_md()
+                .flex()
+                .items_center()
+                .text_size(theme.ui_px(12.))
+                .font_weight(FontWeight::MEDIUM)
+                .cursor_pointer()
+                .when(active, |b| b.bg(theme.send_bg).text_color(theme.send_fg))
+                .when(!active, |b| {
+                    b.border_1()
+                        .border_color(theme.border)
+                        .bg(theme.bg_raised)
+                        .text_color(theme.text_2)
+                        .hover(|s| s.bg(theme.bg_hover))
+                })
+                .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                    this.update(cx, |app, cx| app.set_follow_up_mode(value_all, cx));
+                })
+                .child(label)
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(button("One at a time", false, one_id, this.clone()))
+            .child(button("All", true, all_id, this))
+            .into_any_element()
+    }
+
+    /// Update the follow-up mode locally and push it to pi.
+    fn set_follow_up_mode(&mut self, all: bool, cx: &mut Context<Self>) {
+        let mode = if all { "all" } else { "one-at-a-time" }.to_string();
+        self.follow_up_mode = mode.clone();
+        self.send(CommandBody::SetFollowUpMode { mode }, "set_follow_up_mode");
+        cx.notify();
+    }
+
+    /// A real toggle switch (accent when on), parameterized by its action.
+    fn settings_toggle(
+        &self,
+        id: &'static str,
+        on: bool,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        action: fn(&mut OrbitApp, &mut Context<OrbitApp>),
+    ) -> AnyElement {
+        div()
+            .id(id)
+            .w(px(36.))
+            .h(px(20.))
+            .rounded_full()
+            .p(px(2.))
+            .border_1()
+            .border_color(theme.border)
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .when(on, |t| t.bg(theme.accent).justify_end())
+            .when(!on, |t| t.bg(theme.bg_raised).justify_start())
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                this.update(cx, |app, cx| action(app, cx));
+            })
+            .child(div().size(px(14.)).rounded_full().bg(theme.text))
+            .into_any_element()
+    }
+
+    fn toggle_auto_compaction(&mut self, cx: &mut Context<Self>) {
+        self.auto_compaction = !self.auto_compaction;
+        self.send(
+            CommandBody::SetAutoCompaction {
+                enabled: self.auto_compaction,
+            },
+            "set_auto_compaction",
+        );
+        self.set_status(if self.auto_compaction {
+            "Auto-compaction on"
+        } else {
+            "Auto-compaction off"
+        });
+        cx.notify();
+    }
+
+    fn toggle_auto_retry(&mut self, cx: &mut Context<Self>) {
+        self.auto_retry = !self.auto_retry;
+        self.send(
+            CommandBody::SetAutoRetry {
+                enabled: self.auto_retry,
+            },
+            "set_auto_retry",
+        );
+        self.set_status(if self.auto_retry {
+            "Auto-retry on"
+        } else {
+            "Auto-retry off"
+        });
+        cx.notify();
+    }
+
+    fn compact_now(&mut self, cx: &mut Context<Self>) {
+        if self.is_compacting {
+            return;
+        }
+        self.is_compacting = true;
+        if self.send(
+            CommandBody::Compact {
+                custom_instructions: None,
+            },
+            "compact",
+        ) {
+            self.set_status("Compacting context…");
+        } else {
+            self.is_compacting = false;
+        }
+        cx.notify();
+    }
+
+    fn abort_retry(&mut self, cx: &mut Context<Self>) {
+        self.send(CommandBody::AbortRetry, "abort_retry");
+        self.retrying = false;
+        self.set_status("Retry aborted");
+        cx.notify();
+    }
+
+    fn rename_session(&mut self, cx: &mut Context<Self>) {
+        let name = self.session_name_input.read(cx).text().trim().to_string();
+        if name.is_empty() {
+            self.set_status("Enter a session name first");
+            cx.notify();
+            return;
+        }
+        self.session_name = Some(name.clone());
+        self.send(CommandBody::SetSessionName { name }, "set_session_name");
+        self.set_status("Session renamed");
+        cx.notify();
     }
 
     /// One label/value row inside a Runtime card.
@@ -6531,13 +9964,25 @@ impl OrbitApp {
 }
 
 /// Render an embedded HugeIcons SVG tinted with the given color.
+///
+/// `flex_none` is load-bearing: an SVG defaults to `flex-shrink: 1`, so in a
+/// flex row beside wide text it collapses to zero width (the "icons render
+/// tiny" bug). Icons must always keep their declared size.
 pub(crate) fn icon(path: &'static str, size: f32, color: Hsla) -> impl IntoElement + use<> {
-    gpui::svg().path(path).size(px(size)).text_color(color)
+    gpui::svg()
+        .path(path)
+        .flex_none()
+        .size(px(size))
+        .text_color(color)
 }
 
 /// Same as [`icon`] but for runtime-computed paths (per-provider marks).
 pub(crate) fn icon_dyn(path: SharedString, size: f32, color: Hsla) -> impl IntoElement + use<> {
-    gpui::svg().path(path).size(px(size)).text_color(color)
+    gpui::svg()
+        .path(path)
+        .flex_none()
+        .size(px(size))
+        .text_color(color)
 }
 
 // ── devicons (Nerd Font file glyphs) ───────────────────────────────
@@ -7249,6 +10694,7 @@ fn session_menu_button(
 fn running_loader(theme: Theme, id: usize) -> impl IntoElement + use<> {
     gpui::svg()
         .path("icons/loader.svg")
+        .flex_none()
         .size(px(12.))
         .text_color(theme.ok_green)
         .with_animation(
@@ -7607,6 +11053,21 @@ mod devicons_tests {
         let (_, dark) = dev_file_icon("Cargo.toml", true).unwrap();
         let (_, light) = dev_file_icon("Cargo.toml", false).unwrap();
         let _ = (dark, light);
+    }
+}
+
+#[cfg(test)]
+mod error_label_tests {
+    use super::*;
+
+    #[test]
+    fn humanize_command_reads_as_a_label() {
+        assert_eq!(humanize_command("set_model"), "Set model failed");
+        assert_eq!(humanize_command("get_available_models"), "Get available models failed");
+        assert_eq!(humanize_command("follow_up"), "Follow up failed");
+        assert_eq!(humanize_command("auth.login"), "Auth login failed");
+        // Empty / malformed commands still produce something readable.
+        assert_eq!(humanize_command(""), "Command failed");
     }
 }
 
@@ -8021,5 +11482,270 @@ mod backdrop_layout_tests {
         assert_eq!(sidebar.size.width, px(240.));
         assert_eq!(main.origin.x, px(240.), "main starts after the sidebar");
         assert_eq!(main.size.width, px(1000.));
+    }
+
+    /// Regression: a provider card's name/id column must get a real width.
+    /// `truncate()` collapses to a bare ellipsis when the text element's width
+    /// resolves to 0 — which happens when `w_full()`/`min_w_0()` are set on the
+    /// text inside a `flex_1` column. Relying on the parent's stretch is what
+    /// keeps the name visible.
+    /// Regression: a provider card's name/id column must get a real width.
+    /// `truncate()` renders a bare ellipsis when its element resolves to zero
+    /// width, which happens when `w_full()` is used inside a flex-grow column.
+    /// The card relies on the parent's stretch and gives the name the full
+    /// width (the status pill lives on the badges row, not beside the name).
+    #[gpui::test]
+    fn provider_name_column_has_a_real_width(cx: &mut gpui::TestAppContext) {
+        use gpui::{point, size};
+
+        struct CardHeaderTestView;
+        impl Render for CardHeaderTestView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::for_id(ThemeId::Orbit);
+                // One 3-column grid cell's worth of width.
+                div()
+                    .w(px(320.))
+                    .flex()
+                    .flex_col()
+                    .p(px(14.))
+                    .gap_2p5()
+                    .child(
+                        div()
+                            .flex()
+                            .items_start()
+                            .gap_3()
+                            .child(div().size(px(52.)).flex_none())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .id("provider-name")
+                                            .debug_selector(|| "provider-name".to_string())
+                                            .text_size(theme.ui_px(14.))
+                                            .truncate()
+                                            .child("Amazon Bedrock"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("provider-id")
+                                            .debug_selector(|| "provider-id".to_string())
+                                            .text_size(theme.code_px(10.5))
+                                            .truncate()
+                                            .child("amazon-bedrock"),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("provider-endpoint")
+                            .debug_selector(|| "provider-endpoint".to_string())
+                            .text_size(theme.code_px(10.5))
+                            .truncate()
+                            .child("https://api.example.com/v1 · openai-completions"),
+                    )
+            }
+        }
+
+        let cx = cx.add_empty_window();
+        let _ = cx.draw(point(px(0.), px(0.)), size(px(1000.), px(300.)), |_, cx| {
+            cx.new(|_| CardHeaderTestView)
+        });
+        let name = cx.debug_bounds("provider-name").expect("name laid out");
+        let id = cx.debug_bounds("provider-id").expect("id laid out");
+        let endpoint = cx.debug_bounds("provider-endpoint").expect("endpoint laid out");
+        assert!(
+            name.size.width > px(150.),
+            "provider name collapsed to an ellipsis: {:?}",
+            name.size
+        );
+        assert!(id.size.width > px(150.), "provider id collapsed: {:?}", id.size);
+        assert!(
+            endpoint.size.width > px(250.),
+            "provider endpoint collapsed: {:?}",
+            endpoint.size
+        );
+    }
+
+    /// Regression: the Agent tab's long card descriptions blew the settings
+    /// content column past the window. A text element's min-content width is
+    /// its full unwrapped line in gpui, so a `flex_1` column with default
+    /// `min-width: auto` refuses to shrink and the card (and its toggle)
+    /// overflow off-screen. `min_w_0` on the settings root and content column
+    /// lets the column take the window width; the description then wraps.
+    #[gpui::test]
+    fn settings_cards_stay_inside_the_content_column(cx: &mut gpui::TestAppContext) {
+        use gpui::{point, size};
+
+        struct SettingsCardTestView;
+        impl Render for SettingsCardTestView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::for_id(ThemeId::Orbit);
+                let card = div()
+                    .id("settings-card")
+                    .debug_selector(|| "settings-card".to_string())
+                    .bg(theme.bg_composer)
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded_lg()
+                    .px(px(14.))
+                    .py(px(12.))
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(theme.ui_px(13.))
+                                    .child("Follow-up messages"),
+                            )
+                            .child(
+                                div()
+                                    .id("settings-card-desc")
+                                    .debug_selector(|| "settings-card-desc".to_string())
+                                    .text_size(theme.ui_px(12.))
+                                    .child("Messages sent while the agent is running wait in the queue above the composer and are delivered once the current task finishes. All delivers the whole queue at once; One at a time delivers one per run."),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().h(px(28.)).px(px(10.)).child("One at a time"))
+                            .child(div().h(px(28.)).px(px(10.)).child("All")),
+                    );
+
+                div()
+                    .size_full()
+                    .flex()
+                    .child(div().flex_none().w(px(240.)).h_full())
+                    .child(
+                        div()
+                            .id("settings-content-column")
+                            .debug_selector(|| "settings-content-column".to_string())
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .id("settings-scroll")
+                                    .flex_1()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .child(
+                                        div()
+                                            .w_full()
+                                            .px(px(24.))
+                                            .flex()
+                                            .flex_col()
+                                            .gap_3()
+                                            .child(card),
+                                    ),
+                            ),
+                    )
+            }
+        }
+
+        let cx = cx.add_empty_window();
+        let _ = cx.draw(point(px(0.), px(0.)), size(px(1240.), px(700.)), |_, cx| {
+            cx.new(|_| SettingsCardTestView)
+        });
+        let card = cx.debug_bounds("settings-card").expect("card");
+        let desc = cx.debug_bounds("settings-card-desc").expect("description");
+        let content = cx
+            .debug_bounds("settings-content-column")
+            .expect("content column");
+        assert_eq!(
+            content.size.width,
+            px(1000.),
+            "content column must take the space beside the 240 px nav"
+        );
+        assert!(
+            card.origin.x + card.size.width <= px(1240.),
+            "card overflows the window: {:?}",
+            card
+        );
+        assert!(
+            desc.size.height > px(30.),
+            "long description must wrap to multiple lines, got {:?}",
+            desc.size
+        );
+        assert!(
+            desc.size.width < card.size.width,
+            "description must be narrower than the card so the control fits: {:?}",
+            desc.size
+        );
+    }
+
+    /// Regression: an SVG defaults to `flex-shrink: 1`, so beside wide text
+    /// (e.g. the transcript's activity label + copy button) it collapses to
+    /// zero width — the "icons render tiny" bug. `icon`/`icon_dyn`/`glyph`
+    /// set `flex_none`; this pins both halves of that behavior.
+    #[gpui::test]
+    fn flex_none_keeps_icons_from_collapsing(cx: &mut gpui::TestAppContext) {
+        use gpui::{point, size};
+
+        struct Probe;
+        impl Render for Probe {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .w(px(120.))
+                    .h(px(40.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .whitespace_nowrap()
+                            .child("a very long unwrapping label that will not shrink at all"),
+                    )
+                    .child(
+                        gpui::svg()
+                            .path("icons/copy.svg")
+                            .id("probe-icon-fixed")
+                            .debug_selector(|| "probe-icon-fixed".to_string())
+                            .flex_none()
+                            .size(px(16.)),
+                    )
+                    .child(
+                        gpui::svg()
+                            .path("icons/copy.svg")
+                            .id("probe-icon-shrunk")
+                            .debug_selector(|| "probe-icon-shrunk".to_string())
+                            .size(px(16.)),
+                    )
+            }
+        }
+
+        let cx = cx.add_empty_window();
+        let _ = cx.draw(point(px(0.), px(0.)), size(px(400.), px(200.)), |_, cx| {
+            cx.new(|_| Probe)
+        });
+        let fixed = cx.debug_bounds("probe-icon-fixed").expect("fixed icon");
+        let shrunk = cx.debug_bounds("probe-icon-shrunk").expect("shrunk icon");
+        assert_eq!(
+            fixed.size.width,
+            px(16.),
+            "flex_none icon must keep its size: {:?}",
+            fixed
+        );
+        assert!(
+            shrunk.size.width < px(16.),
+            "without flex_none the icon collapses: {:?}",
+            shrunk
+        );
     }
 }

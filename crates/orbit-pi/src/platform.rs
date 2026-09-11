@@ -163,3 +163,100 @@ pub fn persist_preferred_open_in_app(app_id: &str) {
         serde_json::json!({ "open_in_app": app_id }).to_string(),
     );
 }
+
+/// Run an interactive shell command in the user's terminal. Used for
+/// `pi /login <provider>`, whose OAuth/device flow is a terminal UI Orbit
+/// cannot render. Best-effort: failures leave the caller to surface a hint.
+#[cfg(target_os = "macos")]
+pub fn open_terminal_command(command: &str) -> Result<(), String> {
+    // A `.command` file opened with `open` runs in Terminal.app without
+    // requiring Automation (AppleScript) permission, and works even when a
+    // non-default terminal is installed.
+    let path = std::env::temp_dir().join(format!("orbit-{}.command", std::process::id()));
+    let script = format!("#!/bin/zsh\n{command}\n");
+    std::fs::write(&path, script).map_err(|err| format!("could not write login script: {err}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700));
+    }
+    std::process::Command::new("/usr/bin/open")
+        .arg(&path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("could not open Terminal: {err}"))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn open_terminal_command(command: &str) -> Result<(), String> {
+    for terminal in ["x-terminal-emulator", "gnome-terminal", "konsole", "xterm"] {
+        let mut cmd = std::process::Command::new(terminal);
+        match terminal {
+            "gnome-terminal" => cmd.arg("--").args(["sh", "-c", command]),
+            "konsole" => cmd.args(["-e", "sh", "-c", command]),
+            _ => cmd.args(["-e", "sh", "-c", command]),
+        };
+        if cmd.spawn().is_ok() {
+            return Ok(());
+        }
+    }
+    Err("no terminal emulator found — run the command manually".into())
+}
+
+/// Open an `http(s)` URL in the user's default browser. Used for the OAuth
+/// authorization leg of a browser login; the URL comes from pi's `auth.*`
+/// events, so the scheme is validated before launching.
+#[cfg(target_os = "macos")]
+pub fn open_url(url: &str) -> Result<(), String> {
+    if !is_safe_browser_url(url) {
+        return Err("refusing to open a non-http(s) URL".into());
+    }
+    std::process::Command::new("/usr/bin/open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("could not open the browser: {err}"))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn open_url(url: &str) -> Result<(), String> {
+    if !is_safe_browser_url(url) {
+        return Err("refusing to open a non-http(s) URL".into());
+    }
+    let opener = if cfg!(target_os = "windows") {
+        "cmd"
+    } else {
+        "xdg-open"
+    };
+    let mut command = std::process::Command::new(opener);
+    if cfg!(target_os = "windows") {
+        command.args(["/C", "start", "", url]);
+    } else {
+        command.arg(url);
+    }
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("could not open the browser: {err}"))
+}
+
+/// Only `http`/`https` URLs reach the OS opener, so a compromised or buggy
+/// server can never hand the shell a `file:`/`javascript:` target.
+fn is_safe_browser_url(url: &str) -> bool {
+    let trimmed = url.trim();
+    trimmed.starts_with("https://") || trimmed.starts_with("http://")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_safe_browser_url;
+
+    #[test]
+    fn only_http_urls_are_opened() {
+        assert!(is_safe_browser_url("https://claude.ai/oauth"));
+        assert!(is_safe_browser_url("http://127.0.0.1:1455/callback"));
+        assert!(!is_safe_browser_url("file:///etc/passwd"));
+        assert!(!is_safe_browser_url("javascript:alert(1)"));
+        assert!(!is_safe_browser_url("  "));
+    }
+}

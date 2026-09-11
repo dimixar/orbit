@@ -424,6 +424,18 @@ impl CommandPalette {
                 "settings preferences general language font",
             ),
             (
+                SettingsSection::Runtime,
+                "icons/server-stack.svg",
+                "Runtime",
+                "settings preferences runtime process pi start stop restart",
+            ),
+            (
+                SettingsSection::Agent,
+                "icons/spark.svg",
+                "Agent",
+                "settings preferences agent steer follow-up compaction retry rename",
+            ),
+            (
                 SettingsSection::Appearance,
                 "icons/contrast.svg",
                 "Appearance",
