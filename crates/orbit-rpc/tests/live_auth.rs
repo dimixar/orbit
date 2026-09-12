@@ -21,12 +21,13 @@ fn repo_root() -> PathBuf {
 
 #[test]
 fn live_auth_capability_round_trip() {
-    let client =
-        PiClient::spawn(&repo_root(), Some(Path::new("/tmp/orbit-pi-auth-sessions")))
-            .expect("spawn pi");
+    let client = PiClient::spawn(&repo_root(), Some(Path::new("/tmp/orbit-pi-auth-sessions")))
+        .expect("spawn pi");
 
     let rx = client.send(CommandBody::AuthList).expect("send auth.list");
-    let response = rx.recv_timeout(Duration::from_secs(15)).expect("auth.list response");
+    let response = rx
+        .recv_timeout(Duration::from_secs(15))
+        .expect("auth.list response");
     let Event::Response {
         success,
         data,
@@ -67,7 +68,11 @@ fn live_auth_capability_round_trip() {
     for provider in &providers {
         assert!(!provider.id.is_empty());
         for method in &provider.methods {
-            assert!(!method.id.is_empty(), "{} has an empty method id", provider.id);
+            assert!(
+                !method.id.is_empty(),
+                "{} has an empty method id",
+                provider.id
+            );
             method_count += 1;
         }
     }

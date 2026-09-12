@@ -632,6 +632,40 @@ pub(crate) fn remove_auth(id: &str) -> Result<(), String> {
     remove_auth_at(&auth_path(), id)
 }
 
+/// Store an Ollama Cloud usage session (a `Cookie:` header the user pasted
+/// from their own signed-in browser) for provider id `ollama`. Written to
+/// `auth.json` with `0600`; the value is only ever sent to `ollama.com` by the
+/// pi-side quota handler and never logged or shown again.
+///
+/// This is deliberately a distinct credential type from an API key, so the
+/// handler can tell the current monthly-credit API path (real key) from the
+/// legacy session/weekly settings-page path (session).
+pub(crate) fn write_ollama_cloud_session(session: &str) -> Result<(), String> {
+    write_ollama_cloud_session_at(&auth_path(), session)
+}
+
+fn write_ollama_cloud_session_at(path: &Path, session: &str) -> Result<(), String> {
+    let session = session.trim();
+    if session.is_empty() {
+        return Err("A session cookie is required.".into());
+    }
+    // A pasted value must look like a cookie header, not an API key. Reject
+    // anything without a `name=value` pair so a stray key can't be stored as
+    // a session (and leak into a Cookie header).
+    if !session.contains('=') {
+        return Err("Paste the Cookie header (e.g. `__Secure-session=…`).".into());
+    }
+    let mut root = read_auth_root_at(path)?;
+    let entries = root
+        .as_object_mut()
+        .ok_or_else(|| "auth.json must contain a JSON object.".to_string())?;
+    let mut entry = Map::new();
+    entry.insert("type".into(), Value::String("ollama_cloud_session".into()));
+    entry.insert("session".into(), Value::String(session.to_string()));
+    entries.insert("ollama".into(), Value::Object(entry));
+    write_json_secure(path, &root)
+}
+
 fn remove_auth_at(path: &Path, id: &str) -> Result<(), String> {
     let mut root = read_auth_root_at(path)?;
     if let Some(entries) = root.as_object_mut() {
@@ -884,6 +918,50 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("auth.json");
         assert!(write_api_key_at(&path, "anthropic", "   ").is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn stores_ollama_cloud_session_as_a_distinct_secure_entry() {
+        let dir = std::env::temp_dir().join(format!("orbit-ollama-session-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("auth.json");
+        // Keep an unrelated provider's credential intact.
+        write_api_key_at(&path, "anthropic", "sk-ant-test").unwrap();
+
+        write_ollama_cloud_session_at(&path, "__Secure-session=abc123; cf_clearance=xyz").unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let root: Value = serde_json::from_str(&raw).unwrap();
+        let ollama = root.get("ollama").expect("ollama entry");
+        // A distinct type, so the handler can tell it apart from an API key.
+        assert_eq!(ollama.get("type").unwrap(), "ollama_cloud_session");
+        assert_eq!(
+            ollama.get("session").unwrap(),
+            "__Secure-session=abc123; cf_clearance=xyz"
+        );
+        // The unrelated key survives the write.
+        assert!(root.get("anthropic").is_some());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "auth.json must stay owner-only");
+        }
+    }
+
+    #[test]
+    fn rejects_a_session_value_without_a_cookie_pair() {
+        let dir = std::env::temp_dir().join(format!("orbit-ollama-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("auth.json");
+        // A bare API key has no `name=value` pair and must not be stored as a
+        // session (it would otherwise leak into a Cookie header).
+        assert!(write_ollama_cloud_session_at(&path, "abc123realkey").is_err());
+        assert!(write_ollama_cloud_session_at(&path, "   ").is_err());
         assert!(!path.exists());
     }
 

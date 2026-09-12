@@ -337,6 +337,13 @@ impl OrbitApp {
             self.on_auth_response(command, success, data, error, cx);
             return;
         }
+        // Account quota/balance/spend from the `quota.*` namespace; carries no
+        // secrets, so it merges straight into the cache.
+        if command == "quota.list" {
+            self.quota.on_response(success, data, error);
+            cx.notify();
+            return;
+        }
         // Error handling (docs #error-handling): a failed command carries an
         // `error` string. Surface it, unwind command-specific optimistic
         // state, and stop — success paths below assume `data` is valid.

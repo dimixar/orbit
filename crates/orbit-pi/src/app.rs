@@ -36,7 +36,8 @@ use gpui::{
     WindowControlArea,
 };
 use orbit_rpc::{
-    CommandBody, ContextUsage, Event, PendingQueue, PiClient, SessionState, SessionUsage,
+    CommandBody, ContextUsage, Event, PendingQueue, PiClient, QuotaReport, SessionState,
+    SessionUsage,
 };
 use serde_json::Value;
 
@@ -54,6 +55,7 @@ use crate::model_selector::{
 use crate::onboarding::{self, Dependency};
 use crate::platform::{self, ExternalApp};
 use crate::providers::{self, CustomProvider};
+use crate::quota::{QuotaManager, QuotaSupport};
 use crate::sessions::{self, SessionInfo};
 use crate::sidepane::{SidePane, SidePaneResize};
 use crate::theme::{self, Theme, ThemeId, ThemeMode};
@@ -303,6 +305,8 @@ pub struct OrbitApp {
     refreshing: bool,
     /// Whether the top-bar session-details popover is open.
     session_details_open: bool,
+    /// Whether the top-bar provider-quota popover is open.
+    quota_popup_open: bool,
     /// The `sessionId` pi reports for the active session (its task id).
     session_id: Option<String>,
     /// Current agent turn number for this session (0 = none yet).
@@ -336,6 +340,9 @@ pub struct OrbitApp {
     /// RPC namespace. When pi doesn't advertise those commands this stays
     /// unsupported and the page keeps the Terminal login fallback.
     auth: AuthManager,
+    /// Non-secret account quota/balance/spend per connected provider, from the
+    /// `quota.*` RPC namespace. Empty when pi does not support it.
+    quota: QuotaManager,
     /// True once a credential changed and pi needs a restart to load it
     /// (pi reads auth.json only at startup). Only used on the file-based
     /// fallback path; RPC logins take effect live.
@@ -598,6 +605,7 @@ impl OrbitApp {
             deps,
             refreshing: false,
             session_details_open: false,
+            quota_popup_open: false,
             session_id: None,
             turn_count: 0,
             turn_open: false,
@@ -612,6 +620,7 @@ impl OrbitApp {
             provider_auth: HashMap::new(),
             provider_auth_error: None,
             auth: AuthManager::new(),
+            quota: QuotaManager::new(),
             provider_auth_dirty: false,
             provider_catalog_counts: HashMap::new(),
             provider_metadata: Vec::new(),
@@ -838,6 +847,16 @@ struct ProviderEditor {
     error: Option<String>,
 }
 
+/// What a [`ProviderKeyEditor`] is collecting. Ollama Cloud needs both a
+/// monthly-credit API key and an optional legacy session; everything else uses
+/// the plain API-key form.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProviderKeyKind {
+    ApiKey,
+    /// A pasted `Cookie:` header for Ollama Cloud's settings-page usage.
+    OllamaCloudSession,
+}
+
 /// The API-key editor's open state (one field, provider-scoped).
 struct ProviderKeyEditor {
     provider_id: String,
@@ -845,6 +864,7 @@ struct ProviderKeyEditor {
     /// Supports OAuth too, so the modal can offer the sign-in path as well.
     oauth: bool,
     note: &'static str,
+    kind: ProviderKeyKind,
     key: Entity<ComposerInput>,
     error: Option<String>,
 }
@@ -893,6 +913,9 @@ struct ProviderView {
     /// Live credential facts from the `auth.*` RPC namespace, when pi
     /// supports it. Preferred over the on-disk `auth` snapshot.
     live_status: Option<ProviderStatus>,
+    /// Account quota/balance/spend from the `quota.*` RPC namespace, when
+    /// available and connected.
+    quota: Option<QuotaReport>,
     /// The provider's env var is set in this process's environment.
     env_authed: bool,
 }
@@ -983,6 +1006,11 @@ enum ProviderAction {
         name: String,
         oauth: bool,
         note: &'static str,
+    },
+    /// Open the Ollama Cloud session editor (a pasted cookie header) — the
+    /// legacy session/weekly path, distinct from the monthly-credit API key.
+    EditOllamaSession {
+        name: String,
     },
     SignOut {
         id: String,

@@ -803,6 +803,7 @@ impl OrbitApp {
             note,
             auth: self.provider_auth.get(id).copied(),
             live_status: self.auth.status(id).cloned(),
+            quota: self.quota.report(id).cloned(),
         }
     }
 
@@ -1009,6 +1010,174 @@ impl OrbitApp {
             }
         }
         body = body.child(buttons);
+        Some(body.into_any_element())
+    }
+
+    /// Account quota/balance/spend for a connected provider, from the
+    /// `quota.*` RPC namespace. `None` when there is nothing to render, so a
+    /// provider with no usage surface adds no empty block to its card.
+    pub(super) fn provider_quota_section(
+        &self,
+        view: &ProviderView,
+        theme: Theme,
+    ) -> Option<AnyElement> {
+        let report = view.quota.as_ref()?;
+        if !report.has_data() && report.error.is_none() && report.note.is_none() {
+            return None;
+        }
+
+        let amount = |value: f64| -> String {
+            if value.fract() == 0.0 {
+                format!("{value:.0}")
+            } else {
+                format!("{value:.2}")
+            }
+        };
+        let reset_label = |ms: i64| format!("resets {}", format_epoch_ms(ms));
+
+        let mut head = div().flex().items_center().gap_2().child(
+            div()
+                .text_size(theme.ui_px(10.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text_3)
+                .child("USAGE"),
+        );
+        if let Some(plan) = &report.plan {
+            head = head.child(self.provider_badge(
+                plan,
+                theme.accent,
+                theme.accent.opacity(0.12),
+                theme,
+            ));
+        }
+
+        let mut body = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .px_3()
+            .py_2p5()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_main)
+            .child(head);
+
+        for window in &report.windows {
+            let value = if let Some(percent) = window.used_percent {
+                format!("{percent:.0}% used")
+            } else if let (Some(used), Some(limit)) = (window.used, window.limit) {
+                format!("{} / {}", amount(used), amount(limit))
+            } else if let Some(used) = window.used {
+                match &window.unit {
+                    Some(unit) => format!("{} {unit}", amount(used)),
+                    None => amount(used),
+                }
+            } else {
+                continue;
+            };
+
+            let mut row = div().w_full().flex().flex_col().gap_1().child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text_2)
+                            .child(window.label.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text)
+                            .child(value),
+                    ),
+            );
+
+            if let Some(fraction) = window.fraction() {
+                let tint = if fraction >= 0.9 {
+                    theme.crit
+                } else if fraction >= 0.75 {
+                    theme.warn
+                } else {
+                    theme.ok_green
+                };
+                row = row.child(
+                    div()
+                        .w_full()
+                        .h(px(4.))
+                        .rounded_full()
+                        .overflow_hidden()
+                        .bg(theme.overlay_strong)
+                        .child(div().h_full().rounded_full().bg(tint).w(relative(fraction))),
+                );
+            }
+            if let Some(resets_at) = window.resets_at {
+                row = row.child(
+                    div()
+                        .text_size(theme.ui_px(10.))
+                        .text_color(theme.text_3)
+                        .child(reset_label(resets_at)),
+                );
+            }
+            body = body.child(row);
+        }
+
+        for balance in &report.balances {
+            let text = if balance.currency.is_empty() {
+                amount(balance.amount)
+            } else {
+                format!("{} {}", amount(balance.amount), balance.currency)
+            };
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text_2)
+                            .child(balance.label.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text)
+                            .child(text),
+                    ),
+            );
+        }
+
+        if let Some(error) = &report.error {
+            body = body.child(
+                div()
+                    .text_size(theme.ui_px(10.5))
+                    .text_color(theme.crit)
+                    .child(error.to_string()),
+            );
+        } else if !report.has_data() {
+            if let Some(note) = &report.note {
+                body = body.child(
+                    div()
+                        .text_size(theme.ui_px(10.5))
+                        .text_color(theme.text_3)
+                        .child(note.to_string()),
+                );
+            }
+        }
+
         Some(body.into_any_element())
     }
 
@@ -1339,6 +1508,23 @@ impl OrbitApp {
                     ));
                 }
             }
+            // Ollama Cloud usage is separate from the local endpoint's API key:
+            // current accounts use a real cloud key (monthly credits); legacy
+            // accounts expose session/weekly usage only behind a signed-in
+            // settings page, which needs the user's own session cookie. Offer
+            // the session editor explicitly so neither is auto-scraped.
+            if view.id == "ollama" {
+                primary = primary.child(self.provider_button(
+                    "provider-ollama-session".to_string(),
+                    "Usage session",
+                    ProviderButtonStyle::Ghost,
+                    theme,
+                    this.clone(),
+                    ProviderAction::EditOllamaSession {
+                        name: view.name.clone(),
+                    },
+                ));
+            }
             let connected = view.auth.is_some()
                 || view
                     .live_status
@@ -1405,6 +1591,9 @@ impl OrbitApp {
             .child(header)
             .child(badges)
             .child(facts)
+            .when_some(self.provider_quota_section(view, theme), |card, section| {
+                card.child(section)
+            })
             .child(base_url)
             .child(div().h(px(1.)).w_full().bg(theme.border))
             .child(actions)
@@ -1512,6 +1701,7 @@ impl OrbitApp {
             ProviderAction::AuthCancel => Some("icons/x.svg"),
             ProviderAction::AuthDismiss => Some("icons/check.svg"),
             ProviderAction::EditKey { .. } => Some("icons/at-sign.svg"),
+            ProviderAction::EditOllamaSession { .. } => Some("icons/clock.svg"),
             ProviderAction::SignOut { .. } => Some("icons/stop.svg"),
             ProviderAction::Configure { .. } => Some("icons/settings.svg"),
             ProviderAction::Remove { .. } | ProviderAction::ConfirmRemove { .. } => {
@@ -1559,6 +1749,15 @@ impl OrbitApp {
                 oauth,
                 note,
             } => self.provider_key_open(id, name, oauth, note, window, cx),
+            ProviderAction::EditOllamaSession { name } => self.provider_credential_open(
+                "ollama".to_string(),
+                name,
+                false,
+                "",
+                ProviderKeyKind::OllamaCloudSession,
+                window,
+                cx,
+            ),
             ProviderAction::SignOut { id } => self.provider_sign_out(id, cx),
             ProviderAction::Configure { id } => self.provider_editor_open(Some(id), window, cx),
             ProviderAction::Remove { id } => {
@@ -1584,6 +1783,17 @@ impl OrbitApp {
     ) -> Option<AnyElement> {
         let editor = self.provider_key_editor.as_ref()?;
 
+        let (field_label, hint) = match editor.kind {
+            ProviderKeyKind::ApiKey => (
+                "API key",
+                "A literal key, `$ENV_VAR`, or `!command` — stored in auth.json (0600).",
+            ),
+            ProviderKeyKind::OllamaCloudSession => (
+                "Session cookie",
+                "Paste the Cookie header from ollama.com/settings (e.g. `__Secure-session=…`). Stored in auth.json (0600); only sent to ollama.com.",
+            ),
+        };
+
         let mut body = div().w_full().flex().flex_col().gap_3().child(
             div()
                 .flex()
@@ -1594,7 +1804,7 @@ impl OrbitApp {
                         .text_size(theme.ui_px(12.))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text_2)
-                        .child("API key"),
+                        .child(field_label),
                 )
                 .child(
                     div()
@@ -1612,9 +1822,7 @@ impl OrbitApp {
                     div()
                         .text_size(theme.ui_px(11.))
                         .text_color(theme.text_3)
-                        .child(
-                        "A literal key, `$ENV_VAR`, or `!command` — stored in auth.json (0600).",
-                    ),
+                        .child(hint),
                 ),
         );
         if !editor.note.is_empty() {
@@ -1625,7 +1833,7 @@ impl OrbitApp {
                     .child(editor.note.to_string()),
             );
         }
-        if editor.oauth {
+        if editor.oauth && editor.kind == ProviderKeyKind::ApiKey {
             let id = editor.provider_id.clone();
             let name = editor.provider_name.clone();
             let this_signin = this.clone();
@@ -3631,12 +3839,40 @@ impl OrbitApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.provider_credential_open(
+            provider_id,
+            provider_name,
+            oauth,
+            note,
+            ProviderKeyKind::ApiKey,
+            window,
+            cx,
+        );
+    }
+
+    /// Open the credential editor for `kind` (API key or an Ollama Cloud
+    /// session). One modal handles both; the field, hint, and save path differ.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn provider_credential_open(
+        &mut self,
+        provider_id: String,
+        provider_name: String,
+        oauth: bool,
+        note: &'static str,
+        kind: ProviderKeyKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let placeholder = match kind {
+            ProviderKeyKind::ApiKey => "sk-…",
+            ProviderKeyKind::OllamaCloudSession => "__Secure-session=…",
+        };
         let key = cx.new(|cx| {
             ComposerInput::new(cx)
                 .with_element_id("provider-key-input")
                 .with_key_context("Composer Picker")
                 .with_max_lines(1)
-                .with_placeholder("sk-…")
+                .with_placeholder(placeholder)
         });
         let focus = key.read(cx).focus_handle(cx);
         window.focus(&focus);
@@ -3645,6 +3881,7 @@ impl OrbitApp {
             provider_name,
             oauth,
             note,
+            kind,
             key,
             error: None,
         });
@@ -3658,13 +3895,22 @@ impl OrbitApp {
         };
         let id = editor.provider_id.clone();
         let name = editor.provider_name.clone();
+        let kind = editor.kind;
         let key = editor.key.read(cx).text();
-        match providers::write_api_key(&id, &key) {
+        let result = match kind {
+            ProviderKeyKind::ApiKey => providers::write_api_key(&id, &key),
+            ProviderKeyKind::OllamaCloudSession => providers::write_ollama_cloud_session(&key),
+        };
+        match result {
             Ok(()) => {
                 self.provider_key_editor = None;
                 self.provider_auth_dirty = true;
                 self.reload_custom_providers(cx);
-                self.set_status(format!("API key saved for {name} — Restart pi to use it"));
+                let what = match kind {
+                    ProviderKeyKind::ApiKey => "API key",
+                    ProviderKeyKind::OllamaCloudSession => "Ollama Cloud session",
+                };
+                self.set_status(format!("{what} saved for {name} — Restart pi to use it"));
             }
             Err(err) => {
                 if let Some(editor) = self.provider_key_editor.as_mut() {

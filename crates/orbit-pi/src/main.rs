@@ -26,6 +26,7 @@ mod model_selector_match;
 mod onboarding;
 mod platform;
 mod providers;
+mod quota;
 mod review;
 mod sessions;
 mod sidepane;

@@ -112,20 +112,16 @@ fn collect_auth_events(
 
 fn response(client: &PiClient, body: CommandBody) -> Event {
     let rx = client.send(body).expect("send");
-    rx.recv_timeout(Duration::from_secs(5)).unwrap_or_else(|err| {
-        panic!(
-            "response: {err}; stderr={:?}",
-            client.recent_stderr(20)
-        )
-    })
+    rx.recv_timeout(Duration::from_secs(5))
+        .unwrap_or_else(|err| panic!("response: {err}; stderr={:?}", client.recent_stderr(20)))
 }
 
 #[test]
 fn routes_auth_commands_and_async_events() {
     let (bin, _dir) = fake_pi();
     let workspace = std::env::temp_dir();
-    let client = PiClient::spawn_with_bin(bin.to_str().unwrap(), &workspace, None)
-        .expect("spawn fake pi");
+    let client =
+        PiClient::spawn_with_bin(bin.to_str().unwrap(), &workspace, None).expect("spawn fake pi");
 
     // auth.list → capability discovery the UI renders from.
     match response(&client, CommandBody::AuthList) {
@@ -174,7 +170,9 @@ fn routes_auth_commands_and_async_events() {
             assert_eq!(command, "auth.login");
             assert!(success);
             assert_eq!(
-                data.as_ref().and_then(|d| d.get("sessionId")).and_then(|v| v.as_str()),
+                data.as_ref()
+                    .and_then(|d| d.get("sessionId"))
+                    .and_then(|v| v.as_str()),
                 Some("sess-1")
             );
         }
@@ -188,9 +186,9 @@ fn routes_auth_commands_and_async_events() {
         "first event should be login started, got {events:?}"
     );
     assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, AuthEvent::LoginUrl { url, .. } if url.contains("claude.ai"))),
+        events.iter().any(
+            |event| matches!(event, AuthEvent::LoginUrl { url, .. } if url.contains("claude.ai"))
+        ),
         "browser URL should stream through, got {events:?}"
     );
     assert!(
@@ -233,7 +231,9 @@ fn routes_auth_commands_and_async_events() {
             session_id: "sess-1".into(),
         },
     ) {
-        Event::Response { command, success, .. } => {
+        Event::Response {
+            command, success, ..
+        } => {
             assert_eq!(command, "auth.cancel");
             assert!(success);
         }
@@ -256,7 +256,9 @@ fn routes_auth_commands_and_async_events() {
             provider: "anthropic".into(),
         },
     ) {
-        Event::Response { command, success, .. } => {
+        Event::Response {
+            command, success, ..
+        } => {
             assert_eq!(command, "auth.logout");
             assert!(success);
         }

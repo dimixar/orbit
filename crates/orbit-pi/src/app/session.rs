@@ -549,6 +549,10 @@ impl OrbitApp {
     ) {
         // The top-bar info affordance shows the active session's details.
         self.session_details_open = !self.session_details_open;
+        // Only one top-bar popover is meaningful at a time.
+        if self.session_details_open {
+            self.quota_popup_open = false;
+        }
         cx.notify();
     }
 
@@ -793,6 +797,178 @@ impl OrbitApp {
         )
     }
 
+    /// The top-bar quota pill: the single most-constraining provider window
+    /// across every connected account, as a tiny meter plus percentage. This is
+    /// deliberately provider-independent — it reads the normalized
+    /// [`QuotaReport`] list and never names a specific provider in code, so a
+    /// new adapter needs no UI change. `None` (hidden) when pi lacks `quota.*`
+    /// or nothing has been reported yet.
+    pub(super) fn render_quota_pill(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        // Something to show at all? A balance-only provider (DeepSeek,
+        // OpenRouter) has no percentage window but is still worth surfacing,
+        // so the pill falls back to a compact label instead of hiding.
+        if self.quota.reports().is_empty() {
+            return None;
+        }
+        let theme = *theme::get(cx);
+
+        let mut pill = div()
+            .id("top-quota")
+            .relative()
+            .h(px(26.))
+            .px(px(8.))
+            .rounded_md()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.bg_hover))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_quota_click))
+            .children(self.render_quota_popup(cx));
+
+        match self.quota.peak_window() {
+            Some((_, peak)) => {
+                if let Some(fraction) = peak.fraction() {
+                    let percent = (fraction * 100.0).round() as i32;
+                    pill = pill
+                        .child(
+                            div()
+                                .w(px(44.))
+                                .h(px(5.))
+                                .rounded_full()
+                                .overflow_hidden()
+                                .bg(theme.overlay_strong)
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .rounded_full()
+                                        .bg(quota_tint(fraction, theme))
+                                        .w(relative(fraction)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(theme.ui_px(11.5))
+                                .text_color(theme.text_2)
+                                .child(format!("{percent}%")),
+                        );
+                }
+            }
+            // No percentage/used-limit pair anywhere (credits/balance only):
+            // a quiet label keeps the popover reachable.
+            None => {
+                pill = pill
+                    .child(icon("icons/spark.svg", 13., theme.text_2))
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(11.5))
+                            .text_color(theme.text_2)
+                            .child("Usage"),
+                    );
+            }
+        }
+
+        Some(pill.into_any_element())
+    }
+
+    /// The quota popover: every connected provider's windows and balances,
+    /// grouped by provider and read from the normalized model. Rendered only
+    /// while open; anchored under the pill.
+    pub(super) fn render_quota_popup(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if !self.quota_popup_open {
+            return None;
+        }
+        let theme = *theme::get(cx);
+        let this = cx.entity();
+
+        let header = div()
+            .px(px(12.))
+            .py(px(10.))
+            .border_b_1()
+            .border_color(theme.border)
+            .flex()
+            .items_center()
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(theme.ui_px(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child("Provider usage"),
+            )
+            .child(
+                div()
+                    .text_size(theme.ui_px(10.5))
+                    .text_color(theme.text_3)
+                    .child("subscription quota"),
+            );
+
+        let reports = self.quota.reports();
+        let body = div().flex().flex_col().child(header).children(
+            reports
+                .iter()
+                .map(|report| quota_provider_row(report, theme)),
+        );
+
+        let popup = div()
+            .w(px(320.))
+            .font_family(theme::ui_font_family())
+            .rounded(px(8.))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.menu_bg)
+            .shadow(theme.popover_shadow())
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .occlude()
+            .on_mouse_down_out({
+                let this = this.clone();
+                move |_: &MouseDownEvent, _, cx: &mut App| {
+                    this.update(cx, |app, cx| {
+                        if app.quota_popup_open {
+                            app.quota_popup_open = false;
+                            cx.notify();
+                        }
+                    });
+                }
+            })
+            .child(body);
+
+        Some(
+            div()
+                .absolute()
+                .bottom_0()
+                .right_0()
+                .size(px(0.))
+                .child(
+                    anchored()
+                        .position_mode(AnchoredPositionMode::Local)
+                        .anchor(Corner::TopRight)
+                        .offset(point(px(0.), px(6.)))
+                        .snap_to_window()
+                        .child(deferred(popup)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Toggle the top-bar quota popover.
+    pub(super) fn on_quota_click(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.quota_popup_open = !self.quota_popup_open;
+        // The quota popover and the session-details popover share the top
+        // bar; only one is meaningful at a time.
+        if self.quota_popup_open {
+            self.session_details_open = false;
+        }
+        cx.notify();
+    }
+
     /// A read-only identifier row in the session-details popover, with a copy
     /// affordance that copies `value` to the clipboard.
     pub(super) fn session_detail_row(
@@ -963,4 +1139,191 @@ impl OrbitApp {
         self.transcript.dismiss_rail_hint();
         cx.notify();
     }
+}
+
+/// Meter/accent color for a consumed fraction. Green → amber → red at the
+/// same thresholds the Settings quota meters use, so the two surfaces agree.
+fn quota_tint(fraction: f32, theme: Theme) -> Hsla {
+    if fraction >= 0.9 {
+        theme.crit
+    } else if fraction >= 0.75 {
+        theme.warn
+    } else {
+        theme.ok_green
+    }
+}
+
+/// One provider block in the top-bar quota popover. Provider-independent: it
+/// renders whatever the normalized report carries (windows, balances, note,
+/// error) and names the provider by id only, never a bespoke label.
+fn quota_provider_row(report: &QuotaReport, theme: Theme) -> AnyElement {
+    let name = providers::provider_display_name(&report.provider);
+    let amount = |value: f64| -> String {
+        if value.fract() == 0.0 {
+            format!("{value:.0}")
+        } else {
+            format!("{value:.2}")
+        }
+    };
+
+    let mut header = div()
+        .px(px(12.))
+        .pt(px(10.))
+        .pb(px(4.))
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(theme.ui_px(11.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child(name),
+        );
+    if let Some(plan) = &report.plan {
+        header = header.child(
+            div()
+                .px(px(6.))
+                .h(px(16.))
+                .rounded_sm()
+                .bg(theme.accent.opacity(0.12))
+                .text_size(theme.ui_px(10.))
+                .text_color(theme.accent)
+                .flex()
+                .items_center()
+                .child(plan.clone()),
+        );
+    }
+
+    let mut block = div().pb(px(6.)).flex().flex_col().child(header);
+
+    for window in &report.windows {
+        let value = if let Some(percent) = window.used_percent {
+            format!("{percent:.0}% used")
+        } else if let (Some(used), Some(limit)) = (window.used, window.limit) {
+            format!("{} / {}", amount(used), amount(limit))
+        } else if let Some(used) = window.used {
+            match &window.unit {
+                Some(unit) => format!("{} {unit}", amount(used)),
+                None => amount(used),
+            }
+        } else {
+            continue;
+        };
+
+        let mut row = div()
+            .px(px(12.))
+            .py(px(3.))
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text_2)
+                            .child(window.label.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text)
+                            .child(value),
+                    ),
+            );
+
+        if let Some(fraction) = window.fraction() {
+            row = row.child(
+                div()
+                    .w_full()
+                    .h(px(4.))
+                    .rounded_full()
+                    .overflow_hidden()
+                    .bg(theme.overlay_strong)
+                    .child(
+                        div()
+                            .h_full()
+                            .rounded_full()
+                            .bg(quota_tint(fraction, theme))
+                            .w(relative(fraction)),
+                    ),
+            );
+        }
+        if let Some(resets_at) = window.resets_at {
+            row = row.child(
+                div()
+                    .text_size(theme.ui_px(10.))
+                    .text_color(theme.text_3)
+                    .child(format!("resets {}", format_epoch_ms(resets_at))),
+            );
+        }
+        block = block.child(row);
+    }
+
+    for balance in &report.balances {
+        let text = if balance.currency.is_empty() {
+            amount(balance.amount)
+        } else {
+            format!("{} {}", amount(balance.amount), balance.currency)
+        };
+        block = block.child(
+            div()
+                .px(px(12.))
+                .py(px(3.))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(theme.ui_px(11.))
+                        .text_color(theme.text_2)
+                        .child(balance.label.clone()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(theme.ui_px(11.))
+                        .text_color(theme.text)
+                        .child(text),
+                ),
+        );
+    }
+
+    if let Some(error) = &report.error {
+        block = block.child(
+            div()
+                .px(px(12.))
+                .pt(px(2.))
+                .text_size(theme.ui_px(10.5))
+                .text_color(theme.crit)
+                .child(error.clone()),
+        );
+    } else if !report.has_data() {
+        if let Some(note) = &report.note {
+            block = block.child(
+                div()
+                    .px(px(12.))
+                    .pt(px(2.))
+                    .text_size(theme.ui_px(10.5))
+                    .text_color(theme.text_3)
+                    .child(note.clone()),
+            );
+        }
+    }
+
+    block.into_any_element()
 }

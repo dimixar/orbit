@@ -27,7 +27,9 @@ fn live_state_model_matches_catalog() {
     let client = PiClient::spawn(&root, None).expect("spawn");
 
     let _ = client.send(CommandBody::GetState).expect("state");
-    let _ = client.send(CommandBody::GetAvailableModels).expect("models");
+    let _ = client
+        .send(CommandBody::GetAvailableModels)
+        .expect("models");
 
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut state_model = None;

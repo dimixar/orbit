@@ -64,9 +64,7 @@ fn live_agent_control_commands_round_trip() {
     // Queue delivery modes. These are per-process and reset when pi exits.
     let (ok, _) = round_trip(
         &client,
-        CommandBody::SetSteeringMode {
-            mode: "all".into(),
-        },
+        CommandBody::SetSteeringMode { mode: "all".into() },
         "set_steering_mode",
     );
     assert!(ok, "set_steering_mode failed");

@@ -163,6 +163,10 @@ impl Render for OrbitApp {
         // ── top-bar right controls ──
         let mut top_controls = div().flex().items_center().gap_2();
         top_controls = top_controls.children(self.render_open_in_control(cx));
+        // Provider quota — a compact, provider-independent headroom meter.
+        // Hidden entirely on a pi without `quota.*` (or when no provider
+        // reports anything), so the bar never shows a fabricated value.
+        top_controls = top_controls.children(self.render_quota_pill(cx));
         top_controls = top_controls
             .child(
                 div()

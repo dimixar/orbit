@@ -123,6 +123,7 @@ impl OrbitApp {
         // the next `auth.list` can reconcile a completion that happened while
         // Orbit was reconnecting.
         self.auth.on_disconnect();
+        self.quota.on_disconnect();
     }
 
     /// Ask pi for provider auth capabilities. Harmless on a pi that doesn't
@@ -134,6 +135,17 @@ impl OrbitApp {
         for provider in wanted {
             self.send(CommandBody::AuthStatus { provider }, "auth.status");
         }
+        self.refresh_quota();
+    }
+
+    /// Ask pi for account quota/balance/spend for every connected provider.
+    /// Harmless on a pi build without the quota RPC: the failed response marks
+    /// it unsupported and the cards simply omit quota meters.
+    pub(super) fn refresh_quota(&mut self) {
+        if self.quota.support() == QuotaSupport::Unsupported {
+            return;
+        }
+        self.send(CommandBody::QuotaList { provider: None }, "quota.list");
     }
 
     /// Refresh capabilities and per-provider status against the *current*
@@ -144,6 +156,7 @@ impl OrbitApp {
             return;
         }
         self.send(CommandBody::AuthList, "auth.list");
+        self.refresh_quota();
         if self.auth.is_busy() {
             // A login is mid-flight; don't disturb it with status refreshes.
             return;
@@ -180,6 +193,7 @@ impl OrbitApp {
                     // banner is needed on the RPC path.
                     self.provider_auth_dirty = false;
                     self.send(CommandBody::AuthList, "auth.list");
+                    self.refresh_quota();
                     self.refresh_catalogs();
                     self.reload_custom_providers(cx);
                 }

@@ -14,7 +14,7 @@ pub mod types;
 
 pub use client::{pi_binary, PiClient, PI_BIN_ENV};
 pub use types::{
-    is_auth_event, AssistantMessageEvent, AuthErrorCode, AuthEvent, AuthMethodCapability,
-    AuthProvider, Command, CommandBody, ContextUsage, Event, MessageUsage, PendingQueue,
-    SessionState, SessionUsage,
+    is_auth_event, parse_quota_reports, AssistantMessageEvent, AuthErrorCode, AuthEvent,
+    AuthMethodCapability, AuthProvider, Command, CommandBody, ContextUsage, Event, MessageUsage,
+    PendingQueue, QuotaBalance, QuotaKind, QuotaReport, QuotaWindow, SessionState, SessionUsage,
 };

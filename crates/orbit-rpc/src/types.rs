@@ -124,7 +124,9 @@ pub enum CommandBody {
     AuthList,
     /// Current credential status for one provider (never token material).
     #[serde(rename = "auth.status")]
-    AuthStatus { provider: String },
+    AuthStatus {
+        provider: String,
+    },
     /// Begin a login. `method` is provider-defined (`browser`, `device_code`,
     /// `api_key`, …) and is discovered from `auth.list`. `session_id` is
     /// client-generated so the login can be cancelled deterministically and
@@ -138,12 +140,25 @@ pub enum CommandBody {
     },
     /// Remove the stored credential for a provider.
     #[serde(rename = "auth.logout")]
-    AuthLogout { provider: String },
+    AuthLogout {
+        provider: String,
+    },
     /// Cancel an in-flight login session.
     #[serde(rename = "auth.cancel")]
     AuthCancel {
         #[serde(rename = "sessionId")]
         session_id: String,
+    },
+
+    // ── provider quota / usage ──────────────────────────────────────────
+    /// Account-level quota, balance, or spend for connected providers. pi
+    /// resolves each provider's credential and queries the provider's own
+    /// usage endpoint; Orbit only ever receives normalized, non-secret
+    /// figures. `provider` (when present) restricts the query to one id.
+    #[serde(rename = "quota.list")]
+    QuotaList {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
     },
 
     /// Anything the typed enum does not cover yet; sent verbatim.
@@ -497,14 +512,9 @@ pub enum AuthEvent {
         provider: String,
     },
     /// One or more providers' stored credentials changed (login or logout).
-    CredentialsChanged {
-        providers: Vec<String>,
-    },
+    CredentialsChanged { providers: Vec<String> },
     /// A future `auth.*` event; the UI ignores it and the raw value survives.
-    Other {
-        kind: String,
-        value: Value,
-    },
+    Other { kind: String, value: Value },
 }
 
 impl AuthEvent {
@@ -596,6 +606,235 @@ impl AuthEvent {
 /// Any `auth_*` event type routes through [`AuthEvent::from_value`].
 pub fn is_auth_event(kind: &str) -> bool {
     kind.starts_with("auth_")
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Provider quota / usage
+// ───────────────────────────────────────────────────────────────────────────
+
+/// What a provider's report describes. Mirrors the union of provider billing
+/// models: subscription windows, credits, a cash balance, or trailing spend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuotaKind {
+    /// Subscription rate-limit windows (5h / weekly / monthly).
+    Subscription,
+    /// Prepaid credits (money or credit units) plus optional spend.
+    Credits,
+    /// Account cash balance, potentially in several currencies.
+    Balance,
+    /// Trailing spend over a fixed window (e.g. last 30 days).
+    Spend,
+    /// The provider is connected but exposes no usage surface.
+    Unsupported,
+}
+
+impl QuotaKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Subscription => "subscription",
+            Self::Credits => "credits",
+            Self::Balance => "balance",
+            Self::Spend => "spend",
+            Self::Unsupported => "unsupported",
+        }
+    }
+
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "subscription" => Self::Subscription,
+            "credits" => Self::Credits,
+            "balance" => Self::Balance,
+            "spend" => Self::Spend,
+            _ => Self::Unsupported,
+        }
+    }
+}
+
+/// One metered window in a quota report. Either a percentage (`used_percent`)
+/// or a counted pair (`used` / `limit`), never both fabricated.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuotaWindow {
+    /// Stable machine id (e.g. `five_hour`, `weekly`); used for keying.
+    pub id: String,
+    /// Human label from the adapter (`5-hour`, `Weekly`).
+    pub label: String,
+    /// 0..=100, when the provider reports a percentage.
+    pub used_percent: Option<f32>,
+    /// Count consumed, when the provider reports counts.
+    pub used: Option<f64>,
+    /// Count allowance, when the provider reports counts.
+    pub limit: Option<f64>,
+    /// Unit for `used`/`limit` (`requests`, `credits`, `tokens`, …).
+    pub unit: Option<String>,
+    /// Absolute reset time in epoch milliseconds.
+    pub resets_at: Option<i64>,
+}
+
+impl QuotaWindow {
+    pub fn from_value(value: &Value) -> Option<Self> {
+        let id = value.get("id").and_then(Value::as_str)?.to_string();
+        let label = value
+            .get("label")
+            .and_then(Value::as_str)
+            .filter(|label| !label.is_empty())
+            .unwrap_or(&id)
+            .to_string();
+        let used_percent = value
+            .get("usedPercent")
+            .and_then(json_f64_or_null)
+            .map(|p| p.clamp(0.0, 100.0) as f32);
+        let used = value.get("used").and_then(json_f64_or_null);
+        let limit = value.get("limit").and_then(json_f64_or_null);
+        let unit = value
+            .get("unit")
+            .and_then(Value::as_str)
+            .filter(|unit| !unit.is_empty())
+            .map(str::to_owned);
+        let resets_at = value.get("resetsAt").and_then(json_i64_or_null);
+        Some(Self {
+            id,
+            label,
+            used_percent,
+            used,
+            limit,
+            unit,
+            resets_at,
+        })
+    }
+
+    /// Fraction consumed, 0..=1, for a meter fill. Derived from the percentage
+    /// when present, otherwise from `used / limit`.
+    pub fn fraction(&self) -> Option<f32> {
+        if let Some(percent) = self.used_percent {
+            return Some((percent / 100.0).clamp(0.0, 1.0));
+        }
+        let (used, limit) = (self.used?, self.limit?);
+        (limit > 0.0).then(|| ((used / limit) as f32).clamp(0.0, 1.0))
+    }
+}
+
+/// One monetary balance line (`Available`, `Cash`, `Granted`, …).
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuotaBalance {
+    pub label: String,
+    pub amount: f64,
+    pub currency: String,
+}
+
+impl QuotaBalance {
+    pub fn from_value(value: &Value) -> Option<Self> {
+        let amount = value.get("amount").and_then(json_f64_or_null)?;
+        let label = value
+            .get("label")
+            .and_then(Value::as_str)
+            .filter(|label| !label.is_empty())
+            .unwrap_or("Balance")
+            .to_string();
+        let currency = value
+            .get("currency")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        Some(Self {
+            label,
+            amount,
+            currency,
+        })
+    }
+}
+
+/// A normalized account-usage report for one provider. This is the entire
+/// non-secret surface: no token, key, or account identifier is ever present.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuotaReport {
+    pub provider: String,
+    pub kind: QuotaKind,
+    /// Plan tier label (`Max`, `Plus`, `Pro`), when the provider reports one.
+    pub plan: Option<String>,
+    pub windows: Vec<QuotaWindow>,
+    pub balances: Vec<QuotaBalance>,
+    /// Short, provider-supplied note (e.g. an unsupported reason).
+    pub note: Option<String>,
+    /// When the snapshot was taken, in epoch milliseconds.
+    pub fetched_at: Option<i64>,
+    /// A provider/query error; the report may still carry stale windows.
+    pub error: Option<String>,
+}
+
+impl QuotaReport {
+    /// Parse one report object from a `quota.list` payload.
+    pub fn from_value(value: &Value) -> Option<Self> {
+        let provider = value.get("provider").and_then(Value::as_str)?.to_string();
+        let kind = value
+            .get("kind")
+            .and_then(Value::as_str)
+            .map(QuotaKind::from_wire)
+            .unwrap_or(QuotaKind::Unsupported);
+        let plan = value
+            .get("plan")
+            .and_then(Value::as_str)
+            .filter(|plan| !plan.is_empty())
+            .map(str::to_owned);
+        let windows = value
+            .get("windows")
+            .and_then(Value::as_array)
+            .map(|windows| windows.iter().filter_map(QuotaWindow::from_value).collect())
+            .unwrap_or_default();
+        let balances = value
+            .get("balances")
+            .and_then(Value::as_array)
+            .map(|balances| {
+                balances
+                    .iter()
+                    .filter_map(QuotaBalance::from_value)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let note = value
+            .get("note")
+            .and_then(Value::as_str)
+            .filter(|note| !note.is_empty())
+            .map(str::to_owned);
+        let fetched_at = value.get("fetchedAt").and_then(json_i64_or_null);
+        let error = value
+            .get("error")
+            .and_then(Value::as_str)
+            .filter(|error| !error.is_empty())
+            .map(str::to_owned);
+        Some(Self {
+            provider,
+            kind,
+            plan,
+            windows,
+            balances,
+            note,
+            fetched_at,
+            error,
+        })
+    }
+
+    /// Whether this report has anything worth rendering.
+    pub fn has_data(&self) -> bool {
+        !self.windows.is_empty() || !self.balances.is_empty()
+    }
+}
+
+/// Parse the `providers` array of a `quota.list` payload.
+pub fn parse_quota_reports(data: &Value) -> Vec<QuotaReport> {
+    data.get("providers")
+        .and_then(Value::as_array)
+        .map(|reports| reports.iter().filter_map(QuotaReport::from_value).collect())
+        .unwrap_or_default()
+}
+
+fn json_i64_or_null(value: &Value) -> Option<i64> {
+    if value.is_null() {
+        return None;
+    }
+    value
+        .as_i64()
+        .or_else(|| value.as_f64().map(|f| f as i64))
+        .or_else(|| value.as_u64().and_then(|u| i64::try_from(u).ok()))
 }
 
 fn str_field(value: &Value, key: &str) -> String {
@@ -802,16 +1041,18 @@ fn delta_summary(delta: &str) -> String {
 
 fn auth_one_line(event: &AuthEvent) -> String {
     match event {
-        AuthEvent::LoginStarted { provider, method, .. } => {
+        AuthEvent::LoginStarted {
+            provider, method, ..
+        } => {
             format!("auth started: {provider} ({method})")
         }
         AuthEvent::LoginUrl { provider, .. } => format!("auth url: {provider}"),
         AuthEvent::DeviceCode { provider, .. } => format!("auth device code: {provider}"),
         AuthEvent::LoginWaiting { provider, .. } => format!("auth waiting: {provider}"),
         AuthEvent::LoginSucceeded { provider, .. } => format!("auth ✓ {provider}"),
-        AuthEvent::LoginFailed {
-            provider, code, ..
-        } => format!("auth ✗ {provider} ({})", code.as_str()),
+        AuthEvent::LoginFailed { provider, code, .. } => {
+            format!("auth ✗ {provider} ({})", code.as_str())
+        }
         AuthEvent::LoginCancelled { provider, .. } => format!("auth cancelled: {provider}"),
         AuthEvent::CredentialsChanged { providers } => {
             format!("auth credentials changed: {}", providers.join(", "))
@@ -1277,14 +1518,9 @@ mod tests {
 
     #[test]
     fn agent_control_commands_serialize_to_pi_wire_types() {
-        let steering = Command::new(
-            "m1",
-            CommandBody::SetSteeringMode {
-                mode: "all".into(),
-            },
-        )
-        .to_wire()
-        .unwrap();
+        let steering = Command::new("m1", CommandBody::SetSteeringMode { mode: "all".into() })
+            .to_wire()
+            .unwrap();
         let parsed: Value = serde_json::from_str(&steering).unwrap();
         assert_eq!(parsed["type"], "set_steering_mode");
         assert_eq!(parsed["mode"], "all");
@@ -1313,20 +1549,20 @@ mod tests {
         assert_eq!(parsed["type"], "compact");
         assert_eq!(parsed["customInstructions"], "focus on code");
 
-        let compact_default = Command::new("c2", CommandBody::Compact {
-            custom_instructions: None,
-        })
+        let compact_default = Command::new(
+            "c2",
+            CommandBody::Compact {
+                custom_instructions: None,
+            },
+        )
         .to_wire()
         .unwrap();
         let parsed: Value = serde_json::from_str(&compact_default).unwrap();
         assert!(parsed.get("customInstructions").is_none());
 
-        let auto_compact = Command::new(
-            "a1",
-            CommandBody::SetAutoCompaction { enabled: false },
-        )
-        .to_wire()
-        .unwrap();
+        let auto_compact = Command::new("a1", CommandBody::SetAutoCompaction { enabled: false })
+            .to_wire()
+            .unwrap();
         let parsed: Value = serde_json::from_str(&auto_compact).unwrap();
         assert_eq!(parsed["type"], "set_auto_compaction");
         assert_eq!(parsed["enabled"], false);
@@ -1639,7 +1875,10 @@ mod tests {
     #[test]
     fn auth_commands_serialize_to_pi_wire_types() {
         let list = Command::new("a1", CommandBody::AuthList).to_wire().unwrap();
-        assert_eq!(serde_json::from_str::<Value>(&list).unwrap()["type"], "auth.list");
+        assert_eq!(
+            serde_json::from_str::<Value>(&list).unwrap()["type"],
+            "auth.list"
+        );
 
         let status = Command::new(
             "a2",
@@ -1813,7 +2052,9 @@ mod tests {
     fn unknown_auth_event_is_forward_compatible() {
         let ev = Event::parse_line(r#"{"type":"auth_quantum_entangled","sessionId":"s9"}"#);
         match ev {
-            Event::Auth(AuthEvent::Other { kind, .. }) => assert_eq!(kind, "auth_quantum_entangled"),
+            Event::Auth(AuthEvent::Other { kind, .. }) => {
+                assert_eq!(kind, "auth_quantum_entangled")
+            }
             other => panic!("expected auth other, got {other:?}"),
         }
     }
@@ -1840,7 +2081,10 @@ mod tests {
             AuthErrorCode::Unknown
         );
         // pi has historically spelled cancel both ways.
-        assert_eq!(AuthErrorCode::from_code("canceled"), AuthErrorCode::Cancelled);
+        assert_eq!(
+            AuthErrorCode::from_code("canceled"),
+            AuthErrorCode::Cancelled
+        );
     }
 
     #[test]
@@ -1863,10 +2107,7 @@ mod tests {
         assert!(providers[0].authenticated);
         assert!(providers[0].supports_oauth());
         assert!(providers[0].supports_api_key());
-        assert_eq!(
-            providers[0].methods[0].label,
-            "Sign in with browser"
-        );
+        assert_eq!(providers[0].methods[0].label, "Sign in with browser");
         assert!(!providers[1].authenticated);
         assert_eq!(
             providers[1].device_code_method().map(|m| m.id.as_str()),
@@ -1892,5 +2133,63 @@ mod tests {
             providers: vec!["x".into()],
         };
         assert_eq!(changed.session_id(), None);
+    }
+
+    #[test]
+    fn quota_list_serializes_with_optional_provider() {
+        let all = Command::new("q1", CommandBody::QuotaList { provider: None })
+            .to_wire()
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&all).unwrap();
+        assert_eq!(parsed["type"], "quota.list");
+        assert!(parsed.get("provider").is_none());
+
+        let one = Command::new(
+            "q2",
+            CommandBody::QuotaList {
+                provider: Some("anthropic".into()),
+            },
+        )
+        .to_wire()
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&one).unwrap();
+        assert_eq!(parsed["type"], "quota.list");
+        assert_eq!(parsed["provider"], "anthropic");
+    }
+
+    #[test]
+    fn parses_quota_reports_with_windows_and_balances() {
+        let raw = r#"{"providers":[
+            {"provider":"anthropic","kind":"subscription","plan":"Max",
+             "windows":[
+               {"id":"five_hour","label":"5-hour","usedPercent":6.0,"resetsAt":1738300000000},
+               {"id":"weekly","label":"Weekly","used":42,"limit":100,"unit":"requests"}
+             ],
+             "balances":[],
+             "fetchedAt":1738290000000},
+            {"provider":"deepseek","kind":"balance","windows":[],
+             "balances":[{"label":"Available","amount":110.0,"currency":"CNY"}]},
+            {"provider":"groq","kind":"unsupported","note":"no usage API"}
+        ]}"#;
+        let value: Value = serde_json::from_str(raw).unwrap();
+        let reports = parse_quota_reports(&value);
+        assert_eq!(reports.len(), 3);
+
+        let anthropic = &reports[0];
+        assert_eq!(anthropic.kind, QuotaKind::Subscription);
+        assert_eq!(anthropic.plan.as_deref(), Some("Max"));
+        assert_eq!(anthropic.windows.len(), 2);
+        assert_eq!(anthropic.windows[0].used_percent, Some(6.0));
+        assert!((anthropic.windows[0].fraction().unwrap() - 0.06).abs() < 1e-6);
+        assert_eq!(anthropic.windows[1].fraction(), Some(0.42));
+        assert_eq!(anthropic.windows[0].resets_at, Some(1_738_300_000_000));
+
+        let deepseek = &reports[1];
+        assert_eq!(deepseek.kind, QuotaKind::Balance);
+        assert_eq!(deepseek.balances[0].amount, 110.0);
+        assert_eq!(deepseek.balances[0].currency, "CNY");
+
+        assert!(!reports[2].has_data());
+        assert_eq!(reports[2].note.as_deref(), Some("no usage API"));
     }
 }
