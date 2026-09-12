@@ -17,10 +17,144 @@ use serde_json::Value;
 
 use crate::composer::ComposerInput;
 
-use super::aggregate::{BucketRow, ChartMetric, SessionRow, UsageSnapshot};
+use super::aggregate::{BucketRow, ChartMetric, LatencyMetric, SessionRow, UsageSnapshot};
 use super::collect::{now_ms, UsageScanner};
 use super::model::*;
-use super::table::{BucketTable, FailureSort, FailureTable, FailureRow, SessionTable};
+use super::table::{BucketTable, FailureRow, FailureSort, FailureTable, SessionTable};
+
+/// Page sizes offered by the sessions table footer (§26).
+pub const PAGE_SIZES: [usize; 4] = [10, 25, 50, 100];
+/// Default rows per page.
+pub const DEFAULT_PAGE_SIZE: usize = 25;
+
+/// Everything one request to the sessions table needs, independent of GPUI
+/// (§100/§101): filter/search narrow, sort orders, then pagination slices.
+/// Tables never receive the full dataset.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionQuery {
+    pub search: String,
+    pub sort: SessionSort,
+    pub desc: bool,
+    /// 1-based.
+    pub page: usize,
+    pub page_size: usize,
+}
+
+/// One page of sessions plus the metadata the footer needs (§75).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionQueryResult {
+    pub rows: Vec<SessionRow>,
+    /// Rows matching the search across the whole filtered set (not the page).
+    pub total: usize,
+    pub page: usize,
+    pub page_size: usize,
+}
+
+impl SessionQueryResult {
+    pub fn page_count(&self) -> usize {
+        self.total.div_ceil(self.page_size.max(1)).max(1)
+    }
+
+    pub fn first_row(&self) -> usize {
+        if self.total == 0 {
+            0
+        } else {
+            (self.page - 1) * self.page_size + 1
+        }
+    }
+
+    pub fn last_row(&self) -> usize {
+        (self.first_row() + self.rows.len()).saturating_sub(1)
+    }
+}
+
+/// Filter → search → sort → paginate, in that order (§74). Pure, so the
+/// ordering guarantees are unit-tested without GPUI.
+pub fn query_sessions(
+    index: &UsageIndex,
+    snapshot: &UsageSnapshot,
+    query: &SessionQuery,
+) -> SessionQueryResult {
+    let needle = query.search.trim().to_lowercase();
+    let mut rows: Vec<SessionRow> = snapshot
+        .sessions
+        .iter()
+        .filter(|row| session_matches(index, row, &needle))
+        .cloned()
+        .collect();
+    sort_session_rows(&mut rows, query.sort, query.desc, index);
+
+    let total = rows.len();
+    let page_size = query.page_size.max(1);
+    let page_count = total.div_ceil(page_size).max(1);
+    let page = query.page.clamp(1, page_count);
+    let start = (page - 1) * page_size;
+    let rows = if start < total {
+        rows[start..(start + page_size).min(total)].to_vec()
+    } else {
+        Vec::new()
+    };
+    SessionQueryResult {
+        rows,
+        total,
+        page,
+        page_size,
+    }
+}
+
+/// The searchable fields of a session (§30): title, session id, workspace,
+/// project path, provider, model, and a coarse status.
+fn session_matches(index: &UsageIndex, row: &SessionRow, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    row.title.to_lowercase().contains(needle)
+        || row.id.to_lowercase().contains(needle)
+        || row.workspace.to_lowercase().contains(needle)
+        || row.provider.to_lowercase().contains(needle)
+        || row.top_model.to_lowercase().contains(needle)
+        || index
+            .workspace_of_session(row.session)
+            .path
+            .to_lowercase()
+            .contains(needle)
+        || session_status(row).contains(needle)
+}
+
+fn session_status(row: &SessionRow) -> &'static str {
+    if row.totals.errors > 0 || row.tool_errors > 0 {
+        "error failed"
+    } else {
+        "ok"
+    }
+}
+
+/// The one ordering used by the table, the export, and the tests (§25).
+pub fn sort_session_rows(
+    rows: &mut [SessionRow],
+    sort: SessionSort,
+    desc: bool,
+    index: &UsageIndex,
+) {
+    rows.sort_by(|a, b| {
+        let ordering = if sort.is_text() {
+            sort.text(a)
+                .to_lowercase()
+                .cmp(&sort.text(b).to_lowercase())
+        } else {
+            sort.key(a)
+                .partial_cmp(&sort.key(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        };
+        let ordering = if desc { ordering.reverse() } else { ordering };
+        ordering.then_with(|| a.title.cmp(&b.title)).then_with(|| {
+            index
+                .session(a.session)
+                .id
+                .cmp(&index.session(b.session).id)
+        })
+    });
+}
 
 /// How long the page may serve a stale index before it rescans on open.
 const STALE_AFTER: Duration = Duration::from_secs(60);
@@ -34,6 +168,7 @@ pub enum SessionSort {
     Started,
     Title,
     Workspace,
+    Provider,
     Model,
     Requests,
     Input,
@@ -46,11 +181,29 @@ pub enum SessionSort {
 }
 
 impl SessionSort {
+    /// Every sortable column, in the order the table offers them.
+    pub const ALL: [Self; 13] = [
+        Self::Title,
+        Self::Workspace,
+        Self::Provider,
+        Self::Model,
+        Self::Started,
+        Self::Duration,
+        Self::Requests,
+        Self::Input,
+        Self::Output,
+        Self::Cache,
+        Self::Tokens,
+        Self::Errors,
+        Self::Tools,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Started => "Started",
             Self::Title => "Session",
             Self::Workspace => "Workspace",
+            Self::Provider => "Provider",
             Self::Model => "Model",
             Self::Requests => "Requests",
             Self::Input => "Input",
@@ -68,6 +221,7 @@ impl SessionSort {
             Self::Started => "started",
             Self::Title => "title",
             Self::Workspace => "workspace",
+            Self::Provider => "provider",
             Self::Model => "model",
             Self::Requests => "requests",
             Self::Input => "input",
@@ -81,22 +235,7 @@ impl SessionSort {
     }
 
     pub fn parse(raw: &str) -> Option<Self> {
-        [
-            Self::Started,
-            Self::Title,
-            Self::Workspace,
-            Self::Model,
-            Self::Requests,
-            Self::Input,
-            Self::Output,
-            Self::Cache,
-            Self::Tokens,
-            Self::Duration,
-            Self::Errors,
-            Self::Tools,
-        ]
-        .into_iter()
-        .find(|s| s.as_str() == raw.trim())
+        Self::ALL.into_iter().find(|s| s.as_str() == raw.trim())
     }
 
     /// Numeric value for sorting; text columns sort on their label.
@@ -111,7 +250,7 @@ impl SessionSort {
             Self::Duration => row.duration_ms() as f64,
             Self::Errors => (row.totals.errors + row.tool_errors) as f64,
             Self::Tools => row.tool_runs as f64,
-            Self::Title | Self::Workspace | Self::Model => 0.0,
+            Self::Title | Self::Workspace | Self::Provider | Self::Model => 0.0,
         }
     }
 
@@ -119,13 +258,17 @@ impl SessionSort {
         match self {
             Self::Title => &row.title,
             Self::Workspace => &row.workspace,
+            Self::Provider => &row.provider,
             Self::Model => &row.top_model,
             _ => "",
         }
     }
 
     fn is_text(self) -> bool {
-        matches!(self, Self::Title | Self::Workspace | Self::Model)
+        matches!(
+            self,
+            Self::Title | Self::Workspace | Self::Provider | Self::Model
+        )
     }
 }
 
@@ -169,6 +312,10 @@ pub enum MenuKind {
     Workspace,
     Provider,
     Model,
+    /// The sessions table's rows-per-page picker.
+    PageSize,
+    /// The sessions table's column-visibility picker.
+    Columns,
     /// The header's export popover.
     Export,
 }
@@ -201,6 +348,17 @@ pub struct UsagePage {
     bucket_sort_desc: bool,
     failure_sort: FailureSort,
     failure_sort_desc: bool,
+    /// 1-based session-table page and its size (§26).
+    page: usize,
+    page_size: usize,
+    /// Session columns the user hid (§41); persisted.
+    hidden_columns: Vec<SessionSort>,
+    /// Which latency register the response-time chart plots (§20).
+    latency_metric: LatencyMetric,
+    /// The timeline's "View data" table is open (§52).
+    chart_data_open: bool,
+    /// Breakdown panels expanded past their ranked top rows (§13/§15).
+    expanded_breakdowns: Vec<&'static str>,
 
     // ── controls ──
     /// The page's own scroll position. Opening the page always starts at the
@@ -285,8 +443,11 @@ impl UsagePage {
                 .with_key_context("Composer Picker")
                 .with_max_lines(1)
         });
-        let search_sub = cx.observe(&search, |_, _, cx| {
-            // The search narrows the sessions table, so its rows are stale.
+        let search_sub = cx.observe(&search, |page: &mut Self, _, cx| {
+            // The search narrows the sessions table, so its rows are stale and
+            // the page must return to the first page of the new result (§28).
+            page.page = 1;
+            page.tables_dirty = true;
             cx.notify();
         });
         let menu_query_sub = cx.observe(&menu_query, |_, _, cx| cx.notify());
@@ -303,6 +464,13 @@ impl UsagePage {
             bucket_sort_desc: true,
             failure_sort: FailureSort::When,
             failure_sort_desc: true,
+            page: 1,
+            page_size: prefs.page_size,
+            hidden_columns: prefs.hidden_columns.clone(),
+            latency_metric: LatencyMetric::parse(&prefs.latency_metric)
+                .unwrap_or(LatencyMetric::Average),
+            chart_data_open: false,
+            expanded_breakdowns: Vec::new(),
             scroll: ScrollHandle::new(),
             search,
             menu: None,
@@ -365,9 +533,9 @@ impl UsagePage {
     /// The session store changed under us (pi wrote a session while the page
     /// is open). Rate-limited so a streaming agent doesn't spin the scanner.
     pub fn mark_stale(&mut self, cx: &mut Context<Self>) {
-        let due = self.last_request.is_none_or(|last| {
-            Instant::now().duration_since(last) >= RESCAN_INTERVAL
-        });
+        let due = self
+            .last_request
+            .is_none_or(|last| Instant::now().duration_since(last) >= RESCAN_INTERVAL);
         self.maybe_scan(due, cx);
     }
 
@@ -427,15 +595,22 @@ impl UsagePage {
     fn prune_filter(&mut self, index: &UsageIndex) {
         let mut filter = self.filter.clone();
         let before = filter.clone();
-        if filter.session.is_some_and(|id| index.try_session(id).is_none()) {
+        if filter
+            .session
+            .is_some_and(|id| index.try_session(id).is_none())
+        {
             filter.session = None;
             self.status = Some((
                 "That session is no longer in the store — scope cleared".to_string(),
                 Instant::now(),
             ));
         }
-        filter.workspaces.retain(|id| index.workspaces.len() > *id as usize);
-        filter.providers.retain(|id| index.providers.len() > *id as usize);
+        filter
+            .workspaces
+            .retain(|id| index.workspaces.len() > *id as usize);
+        filter
+            .providers
+            .retain(|id| index.providers.len() > *id as usize);
         filter.models.retain(|id| index.models.len() > *id as usize);
         if filter != before {
             self.filter = filter;
@@ -451,7 +626,6 @@ impl UsagePage {
             return;
         };
         self.snapshot = Some(Rc::new(UsageSnapshot::compute(&index, &self.filter)));
-
     }
 
     // ── reads used by the view ─────────────────────────────────────────────
@@ -523,7 +697,11 @@ impl UsagePage {
             let page = cx.entity().downgrade();
             let (sort, desc) = (self.bucket_sort, self.bucket_sort_desc);
             let state = cx.new(|cx| {
-                TableState::new(BucketTable::new(page, sort, desc, Granularity::Day), window, cx)
+                TableState::new(
+                    BucketTable::new(page, sort, desc, Granularity::Day),
+                    window,
+                    cx,
+                )
             });
             let sub = cx.subscribe_in(
                 &state,
@@ -608,12 +786,7 @@ impl UsagePage {
     }
 
     /// A header click on the failures table.
-    pub fn set_failure_sort(
-        &mut self,
-        sort: FailureSort,
-        desc: bool,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_failure_sort(&mut self, sort: FailureSort, desc: bool, cx: &mut Context<Self>) {
         if self.failure_sort == sort && self.failure_sort_desc == desc {
             return;
         }
@@ -633,12 +806,14 @@ impl UsagePage {
 
         let width = self.table_width();
         let (sort, desc) = (self.session_sort, self.session_sort_desc);
-        let rows = self.session_rows(cx);
+        // Only the current page reaches the table (§26/§56).
+        let rows = self.session_page(cx).rows;
+        let hidden = self.hidden_columns.clone();
         if let Some(state) = self.session_table.clone() {
             state.update(cx, |state, cx| {
                 let delegate = state.delegate_mut();
                 let mut changed = delegate.set_rows(rows);
-                changed |= delegate.set_layout(width, sort, desc);
+                changed |= delegate.set_layout(width, sort, desc, &hidden);
                 if changed {
                     state.refresh(cx);
                 }
@@ -683,7 +858,7 @@ impl UsagePage {
             TableEvent::SelectRow(ix) | TableEvent::DoubleClickedRow(ix) => *ix,
             _ => return,
         };
-        let rows = self.session_rows(cx);
+        let rows = self.session_page(cx).rows;
         let Some(row) = rows.get(ix) else {
             return;
         };
@@ -766,39 +941,49 @@ impl UsagePage {
         (self.custom_start, self.custom_end)
     }
 
-    /// Session rows, filtered by the search box and ordered by the active sort.
-    pub fn session_rows(&self, cx: &App) -> Vec<SessionRow> {
-        let Some(snapshot) = &self.snapshot else {
-            return Vec::new();
-        };
-        let query = self.search.read(cx).text().to_lowercase();
-        let mut rows: Vec<SessionRow> = snapshot
-            .sessions
-            .iter()
-            .filter(|row| {
-                if query.is_empty() {
-                    return true;
-                }
-                row.title.to_lowercase().contains(&query)
-                    || row.workspace.to_lowercase().contains(&query)
-                    || row.top_model.to_lowercase().contains(&query)
-            })
-            .cloned()
-            .collect();
-        let sort = self.session_sort;
-        let desc = self.session_sort_desc;
-        rows.sort_by(|a, b| {
-            let ordering = if sort.is_text() {
-                sort.text(a).to_lowercase().cmp(&sort.text(b).to_lowercase())
-            } else {
-                sort.key(a)
-                    .partial_cmp(&sort.key(b))
-                    .unwrap_or(std::cmp::Ordering::Equal)
+    /// The current sessions-table query, assembled from the page's controls.
+    pub fn session_query(&self, cx: &App) -> SessionQuery {
+        SessionQuery {
+            search: self.search.read(cx).text(),
+            sort: self.session_sort,
+            desc: self.session_sort_desc,
+            page: self.page,
+            page_size: self.page_size,
+        }
+    }
+
+    /// One page of sessions plus the totals the footer reports (§26/§75).
+    pub fn session_page(&self, cx: &App) -> SessionQueryResult {
+        let (Some(index), Some(snapshot)) = (self.index.as_ref(), self.snapshot.as_ref()) else {
+            return SessionQueryResult {
+                rows: Vec::new(),
+                total: 0,
+                page: self.page,
+                page_size: self.page_size,
             };
-            let ordering = if desc { ordering.reverse() } else { ordering };
-            ordering.then_with(|| a.title.cmp(&b.title))
-        });
-        rows
+        };
+        query_sessions(index, snapshot, &self.session_query(cx))
+    }
+
+    /// Hidden session columns (§41), for the columns menu.
+    pub fn hidden_columns(&self) -> &[SessionSort] {
+        &self.hidden_columns
+    }
+
+    pub fn column_visible(&self, column: SessionSort) -> bool {
+        !self.hidden_columns.contains(&column)
+    }
+
+    pub fn is_chart_data_open(&self) -> bool {
+        self.chart_data_open
+    }
+
+    pub fn latency_metric(&self) -> LatencyMetric {
+        self.latency_metric
+    }
+
+    pub fn is_breakdown_expanded(&self, id: &str) -> bool {
+        self.expanded_breakdowns.contains(&id)
     }
 
     pub fn bucket_rows(&self) -> Vec<BucketRow> {
@@ -826,6 +1011,8 @@ impl UsagePage {
 
     pub fn set_filter(&mut self, filter: UsageFilter, cx: &mut Context<Self>) {
         self.filter = filter;
+        // A narrower or different result set invalidates the current page (§28).
+        self.page = 1;
         self.dirty = true;
         self.recompute();
         self.persist();
@@ -856,7 +1043,12 @@ impl UsagePage {
         }
     }
 
-    pub fn open_menu(&mut self, menu: Option<MenuKind>, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_menu(
+        &mut self,
+        menu: Option<MenuKind>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.menu = menu;
         self.menu_highlight = 0;
         self.calendar_open = false;
@@ -990,7 +1182,7 @@ impl UsagePage {
             MenuKind::Workspace => &mut filter.workspaces,
             MenuKind::Provider => &mut filter.providers,
             MenuKind::Model => &mut filter.models,
-            MenuKind::Range | MenuKind::Export => return,
+            MenuKind::Range | MenuKind::Export | MenuKind::PageSize | MenuKind::Columns => return,
         };
         if let Some(ix) = list.iter().position(|value| *value == id) {
             list.remove(ix);
@@ -1006,7 +1198,7 @@ impl UsagePage {
             MenuKind::Workspace => filter.workspaces = ids.to_vec(),
             MenuKind::Provider => filter.providers = ids.to_vec(),
             MenuKind::Model => filter.models = ids.to_vec(),
-            MenuKind::Range | MenuKind::Export => return,
+            MenuKind::Range | MenuKind::Export | MenuKind::PageSize | MenuKind::Columns => return,
         }
         self.set_filter(filter, cx);
     }
@@ -1017,7 +1209,7 @@ impl UsagePage {
             MenuKind::Workspace => filter.workspaces.clear(),
             MenuKind::Provider => filter.providers.clear(),
             MenuKind::Model => filter.models.clear(),
-            MenuKind::Range | MenuKind::Export => return,
+            MenuKind::Range | MenuKind::Export | MenuKind::PageSize | MenuKind::Columns => return,
         }
         self.set_filter(filter, cx);
     }
@@ -1064,6 +1256,9 @@ impl UsagePage {
         }
         self.session_sort = sort;
         self.session_sort_desc = desc;
+        // Re-ordering changes what lands on page 1, so return to it (§29).
+        self.page = 1;
+        self.clear_session_selection(cx);
         self.tables_dirty = true;
         self.persist();
         cx.notify();
@@ -1085,7 +1280,112 @@ impl UsagePage {
         cx.notify();
     }
 
-     /// Open a session in the chat surface.
+    // ── sessions table controls (§26/§29/§30/§41) ──────────────────────────
+
+    pub fn page_size(&self) -> usize {
+        self.page_size
+    }
+
+    /// Drop the table's selected row. The framework tracks selection by row
+    /// index, so it has to be cleared whenever those indices are re-based.
+    fn clear_session_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(state) = self.session_table.clone() {
+            state.update(cx, |state, cx| state.clear_selection(cx));
+        }
+    }
+
+    /// Jump to a page, clamped to the current result set.
+    pub fn set_page(&mut self, page: usize, cx: &mut Context<Self>) {
+        let page = page.max(1);
+        if self.page == page {
+            return;
+        }
+        self.page = page;
+        self.clear_session_selection(cx);
+        self.tables_dirty = true;
+        cx.notify();
+    }
+
+    pub fn set_page_size(&mut self, size: usize, cx: &mut Context<Self>) {
+        if !PAGE_SIZES.contains(&size) || self.page_size == size {
+            return;
+        }
+        self.page_size = size;
+        self.page = 1;
+        self.clear_session_selection(cx);
+        self.tables_dirty = true;
+        self.persist();
+        self.menu = None;
+        cx.notify();
+    }
+
+    /// Toggle a session column's visibility (§41), persisted.
+    pub fn toggle_column(&mut self, column: SessionSort, cx: &mut Context<Self>) {
+        match self
+            .hidden_columns
+            .iter()
+            .position(|entry| *entry == column)
+        {
+            Some(ix) => {
+                self.hidden_columns.remove(ix);
+            }
+            None => self.hidden_columns.push(column),
+        }
+        self.tables_dirty = true;
+        self.persist();
+        cx.notify();
+    }
+
+    /// Restore every session column (§41).
+    pub fn show_all_columns(&mut self, cx: &mut Context<Self>) {
+        if self.hidden_columns.is_empty() {
+            return;
+        }
+        self.hidden_columns.clear();
+        self.tables_dirty = true;
+        self.persist();
+        cx.notify();
+    }
+
+    // ── chart controls (§9/§20/§52) ────────────────────────────────────────
+
+    /// Scope the page to one chart bucket, or clear it (§9/§47).
+    pub fn set_focus(&mut self, focus: Option<TimeFocus>, cx: &mut Context<Self>) {
+        let mut filter = self.filter.clone();
+        filter.focus = focus;
+        self.set_filter(filter, cx);
+    }
+
+    pub fn toggle_chart_data(&mut self, cx: &mut Context<Self>) {
+        self.chart_data_open = !self.chart_data_open;
+        cx.notify();
+    }
+
+    pub fn set_latency_metric(&mut self, metric: LatencyMetric, cx: &mut Context<Self>) {
+        if self.latency_metric == metric {
+            return;
+        }
+        self.latency_metric = metric;
+        self.persist();
+        cx.notify();
+    }
+
+    /// Expand a breakdown panel past its ranked top rows (§13/§15).
+    pub fn toggle_breakdown(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        match self
+            .expanded_breakdowns
+            .iter()
+            .position(|entry| *entry == id)
+        {
+            Some(ix) => {
+                self.expanded_breakdowns.remove(ix);
+            }
+            None => self.expanded_breakdowns.push(id),
+        }
+        cx.notify();
+    }
+
+    /// Open a session in the chat surface.
     pub fn open_session(&mut self, window: &mut Window, cx: &mut Context<Self>, session: u16) {
         let Some(index) = &self.index else {
             return;
@@ -1147,6 +1447,9 @@ impl UsagePage {
             metric: self.metric.as_str().to_string(),
             session_sort: self.session_sort.as_str().to_string(),
             session_sort_desc: self.session_sort_desc,
+            page_size: self.page_size,
+            latency_metric: self.latency_metric.as_str().to_string(),
+            hidden_columns: self.hidden_columns.clone(),
         }
         .persist();
     }
@@ -1154,7 +1457,6 @@ impl UsagePage {
 
 /// Persisted view preferences (§61). Data-derived state is never persisted;
 /// neither is anything transient.
-#[derive(Default)]
 struct Prefs {
     preset: String,
     custom_start: Option<i64>,
@@ -1162,6 +1464,25 @@ struct Prefs {
     metric: String,
     session_sort: String,
     session_sort_desc: bool,
+    page_size: usize,
+    latency_metric: String,
+    hidden_columns: Vec<SessionSort>,
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Self {
+            preset: String::new(),
+            custom_start: None,
+            custom_end: None,
+            metric: String::new(),
+            session_sort: String::new(),
+            session_sort_desc: false,
+            page_size: DEFAULT_PAGE_SIZE,
+            latency_metric: String::new(),
+            hidden_columns: Vec::new(),
+        }
+    }
 }
 
 impl Prefs {
@@ -1179,6 +1500,7 @@ impl Prefs {
                 session_sort: SessionSort::Tokens.as_str().to_string(),
                 session_sort_desc: true,
                 metric: ChartMetric::Tokens.as_str().to_string(),
+                page_size: DEFAULT_PAGE_SIZE,
                 ..Default::default()
             };
         };
@@ -1186,6 +1508,23 @@ impl Prefs {
             return Self::default();
         };
         let text = |key: &str| value.get(key).and_then(Value::as_str).map(str::to_string);
+        let page_size = value
+            .get("page_size")
+            .and_then(Value::as_u64)
+            .map(|size| size as usize)
+            .filter(|size| PAGE_SIZES.contains(size))
+            .unwrap_or(DEFAULT_PAGE_SIZE);
+        let hidden_columns = value
+            .get("hidden_columns")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter_map(SessionSort::parse)
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             preset: text("preset").unwrap_or_default(),
             custom_start: value.get("custom_start").and_then(Value::as_i64),
@@ -1197,6 +1536,10 @@ impl Prefs {
                 .get("session_sort_desc")
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
+            page_size,
+            latency_metric: text("latency_metric")
+                .unwrap_or_else(|| LatencyMetric::Average.as_str().to_string()),
+            hidden_columns,
         }
     }
 
@@ -1212,6 +1555,13 @@ impl Prefs {
             "metric": self.metric,
             "session_sort": self.session_sort,
             "session_sort_desc": self.session_sort_desc,
+            "page_size": self.page_size,
+            "latency_metric": self.latency_metric,
+            "hidden_columns": self
+                .hidden_columns
+                .iter()
+                .map(|column| column.as_str())
+                .collect::<Vec<_>>(),
         });
         let _ = std::fs::write(path, payload.to_string());
     }

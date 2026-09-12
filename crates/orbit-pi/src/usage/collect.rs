@@ -160,7 +160,10 @@ fn scan_store(store: &Path, cache: &mut HashMap<PathBuf, CachedFile>) -> UsageIn
             };
             for file in files.flatten() {
                 let path = file.path();
-                if path.extension().is_none_or(|extension| extension != "jsonl") {
+                if path
+                    .extension()
+                    .is_none_or(|extension| extension != "jsonl")
+                {
                     continue;
                 }
                 let Ok(meta) = file.metadata() else {
@@ -437,13 +440,9 @@ fn parse_session_file(path: &Path) -> Option<FileUsage> {
                     .unwrap_or_default()
                     .to_string();
                 let model_ix = intern_pair(&mut usage.models, &provider, &model);
-                if let Some(record) = parse_request(
-                    message,
-                    ts,
-                    model_ix,
-                    prev_message_ts,
-                    message_ts,
-                ) {
+                if let Some(record) =
+                    parse_request(message, ts, model_ix, prev_message_ts, message_ts)
+                {
                     usage.requests.push(record);
                 }
                 // Tool calls issued by this message wait for their results.
@@ -483,7 +482,10 @@ fn parse_session_file(path: &Path) -> Option<FileUsage> {
                     .get("toolCallId")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                let ok = !message.get("isError").and_then(Value::as_bool).unwrap_or(false);
+                let ok = !message
+                    .get("isError")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 // Pair with its call; a result without a matching call (a
                 // resumed file) still counts as a run at its own timestamp.
                 let matched = pending
@@ -585,7 +587,9 @@ fn parse_request(
     // A message with nothing billed and no failure is a streaming artifact, not
     // a request. A *failed* attempt counts even with zero tokens: it was a real
     // round trip to the provider, and the failure is the interesting part.
-    let failed = message.get("errorMessage").is_some_and(|value| !value.is_null())
+    let failed = message
+        .get("errorMessage")
+        .is_some_and(|value| !value.is_null())
         || message.get("stopReason").and_then(Value::as_str) == Some("error");
     if tokens.is_empty() && !cost_usd.is_some_and(|cost| cost > 0.0) && !failed {
         return None;
@@ -615,10 +619,7 @@ fn parse_request(
 }
 
 fn intern_pair(models: &mut Vec<(String, String)>, provider: &str, model: &str) -> u16 {
-    if let Some(ix) = models
-        .iter()
-        .position(|(p, m)| p == provider && m == model)
-    {
+    if let Some(ix) = models.iter().position(|(p, m)| p == provider && m == model) {
         return ix as u16;
     }
     models.push((provider.to_string(), model.to_string()));
@@ -726,8 +727,7 @@ mod tests {
         path
     }
 
-    const HEADER: &str =
-        r#"{"type":"session","version":3,"id":"s1","timestamp":"2026-09-11T09:00:00.000Z","cwd":"/tmp/orbit"}"#;
+    const HEADER: &str = r#"{"type":"session","version":3,"id":"s1","timestamp":"2026-09-11T09:00:00.000Z","cwd":"/tmp/orbit"}"#;
 
     /// An assistant message with the given usage. `calls` is the toolCall id +
     /// tool name pairs it issued (JSON), empty for a plain reply.
@@ -749,15 +749,24 @@ mod tests {
     fn parses_a_session_into_requests_tools_and_turns() {
         let dir = std::env::temp_dir().join("orbit-usage-parse-test");
         let _ = fs::remove_dir_all(&dir);
-        let bash_call = r#"{"type":"toolCall","id":"c1","name":"bash","arguments":{"command":"ls"}}"#;
-        let read_call = r#"{"type":"toolCall","id":"c2","name":"read","arguments":{"path":"/tmp/x"}}"#;
+        let bash_call =
+            r#"{"type":"toolCall","id":"c1","name":"bash","arguments":{"command":"ls"}}"#;
+        let read_call =
+            r#"{"type":"toolCall","id":"c2","name":"read","arguments":{"path":"/tmp/x"}}"#;
         write_session(
             &dir,
             "a",
             &[
                 HEADER,
                 r#"{"type":"message","timestamp":"2026-09-11T09:00:05.000Z","message":{"role":"user","content":[{"type":"text","text":"fix the OAuth callback"}],"timestamp":1757581205000}}"#,
-                &assistant("2026-09-11T09:00:10.000Z", 100, 50, 20, "toolUse", bash_call),
+                &assistant(
+                    "2026-09-11T09:00:10.000Z",
+                    100,
+                    50,
+                    20,
+                    "toolUse",
+                    bash_call,
+                ),
                 r#"{"type":"message","timestamp":"2026-09-11T09:00:12.000Z","message":{"role":"toolResult","toolCallId":"c1","toolName":"bash","isError":false,"content":[{"type":"text","text":"ok"}]}}"#,
                 &assistant("2026-09-11T09:00:20.000Z", 10, 5, 0, "stop", read_call),
                 r#"{"type":"message","timestamp":"2026-09-11T09:00:21.000Z","message":{"role":"toolResult","toolCallId":"c2","toolName":"read","isError":true,"content":[]}}"#,
@@ -826,7 +835,10 @@ mod tests {
             title_from("<context>\nfix the OAuth callback"),
             "fix the OAuth callback"
         );
-        assert_eq!(title_from("fix the OAuth callback"), "fix the OAuth callback");
+        assert_eq!(
+            title_from("fix the OAuth callback"),
+            "fix the OAuth callback"
+        );
         assert_eq!(title_from("line one\nline two"), "line one line two");
     }
 
@@ -880,7 +892,11 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("--tmp-orbit--")).unwrap();
         fs::write(dir.join("--tmp-orbit--/notes.txt"), "not a session").unwrap();
-        fs::write(dir.join("--tmp-orbit--/bogus.jsonl"), "{\"type\":\"other\"}\n").unwrap();
+        fs::write(
+            dir.join("--tmp-orbit--/bogus.jsonl"),
+            "{\"type\":\"other\"}\n",
+        )
+        .unwrap();
         let mut cache = HashMap::new();
         let index = scan_store(&dir, &mut cache);
         assert!(index.is_empty());
@@ -893,7 +909,10 @@ mod tests {
     fn scanner_is_deterministic_across_runs() {
         let dir = std::env::temp_dir().join("orbit-usage-determinism-test");
         let _ = fs::remove_dir_all(&dir);
-        for (name, ts) in [("b", "2026-09-11T10:00:00.000Z"), ("a", "2026-09-11T09:00:00.000Z")] {
+        for (name, ts) in [
+            ("b", "2026-09-11T10:00:00.000Z"),
+            ("a", "2026-09-11T09:00:00.000Z"),
+        ] {
             let header = HEADER.replace("\"s1\"", &format!("\"{name}\""));
             let request = assistant(ts, 10, 5, 0, "stop", "");
             write_session(&dir, name, &[&header, &request]);
@@ -909,10 +928,18 @@ mod tests {
         );
         assert_eq!(
             first.requests.iter().map(|r| r.session).collect::<Vec<_>>(),
-            second.requests.iter().map(|r| r.session).collect::<Vec<_>>()
+            second
+                .requests
+                .iter()
+                .map(|r| r.session)
+                .collect::<Vec<_>>()
         );
         assert_eq!(
-            first.sessions.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
+            first
+                .sessions
+                .iter()
+                .map(|s| s.id.clone())
+                .collect::<Vec<_>>(),
             second
                 .sessions
                 .iter()
@@ -922,4 +949,3 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 }
-

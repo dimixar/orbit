@@ -45,6 +45,7 @@ mod tests {
             id: id.into(),
             name: name.into(),
             provider: provider.into(),
+            context_window: None,
         }
     }
 

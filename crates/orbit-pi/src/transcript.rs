@@ -156,8 +156,7 @@ impl ChatMessage {
         let role = value.get("role")?.as_str()?;
         let user = role == "user";
         let error = message_error(value);
-        let aborted = !user
-            && value.get("stopReason").and_then(Value::as_str) == Some("aborted");
+        let aborted = !user && value.get("stopReason").and_then(Value::as_str) == Some("aborted");
         let mut message = ChatMessage {
             user,
             steps: vec![Step::default()],
@@ -2109,7 +2108,10 @@ mod tests {
             "usage": {"input": 10, "output": 2, "cacheRead": 0, "cacheWrite": 0,
                 "totalTokens": 12}
         });
-        merge_step(&mut message, ChatMessage::from_value(&second).expect("message"));
+        merge_step(
+            &mut message,
+            ChatMessage::from_value(&second).expect("message"),
+        );
         let total = message.usage().expect("usage");
         assert_eq!(total.input, 110);
         assert_eq!(total.output, 52);
@@ -2120,7 +2122,10 @@ mod tests {
     #[test]
     fn usage_is_absent_without_provider_report() {
         let user = json!({"role": "user", "content": "hi"});
-        assert!(ChatMessage::from_value(&user).expect("message").usage().is_none());
+        assert!(ChatMessage::from_value(&user)
+            .expect("message")
+            .usage()
+            .is_none());
 
         let no_usage = json!({"role": "assistant", "content": [{"type": "text", "text": "hi"}]});
         assert!(ChatMessage::from_value(&no_usage)

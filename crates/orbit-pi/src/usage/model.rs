@@ -183,10 +183,7 @@ impl DateRange {
             RangePreset::ThisMonth => (local_month_start(now_ms), now_ms),
             RangePreset::PreviousMonth => {
                 let this_month = local_month_start(now_ms);
-                (
-                    local_month_start(this_month - 1),
-                    this_month,
-                )
+                (local_month_start(this_month - 1), this_month)
             }
             RangePreset::All => (0, now_ms),
             RangePreset::Custom => unreachable!("custom handled above"),
@@ -270,11 +267,7 @@ impl DateRange {
             return start.format("%b %-d, %Y").to_string();
         }
         if start.year() == end.year() {
-            format!(
-                "{} – {}",
-                start.format("%b %-d"),
-                end.format("%b %-d, %Y")
-            )
+            format!("{} – {}", start.format("%b %-d"), end.format("%b %-d, %Y"))
         } else {
             format!(
                 "{} – {}",
@@ -282,6 +275,28 @@ impl DateRange {
                 end.format("%b %-d, %Y")
             )
         }
+    }
+}
+
+/// A single time bucket selected on a chart: a temporary cross-filter that
+/// narrows every panel on the page without changing the surrounding date
+/// range. Clearing it must restore exactly what was there before, so it is
+/// kept separate from [`DateRange`] rather than folded into it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TimeFocus {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub granularity: Granularity,
+}
+
+impl TimeFocus {
+    pub fn contains(&self, ts_ms: i64) -> bool {
+        ts_ms >= self.start_ms && ts_ms < self.end_ms
+    }
+
+    /// The label shown on the active-filter chip (`Sep 12, 14:00`).
+    pub fn label(&self) -> String {
+        stamp_label(self.start_ms, self.granularity)
     }
 }
 
@@ -378,7 +393,6 @@ impl Outcome {
     pub fn is_aborted(self) -> bool {
         self == Self::Aborted
     }
-
 }
 
 /// One model request.
@@ -602,10 +616,7 @@ impl UsageIndex {
     /// `provider / model` for a request or tool row.
     pub fn model_pair(&self, model: u16) -> (String, String) {
         let entry = self.model(model);
-        (
-            self.provider_of(model).label.clone(),
-            entry.label.clone(),
-        )
+        (self.provider_of(model).label.clone(), entry.label.clone())
     }
 
     /// Whether any request in the index predates `ts_ms` — the "do we have
@@ -635,6 +646,8 @@ pub struct UsageFilter {
     pub models: Vec<u16>,
     /// Drill-down scope: a single session.
     pub session: Option<u16>,
+    /// A single time bucket selected from a chart (drill-down).
+    pub focus: Option<TimeFocus>,
     /// Show only failed requests (toggled from the Errors metric).
     pub errors_only: bool,
     /// Show only requests served partly from cache.
@@ -649,6 +662,7 @@ impl UsageFilter {
             providers: Vec::new(),
             models: Vec::new(),
             session: None,
+            focus: None,
             errors_only: false,
             cached_only: false,
         }
@@ -660,6 +674,7 @@ impl UsageFilter {
             || !self.providers.is_empty()
             || !self.models.is_empty()
             || self.session.is_some()
+            || self.focus.is_some()
             || self.errors_only
             || self.cached_only
     }
@@ -706,8 +721,17 @@ impl UsageFilter {
         self.matches_model(index, model)
     }
 
+    /// The time dimension, shared by requests, tool runs, turns, and errors:
+    /// the date range, then any chart-selected focus bucket.
+    pub fn matches_time(&self, ts_ms: i64) -> bool {
+        if !self.range.contains(ts_ms) {
+            return false;
+        }
+        self.focus.is_none_or(|focus| focus.contains(ts_ms))
+    }
+
     pub fn matches_request(&self, index: &UsageIndex, r: &UsageRecord) -> bool {
-        if !self.range.contains(r.ts_ms) {
+        if !self.matches_time(r.ts_ms) {
             return false;
         }
         if self.errors_only && !r.outcome.is_error() {
@@ -720,7 +744,7 @@ impl UsageFilter {
     }
 
     pub fn matches_tool(&self, index: &UsageIndex, t: &ToolRun) -> bool {
-        if !self.range.contains(t.ts_ms) {
+        if !self.matches_time(t.ts_ms) {
             return false;
         }
         if self.errors_only {
@@ -735,7 +759,7 @@ impl UsageFilter {
     /// Turns are prompts, so only the dimensions a prompt actually has apply:
     /// date, session, and workspace.
     pub fn matches_turn(&self, index: &UsageIndex, session: u16, ts_ms: i64) -> bool {
-        if !self.range.contains(ts_ms) || self.errors_only || self.cached_only {
+        if !self.matches_time(ts_ms) || self.errors_only || self.cached_only {
             return false;
         }
         if let Some(only) = self.session {

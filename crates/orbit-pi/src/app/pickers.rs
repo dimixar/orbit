@@ -152,7 +152,12 @@ impl OrbitApp {
     /// Toggle one of the two composer dropdowns (model / thinking). Opening
     /// one closes the other; clicking the open chip closes it. Re-checks the
     /// catalog on open so the list always reflects the live pi session.
-    pub(super) fn toggle_picker(&mut self, kind: PickerKind, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn toggle_picker(
+        &mut self,
+        kind: PickerKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.picker_is_open(kind) {
             self.close_model_selector(window, cx);
             return;
@@ -167,7 +172,12 @@ impl OrbitApp {
         matches!(&self.model_selector, Some((open_kind, _)) if *open_kind == kind)
     }
 
-    pub(super) fn open_picker(&mut self, kind: PickerKind, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_picker(
+        &mut self,
+        kind: PickerKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.refresh_catalogs();
         self.send(CommandBody::GetState, "get_state");
         // Mutually exclusive with the composer's add menu and the new-task
@@ -207,26 +217,6 @@ impl OrbitApp {
             .ok();
         }) as Box<dyn Fn(bool, &mut Window, &mut App)>;
 
-        let initial_highlight = match kind {
-            PickerKind::Model => self
-                .available_models
-                .iter()
-                .position(|model| {
-                    is_model_selected(
-                        model,
-                        &self.model_label,
-                        &self.model_id,
-                        &self.model_provider,
-                    )
-                })
-                .unwrap_or(0),
-            PickerKind::Thinking => self
-                .available_thinking_levels
-                .iter()
-                .position(|level| level.eq_ignore_ascii_case(&self.thinking_label))
-                .unwrap_or(0),
-        };
-
         let selector = cx.new(|cx| {
             ModelSelector::new(
                 kind,
@@ -239,7 +229,6 @@ impl OrbitApp {
                 on_select_model,
                 on_select_level,
                 on_dismiss,
-                initial_highlight,
                 cx,
             )
         });

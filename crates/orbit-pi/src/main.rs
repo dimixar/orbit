@@ -14,6 +14,7 @@ mod commit_message;
 mod composer;
 mod context_meter;
 mod dither;
+mod favorites;
 mod git;
 mod git_panel;
 mod highlight;
@@ -174,9 +175,10 @@ fn main() {
         usage::kit::init(cx);
         let theme = *theme::get(cx);
         usage::kit::sync(cx, &theme);
-        // Bundle Zed's UI/mono faces so `.ZedSans`/`.ZedMono` resolve to
-        // real fonts (IBM Plex Sans / Lilex) without OS dependencies.
+        // Bundle Zed's UI/mono faces plus the curated font catalog so every
+        // picker choice resolves to a real face without OS dependencies.
         assets::register_zed_fonts(cx).expect("failed to register Zed fonts");
+        assets::register_bundled_fonts(cx).expect("failed to register bundled fonts");
         app_icon::set_dock_icon();
 
         // Open maximized: full width of the screen, filling the visible

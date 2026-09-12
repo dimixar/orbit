@@ -163,7 +163,11 @@ pub fn duration_ms(ms: f64) -> String {
     } else if ms < 60_000.0 {
         format!("{:.0}s", ms / 1_000.0)
     } else if ms < 3_600_000.0 {
-        format!("{}m {}s", (ms / 60_000.0) as u64, (ms / 1_000.0) as u64 % 60)
+        format!(
+            "{}m {}s",
+            (ms / 60_000.0) as u64,
+            (ms / 1_000.0) as u64 % 60
+        )
     } else {
         format!(
             "{}h {:02}m",
@@ -184,9 +188,17 @@ pub fn span_ms(ms: i64) -> String {
     } else if secs < 3_600.0 {
         format!("{}m {:.0}s", (secs / 60.0) as u64, secs % 60.0)
     } else if secs < 86_400.0 {
-        format!("{}h {:02}m", (secs / 3_600.0) as u64, (secs / 60.0) as u64 % 60)
+        format!(
+            "{}h {:02}m",
+            (secs / 3_600.0) as u64,
+            (secs / 60.0) as u64 % 60
+        )
     } else {
-        format!("{}d {}h", (secs / 86_400.0) as u64, (secs / 3_600.0) as u64 % 24)
+        format!(
+            "{}d {}h",
+            (secs / 86_400.0) as u64,
+            (secs / 3_600.0) as u64 % 24
+        )
     }
 }
 
@@ -266,5 +278,4 @@ mod tests {
         assert_eq!(delta(Some(0.01)), "no change");
         assert_eq!(delta(None), "no change");
     }
-
 }

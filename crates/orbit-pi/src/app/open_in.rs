@@ -1,5 +1,5 @@
-use super::*;
 use super::helpers::*;
+use super::*;
 
 impl OrbitApp {
     /// Resolve installed folder-capable apps once, off-thread.
@@ -28,7 +28,12 @@ impl OrbitApp {
             .or_else(|| self.open_in_apps.first())
     }
 
-    pub(super) fn open_workspace_in_app(&mut self, path: &Path, app_id: &str, cx: &mut Context<Self>) {
+    pub(super) fn open_workspace_in_app(
+        &mut self,
+        path: &Path,
+        app_id: &str,
+        cx: &mut Context<Self>,
+    ) {
         let Some(bundle_id) = self
             .open_in_apps
             .iter()
@@ -46,7 +51,12 @@ impl OrbitApp {
         cx.notify();
     }
 
-    pub(super) fn on_open_in_primary(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_open_in_primary(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(path) = self.current_workspace.clone() else {
             return;
         };
@@ -57,7 +67,12 @@ impl OrbitApp {
         self.open_workspace_in_app(&path, app_id, cx);
     }
 
-    pub(super) fn on_open_in_caret(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_open_in_caret(
+        &mut self,
+        _: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.open_in_apps.is_empty() || self.current_workspace.is_none() {
             return;
         }

@@ -156,7 +156,7 @@ These compiled and ran against the pinned version. When in doubt, check
 - **Popovers:** `anchored().position_mode(AnchoredPositionMode::Local).anchor(Corner::BottomLeft).offset(…).snap_to_window()` + `deferred(entity)` paints a floating popup. `on_mouse_down_out` dismisses. **Click-through:** the same click's mouse-up would re-open the chip — `OrbitApp` swallows toggles for ~200 ms after an outside mouse-down dismiss (`menu_dismissed_at`). Layered `BoxShadow`es (`vec![contact, ambient]`) read as a real modal surface.
 - **Picker lists:** **do not use `uniform_list` inside a `deferred` + `anchored` popover** — measured layout can collapse to height 0. Use `max_h` + `overflow_y_scroll` + `ScrollHandle` (Zed `ContextMenu` shape). Keyboard nav must `set_offset` to keep the highlighted row in view. `.on_hover` / `.on_click` live on *stateful* elements (`.id(...)` required).
 - **Assets:** implement `gpui::AssetSource` over `include_dir!` so packaged builds don't depend on cwd. SVG icons: `img("icons/….svg")` via helpers in `app.rs`. Provider marks live under `assets/icons/providers/`.
-- **Fonts:** `cx.text_system().add_fonts` for embedded `Symbols Nerd Font` (devicons). `font_family("Menlo")` resolves via font-kit on macOS for tool rows. Commit Mono / Iosevka are **not** in the tree yet (P1 leftover).
+- **Fonts:** `cx.text_system().add_fonts` for embedded `Symbols Nerd Font` (devicons) and the curated catalog under `assets/fonts/bundled/`. `assets::register_zed_fonts` loads IBM Plex Sans / Lilex; `assets::register_bundled_fonts` recursively loads the bundled faces so `theme::UI_FONTS` / `CODE_FONTS` resolve without an OS dependency. Each family is a statically instanced, subset 400/500/600/700 TTF with a normalized name table (one typographic family, unique PostScript names) so font-kit weight selection works.
 
 ## Keybindings (current)
 
@@ -204,7 +204,7 @@ These compiled and ran against the pinned version. When in doubt, check
 - ✅ Dark zinc palette (hardcoded in `app.rs`, Waku-like). ⬜ `Theme` entity, light mode, accent, density, persist to pi settings.
 - ✅ Sidebar + sessions grouped by workspace; ⬜ Search.
 - ✅ Keybindings / focus for composer + picker; ⬜ broader native menus/dialogs.
-- ⬜ Embed Commit Mono / Iosevka (Nerd Font is already embedded for file glyphs).
+- ✅ Curated embedded font catalog (Inter, Fixel Text, Geist, Atkinson, Source Sans 3, Roboto, Noto Sans, DM Sans, Manrope, JetBrains Mono, Fira Code, Geist Mono, Commit Mono, Source Code Pro, Cascadia Code, Roboto Mono, Iosevka).
 
 ### P2 — Data layer (in progress)
 - ✅ Permissive command/event models; graduate remaining shapes as live dumps arrive.

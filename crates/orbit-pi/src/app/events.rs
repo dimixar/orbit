@@ -485,6 +485,9 @@ impl OrbitApp {
                                     id: id.into(),
                                     name: name.into(),
                                     provider: provider.into(),
+                                    context_window: m
+                                        .get("contextWindow")
+                                        .and_then(serde_json::Value::as_u64),
                                 })
                             })
                             .collect()
@@ -587,8 +590,7 @@ impl OrbitApp {
             "auth.list" => {
                 let before = self.auth.support();
                 self.auth.on_list_response(success, data, error);
-                if self.auth.support() != before
-                    && self.auth.support() == AuthSupport::Unsupported
+                if self.auth.support() != before && self.auth.support() == AuthSupport::Unsupported
                 {
                     self.set_status(
                         "This pi build has no auth RPC — provider sign-in uses Terminal",

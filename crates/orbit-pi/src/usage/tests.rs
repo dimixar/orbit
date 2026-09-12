@@ -8,8 +8,9 @@
 
 use std::rc::Rc;
 
-use super::aggregate::{ChartMetric, Direction, UsageSnapshot};
+use super::aggregate::{ChartMetric, Direction, LatencyMetric, LatencyStats, UsageSnapshot};
 use super::model::*;
+use super::page::{query_sessions, SessionQuery, SessionSort};
 
 /// A tiny builder for synthetic indexes.
 #[derive(Default)]
@@ -40,9 +41,12 @@ impl Fixture {
                 (self.index.providers.len() - 1) as u16
             }
         };
-        if let Some(ix) = self.index.models.iter().position(|m| {
-            m.id == id && m.provider == provider_ix
-        }) {
+        if let Some(ix) = self
+            .index
+            .models
+            .iter()
+            .position(|m| m.id == id && m.provider == provider_ix)
+        {
             return ix as u16;
         }
         self.index.models.push(ModelEntry {
@@ -79,7 +83,16 @@ impl Fixture {
         cache_write: u64,
     ) -> &mut Self {
         self.request_full(
-            session, model, ts_ms, input, output, cache_read, cache_write, None, None, Outcome::Stop,
+            session,
+            model,
+            ts_ms,
+            input,
+            output,
+            cache_read,
+            cache_write,
+            None,
+            None,
+            Outcome::Stop,
         )
     }
 
@@ -152,9 +165,11 @@ impl Fixture {
 
     /// Finish with records in timestamp order, as the scanner would leave them.
     fn build(mut self) -> UsageIndex {
-        self.index
-            .requests
-            .sort_by(|a, b| a.ts_ms.cmp(&b.ts_ms).then_with(|| a.session.cmp(&b.session)));
+        self.index.requests.sort_by(|a, b| {
+            a.ts_ms
+                .cmp(&b.ts_ms)
+                .then_with(|| a.session.cmp(&b.session))
+        });
         self.index
             .tool_runs
             .sort_by(|a, b| a.ts_ms.cmp(&b.ts_ms).then_with(|| a.tool.cmp(&b.tool)));
@@ -181,7 +196,15 @@ fn basic_aggregation_sums_input_and_output() {
     let now = anchor();
     let mut fixture = Fixture::default();
     let session = fixture.session("/tmp/orbit", "fix oauth", now - 3_600_000, vec![]);
-    fixture.request(session, ("anthropic", "claude-sonnet"), now - 60_000, 100, 50, 0, 0);
+    fixture.request(
+        session,
+        ("anthropic", "claude-sonnet"),
+        now - 60_000,
+        100,
+        50,
+        0,
+        0,
+    );
     let index = fixture.build();
     let snapshot = scope(&index, DateRange::for_preset(RangePreset::Last7, now));
 
@@ -198,9 +221,33 @@ fn requests_group_by_local_day_across_midnight() {
     let mut fixture = Fixture::default();
     let session = fixture.session("/tmp/orbit", "late night", midnight - 3_600_000, vec![]);
     // 23:30 the previous day, 00:30 and 23:00 today.
-    fixture.request(session, ("anthropic", "claude"), midnight - 1_800_000, 10, 1, 0, 0);
-    fixture.request(session, ("anthropic", "claude"), midnight + 1_800_000, 20, 2, 0, 0);
-    fixture.request(session, ("anthropic", "claude"), midnight + 23 * 3_600_000, 30, 3, 0, 0);
+    fixture.request(
+        session,
+        ("anthropic", "claude"),
+        midnight - 1_800_000,
+        10,
+        1,
+        0,
+        0,
+    );
+    fixture.request(
+        session,
+        ("anthropic", "claude"),
+        midnight + 1_800_000,
+        20,
+        2,
+        0,
+        0,
+    );
+    fixture.request(
+        session,
+        ("anthropic", "claude"),
+        midnight + 23 * 3_600_000,
+        30,
+        3,
+        0,
+        0,
+    );
     let index = fixture.build();
 
     let today = scope(
@@ -211,7 +258,10 @@ fn requests_group_by_local_day_across_midnight() {
             end_ms: midnight + 24 * 3_600_000,
         },
     );
-    assert_eq!(today.summary.totals.requests, 2, "two requests fall on today");
+    assert_eq!(
+        today.summary.totals.requests, 2,
+        "two requests fall on today"
+    );
     assert_eq!(today.summary.totals.tokens.total, 55);
     assert_eq!(today.buckets.rows.len(), 1);
     assert_eq!(today.series.points.len(), 24, "today buckets by hour");
@@ -224,7 +274,15 @@ fn workspace_and_model_grouping() {
     let mut fixture = Fixture::default();
     let orbit = fixture.session("/Users/dev/orbit", "orbit work", now - 7_200_000, vec![]);
     let site = fixture.session("/Users/dev/website", "site work", now - 3_600_000, vec![]);
-    fixture.request(orbit, ("anthropic", "claude-sonnet"), now - 300_000, 1_000, 200, 100, 10);
+    fixture.request(
+        orbit,
+        ("anthropic", "claude-sonnet"),
+        now - 300_000,
+        1_000,
+        200,
+        100,
+        10,
+    );
     fixture.request(orbit, ("openai", "gpt-5"), now - 200_000, 500, 100, 0, 0);
     fixture.request(site, ("openai", "gpt-5"), now - 100_000, 2_000, 400, 0, 0);
     let index = fixture.build();
@@ -261,7 +319,15 @@ fn cache_math_matches_the_documented_formula() {
     let mut fixture = Fixture::default();
     let session = fixture.session("/tmp/orbit", "cache", now - 3_600_000, vec![]);
     // Uncached prompt 250, cached 750 → 75% hit rate.
-    fixture.request(session, ("anthropic", "claude"), now - 60_000, 250, 100, 750, 40);
+    fixture.request(
+        session,
+        ("anthropic", "claude"),
+        now - 60_000,
+        250,
+        100,
+        750,
+        40,
+    );
     let index = fixture.build();
     let snapshot = scope(&index, DateRange::for_preset(RangePreset::Last7, now));
 
@@ -302,8 +368,16 @@ fn filters_compose_across_dimensions() {
 
     let range = DateRange::for_preset(RangePreset::Last7, now);
     let claude = index.models.iter().position(|m| m.id == "claude").unwrap() as u16;
-    let openai = index.providers.iter().position(|p| p.id == "openai").unwrap() as u16;
-    let orbit_ix = index.workspaces.iter().position(|w| w.label == "orbit").unwrap() as u16;
+    let openai = index
+        .providers
+        .iter()
+        .position(|p| p.id == "openai")
+        .unwrap() as u16;
+    let orbit_ix = index
+        .workspaces
+        .iter()
+        .position(|w| w.label == "orbit")
+        .unwrap() as u16;
 
     let mut filter = UsageFilter::new(range.clone());
     filter.models.push(claude);
@@ -352,7 +426,15 @@ fn no_matches_is_distinct_from_no_data() {
     let now = anchor();
     let mut fixture = Fixture::default();
     let session = fixture.session("/tmp/orbit", "session", now - 3_600_000, vec![]);
-    fixture.request(session, ("anthropic", "claude"), now - 60_000, 100, 10, 0, 0);
+    fixture.request(
+        session,
+        ("anthropic", "claude"),
+        now - 60_000,
+        100,
+        10,
+        0,
+        0,
+    );
     let index = fixture.build();
 
     // A range with no data at all.
@@ -379,8 +461,21 @@ fn no_matches_is_distinct_from_no_data() {
     // matches", even though the range's prompts still exist: prompts are not
     // model calls and do not keep the page alive.
     let mut fixture = Fixture::default();
-    let session = fixture.session("/tmp/orbit", "prompt only", now - 3_600_000, vec![now - 1_000]);
-    fixture.request(session, ("anthropic", "claude"), now - 60_000, 100, 10, 0, 0);
+    let session = fixture.session(
+        "/tmp/orbit",
+        "prompt only",
+        now - 3_600_000,
+        vec![now - 1_000],
+    );
+    fixture.request(
+        session,
+        ("anthropic", "claude"),
+        now - 60_000,
+        100,
+        10,
+        0,
+        0,
+    );
     let index = fixture.build();
     let mut filter = UsageFilter::new(DateRange::for_preset(RangePreset::Last7, now));
     filter.models.push(999);
@@ -398,8 +493,24 @@ fn comparison_uses_the_preceding_window() {
     let session = fixture.session("/tmp/orbit", "compare", now - 20 * 86_400_000, vec![]);
     // Yesterday: 100 tokens. Today: 150 tokens.
     let midnight = day_start(now);
-    fixture.request(session, ("anthropic", "claude"), midnight - 3_600_000, 80, 20, 0, 0);
-    fixture.request(session, ("anthropic", "claude"), midnight + 3_600_000, 100, 50, 0, 0);
+    fixture.request(
+        session,
+        ("anthropic", "claude"),
+        midnight - 3_600_000,
+        80,
+        20,
+        0,
+        0,
+    );
+    fixture.request(
+        session,
+        ("anthropic", "claude"),
+        midnight + 3_600_000,
+        100,
+        50,
+        0,
+        0,
+    );
     let index = fixture.build();
 
     let today = UsageSnapshot::compute(
@@ -472,7 +583,10 @@ fn partial_data_keeps_what_is_known() {
     // Latency averages only over what was measured.
     assert_eq!(snapshot.latency.samples, 1);
     assert_eq!(snapshot.summary.totals.avg_duration_ms(), Some(4_000.0));
-    assert!(!snapshot.latency.has_percentiles(), "one sample is not a p95");
+    assert!(
+        !snapshot.latency.has_percentiles(),
+        "one sample is not a p95"
+    );
     // The error surface is populated.
     assert_eq!(snapshot.errors.provider, 1);
     assert_eq!(snapshot.errors.rows.len(), 1);
@@ -484,7 +598,15 @@ fn tools_count_calls_errors_and_durations() {
     let now = anchor();
     let mut fixture = Fixture::default();
     let session = fixture.session("/tmp/orbit", "tools", now - 3_600_000, vec![]);
-    fixture.request(session, ("anthropic", "claude"), now - 900_000, 100, 10, 0, 0);
+    fixture.request(
+        session,
+        ("anthropic", "claude"),
+        now - 900_000,
+        100,
+        10,
+        0,
+        0,
+    );
     fixture.tool(session, now - 800_000, "bash", Some(5_000), true);
     fixture.tool(session, now - 700_000, "bash", Some(1_000), false);
     fixture.tool(session, now - 600_000, "read", Some(50), true);
@@ -539,7 +661,15 @@ fn granularity_follows_the_window() {
     // The bucket table coarsens relative to the chart on long ranges.
     let mut fixture = Fixture::default();
     let session = fixture.session("/tmp/orbit", "long", now - 200 * 86_400_000, vec![]);
-    fixture.request(session, ("anthropic", "claude"), now - 100 * 86_400_000, 10, 1, 0, 0);
+    fixture.request(
+        session,
+        ("anthropic", "claude"),
+        now - 100 * 86_400_000,
+        10,
+        1,
+        0,
+        0,
+    );
     let index = fixture.build();
     let snapshot = scope(
         &index,
@@ -563,8 +693,24 @@ fn turns_are_counted_as_prompts() {
         now - 3_600_000,
         vec![now - 3_000_000, now - 1_000_000],
     );
-    fixture.request(session, ("anthropic", "claude"), now - 2_900_000, 100, 10, 0, 0);
-    fixture.request(session, ("anthropic", "claude"), now - 900_000, 200, 20, 0, 0);
+    fixture.request(
+        session,
+        ("anthropic", "claude"),
+        now - 2_900_000,
+        100,
+        10,
+        0,
+        0,
+    );
+    fixture.request(
+        session,
+        ("anthropic", "claude"),
+        now - 900_000,
+        200,
+        20,
+        0,
+        0,
+    );
     let index = fixture.build();
     let snapshot = scope(&index, DateRange::for_preset(RangePreset::Last7, now));
     assert_eq!(snapshot.summary.turns, 2);
@@ -588,7 +734,11 @@ fn empty_dataset_produces_an_empty_snapshot() {
     assert!(snapshot.cache.hit_rate.is_none());
     assert!(snapshot.latency.avg_ms.abs() < f64::EPSILON);
     assert!(snapshot.insights.is_empty());
-    assert!(snapshot.series.points.iter().all(|p| p.totals.requests == 0));
+    assert!(snapshot
+        .series
+        .points
+        .iter()
+        .all(|p| p.totals.requests == 0));
 }
 
 #[test]
@@ -624,7 +774,12 @@ fn snapshots_are_deterministic() {
     assert_eq!(first, second);
     // Ordering is by value then label, never by hash iteration.
     // Equal totals: the tiebreak is the label, and the two runs agree.
-    let labels: Vec<&str> = first.models.rows.iter().map(|row| row.label.as_str()).collect();
+    let labels: Vec<&str> = first
+        .models
+        .rows
+        .iter()
+        .map(|row| row.label.as_str())
+        .collect();
     assert_eq!(labels, vec!["claude", "gpt"]);
     assert_eq!(
         first.models.rows[0].totals.tokens.total,
@@ -673,14 +828,41 @@ fn large_dataset_stays_linear_enough() {
 fn csv_export_quotes_and_respects_the_filter() {
     let now = anchor();
     let mut fixture = Fixture::default();
-    let session = fixture.session("/tmp/orbit", "fix, the \"oauth\" flow", now - 3_600_000, vec![]);
-    fixture.request(session, ("anthropic", "claude"), now - 60_000, 100, 50, 0, 0);
+    let session = fixture.session(
+        "/tmp/orbit",
+        "fix, the \"oauth\" flow",
+        now - 3_600_000,
+        vec![],
+    );
+    fixture.request(
+        session,
+        ("anthropic", "claude"),
+        now - 60_000,
+        100,
+        50,
+        0,
+        0,
+    );
     let session = fixture.session("/tmp/other", "other", now - 3_600_000, vec![]);
-    fixture.request(session, ("anthropic", "claude"), now - 60_000, 900, 50, 0, 0);
+    fixture.request(
+        session,
+        ("anthropic", "claude"),
+        now - 60_000,
+        900,
+        50,
+        0,
+        0,
+    );
     let index = fixture.build();
 
     let mut filter = UsageFilter::new(DateRange::for_preset(RangePreset::Last7, now));
-    filter.workspaces.push(index.workspaces.iter().position(|w| w.label == "orbit").unwrap() as u16);
+    filter.workspaces.push(
+        index
+            .workspaces
+            .iter()
+            .position(|w| w.label == "orbit")
+            .unwrap() as u16,
+    );
     let csv = super::view::export_csv(&index, &filter);
     let lines: Vec<&str> = csv.lines().collect();
     assert_eq!(lines.len(), 2, "header + one filtered row");
@@ -725,9 +907,22 @@ fn json_export_carries_the_aggregates_including_unavailable_metrics() {
 fn session_rows_rank_by_tokens_and_carry_their_model() {
     let now = anchor();
     let mut fixture = Fixture::default();
-    let small = fixture.session("/tmp/orbit", "small", now - 7_200_000, vec![now - 7_000_000]);
+    let small = fixture.session(
+        "/tmp/orbit",
+        "small",
+        now - 7_200_000,
+        vec![now - 7_000_000],
+    );
     let big = fixture.session("/tmp/orbit", "big", now - 3_600_000, vec![now - 3_500_000]);
-    fixture.request(small, ("anthropic", "claude"), now - 6_000_000, 100, 10, 0, 0);
+    fixture.request(
+        small,
+        ("anthropic", "claude"),
+        now - 6_000_000,
+        100,
+        10,
+        0,
+        0,
+    );
     fixture.request(big, ("openai", "gpt"), now - 3_000_000, 5_000, 500, 0, 0);
     fixture.tool(big, now - 2_900_000, "bash", Some(1_000), true);
     let index = fixture.build();
@@ -744,11 +939,175 @@ fn session_rows_rank_by_tokens_and_carry_their_model() {
 }
 
 #[test]
+fn session_query_filters_searches_sorts_then_paginates() {
+    let now = anchor();
+    let mut fixture = Fixture::default();
+    for (title, tokens) in [("alpha", 100u64), ("beta", 300), ("gamma", 200)] {
+        let session = fixture.session("/tmp/orbit", title, now - 3_600_000, vec![]);
+        fixture.request(
+            session,
+            ("anthropic", "claude"),
+            now - 60_000,
+            tokens,
+            0,
+            0,
+            0,
+        );
+    }
+    let index = fixture.build();
+    let snapshot = scope(&index, DateRange::for_preset(RangePreset::Last7, now));
+
+    let query = |page, size, search: &str| SessionQuery {
+        search: search.into(),
+        sort: SessionSort::Tokens,
+        desc: true,
+        page,
+        page_size: size,
+    };
+
+    // Sort applies across the whole set before pagination (§74): page 1 holds
+    // the largest by tokens, page 2 the next.
+    let first = query_sessions(&index, &snapshot, &query(1, 1, ""));
+    assert_eq!(first.total, 3);
+    assert_eq!(first.rows[0].title, "beta");
+    assert_eq!((first.first_row(), first.last_row()), (1, 1));
+    let second = query_sessions(&index, &snapshot, &query(2, 1, ""));
+    assert_eq!(second.rows[0].title, "gamma");
+
+    // A page past the end clamps to the last real page rather than showing
+    // nothing (§29).
+    let past = query_sessions(&index, &snapshot, &query(99, 1, ""));
+    assert_eq!(past.page, 3);
+    assert_eq!(past.rows[0].title, "alpha");
+
+    // Search narrows before pagination.
+    let searched = query_sessions(&index, &snapshot, &query(1, 25, "gam"));
+    assert_eq!(searched.total, 1);
+    assert_eq!(searched.rows[0].title, "gamma");
+
+    // Search also matches the session id and the provider (§30).
+    let by_id = query_sessions(
+        &index,
+        &snapshot,
+        &SessionQuery {
+            search: "session-1".into(),
+            ..query(1, 25, "")
+        },
+    );
+    assert_eq!(by_id.total, 1);
+    assert_eq!(by_id.rows[0].title, "beta");
+    let by_provider = query_sessions(&index, &snapshot, &query(1, 25, "anthropic"));
+    assert_eq!(by_provider.total, 3);
+}
+
+#[test]
+fn time_focus_narrows_without_changing_the_range() {
+    let now = anchor();
+    let midnight = day_start(now);
+    let mut fixture = Fixture::default();
+    let session = fixture.session("/tmp/orbit", "focus", midnight, vec![]);
+    fixture.request(
+        session,
+        ("anthropic", "claude"),
+        midnight + 3_600_000,
+        100,
+        10,
+        0,
+        0,
+    );
+    fixture.request(
+        session,
+        ("anthropic", "claude"),
+        midnight + 5 * 3_600_000,
+        200,
+        20,
+        0,
+        0,
+    );
+    let index = fixture.build();
+
+    let range = DateRange {
+        preset: RangePreset::Today,
+        start_ms: midnight,
+        end_ms: midnight + 12 * 3_600_000,
+    };
+    let mut filter = UsageFilter::new(range.clone());
+    filter.focus = Some(TimeFocus {
+        start_ms: midnight + 3_600_000,
+        end_ms: midnight + 4 * 3_600_000,
+        granularity: Granularity::Hour,
+    });
+    let focused = UsageSnapshot::compute(&index, &filter);
+    assert_eq!(focused.summary.totals.requests, 1);
+    assert_eq!(focused.summary.totals.tokens.total, 110);
+    // The range still owns both requests, so the page can say "filtered out".
+    assert_eq!(focused.requests_in_range, 2);
+
+    // Clearing the focus restores the full window.
+    filter.focus = None;
+    let all = UsageSnapshot::compute(&index, &filter);
+    assert_eq!(all.summary.totals.requests, 2);
+    assert_eq!(all.summary.totals.tokens.total, 330);
+}
+
+#[test]
+fn latency_metric_switches_between_average_and_percentiles() {
+    let now = anchor();
+    let mut fixture = Fixture::default();
+    let session = fixture.session("/tmp/orbit", "latency", now - 3_600_000, vec![]);
+    for ix in 0..25u32 {
+        fixture.request_full(
+            session,
+            ("anthropic", "claude"),
+            now - i64::from(ix) * 1_000,
+            100,
+            10,
+            0,
+            0,
+            None,
+            Some(1_000 + ix * 100),
+            Outcome::Stop,
+        );
+    }
+    let index = fixture.build();
+    let snapshot = scope(&index, DateRange::for_preset(RangePreset::Last7, now));
+
+    assert!(snapshot.latency.has_percentiles());
+    let point = snapshot
+        .series
+        .points
+        .iter()
+        .find(|point| point.totals.duration_samples > 0)
+        .expect("a bucket with latency samples");
+    assert!(point.latency.has_percentiles());
+    let average = LatencyMetric::Average
+        .value(&point.latency)
+        .expect("average");
+    let p95 = LatencyMetric::P95.value(&point.latency).expect("p95");
+    assert!(
+        p95 >= average,
+        "p95 {p95} should not trail the mean {average}"
+    );
+
+    // A bucket with no samples offers neither a mean nor a percentile.
+    assert_eq!(LatencyMetric::Average.value(&LatencyStats::default()), None);
+    assert_eq!(LatencyMetric::P99.value(&LatencyStats::default()), None);
+}
+
+#[test]
 fn insights_only_appear_with_signal() {
     let now = anchor();
     let mut fixture = Fixture::default();
     let session = fixture.session("/tmp/orbit", "quiet", now - 3_600_000, vec![]);
-    fixture.request(session, ("anthropic", "claude"), now - 60_000, 100, 10, 0, 0);
+    fixture.request(
+        session,
+        ("anthropic", "claude"),
+        now - 60_000,
+        100,
+        10,
+        0,
+        0,
+    );
     let index = fixture.build();
     let snapshot = scope(&index, DateRange::for_preset(RangePreset::Last7, now));
     // A single tiny data point produces no headline.

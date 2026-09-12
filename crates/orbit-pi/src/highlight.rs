@@ -1452,10 +1452,7 @@ mod tests {
         );
         assert_eq!(
             spans(Lang::Shell, "FOO=1 cargo run"),
-            vec![
-                ("FOO=1", TokenClass::Type),
-                ("cargo", TokenClass::Command),
-            ]
+            vec![("FOO=1", TokenClass::Type), ("cargo", TokenClass::Command),]
         );
     }
 

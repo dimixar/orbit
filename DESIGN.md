@@ -106,7 +106,7 @@ rationed: selection, focus, the caret, the active series. Everything else is ink
 canvas at three weights of emphasis.
 
 The system is monochrome-by-default with semantic color reserved for state, so a
-screenshot in any of the ten palettes still reads as Orbit. Depth is delivered by
+screenshot in any of the thirty-one palettes still reads as Orbit. Depth is delivered by
 hairlines and tonal steps rather than shadows; shadows exist only for surfaces that
 genuinely float above the page (composer, popovers, modals).
 
@@ -114,8 +114,10 @@ genuinely float above the page (composer, popovers, modals).
 - One accent, rationed: ember marks the active thing and nothing else.
 - Hairlines over boxes: `border_1` at `theme.border` separates; cards are the exception.
 - Three ink weights: `text` (primary), `text_2` (secondary), `text_3` (tertiary/labels).
-- Density with air: 28–34px controls, 6–10px padding, 44px page headers.
-- Ten palettes, one grammar: every color is read from `theme::get(cx)`, never hardcoded.
+- Density with air: 28–34px controls, 6–10px padding, 44px page headers. The
+  Appearance panel exposes this as Interface Font Size, Terminal/Editor Font
+  Size, and Spacing Density (a global multiplier through `theme.space`).
+- Thirty-one palettes, one grammar: every color is read from `theme::get(cx)`, never hardcoded.
 
 ## Colors
 
@@ -151,6 +153,16 @@ A number that must shout gets `text` + a larger size, not a color.
 **Character:** One workhorse face for the whole interface — a developer tool does not
 need a display pairing. Mono appears only where content is machine text: code blocks,
 diffs, paths, token counts in tables.
+
+**The Catalog.** Appearance exposes a curated Interface and Code catalog
+(`theme::UI_FONTS` / `CODE_FONTS`) of bundled OFL faces — Inter, Fixel Text,
+Geist Sans, Atkinson Hyperlegible, Source Sans 3, Roboto, Noto Sans, DM Sans,
+Manrope, and JetBrains Mono, Fira Code, Geist Mono, Commit Mono, Source Code
+Pro, Cascadia Code, Roboto Mono, Iosevka. Every family ships as statically
+instanced, subset 400/500/600/700 TTFs under `assets/fonts/bundled/` (glyph set
+is Latin + punctuation + box-drawing + powerline), so a picked face never
+depends on the OS. The bundled IBM Plex Sans and Lilex faces stay in the list
+under their own names (their gpui aliases are `.ZedSans` / `.ZedMono`).
 
 ### Hierarchy
 - **Title** (500, 15px): page titles in a 44px header row.
@@ -272,7 +284,7 @@ incomplete — fix the bridge, not the call site.
 
 ### Do:
 - **Do** read every color, size, and radius from `theme::get(cx)`; add a role to
-  `Palette` when a new semantic need appears so all ten palettes stay legible.
+  `Palette` when a new semantic need appears so all thirty-one palettes stay legible.
 - **Do** use hairlines and whitespace to separate sections; reserve rounded bordered
   surfaces for objects that are conceptually singular (composer, metric board, popover).
 - **Do** keep controls at 28px (compact) / 34px (primary) so a 900px-tall window shows

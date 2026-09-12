@@ -1,10 +1,14 @@
-use super::*;
 use super::helpers::*;
+use super::*;
 
 /// A non-interactive pill used for static meta in the composer row. Ghost
 /// style: it states a fact (the access mode), so it carries no border or
 /// fill and sits quieter than the interactive chips.
-pub(crate) fn pill_static(icon_path: &'static str, label: &str, theme: Theme) -> impl IntoElement + use<> {
+pub(crate) fn pill_static(
+    icon_path: &'static str,
+    label: &str,
+    theme: Theme,
+) -> impl IntoElement + use<> {
     div()
         .flex()
         .items_center()
@@ -445,7 +449,7 @@ pub(crate) fn render_side_row(
                 .w_full()
                 .pl(px(22.))
                 .pr(px(8.))
-                .py(px(5.))
+                .py(theme.space(5.))
                 .rounded_md()
                 .flex()
                 .items_center()
@@ -751,7 +755,11 @@ pub(crate) fn running_loader(theme: Theme, id: usize) -> impl IntoElement + use<
 /// Finder / Delete, or the delete confirmation once armed. Painted via
 /// `deferred` + `anchored` (same convention as the composer pickers),
 /// dismissed by any outside mouse-down.
-pub(crate) fn session_menu_popup(menu: &SessionMenu, this: Entity<OrbitApp>, theme: Theme) -> AnyElement {
+pub(crate) fn session_menu_popup(
+    menu: &SessionMenu,
+    this: Entity<OrbitApp>,
+    theme: Theme,
+) -> AnyElement {
     let deletable = menu.deletable;
     let confirm = menu.confirm_delete;
 
@@ -1018,7 +1026,6 @@ pub(crate) fn workspace_menu_popup(this: Entity<OrbitApp>, theme: Theme) -> AnyE
         .child(deferred(popup))
         .into_any_element()
 }
-
 
 pub(crate) fn menu_item<C: Fn(&mut OrbitApp, &mut Context<OrbitApp>) + 'static>(
     id: &'static str,

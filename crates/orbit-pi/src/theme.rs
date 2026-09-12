@@ -7,7 +7,7 @@
 //! Zed's Lilex (`.ZedMono`).
 
 use std::path::PathBuf;
-use std::sync::{OnceLock, RwLock};
+use std::sync::RwLock;
 
 use gpui::{hsla, point, px, rgb, App, BoxShadow, Global, Hsla, Pixels, SharedString};
 use serde_json::Value;
@@ -35,12 +35,34 @@ pub enum ThemeId {
     AdwaitaPastel,
     Ashen,
     Discord,
+    /// Curated editor themes, ported to the Orbit role model (all dark).
+    Catppuccin,
+    Dracula,
+    Gruvbox,
+    Nord,
+    TokyoNight,
+    OneDarkPro,
+    Monokai,
+    SolarizedDark,
+    AyuDark,
+    Kanagawa,
+    Aura,
+    Carbonfox,
+    FieldsOfTheShire,
+    Flexoki,
+    JetBrains,
+    Mono,
+    MonoPlus,
+    NightOwl,
+    OpenChamber,
+    Vesper,
+    Vitesse,
 }
 
 impl ThemeId {
     /// Selectable themes, in the order shown in the settings dropdown
-    /// (the two Orbit palettes first, then the ported Zed themes).
-    pub const ALL: [ThemeId; 10] = [
+    /// (the two Orbit palettes first, then the ported/curated dark themes).
+    pub const ALL: [ThemeId; 31] = [
         Self::Orbit,
         Self::OrbitLight,
         Self::Vague,
@@ -51,6 +73,27 @@ impl ThemeId {
         Self::AdwaitaPastel,
         Self::Ashen,
         Self::Discord,
+        Self::Aura,
+        Self::AyuDark,
+        Self::Carbonfox,
+        Self::Catppuccin,
+        Self::Dracula,
+        Self::FieldsOfTheShire,
+        Self::Flexoki,
+        Self::Gruvbox,
+        Self::JetBrains,
+        Self::Kanagawa,
+        Self::Mono,
+        Self::MonoPlus,
+        Self::Monokai,
+        Self::NightOwl,
+        Self::Nord,
+        Self::OneDarkPro,
+        Self::OpenChamber,
+        Self::SolarizedDark,
+        Self::TokyoNight,
+        Self::Vesper,
+        Self::Vitesse,
     ];
 
     /// Persisted key; also accepts legacy theme names (mapped to Orbit).
@@ -66,6 +109,27 @@ impl ThemeId {
             Self::AdwaitaPastel => "adwaita-pastel-dark",
             Self::Ashen => "ashen",
             Self::Discord => "discord-dark",
+            Self::Catppuccin => "catppuccin",
+            Self::Dracula => "dracula",
+            Self::Gruvbox => "gruvbox",
+            Self::Nord => "nord",
+            Self::TokyoNight => "tokyo-night",
+            Self::OneDarkPro => "one-dark-pro",
+            Self::Monokai => "monokai",
+            Self::SolarizedDark => "solarized-dark",
+            Self::AyuDark => "ayu-dark",
+            Self::Kanagawa => "kanagawa",
+            Self::Aura => "aura",
+            Self::Carbonfox => "carbonfox",
+            Self::FieldsOfTheShire => "fields-of-the-shire",
+            Self::Flexoki => "flexoki",
+            Self::JetBrains => "jetbrains",
+            Self::Mono => "mono",
+            Self::MonoPlus => "mono-plus",
+            Self::NightOwl => "night-owl",
+            Self::OpenChamber => "open-chamber",
+            Self::Vesper => "vesper",
+            Self::Vitesse => "vitesse",
         }
     }
 
@@ -93,6 +157,28 @@ impl ThemeId {
             "adwaita-pastel-dark" | "adwaita-pastel" => Some(Self::AdwaitaPastel),
             "ashen" => Some(Self::Ashen),
             "discord-dark" | "dark-discord" | "discord" => Some(Self::Discord),
+            // Curated editor themes (plus common aliases).
+            "catppuccin" | "catppuccin-mocha" | "catppuccin-dark" => Some(Self::Catppuccin),
+            "dracula" | "dracula-dark" => Some(Self::Dracula),
+            "gruvbox" | "gruvbox-dark" => Some(Self::Gruvbox),
+            "nord" | "nord-dark" => Some(Self::Nord),
+            "tokyo-night" | "tokyonight" | "tokyo-night-storm" => Some(Self::TokyoNight),
+            "one-dark-pro" | "onedarkpro" => Some(Self::OneDarkPro),
+            "monokai" => Some(Self::Monokai),
+            "solarized-dark" | "solarized" => Some(Self::SolarizedDark),
+            "ayu-dark" | "ayu" => Some(Self::AyuDark),
+            "kanagawa" | "kanagawa-wave" => Some(Self::Kanagawa),
+            "aura" | "aura-dark" => Some(Self::Aura),
+            "carbonfox" | "carbonfox-dark" => Some(Self::Carbonfox),
+            "fields-of-the-shire" | "fields-of-the-shire-dark" => Some(Self::FieldsOfTheShire),
+            "flexoki" => Some(Self::Flexoki),
+            "jetbrains" | "jetbrains-dark" => Some(Self::JetBrains),
+            "mono" => Some(Self::Mono),
+            "mono-plus" => Some(Self::MonoPlus),
+            "night-owl" | "nightowl" | "night-owl-dark" => Some(Self::NightOwl),
+            "open-chamber" | "openchamber" => Some(Self::OpenChamber),
+            "vesper" => Some(Self::Vesper),
+            "vitesse" => Some(Self::Vitesse),
             _ => None,
         }
     }
@@ -110,6 +196,27 @@ impl ThemeId {
             Self::AdwaitaPastel => "Adwaita Pastel Dark",
             Self::Ashen => "Ashen",
             Self::Discord => "Discord Dark",
+            Self::Catppuccin => "Catppuccin",
+            Self::Dracula => "Dracula",
+            Self::Gruvbox => "Gruvbox",
+            Self::Nord => "Nord",
+            Self::TokyoNight => "Tokyonight",
+            Self::OneDarkPro => "One Dark Pro",
+            Self::Monokai => "Monokai",
+            Self::SolarizedDark => "Solarized",
+            Self::AyuDark => "Ayu",
+            Self::Kanagawa => "Kanagawa",
+            Self::Aura => "Aura",
+            Self::Carbonfox => "Carbonfox",
+            Self::FieldsOfTheShire => "Fields of the Shire",
+            Self::Flexoki => "Flexoki",
+            Self::JetBrains => "JetBrains",
+            Self::Mono => "Mono",
+            Self::MonoPlus => "Mono Plus",
+            Self::NightOwl => "Night Owl",
+            Self::OpenChamber => "OpenChamber",
+            Self::Vesper => "Vesper",
+            Self::Vitesse => "Vitesse",
         }
     }
 
@@ -124,7 +231,28 @@ impl ThemeId {
             | Self::MatteBlack
             | Self::AdwaitaPastel
             | Self::Ashen
-            | Self::Discord => ThemeMode::Dark,
+            | Self::Discord
+            | Self::Catppuccin
+            | Self::Dracula
+            | Self::Gruvbox
+            | Self::Nord
+            | Self::TokyoNight
+            | Self::OneDarkPro
+            | Self::Monokai
+            | Self::SolarizedDark
+            | Self::AyuDark
+            | Self::Kanagawa
+            | Self::Aura
+            | Self::Carbonfox
+            | Self::FieldsOfTheShire
+            | Self::Flexoki
+            | Self::JetBrains
+            | Self::Mono
+            | Self::MonoPlus
+            | Self::NightOwl
+            | Self::OpenChamber
+            | Self::Vesper
+            | Self::Vitesse => ThemeMode::Dark,
         }
     }
 
@@ -241,26 +369,37 @@ impl Language {
     }
 }
 
-/// Waku General-settings customization: language + font sizes.
-/// Sizes are px; defaults match Waku (14 UI / 13 code).
+/// Waku General-settings customization: language, type sizes, and density.
+/// Interface size and spacing density are percentages; the terminal and
+/// editor sizes are px with the Waku defaults (13 / 13).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UiPrefs {
     pub language: Language,
-    pub ui_font_size: f32,
-    pub code_font_size: f32,
+    /// Interface type scale, percent (Waku's "Interface Font Size").
+    pub interface_scale: u32,
+    /// Terminal / tool-output size, px (Waku's "Terminal Font Size").
+    pub terminal_font_size: f32,
+    /// Editor / diff / code-block size, px (Waku's "Editor Font Size").
+    pub editor_font_size: f32,
+    /// Global spacing multiplier, percent (Waku's "Spacing Density").
+    pub spacing_density: u32,
 }
 
-/// Selectable UI font sizes (`13 px` … `16 px` in the Waku dropdown).
-pub const UI_FONT_SIZES: [f32; 4] = [13., 14., 15., 16.];
-/// Selectable code font sizes (`12 px` … `15 px`).
-pub const CODE_FONT_SIZES: [f32; 4] = [12., 13., 14., 15.];
+/// Selectable interface type scales, percent.
+pub const INTERFACE_SCALES: [u32; 11] = [80, 85, 90, 95, 100, 105, 110, 115, 120, 125, 130];
+/// Selectable terminal / editor font sizes, px.
+pub const FONT_SIZES: [f32; 6] = [11., 12., 13., 14., 15., 16.];
+/// Selectable spacing densities, percent.
+pub const SPACING_DENSITIES: [u32; 9] = [80, 85, 90, 95, 100, 105, 110, 115, 120];
 
 impl Default for UiPrefs {
     fn default() -> Self {
         Self {
             language: Language::System,
-            ui_font_size: 14.,
-            code_font_size: 13.,
+            interface_scale: 100,
+            terminal_font_size: 13.,
+            editor_font_size: 13.,
+            spacing_density: 100,
         }
     }
 }
@@ -282,8 +421,16 @@ impl UiPrefs {
             .unwrap_or_default()
     }
 
-    /// Parse prefs from JSON, falling back to defaults per field and
-    /// rejecting sizes outside the selectable ranges.
+    /// Nearest selectable interface scale, for migrating legacy px sizes.
+    fn nearest_scale(value: u32) -> u32 {
+        *INTERFACE_SCALES
+            .iter()
+            .min_by_key(|s| s.abs_diff(value))
+            .unwrap()
+    }
+
+    /// Parse prefs from JSON, falling back to defaults per field. Legacy
+    /// `ui_font_size` / `code_font_size` px keys migrate to the new scales.
     fn from_value(value: &Value) -> Self {
         let mut prefs = Self::default();
         if let Some(language) = value
@@ -293,14 +440,34 @@ impl UiPrefs {
         {
             prefs.language = language;
         }
-        if let Some(size) = value.get("ui_font_size").and_then(Value::as_f64) {
-            if UI_FONT_SIZES.contains(&(size as f32)) {
-                prefs.ui_font_size = size as f32;
+        if let Some(scale) = value.get("interface_scale").and_then(Value::as_u64) {
+            let scale = scale as u32;
+            if INTERFACE_SCALES.contains(&scale) {
+                prefs.interface_scale = scale;
+            }
+        } else if let Some(px) = value.get("ui_font_size").and_then(Value::as_f64) {
+            let pct = (px as f32 / 14. * 100.).round() as u32;
+            prefs.interface_scale = Self::nearest_scale(pct);
+        }
+        if let Some(size) = value.get("terminal_font_size").and_then(Value::as_f64) {
+            if FONT_SIZES.contains(&(size as f32)) {
+                prefs.terminal_font_size = size as f32;
             }
         }
-        if let Some(size) = value.get("code_font_size").and_then(Value::as_f64) {
-            if CODE_FONT_SIZES.contains(&(size as f32)) {
-                prefs.code_font_size = size as f32;
+        if let Some(size) = value.get("editor_font_size").and_then(Value::as_f64) {
+            if FONT_SIZES.contains(&(size as f32)) {
+                prefs.editor_font_size = size as f32;
+            }
+        } else if let Some(size) = value.get("code_font_size").and_then(Value::as_f64) {
+            let size = size as f32;
+            if FONT_SIZES.contains(&size) {
+                prefs.editor_font_size = size;
+            }
+        }
+        if let Some(density) = value.get("spacing_density").and_then(Value::as_u64) {
+            let density = density as u32;
+            if SPACING_DENSITIES.contains(&density) {
+                prefs.spacing_density = density;
             }
         }
         prefs
@@ -315,8 +482,10 @@ impl UiPrefs {
             path,
             serde_json::json!({
                 "language": self.language.as_str(),
-                "ui_font_size": self.ui_font_size,
-                "code_font_size": self.code_font_size,
+                "interface_scale": self.interface_scale,
+                "terminal_font_size": self.terminal_font_size,
+                "editor_font_size": self.editor_font_size,
+                "spacing_density": self.spacing_density,
             })
             .to_string(),
         );
@@ -406,6 +575,115 @@ pub fn ui_font_family() -> SharedString {
 /// Current code/mono face family (readable without `cx`).
 pub fn code_font_family() -> SharedString {
     CODE_FONT_FAMILY.read().unwrap().clone()
+}
+
+/// A named entry in the curated Interface / Code font pickers. `family` is
+/// the real family gpui resolves; `label` is what the settings chip shows.
+#[derive(Debug, Clone, Copy)]
+pub struct FontChoice {
+    pub label: &'static str,
+    pub family: &'static str,
+}
+
+/// Orbit's curated interface faces (Waku's list + a System escape hatch).
+pub const UI_FONTS: [FontChoice; 10] = [
+    FontChoice {
+        label: "Inter",
+        family: "Inter",
+    },
+    FontChoice {
+        label: "Fixel Text",
+        family: "Fixel Text",
+    },
+    FontChoice {
+        label: "Geist Sans",
+        family: "Geist",
+    },
+    FontChoice {
+        label: "Atkinson Hyperlegible",
+        family: "Atkinson Hyperlegible",
+    },
+    FontChoice {
+        label: "Source Sans 3",
+        family: "Source Sans 3",
+    },
+    FontChoice {
+        label: "Roboto",
+        family: "Roboto",
+    },
+    FontChoice {
+        label: "Noto Sans",
+        family: "Noto Sans",
+    },
+    FontChoice {
+        label: "DM Sans",
+        family: "DM Sans",
+    },
+    FontChoice {
+        label: "Manrope",
+        family: "Manrope",
+    },
+    FontChoice {
+        label: "IBM Plex Sans",
+        family: ".ZedSans",
+    },
+];
+
+/// Orbit's curated code faces (Waku's list + a System Mono escape hatch).
+pub const CODE_FONTS: [FontChoice; 9] = [
+    FontChoice {
+        label: "JetBrains Mono",
+        family: "JetBrains Mono",
+    },
+    FontChoice {
+        label: "Fira Code",
+        family: "Fira Code",
+    },
+    FontChoice {
+        label: "Geist Mono",
+        family: "Geist Mono",
+    },
+    FontChoice {
+        label: "Commit Mono",
+        family: "CommitMono",
+    },
+    FontChoice {
+        label: "Source Code Pro",
+        family: "Source Code Pro",
+    },
+    FontChoice {
+        label: "Cascadia Code",
+        family: "Cascadia Code",
+    },
+    FontChoice {
+        label: "Roboto Mono",
+        family: "Roboto Mono",
+    },
+    FontChoice {
+        label: "Iosevka",
+        family: "Iosevka",
+    },
+    FontChoice {
+        label: "Lilex",
+        family: ".ZedMono",
+    },
+];
+
+/// Display label for a stored family name: a curated label when one exists,
+/// otherwise the raw family (so legacy/installed choices still read right).
+pub fn font_choice_label(family: &str) -> String {
+    if family == ".ZedSans" {
+        return "IBM Plex Sans".into();
+    }
+    if family == ".ZedMono" {
+        return "Lilex".into();
+    }
+    for choice in UI_FONTS.iter().chain(CODE_FONTS.iter()) {
+        if choice.family == family {
+            return choice.label.into();
+        }
+    }
+    family.to_string()
 }
 
 /// Current font families as a struct (for the settings UI).
@@ -892,6 +1170,888 @@ const DISCORD: Palette = Palette {
     trough: 0x1A1A1E,
 };
 
+/// Catppuccin — ported from OpenChamber's `catppuccin-dark`.
+const CATPPUCCIN: Palette = Palette {
+    bg_main: 0x1E1E2E,
+    bg_sidebar: 0x2A273B,
+    bg_raised: 0x282841,
+    bg_hover: 0x2E2E42,
+    active: 0x44425C,
+    active_fg: 0xF4F2FF,
+    border: 0x35324A,
+    text: 0xCDD6F4,
+    text_2: 0x969CB1,
+    text_3: 0x72768A,
+    ok_green: 0xA6D189,
+    stop_red: 0xF38BA8,
+    stop_red_hover: 0xF5A0B8,
+    add_green: 0xA6D189,
+    del_red: 0xF38BA8,
+    accent: 0x7D8FFF,
+    menu_bg: 0x1E1E2E,
+    send_bg: 0x7D8FFF,
+    send_bg_hover: 0x9EA6DF,
+    send_fg: 0x1E1E2E,
+    assistant_text: 0xCDD6F4,
+    code_bg: 0x211F31,
+    code_text: 0xCDD6F4,
+    syn_string: 0xA6E3A1,
+    syn_number: 0xF38BA8,
+    syn_function: 0xB4BEFE,
+    syn_type: 0xF9E2AF,
+    syn_comment: 0xA6ADC8,
+    syn_literal: 0xF38BA8,
+    syn_meta: 0xF4B8E4,
+    syn_operator: 0xF38BA8,
+    tool_border: 0x35324A,
+    tool_meta: 0x969CB1,
+    ring_track: 0x282841,
+    ring_fill: 0xCDD6F4,
+    warn: 0xF4B8E4,
+    crit: 0xF38BA8,
+    trough: 0x26263F,
+};
+
+/// Dracula — ported from OpenChamber's `dracula-dark`.
+const DRACULA: Palette = Palette {
+    bg_main: 0x14151F,
+    bg_sidebar: 0x181926,
+    bg_raised: 0x161722,
+    bg_hover: 0x26283B,
+    active: 0x30334B,
+    active_fg: 0xFFFFFF,
+    border: 0x292A36,
+    text: 0xF8F8F2,
+    text_2: 0x7C7E9C,
+    text_3: 0x5D5E76,
+    ok_green: 0x50FA7B,
+    stop_red: 0xFF5555,
+    stop_red_hover: 0xFF7474,
+    add_green: 0x50FA7B,
+    del_red: 0xFF5555,
+    accent: 0xBD93F9,
+    menu_bg: 0x14151F,
+    send_bg: 0xBD93F9,
+    send_bg_hover: 0xA480D8,
+    send_fg: 0x14151F,
+    assistant_text: 0xF8F8F2,
+    code_bg: 0x181926,
+    code_text: 0xF8F8F2,
+    syn_string: 0x50FA7B,
+    syn_number: 0xFF79C6,
+    syn_function: 0xBD93F9,
+    syn_type: 0xFFB86C,
+    syn_comment: 0xB6B9E4,
+    syn_literal: 0xFF79C6,
+    syn_meta: 0xFFB86C,
+    syn_operator: 0xFF79C6,
+    tool_border: 0x292A36,
+    tool_meta: 0x7C7E9C,
+    ring_track: 0x161722,
+    ring_fill: 0xF8F8F2,
+    warn: 0xFFB86C,
+    crit: 0xFF5555,
+    trough: 0x1F2030,
+};
+
+/// Gruvbox — ported from OpenChamber's `gruvbox-dark`.
+const GRUVBOX: Palette = Palette {
+    bg_main: 0x282828,
+    bg_sidebar: 0x32302F,
+    bg_raised: 0x25292B,
+    bg_hover: 0x534F42,
+    active: 0x535043,
+    active_fg: 0xFBF1C7,
+    border: 0x453F3B,
+    text: 0xEBDBB2,
+    text_2: 0x918574,
+    text_3: 0x72695D,
+    ok_green: 0xB8BB26,
+    stop_red: 0xFB4934,
+    stop_red_hover: 0xFC6A59,
+    add_green: 0xB8BB26,
+    del_red: 0xFB4934,
+    accent: 0x83A598,
+    menu_bg: 0x282828,
+    send_bg: 0x83A598,
+    send_bg_hover: 0x759287,
+    send_fg: 0x282828,
+    assistant_text: 0xEBDBB2,
+    code_bg: 0x32302F,
+    code_text: 0xEBDBB2,
+    syn_string: 0xB8BB26,
+    syn_number: 0xFB4934,
+    syn_function: 0x83A598,
+    syn_type: 0xFABD2F,
+    syn_comment: 0xA89984,
+    syn_literal: 0xFB4934,
+    syn_meta: 0xFABD2F,
+    syn_operator: 0xFB4934,
+    tool_border: 0x453F3B,
+    tool_meta: 0x918574,
+    ring_track: 0x25292B,
+    ring_fill: 0xEBDBB2,
+    warn: 0xFABD2F,
+    crit: 0xFB4934,
+    trough: 0x343230,
+};
+
+/// Nord — ported from OpenChamber's `nord-dark`.
+const NORD: Palette = Palette {
+    bg_main: 0x1F2430,
+    bg_sidebar: 0x222938,
+    bg_raised: 0x1C202A,
+    bg_hover: 0x313A46,
+    active: 0x3E4A56,
+    active_fg: 0xF8FAFC,
+    border: 0x383D49,
+    text: 0xE5E9F0,
+    text_2: 0x7C828E,
+    text_3: 0x606672,
+    ok_green: 0xA3BE8C,
+    stop_red: 0xBF616A,
+    stop_red_hover: 0xCB7D85,
+    add_green: 0xA3BE8C,
+    del_red: 0xBF616A,
+    accent: 0x88C0D0,
+    menu_bg: 0x1F2430,
+    send_bg: 0x88C0D0,
+    send_bg_hover: 0x78A9B8,
+    send_fg: 0x1F2430,
+    assistant_text: 0xE5E9F0,
+    code_bg: 0x222938,
+    code_text: 0xE5E9F0,
+    syn_string: 0xA3BE8C,
+    syn_number: 0xD57780,
+    syn_function: 0x88C0D0,
+    syn_type: 0xEAC196,
+    syn_comment: 0xA4ADBF,
+    syn_literal: 0xD57780,
+    syn_meta: 0xD08770,
+    syn_operator: 0xD57780,
+    tool_border: 0x383D49,
+    tool_meta: 0x7C828E,
+    ring_track: 0x1C202A,
+    ring_fill: 0xE5E9F0,
+    warn: 0xD08770,
+    crit: 0xBF616A,
+    trough: 0x252C3C,
+};
+
+/// Tokyonight — ported from OpenChamber's `tokyonight-dark`.
+const TOKYO_NIGHT: Palette = Palette {
+    bg_main: 0x0F111A,
+    bg_sidebar: 0x111428,
+    bg_raised: 0x131629,
+    bg_hover: 0x272E49,
+    active: 0x30313E,
+    active_fg: 0xEAEAFF,
+    border: 0x2D2F43,
+    text: 0xC0CAF5,
+    text_2: 0x8890B3,
+    text_3: 0x646A85,
+    ok_green: 0x9ECE6A,
+    stop_red: 0xF7768E,
+    stop_red_hover: 0xF88FA2,
+    add_green: 0x9ECE6A,
+    del_red: 0xF7768E,
+    accent: 0x7AA2F7,
+    menu_bg: 0x0F111A,
+    send_bg: 0x7AA2F7,
+    send_bg_hover: 0x6A8CD6,
+    send_fg: 0x0F111A,
+    assistant_text: 0xC0CAF5,
+    code_bg: 0x111428,
+    code_text: 0xC0CAF5,
+    syn_string: 0x9ECE6A,
+    syn_number: 0xFF9E64,
+    syn_function: 0xBB9AF7,
+    syn_type: 0xE0AF68,
+    syn_comment: 0x7A88CF,
+    syn_literal: 0xFF9E64,
+    syn_meta: 0xE0AF68,
+    syn_operator: 0xFF9E64,
+    tool_border: 0x2D2F43,
+    tool_meta: 0x8890B3,
+    ring_track: 0x131629,
+    ring_fill: 0xC0CAF5,
+    warn: 0xE0AF68,
+    crit: 0xF7768E,
+    trough: 0x15192B,
+};
+
+/// One Dark Pro — ported from OpenChamber's `onedarkpro-dark`.
+const ONE_DARK_PRO: Palette = Palette {
+    bg_main: 0x1E222A,
+    bg_sidebar: 0x212631,
+    bg_raised: 0x232832,
+    bg_hover: 0x323640,
+    active: 0x3A3E49,
+    active_fg: 0xF6F7FB,
+    border: 0x313848,
+    text: 0xABB2BF,
+    text_2: 0x737A89,
+    text_3: 0x5A606C,
+    ok_green: 0x98C379,
+    stop_red: 0xE06C75,
+    stop_red_hover: 0xE6868E,
+    add_green: 0x98C379,
+    del_red: 0xE06C75,
+    accent: 0x61AFEF,
+    menu_bg: 0x1E222A,
+    send_bg: 0x61AFEF,
+    send_bg_hover: 0x579AD1,
+    send_fg: 0x1E222A,
+    assistant_text: 0xABB2BF,
+    code_bg: 0x212631,
+    code_text: 0xABB2BF,
+    syn_string: 0x98C379,
+    syn_number: 0xE06C75,
+    syn_function: 0x61AFEF,
+    syn_type: 0xE5C07B,
+    syn_comment: 0x818899,
+    syn_literal: 0xE06C75,
+    syn_meta: 0xE5C07B,
+    syn_operator: 0xE06C75,
+    tool_border: 0x313848,
+    tool_meta: 0x737A89,
+    ring_track: 0x232832,
+    ring_fill: 0xABB2BF,
+    warn: 0xE5C07B,
+    crit: 0xE06C75,
+    trough: 0x272C37,
+};
+
+/// Monokai — ported from OpenChamber's `monokai-dark`.
+const MONOKAI: Palette = Palette {
+    bg_main: 0x23241E,
+    bg_sidebar: 0x282A20,
+    bg_raised: 0x21221A,
+    bg_hover: 0x36372A,
+    active: 0x434D3C,
+    active_fg: 0xFFFFFF,
+    border: 0x343528,
+    text: 0xF8F8F2,
+    text_2: 0x939390,
+    text_3: 0x71726E,
+    ok_green: 0xA6E22E,
+    stop_red: 0xF92672,
+    stop_red_hover: 0xFA4D8B,
+    add_green: 0xA6E22E,
+    del_red: 0xF92672,
+    accent: 0xAE81FF,
+    menu_bg: 0x23241E,
+    send_bg: 0xAE81FF,
+    send_bg_hover: 0x9973DD,
+    send_fg: 0x23241E,
+    assistant_text: 0xF8F8F2,
+    code_bg: 0x27281F,
+    code_text: 0xF8F8F2,
+    syn_string: 0xA6E22E,
+    syn_number: 0xF92672,
+    syn_function: 0xAE81FF,
+    syn_type: 0xFD971F,
+    syn_comment: 0xC5C5C0,
+    syn_literal: 0xF92672,
+    syn_meta: 0xFD971F,
+    syn_operator: 0xF92672,
+    tool_border: 0x343528,
+    tool_meta: 0x939390,
+    ring_track: 0x21221A,
+    ring_fill: 0xF8F8F2,
+    warn: 0xFD971F,
+    crit: 0xF92672,
+    trough: 0x303126,
+};
+
+/// Solarized — ported from OpenChamber's `solarized-dark`.
+const SOLARIZED_DARK: Palette = Palette {
+    bg_main: 0x001E25,
+    bg_sidebar: 0x02232E,
+    bg_raised: 0x052832,
+    bg_hover: 0x16333B,
+    active: 0x1E3B43,
+    active_fg: 0xFDF6E3,
+    border: 0x223A41,
+    text: 0x93A1A1,
+    text_2: 0x6F7475,
+    text_3: 0x515D60,
+    ok_green: 0x859900,
+    stop_red: 0xDC322F,
+    stop_red_hover: 0xE25754,
+    add_green: 0x859900,
+    del_red: 0xDC322F,
+    accent: 0x278BD2,
+    menu_bg: 0x001E25,
+    send_bg: 0x278BD2,
+    send_bg_hover: 0x5C65AC,
+    send_fg: 0x001F27,
+    assistant_text: 0x93A1A1,
+    code_bg: 0x022733,
+    code_text: 0x93A1A1,
+    syn_string: 0x859900,
+    syn_number: 0xD33682,
+    syn_function: 0x6C71C4,
+    syn_type: 0xB58900,
+    syn_comment: 0x6C7F80,
+    syn_literal: 0xD33682,
+    syn_meta: 0xB58900,
+    syn_operator: 0xD33682,
+    tool_border: 0x223A41,
+    tool_meta: 0x6F7475,
+    ring_track: 0x052832,
+    ring_fill: 0x93A1A1,
+    warn: 0xB58900,
+    crit: 0xDC322F,
+    trough: 0x062930,
+};
+
+/// Ayu — ported from OpenChamber's `ayu-dark`.
+const AYU_DARK: Palette = Palette {
+    bg_main: 0x0F1419,
+    bg_sidebar: 0x18222C,
+    bg_raised: 0x17202A,
+    bg_hover: 0x22262D,
+    active: 0x242830,
+    active_fg: 0xFBFBFD,
+    border: 0x292C30,
+    text: 0xD6DAE0,
+    text_2: 0x777E86,
+    text_3: 0x585E65,
+    ok_green: 0x78D05C,
+    stop_red: 0xF58572,
+    stop_red_hover: 0xF79B8B,
+    add_green: 0x78D05C,
+    del_red: 0xF58572,
+    accent: 0x3FB7E3,
+    menu_bg: 0x0F1419,
+    send_bg: 0x3FB7E3,
+    send_bg_hover: 0x389FC5,
+    send_fg: 0x0F1419,
+    assistant_text: 0xD6DAE0,
+    code_bg: 0x18222C,
+    code_text: 0xD6DAE0,
+    syn_string: 0xB1C74A,
+    syn_number: 0xF2856F,
+    syn_function: 0x3FB7E3,
+    syn_type: 0xE4A75C,
+    syn_comment: 0xA3ADBA,
+    syn_literal: 0xF2856F,
+    syn_meta: 0xE4A75C,
+    syn_operator: 0xF2856F,
+    tool_border: 0x292C30,
+    tool_meta: 0x777E86,
+    ring_track: 0x17202A,
+    ring_fill: 0xD6DAE0,
+    warn: 0xE4A75C,
+    crit: 0xF58572,
+    trough: 0x1E252D,
+};
+
+/// Kanagawa — ported from OpenChamber's `kanagawa-dark`.
+const KANAGAWA: Palette = Palette {
+    bg_main: 0x1F1F28,
+    bg_sidebar: 0x23232D,
+    bg_raised: 0x2A2A37,
+    bg_hover: 0x363646,
+    active: 0x303944,
+    active_fg: 0xDCD7BA,
+    border: 0x333343,
+    text: 0xDCD7BA,
+    text_2: 0x8B8B85,
+    text_3: 0x6B6B69,
+    ok_green: 0x98BB6C,
+    stop_red: 0xE82424,
+    stop_red_hover: 0xEC4B4B,
+    add_green: 0x98BB6C,
+    del_red: 0xE82424,
+    accent: 0x7FB4CA,
+    menu_bg: 0x1F1F28,
+    send_bg: 0x7FB4CA,
+    send_bg_hover: 0x9DC5E0,
+    send_fg: 0x1F1F28,
+    assistant_text: 0xDCD7BA,
+    code_bg: 0x16161D,
+    code_text: 0xDCD7BA,
+    syn_string: 0x98BB6C,
+    syn_number: 0xFF9E3B,
+    syn_function: 0xE6C384,
+    syn_type: 0xC8C093,
+    syn_comment: 0x54546D,
+    syn_literal: 0xFF9E3B,
+    syn_meta: 0xFF9E3B,
+    syn_operator: 0xC34043,
+    tool_border: 0x333343,
+    tool_meta: 0x8B8B85,
+    ring_track: 0x2A2A37,
+    ring_fill: 0xDCD7BA,
+    warn: 0xFF9E3B,
+    crit: 0xE82424,
+    trough: 0x2A2A36,
+};
+
+/// Aura — ported from OpenChamber's `aura-dark`.
+const AURA: Palette = Palette {
+    bg_main: 0x15141B,
+    bg_sidebar: 0x1A1921,
+    bg_raised: 0x201E2B,
+    bg_hover: 0x262835,
+    active: 0x2C2F3E,
+    active_fg: 0xFFFFFF,
+    border: 0x2A2935,
+    text: 0xEDECEE,
+    text_2: 0x8A8282,
+    text_3: 0x676163,
+    ok_green: 0x61FFCA,
+    stop_red: 0xFF6767,
+    stop_red_hover: 0xFF8282,
+    add_green: 0x61FFCA,
+    del_red: 0xFF6767,
+    accent: 0xA277FF,
+    menu_bg: 0x15141B,
+    send_bg: 0xA277FF,
+    send_bg_hover: 0x8D68DD,
+    send_fg: 0x15141B,
+    assistant_text: 0xEDECEE,
+    code_bg: 0x1A1921,
+    code_text: 0xEDECEE,
+    syn_string: 0x61FFCA,
+    syn_number: 0xFF6767,
+    syn_function: 0xA277FF,
+    syn_type: 0xFFCA85,
+    syn_comment: 0x6D6D6D,
+    syn_literal: 0xFF6767,
+    syn_meta: 0xFFCA85,
+    syn_operator: 0xFF6767,
+    tool_border: 0x2A2935,
+    tool_meta: 0x8A8282,
+    ring_track: 0x201E2B,
+    ring_fill: 0xEDECEE,
+    warn: 0xFFCA85,
+    crit: 0xFF6767,
+    trough: 0x25232F,
+};
+
+/// Carbonfox — ported from OpenChamber's `carbonfox-dark`.
+const CARBONFOX: Palette = Palette {
+    bg_main: 0x161616,
+    bg_sidebar: 0x222222,
+    bg_raised: 0x222222,
+    bg_hover: 0x262626,
+    active: 0x333333,
+    active_fg: 0xFFFFFF,
+    border: 0x2D2C2C,
+    text: 0xF2F4F8,
+    text_2: 0x8B8A8A,
+    text_3: 0x686767,
+    ok_green: 0x42BE65,
+    stop_red: 0xFF8389,
+    stop_red_hover: 0xFF999E,
+    add_green: 0x42BE65,
+    del_red: 0xFF8389,
+    accent: 0x33B1FF,
+    menu_bg: 0x161616,
+    send_bg: 0x33B1FF,
+    send_bg_hover: 0x2F9ADC,
+    send_fg: 0x161616,
+    assistant_text: 0xF2F4F8,
+    code_bg: 0x262626,
+    code_text: 0xF2F4F8,
+    syn_string: 0x42BE65,
+    syn_number: 0xFF8389,
+    syn_function: 0x78A9FF,
+    syn_type: 0x08BDBA,
+    syn_comment: 0x8D8D8D,
+    syn_literal: 0xFF8389,
+    syn_meta: 0xF1C21B,
+    syn_operator: 0xFF8389,
+    tool_border: 0x2D2C2C,
+    tool_meta: 0x8B8A8A,
+    ring_track: 0x222222,
+    ring_fill: 0xF2F4F8,
+    warn: 0xF1C21B,
+    crit: 0xFF8389,
+    trough: 0x292828,
+};
+
+/// Fields of the Shire — ported from OpenChamber's `fields-of-the-shire-dark`.
+const FIELDS_OF_THE_SHIRE: Palette = Palette {
+    bg_main: 0x1B1815,
+    bg_sidebar: 0x23201C,
+    bg_raised: 0x2B2622,
+    bg_hover: 0x332D28,
+    active: 0x35312D,
+    active_fg: 0xEBE0D1,
+    border: 0x35322F,
+    text: 0xEBE0D1,
+    text_2: 0x83796F,
+    text_3: 0x645C54,
+    ok_green: 0x7F905E,
+    stop_red: 0xB34D3B,
+    stop_red_hover: 0xC16D5E,
+    add_green: 0x7F905E,
+    del_red: 0xB34D3B,
+    accent: 0x7A8A5A,
+    menu_bg: 0x1B1815,
+    send_bg: 0x7A8A5A,
+    send_bg_hover: 0x93A56B,
+    send_fg: 0x0C0A08,
+    assistant_text: 0xEBE0D1,
+    code_bg: 0x23201C,
+    code_text: 0xEBE0D1,
+    syn_string: 0x93A56B,
+    syn_number: 0xC47A3A,
+    syn_function: 0xC47A3A,
+    syn_type: 0x7A8A5A,
+    syn_comment: 0x6A5E52,
+    syn_literal: 0xC47A3A,
+    syn_meta: 0xC47A3A,
+    syn_operator: 0xA89888,
+    tool_border: 0x35322F,
+    tool_meta: 0x83796F,
+    ring_track: 0x2B2622,
+    ring_fill: 0xEBE0D1,
+    warn: 0xC47A3A,
+    crit: 0xB34D3B,
+    trough: 0x282320,
+};
+
+/// Flexoki — ported from OpenChamber's `flexoki-dark`.
+const FLEXOKI: Palette = Palette {
+    bg_main: 0x171515,
+    bg_sidebar: 0x1C1B1A,
+    bg_raised: 0x1C1A19,
+    bg_hover: 0x2D2B2B,
+    active: 0x323030,
+    active_fg: 0xCECDC3,
+    border: 0x2B2A28,
+    text: 0xCECDC3,
+    text_2: 0x807E79,
+    text_3: 0x605E5B,
+    ok_green: 0xA0AF54,
+    stop_red: 0xD14D41,
+    stop_red_hover: 0xD96D63,
+    add_green: 0xA0AF54,
+    del_red: 0xD14D41,
+    accent: 0xDA702C,
+    menu_bg: 0x171515,
+    send_bg: 0xDA702C,
+    send_bg_hover: 0xDA702C,
+    send_fg: 0x171515,
+    assistant_text: 0xCECDC3,
+    code_bg: 0x1C1B1A,
+    code_text: 0xCECDC3,
+    syn_string: 0x3AA99F,
+    syn_number: 0x8B7EC8,
+    syn_function: 0xDA702C,
+    syn_type: 0xD0A215,
+    syn_comment: 0x878580,
+    syn_literal: 0x8B7EC8,
+    syn_meta: 0xDA702C,
+    syn_operator: 0xD14D41,
+    tool_border: 0x2B2A28,
+    tool_meta: 0x807E79,
+    ring_track: 0x1C1A19,
+    ring_fill: 0xCECDC3,
+    warn: 0xDA702C,
+    crit: 0xD14D41,
+    trough: 0x1E1D1C,
+};
+
+/// JetBrains — ported from OpenChamber's `jetbrains-dark`.
+const JETBRAINS: Palette = Palette {
+    bg_main: 0x1E1F22,
+    bg_sidebar: 0x26282B,
+    bg_raised: 0x2B2D30,
+    bg_hover: 0x3C3E41,
+    active: 0x43454A,
+    active_fg: 0xDFE1E5,
+    border: 0x383A3F,
+    text: 0xDFE1E5,
+    text_2: 0x9FA0A2,
+    text_3: 0x78797C,
+    ok_green: 0x57965D,
+    stop_red: 0xFA6675,
+    stop_red_hover: 0xFB828E,
+    add_green: 0x57965D,
+    del_red: 0xFA6675,
+    accent: 0x6796F5,
+    menu_bg: 0x1E1F22,
+    send_bg: 0x6796F5,
+    send_bg_hover: 0x70AEFF,
+    send_fg: 0x1E1F22,
+    assistant_text: 0xDFE1E5,
+    code_bg: 0x1E1F22,
+    code_text: 0xBCBEC4,
+    syn_string: 0x6AAB73,
+    syn_number: 0x2AACB8,
+    syn_function: 0x6AA2D7,
+    syn_type: 0xA6BB77,
+    syn_comment: 0x7A7E85,
+    syn_literal: 0x2AACB8,
+    syn_meta: 0xF2C55C,
+    syn_operator: 0xBCBEC4,
+    tool_border: 0x383A3F,
+    tool_meta: 0x9FA0A2,
+    ring_track: 0x2B2D30,
+    ring_fill: 0xDFE1E5,
+    warn: 0xF2C55C,
+    crit: 0xFA6675,
+    trough: 0x28292C,
+};
+
+/// Mono — ported from OpenChamber's `mono-dark`.
+const MONO: Palette = Palette {
+    bg_main: 0x000000,
+    bg_sidebar: 0x0A0A0A,
+    bg_raised: 0x141414,
+    bg_hover: 0x1F1F1F,
+    active: 0x1F1F1F,
+    active_fg: 0xE5E5E5,
+    border: 0x2F2F2F,
+    text: 0xE5E5E5,
+    text_2: 0x808080,
+    text_3: 0x5A5A5A,
+    ok_green: 0xE5E5E5,
+    stop_red: 0x666666,
+    stop_red_hover: 0x828282,
+    add_green: 0xE5E5E5,
+    del_red: 0x666666,
+    accent: 0xFFFFFF,
+    menu_bg: 0x000000,
+    send_bg: 0xFFFFFF,
+    send_bg_hover: 0xE5E5E5,
+    send_fg: 0x000000,
+    assistant_text: 0xE5E5E5,
+    code_bg: 0x0A0A0A,
+    code_text: 0xE5E5E5,
+    syn_string: 0xB3B3B3,
+    syn_number: 0x999999,
+    syn_function: 0xE5E5E5,
+    syn_type: 0xD9D9D9,
+    syn_comment: 0x666666,
+    syn_literal: 0x999999,
+    syn_meta: 0x999999,
+    syn_operator: 0x808080,
+    tool_border: 0x2F2F2F,
+    tool_meta: 0x808080,
+    ring_track: 0x141414,
+    ring_fill: 0xE5E5E5,
+    warn: 0x999999,
+    crit: 0x666666,
+    trough: 0x1A1A1A,
+};
+
+/// Mono Plus — ported from OpenChamber's `mono-plus-dark`.
+const MONO_PLUS: Palette = Palette {
+    bg_main: 0x000000,
+    bg_sidebar: 0x0A0A0A,
+    bg_raised: 0x141414,
+    bg_hover: 0x1F1F1F,
+    active: 0x1F1F1F,
+    active_fg: 0xE5E5E5,
+    border: 0x2F2F2F,
+    text: 0xE5E5E5,
+    text_2: 0x808080,
+    text_3: 0x5A5A5A,
+    ok_green: 0x6A8E6A,
+    stop_red: 0x9E6A6A,
+    stop_red_hover: 0xAF8585,
+    add_green: 0x6A8E6A,
+    del_red: 0x9E6A6A,
+    accent: 0xA2BEE8,
+    menu_bg: 0x000000,
+    send_bg: 0xA2BEE8,
+    send_bg_hover: 0xE5E5E5,
+    send_fg: 0x000000,
+    assistant_text: 0xE5E5E5,
+    code_bg: 0x0A0A0A,
+    code_text: 0xD4D4D4,
+    syn_string: 0xB6D8E6,
+    syn_number: 0xE3BDAD,
+    syn_function: 0xA2BEE8,
+    syn_type: 0xEDCBB8,
+    syn_comment: 0x8C8C8C,
+    syn_literal: 0xE3BDAD,
+    syn_meta: 0x9E8A6A,
+    syn_operator: 0xDCCDBE,
+    tool_border: 0x2F2F2F,
+    tool_meta: 0x808080,
+    ring_track: 0x141414,
+    ring_fill: 0xE5E5E5,
+    warn: 0x9E8A6A,
+    crit: 0x9E6A6A,
+    trough: 0x1A1A1A,
+};
+
+/// Night Owl — ported from OpenChamber's `nightowl-dark`.
+const NIGHT_OWL: Palette = Palette {
+    bg_main: 0x011627,
+    bg_sidebar: 0x0B253A,
+    bg_raised: 0x001122,
+    bg_hover: 0x233344,
+    active: 0x323F50,
+    active_fg: 0xFFFFFF,
+    border: 0x2B3339,
+    text: 0xD6DEEB,
+    text_2: 0x7D8892,
+    text_3: 0x586672,
+    ok_green: 0xC5E478,
+    stop_red: 0xEF5350,
+    stop_red_hover: 0xF27270,
+    add_green: 0xC5E478,
+    del_red: 0xEF5350,
+    accent: 0x82AAFF,
+    menu_bg: 0x011627,
+    send_bg: 0x82AAFF,
+    send_bg_hover: 0x6F94DF,
+    send_fg: 0x011627,
+    assistant_text: 0xD6DEEB,
+    code_bg: 0x0B253A,
+    code_text: 0xD6DEEB,
+    syn_string: 0xECC48D,
+    syn_number: 0xF78C6C,
+    syn_function: 0x82AAFF,
+    syn_type: 0xC5E478,
+    syn_comment: 0x5F7E97,
+    syn_literal: 0xF78C6C,
+    syn_meta: 0xECC48D,
+    syn_operator: 0xF78C6C,
+    tool_border: 0x2B3339,
+    tool_meta: 0x7D8892,
+    ring_track: 0x001122,
+    ring_fill: 0xD6DEEB,
+    warn: 0xECC48D,
+    crit: 0xEF5350,
+    trough: 0x162431,
+};
+
+/// OpenChamber — ported from OpenChamber's `openchamber-dark`.
+const OPEN_CHAMBER: Palette = Palette {
+    bg_main: 0x120F0E,
+    bg_sidebar: 0x171615,
+    bg_raised: 0x181715,
+    bg_hover: 0x23201F,
+    active: 0x312E2D,
+    active_fg: 0xC9C5BA,
+    border: 0x242323,
+    text: 0xC9C5BA,
+    text_2: 0x8F8B81,
+    text_3: 0x6A665E,
+    ok_green: 0x76AD4F,
+    stop_red: 0xDA5B4A,
+    stop_red_hover: 0xE1796B,
+    add_green: 0x76AD4F,
+    del_red: 0xDA5B4A,
+    accent: 0xDA7C47,
+    menu_bg: 0x120F0E,
+    send_bg: 0xDA7C47,
+    send_bg_hover: 0xEB8C57,
+    send_fg: 0x000000,
+    assistant_text: 0xC9C5BA,
+    code_bg: 0x120F0E,
+    code_text: 0xC9C5BA,
+    syn_string: 0xD58373,
+    syn_number: 0x279E93,
+    syn_function: 0x78A952,
+    syn_type: 0x479CB1,
+    syn_comment: 0x728772,
+    syn_literal: 0x279E93,
+    syn_meta: 0xC67F13,
+    syn_operator: 0xDA6B6D,
+    tool_border: 0x242323,
+    tool_meta: 0x8F8B81,
+    ring_track: 0x181715,
+    ring_fill: 0xC9C5BA,
+    warn: 0xC67F13,
+    crit: 0xDA5B4A,
+    trough: 0x171616,
+};
+
+/// Vesper — ported from OpenChamber's `vesper-dark`.
+const VESPER: Palette = Palette {
+    bg_main: 0x151515,
+    bg_sidebar: 0x1C1B1B,
+    bg_raised: 0x242121,
+    bg_hover: 0x2F2F2F,
+    active: 0x343333,
+    active_fg: 0xFFFFFF,
+    border: 0x373636,
+    text: 0xE8E5E5,
+    text_2: 0x848484,
+    text_3: 0x636363,
+    ok_green: 0x99FFE4,
+    stop_red: 0xFF8080,
+    stop_red_hover: 0xFF9797,
+    add_green: 0x99FFE4,
+    del_red: 0xFF8080,
+    accent: 0xFFC799,
+    menu_bg: 0x151515,
+    send_bg: 0xFFC799,
+    send_bg_hover: 0xDBAC84,
+    send_fg: 0x101010,
+    assistant_text: 0xE8E5E5,
+    code_bg: 0x141414,
+    code_text: 0xFFFFFF,
+    syn_string: 0x99FFE4,
+    syn_number: 0xFF8080,
+    syn_function: 0xFFC799,
+    syn_type: 0xFFC799,
+    syn_comment: 0xA0A0A0,
+    syn_literal: 0xFF8080,
+    syn_meta: 0xFFC799,
+    syn_operator: 0xFF8080,
+    tool_border: 0x373636,
+    tool_meta: 0x848484,
+    ring_track: 0x242121,
+    ring_fill: 0xE8E5E5,
+    warn: 0xFFC799,
+    crit: 0xFF8080,
+    trough: 0x1F1F1F,
+};
+
+/// Vitesse — ported from OpenChamber's `vitesse-dark-dark`.
+const VITESSE: Palette = Palette {
+    bg_main: 0x121212,
+    bg_sidebar: 0x171717,
+    bg_raised: 0x1A1A1A,
+    bg_hover: 0x232323,
+    active: 0x272727,
+    active_fg: 0xDBD7CA,
+    border: 0x313131,
+    text: 0xDBD7CA,
+    text_2: 0xC0BEB9,
+    text_3: 0x8C8A87,
+    ok_green: 0x4D9375,
+    stop_red: 0xCB7676,
+    stop_red_hover: 0xD48F8F,
+    add_green: 0x4D9375,
+    del_red: 0xCB7676,
+    accent: 0x4D9375,
+    menu_bg: 0x121212,
+    send_bg: 0x4D9375,
+    send_bg_hover: 0x4D9375,
+    send_fg: 0x121212,
+    assistant_text: 0xDBD7CA,
+    code_bg: 0x121212,
+    code_text: 0xDBD7CA,
+    syn_string: 0xC98A7D,
+    syn_number: 0x4C9A91,
+    syn_function: 0x80A665,
+    syn_type: 0x5D99A9,
+    syn_comment: 0x758575,
+    syn_literal: 0x4C9A91,
+    syn_meta: 0xD4976C,
+    syn_operator: 0xCB7676,
+    tool_border: 0x313131,
+    tool_meta: 0xC0BEB9,
+    ring_track: 0x1A1A1A,
+    ring_fill: 0xDBD7CA,
+    warn: 0xD4976C,
+    crit: 0xCB7676,
+    trough: 0x1E1E1E,
+};
+
 fn palette(id: ThemeId) -> Palette {
     match id {
         ThemeId::Orbit => ORBIT,
@@ -904,6 +2064,27 @@ fn palette(id: ThemeId) -> Palette {
         ThemeId::AdwaitaPastel => ADWAITA_PASTEL,
         ThemeId::Ashen => ASHEN,
         ThemeId::Discord => DISCORD,
+        ThemeId::Catppuccin => CATPPUCCIN,
+        ThemeId::Dracula => DRACULA,
+        ThemeId::Gruvbox => GRUVBOX,
+        ThemeId::Nord => NORD,
+        ThemeId::TokyoNight => TOKYO_NIGHT,
+        ThemeId::OneDarkPro => ONE_DARK_PRO,
+        ThemeId::Monokai => MONOKAI,
+        ThemeId::SolarizedDark => SOLARIZED_DARK,
+        ThemeId::AyuDark => AYU_DARK,
+        ThemeId::Kanagawa => KANAGAWA,
+        ThemeId::Aura => AURA,
+        ThemeId::Carbonfox => CARBONFOX,
+        ThemeId::FieldsOfTheShire => FIELDS_OF_THE_SHIRE,
+        ThemeId::Flexoki => FLEXOKI,
+        ThemeId::JetBrains => JETBRAINS,
+        ThemeId::Mono => MONO,
+        ThemeId::MonoPlus => MONO_PLUS,
+        ThemeId::NightOwl => NIGHT_OWL,
+        ThemeId::OpenChamber => OPEN_CHAMBER,
+        ThemeId::Vesper => VESPER,
+        ThemeId::Vitesse => VITESSE,
     }
 }
 
@@ -928,16 +2109,28 @@ impl Theme {
         self
     }
 
-    /// Scale an interface text size by the UI font-size setting
-    /// (`ui_font_size / 14`, the Waku default).
+    /// Scale an interface text size by the Interface Font Size setting
+    /// (`interface_scale / 100`).
     pub fn ui_px(&self, value: f32) -> Pixels {
-        px(value * (self.ui.ui_font_size / 14.))
+        px(value * (self.ui.interface_scale as f32 / 100.))
     }
 
-    /// Scale a code-surface size (code blocks, diffs, tool output) by the
-    /// code font-size setting (`code_font_size / 13`, the Waku default).
+    /// Scale an editor-surface size (code blocks, diffs) by the Editor font
+    /// size setting (`editor_font_size / 13`, the Waku default).
     pub fn code_px(&self, value: f32) -> Pixels {
-        px(value * (self.ui.code_font_size / 13.))
+        px(value * (self.ui.editor_font_size / 13.))
+    }
+
+    /// Scale a terminal/tool-output size by the Terminal font size setting
+    /// (`terminal_font_size / 13`, the Waku default).
+    pub fn term_px(&self, value: f32) -> Pixels {
+        px(value * (self.ui.terminal_font_size / 13.))
+    }
+
+    /// Scale a spacing value by the Spacing Density setting
+    /// (`spacing_density / 100`).
+    pub fn space(&self, value: f32) -> Pixels {
+        px(value * (self.ui.spacing_density as f32 / 100.))
     }
 
     /// Paint color for one syntax token, shared by transcript code blocks
@@ -1099,21 +2292,6 @@ pub fn get(cx: &App) -> &Theme {
     cx.global::<Theme>()
 }
 
-/// Cached list of available font families. Font availability doesn't change
-/// mid-run (bundled faces are registered at startup), so the CoreText
-/// enumeration happens once instead of on every settings render — the
-/// settings panel re-renders on every dropdown scroll tick, and enumerating
-/// all system fonts per frame is what made the theme/font selectors lag.
-static AVAILABLE_FONTS: OnceLock<Vec<String>> = OnceLock::new();
-
-/// Available font families (installed + bundled Zed faces) for the settings
-/// dropdowns.
-pub fn available_fonts(cx: &App) -> Vec<String> {
-    AVAILABLE_FONTS
-        .get_or_init(|| cx.text_system().all_font_names())
-        .clone()
-}
-
 /// Switch to a palette, persist the choice, and notify global observers.
 pub fn set_theme(cx: &mut App, id: ThemeId) {
     if get(cx).theme_id == id {
@@ -1171,7 +2349,10 @@ mod tests {
         assert_eq!(ThemeId::parse("obsidian-dark"), Some(ThemeId::Obsidian));
         assert_eq!(ThemeId::parse("obsidian"), Some(ThemeId::Obsidian));
         assert_eq!(ThemeId::parse("matte-black"), Some(ThemeId::MatteBlack));
-        assert_eq!(ThemeId::parse("matte-black-theme"), Some(ThemeId::MatteBlack));
+        assert_eq!(
+            ThemeId::parse("matte-black-theme"),
+            Some(ThemeId::MatteBlack)
+        );
         assert_eq!(
             ThemeId::parse("adwaita-pastel-dark"),
             Some(ThemeId::AdwaitaPastel)
@@ -1206,6 +2387,37 @@ mod tests {
         assert_eq!(ThemeId::Discord.label(), "Discord Dark");
     }
 
+    /// The full curated catalog (Waku's list) is selectable under its names.
+    #[test]
+    fn full_curated_theme_catalog_is_present() {
+        let labels: Vec<&str> = ThemeId::ALL.iter().map(|id| id.label()).collect();
+        for wanted in [
+            "Aura",
+            "Ayu",
+            "Carbonfox",
+            "Catppuccin",
+            "Dracula",
+            "Fields of the Shire",
+            "Flexoki",
+            "Gruvbox",
+            "JetBrains",
+            "Kanagawa",
+            "Mono",
+            "Mono Plus",
+            "Monokai",
+            "Night Owl",
+            "Nord",
+            "One Dark Pro",
+            "OpenChamber",
+            "Solarized",
+            "Tokyonight",
+            "Vesper",
+            "Vitesse",
+        ] {
+            assert!(labels.contains(&wanted), "missing theme {wanted}");
+        }
+    }
+
     /// Every palette must keep its foreground readable against the surfaces
     /// it is painted on — the ported Zed themes are normalised into the same
     /// contrast band as Orbit so none reads as washed out or blown out.
@@ -1229,14 +2441,23 @@ mod tests {
         }
         for id in ThemeId::ALL {
             let p = palette(id);
-            assert!(contrast(p.text, p.bg_main) >= 4.5, "{id:?}: body text on bg");
+            assert!(
+                contrast(p.text, p.bg_main) >= 4.5,
+                "{id:?}: body text on bg"
+            );
             assert!(
                 contrast(p.text, p.bg_raised) >= 3.5,
                 "{id:?}: body text on raised"
             );
             assert!(contrast(p.active_fg, p.active) >= 4.5, "{id:?}: active row");
-            assert!(contrast(p.text_2, p.bg_main) >= 3.0, "{id:?}: secondary text");
-            assert!(contrast(p.text_3, p.bg_main) >= 2.5, "{id:?}: tertiary text");
+            assert!(
+                contrast(p.text_2, p.bg_main) >= 3.0,
+                "{id:?}: secondary text"
+            );
+            assert!(
+                contrast(p.text_3, p.bg_main) >= 2.5,
+                "{id:?}: tertiary text"
+            );
             assert!(contrast(p.send_fg, p.send_bg) >= 4.5, "{id:?}: send button");
         }
     }
@@ -1262,30 +2483,50 @@ mod tests {
         use serde_json::json;
         let prefs = UiPrefs::from_value(&json!({
             "language": "en",
-            "ui_font_size": 22,
-            "code_font_size": 15,
+            "interface_scale": 500,
+            "terminal_font_size": 15,
+            "editor_font_size": 12,
+            "spacing_density": 100,
         }));
-        // 22 px isn't selectable — falls back to the default; 15 is valid.
+        // 500% isn't selectable — falls back to the default; the rest apply.
         assert_eq!(prefs.language, Language::English);
-        assert_eq!(prefs.ui_font_size, 14.);
-        assert_eq!(prefs.code_font_size, 15.);
+        assert_eq!(prefs.interface_scale, 100);
+        assert_eq!(prefs.terminal_font_size, 15.);
+        assert_eq!(prefs.editor_font_size, 12.);
+        assert_eq!(prefs.spacing_density, 100);
         // Malformed payload → all defaults.
         assert_eq!(
             UiPrefs::from_value(&json!({"language": 3})),
             UiPrefs::default()
         );
+        // Legacy px keys migrate onto the new percentage / px scales.
+        let legacy = UiPrefs::from_value(&json!({
+            "ui_font_size": 16,
+            "code_font_size": 15,
+        }));
+        assert_eq!(legacy.interface_scale, 115);
+        assert_eq!(legacy.editor_font_size, 15.);
     }
 
     #[test]
     fn font_scale_helpers() {
+        fn close(a: Pixels, b: Pixels) -> bool {
+            (f32::from(a) - f32::from(b)).abs() < 0.01
+        }
         let mut theme = Theme::dark();
         // Defaults are the Waku values — no scaling.
         assert_eq!(theme.ui_px(14.), px(14.));
         assert_eq!(theme.code_px(13.), px(13.));
-        theme.ui.ui_font_size = 16.;
-        theme.ui.code_font_size = 12.;
-        assert_eq!(theme.ui_px(14.), px(16.));
-        assert_eq!(theme.code_px(13.), px(12.));
+        assert_eq!(theme.term_px(13.), px(13.));
+        assert_eq!(theme.space(12.), px(12.));
+        theme.ui.interface_scale = 125;
+        theme.ui.editor_font_size = 11.;
+        theme.ui.terminal_font_size = 15.;
+        theme.ui.spacing_density = 75;
+        assert_eq!(theme.ui_px(14.), px(17.5));
+        assert!(close(theme.code_px(13.), px(11.)));
+        assert!(close(theme.term_px(13.), px(15.)));
+        assert_eq!(theme.space(10.), px(7.5));
         // A palette switch carries UI customization over.
         let light = Theme::for_id(ThemeId::OrbitLight).with_ui(theme.ui);
         assert_eq!(light.theme_id, ThemeId::OrbitLight);

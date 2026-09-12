@@ -15,12 +15,12 @@ use std::rc::Rc;
 
 use gpui::{
     div, prelude::*, px, relative, AnyElement, App, ElementId, FontWeight, IntoElement,
-    SharedString, Window,
+    MouseButton, SharedString, Window,
 };
 use gpui_component::chart::AreaChart;
 use gpui_component::plot::AXIS_GAP;
 
-use super::aggregate::{ChartMetric, TimeSeries};
+use super::aggregate::{ChartMetric, LatencyMetric, TimeSeries};
 use super::format;
 use crate::theme::Theme;
 
@@ -32,6 +32,35 @@ const MAX_X_LABELS: usize = 8;
 
 /// The page's hover callback: the bucket under the pointer, or nothing.
 type HoverFn = Rc<dyn Fn(Option<usize>, &mut Window, &mut App)>;
+/// The page's select callback: the bucket that was clicked (§9).
+type SelectFn = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+
+/// The plotted value of one bucket. Latency is the only metric whose register
+/// is user-switchable (§20); everything else reads straight off the totals.
+pub fn point_value(
+    metric: ChartMetric,
+    latency_metric: LatencyMetric,
+    point: &super::aggregate::SeriesPoint,
+) -> f64 {
+    if metric == ChartMetric::Latency {
+        latency_metric
+            .value(&point.latency)
+            .or_else(|| point.totals.avg_duration_ms())
+            .unwrap_or(0.0)
+    } else {
+        metric.value(&point.totals)
+    }
+}
+
+/// The formatted figure for a bucket, in the metric's own register — shared by
+/// the chart axis and the "View data" table so they always agree (§52).
+pub fn format_point(
+    metric: ChartMetric,
+    latency_metric: LatencyMetric,
+    point: &super::aggregate::SeriesPoint,
+) -> String {
+    axis_label(point_value(metric, latency_metric, point), metric)
+}
 
 /// One plotted point. The framework's chart takes an owned data set and two
 /// accessor closures, so the row is a plain value type.
@@ -81,17 +110,21 @@ pub fn timeline(
     id: &'static str,
     series: &TimeSeries,
     metric: ChartMetric,
+    latency_metric: LatencyMetric,
     hover: Option<usize>,
+    selected: Option<usize>,
     theme: Theme,
     on_hover: impl Fn(Option<usize>, &mut Window, &mut App) + 'static,
+    on_select: impl Fn(usize, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let values: Vec<f64> = series
         .points
         .iter()
-        .map(|bucket| metric.value(&bucket.totals))
+        .map(|point| point_value(metric, latency_metric, point))
         .collect();
-    let max = nice_max(series.max(metric));
+    let max = nice_max(values.iter().copied().fold(0.0, f64::max));
     let hover = hover.filter(|ix| *ix < values.len());
+    let selected = selected.filter(|ix| *ix < values.len());
     let count = values.len();
     let accent = theme.accent;
 
@@ -142,28 +175,34 @@ pub fn timeline(
                         .top(relative(fraction))
                         .right(px(8.))
                         .mt(-(line_h / 2.0))
-                        .child(axis_label(
-                            max * (step as f64 / 4.0),
-                            metric,
-                        ))
+                        .child(axis_label(max * (step as f64 / 4.0), metric))
                         .into_any_element()
                 })),
         );
 
-    // Hover targets: one flexible cell per bucket. Exact hit-testing with no
-    // pointer-to-data coordinate math, and cheap at ≤ 70 cells.
+    // Hover + click targets: one flexible cell per bucket. Exact hit-testing
+    // with no pointer-to-data coordinate math, and cheap at ≤ 70 cells.
     let on_hover: HoverFn = Rc::new(on_hover);
+    let on_select: SelectFn = Rc::new(on_select);
     let cells: Vec<AnyElement> = (0..count)
         .map(|ix| {
             let on_hover = on_hover.clone();
+            let on_select = on_select.clone();
             div()
-                .id(ElementId::NamedInteger("usage-chart-cell".into(), ix as u64))
+                .id(ElementId::NamedInteger(
+                    "usage-chart-cell".into(),
+                    ix as u64,
+                ))
                 .flex_1()
                 .h_full()
                 .on_hover(move |entered, window, cx| {
                     if *entered {
                         on_hover(Some(ix), window, cx);
                     }
+                })
+                // A click selects this bucket as the page's time scope (§9).
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    on_select(ix, window, cx);
                 })
                 .into_any_element()
         })
@@ -172,7 +211,7 @@ pub fn timeline(
 
     // The readout sits inside the plot so it can never escape the page, and
     // flips side with the bucket so it never covers the marker.
-    let tooltip = hover.map(|ix| readout(series, metric, ix, theme, count));
+    let tooltip = hover.map(|ix| readout(series, metric, latency_metric, ix, theme, count));
 
     let plot = div()
         .relative()
@@ -180,21 +219,21 @@ pub fn timeline(
         .min_w_0()
         .h(px(PLOT_H))
         .child(
-            div()
-                .absolute()
-                .inset_0()
-                .child(
-                    AreaChart::new(data)
-                        .x(|datum: &Datum| datum.label.clone())
-                        .y(|datum: &Datum| datum.value)
-                        .tick_margin(tick_margin)
-                        .stroke(accent)
-                        .fill(accent.opacity(0.14))
-                        // Buckets are discrete measurements; the framework's
-                        // default smoothing would imply values between them.
-                        .linear(),
-                ),
+            div().absolute().inset_0().child(
+                AreaChart::new(data)
+                    .x(|datum: &Datum| datum.label.clone())
+                    .y(|datum: &Datum| datum.value)
+                    .tick_margin(tick_margin)
+                    .stroke(accent)
+                    .fill(accent.opacity(0.14))
+                    // Buckets are discrete measurements; the framework's
+                    // default smoothing would imply values between them.
+                    .linear(),
+            ),
         )
+        // A selected bucket keeps a visible band so the active time scope is
+        // obvious even after the pointer leaves (§73).
+        .children(selected.map(|ix| selection_band(ix, count, theme)))
         // The framework's plot has no hover state of its own, so the page owns
         // the pointer: one invisible cell per bucket, plus a guide line and a
         // marker drawn by the plot's decoration overlay.
@@ -253,9 +292,30 @@ fn marker(ix: usize, count: usize, value: f64, max: f64, theme: Theme) -> AnyEle
         .into_any_element()
 }
 
+/// The selected bucket's band: a restrained accent wash behind the point.
+fn selection_band(ix: usize, count: usize, theme: Theme) -> AnyElement {
+    let fraction = (ix as f32 + 0.5) / count.max(1) as f32;
+    div()
+        .absolute()
+        .top_0()
+        .bottom(px(AXIS_GAP))
+        .left(relative(fraction))
+        .w(relative(1.0 / count.max(1) as f32))
+        .ml(relative(-0.5 / count.max(1) as f32))
+        .bg(theme.accent.opacity(0.10))
+        .into_any_element()
+}
+
 /// The hover readout. Every row is a real measurement from the bucket; the
 /// metric's own register decides which rows are worth showing.
-fn readout(series: &TimeSeries, metric: ChartMetric, ix: usize, theme: Theme, count: usize) -> AnyElement {
+fn readout(
+    series: &TimeSeries,
+    metric: ChartMetric,
+    latency_metric: LatencyMetric,
+    ix: usize,
+    theme: Theme,
+    count: usize,
+) -> AnyElement {
     let Some(bucket) = series.points.get(ix) else {
         return div().into_any_element();
     };
@@ -280,14 +340,23 @@ fn readout(series: &TimeSeries, metric: ChartMetric, ix: usize, theme: Theme, co
             rows.push(("Priced", format::exact(totals.priced_requests)));
         }
         ChartMetric::Latency => {
+            // The active register first, then the others when the bucket has
+            // enough observations for them to mean anything (§20).
+            let latency = &bucket.latency;
+            for choice in LatencyMetric::ALL {
+                if let Some(value) = choice.value(latency) {
+                    rows.push((
+                        latency_row_label(choice, choice == latency_metric),
+                        format::duration_ms(value),
+                    ));
+                } else if choice == LatencyMetric::Average {
+                    rows.push(("Average", "—".into()));
+                }
+            }
             rows.push((
-                "Average",
-                totals
-                    .avg_duration_ms()
-                    .map(format::duration_ms)
-                    .unwrap_or_else(|| "—".into()),
+                "Measured",
+                format::exact(latency.samples.max(totals.duration_samples)),
             ));
-            rows.push(("Measured", format::exact(totals.duration_samples)));
             rows.push(("Requests", format::exact(totals.requests)));
         }
         ChartMetric::Errors => {
@@ -297,15 +366,19 @@ fn readout(series: &TimeSeries, metric: ChartMetric, ix: usize, theme: Theme, co
         }
     }
     let footer = match metric {
-        ChartMetric::Tokens | ChartMetric::Input | ChartMetric::Output | ChartMetric::Cache => Some((
-            "Total",
-            format!(
-                "{} ({})",
-                format::compact(totals.tokens.total),
-                format::exact(totals.tokens.total)
-            ),
-        )),
-        ChartMetric::Errors => totals.error_rate().map(|rate| ("Failure rate", format::percent(rate))),
+        ChartMetric::Tokens | ChartMetric::Input | ChartMetric::Output | ChartMetric::Cache => {
+            Some((
+                "Total",
+                format!(
+                    "{} ({})",
+                    format::compact(totals.tokens.total),
+                    format::exact(totals.tokens.total)
+                ),
+            ))
+        }
+        ChartMetric::Errors => totals
+            .error_rate()
+            .map(|rate| ("Failure rate", format::percent(rate))),
         _ => None,
     };
 
@@ -347,13 +420,25 @@ fn readout(series: &TimeSeries, metric: ChartMetric, ix: usize, theme: Theme, co
         .child(body)
         .occlude();
     if on_left_half {
-        card.ml(px(12.))
-            .left(relative(fraction))
-            .into_any_element()
+        card.ml(px(12.)).left(relative(fraction)).into_any_element()
     } else {
         card.mr(px(12.))
             .right(relative(1.0 - fraction))
             .into_any_element()
+    }
+}
+
+/// Static labels for the latency readout, with the active register marked.
+fn latency_row_label(choice: LatencyMetric, shown: bool) -> &'static str {
+    match (choice, shown) {
+        (LatencyMetric::Average, false) => "Average",
+        (LatencyMetric::Average, true) => "Average (shown)",
+        (LatencyMetric::P50, false) => "P50",
+        (LatencyMetric::P50, true) => "P50 (shown)",
+        (LatencyMetric::P95, false) => "P95",
+        (LatencyMetric::P95, true) => "P95 (shown)",
+        (LatencyMetric::P99, false) => "P99",
+        (LatencyMetric::P99, true) => "P99 (shown)",
     }
 }
 
@@ -365,8 +450,18 @@ fn readout_row(label: &str, value: &str, theme: Theme) -> AnyElement {
         .gap(px(12.))
         .whitespace_nowrap()
         .text_size(theme.ui_px(11.5))
-        .child(div().flex_none().text_color(theme.text_3).child(label.to_string()))
-        .child(div().min_w_0().text_color(theme.text).child(value.to_string()))
+        .child(
+            div()
+                .flex_none()
+                .text_color(theme.text_3)
+                .child(label.to_string()),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .text_color(theme.text)
+                .child(value.to_string()),
+        )
         .into_any_element()
 }
 

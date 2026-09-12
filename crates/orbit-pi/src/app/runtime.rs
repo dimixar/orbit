@@ -1,5 +1,5 @@
-use super::*;
 use super::helpers::*;
+use super::*;
 
 impl OrbitApp {
     /// Record a status message; the status bar surfaces it briefly (see
@@ -18,7 +18,12 @@ impl OrbitApp {
     }
 
     /// Dismiss the current error banner.
-    pub(super) fn dismiss_error(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn dismiss_error(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.error = None;
         cx.notify();
     }
@@ -168,10 +173,7 @@ impl OrbitApp {
                     }
                 }
                 AuthEffect::CancelLogin(session_id) => {
-                    self.send(
-                        CommandBody::AuthCancel { session_id },
-                        "auth.cancel",
-                    );
+                    self.send(CommandBody::AuthCancel { session_id }, "auth.cancel");
                 }
                 AuthEffect::RefreshProviders => {
                     // The login/logout already took effect in pi; no restart
@@ -188,7 +190,13 @@ impl OrbitApp {
 
     /// Start a provider login through the RPC namespace. `method` comes from
     /// the provider's discovered capability, never a hardcoded flow.
-    pub(super) fn auth_start_login(&mut self, provider: String, name: String, method: String, cx: &mut Context<Self>) {
+    pub(super) fn auth_start_login(
+        &mut self,
+        provider: String,
+        name: String,
+        method: String,
+        cx: &mut Context<Self>,
+    ) {
         match self.auth.support() {
             AuthSupport::Unsupported => {
                 // pi has no auth RPC: hand the login to the Terminal the way

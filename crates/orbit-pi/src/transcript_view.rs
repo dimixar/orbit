@@ -20,9 +20,9 @@ use std::{
 };
 
 use gpui::{
-    deferred, div, img, linear_color_stop, linear_gradient, list, point, prelude::*, px,
-    svg, AnyElement, App, ClipboardItem, ElementId, Font, FontFeatures, FontStyle, FontWeight,
-    Hsla, ImageSource, InteractiveText, ObjectFit, Pixels, ScrollHandle, SharedString,
+    deferred, div, img, linear_color_stop, linear_gradient, list, point, prelude::*, px, svg,
+    AnyElement, App, ClipboardItem, ElementId, Font, FontFeatures, FontStyle, FontWeight, Hsla,
+    ImageSource, InteractiveText, ObjectFit, Pixels, ScrollHandle, SharedString,
     StrikethroughStyle, StyledText, TextAlign, TextRun, UnderlineStyle, Window,
 };
 
@@ -886,7 +886,7 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
         .flex()
         .flex_col()
         .items_start()
-        .gap(px(CONTENT_GAP));
+        .gap(theme.space(CONTENT_GAP));
 
     // The turn fold precedes the run's first work (Waku: collapsed turns
     // hide the pre-answer work behind a single "Worked for" divider).
@@ -1567,8 +1567,10 @@ fn render_detail_section(
     // full captured text, folded or not.
     let lines: Vec<&str> = content.split('\n').collect();
     let foldable = lines.len() > OUTPUT_COLLAPSE_LINES;
-    let expanded =
-        foldable && expanded_sections.borrow().contains(&(key.0, key.1, section));
+    let expanded = foldable
+        && expanded_sections
+            .borrow()
+            .contains(&(key.0, key.1, section));
     let visible: &[&str] = if foldable && !expanded {
         &lines[..OUTPUT_PREVIEW_LINES]
     } else if lines.len() > OUTPUT_EXPANDED_PAINT_LINES {
@@ -1641,8 +1643,8 @@ fn render_detail_section(
                         div()
                             .flex_none()
                             .font_family(theme::code_font_family())
-                            .text_size(theme.code_px(13.))
-                            .line_height(theme.code_px(20.))
+                            .text_size(theme.term_px(13.))
+                            .line_height(theme.term_px(20.))
                             .text_color(theme.text_3)
                             .child("$"),
                     )
@@ -1726,8 +1728,8 @@ fn render_detail_body(
         .flex_1()
         .min_w_0()
         .font_family(theme::code_font_family())
-        .text_size(theme.code_px(13.))
-        .line_height(theme.code_px(20.))
+        .text_size(theme.term_px(13.))
+        .line_height(theme.term_px(20.))
         .text_color(theme.code_text)
         .whitespace_normal()
         .flex()
@@ -1955,7 +1957,12 @@ fn usage_breakdown_card(usage: &MessageUsage, theme: Theme) -> AnyElement {
             format_tokens(usage.total),
             theme,
         ))
-        .child(usage_metric_row("icons/usage-cost.svg", "Cost", cost, theme))
+        .child(usage_metric_row(
+            "icons/usage-cost.svg",
+            "Cost",
+            cost,
+            theme,
+        ))
         .into_any_element()
 }
 
@@ -3012,35 +3019,30 @@ fn render_prose(
             }
         })
         .collect();
-    div()
-        .w_full()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .children(
-            blocks
-                .iter()
-                .enumerate()
-                .map(move |(block_ix, block)| {
-                    let gap = gaps[block_ix];
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .when(gap > 0.0, |node| node.mt(px(gap)))
-                        .child(render_block(
-                            block,
-                            ix,
-                            salt,
-                            block_ix,
-                            theme,
-                            copied_sections.clone(),
-                            expanded_blocks.clone(),
-                            collapsible,
-                            scroller.clone(),
-                        ))
-                })
-                .collect::<Vec<_>>(),
-        )
+    div().w_full().min_w_0().flex().flex_col().children(
+        blocks
+            .iter()
+            .enumerate()
+            .map(move |(block_ix, block)| {
+                let gap = gaps[block_ix];
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .when(gap > 0.0, |node| node.mt(px(gap)))
+                    .child(render_block(
+                        block,
+                        ix,
+                        salt,
+                        block_ix,
+                        theme,
+                        copied_sections.clone(),
+                        expanded_blocks.clone(),
+                        collapsible,
+                        scroller.clone(),
+                    ))
+            })
+            .collect::<Vec<_>>(),
+    )
 }
 
 /// Vertical space to place *above* `next`, given `prev`. More room above a
@@ -3653,23 +3655,21 @@ fn render_table(
     let align_at = |col: usize| aligns.get(col).copied().unwrap_or_default();
     let header_last = header.len().saturating_sub(1);
     let mut inner = div().flex_none().min_w_full().flex().flex_col();
-    inner = inner.child(
-        div().w_full().flex().bg(theme.overlay).children(
-            header.iter().enumerate().map(|(col, text)| {
-                make_cell(
-                    text,
-                    &widths,
-                    col,
-                    col == header_last,
-                    true,
-                    align_at(col),
-                    col,
-                    salt,
-                    theme,
-                )
-            }),
-        ),
-    );
+    inner = inner.child(div().w_full().flex().bg(theme.overlay).children(
+        header.iter().enumerate().map(|(col, text)| {
+            make_cell(
+                text,
+                &widths,
+                col,
+                col == header_last,
+                true,
+                align_at(col),
+                col,
+                salt,
+                theme,
+            )
+        }),
+    ));
     for (row_ix, row) in rows.iter().enumerate() {
         let row_last = row.len().saturating_sub(1);
         inner = inner.child(

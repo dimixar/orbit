@@ -1,5 +1,5 @@
-use super::*;
 use super::helpers::*;
+use super::*;
 
 impl OrbitApp {
     /// The filtered menu entries for the active trigger (empty when none).
@@ -381,7 +381,12 @@ impl OrbitApp {
     /// Files dropped anywhere on the window: images become attachments
     /// (thumbnail chips above the composer); anything else is referenced by
     /// path at the caret so the agent can read it with its tools.
-    pub(super) fn on_file_drop(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_file_drop(
+        &mut self,
+        paths: &ExternalPaths,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.file_drag_hovered = false;
         if self.settings_open {
             cx.notify();
@@ -499,12 +504,22 @@ impl OrbitApp {
         }
     }
 
-    pub(super) fn on_add_menu_next(&mut self, _: &crate::AddMenuNext, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_add_menu_next(
+        &mut self,
+        _: &crate::AddMenuNext,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.add_menu_highlight = (self.add_menu_highlight + 1) % ADD_MENU_ITEMS.len();
         cx.notify();
     }
 
-    pub(super) fn on_add_menu_prev(&mut self, _: &crate::AddMenuPrev, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_add_menu_prev(
+        &mut self,
+        _: &crate::AddMenuPrev,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.add_menu_highlight =
             (self.add_menu_highlight + ADD_MENU_ITEMS.len() - 1) % ADD_MENU_ITEMS.len();
         cx.notify();
@@ -529,7 +544,12 @@ impl OrbitApp {
     }
 
     /// Execute add-menu row `ix` (see [`ADD_MENU_ITEMS`]), then close.
-    pub(super) fn run_add_menu_item(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn run_add_menu_item(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.add_menu_open = false;
         self.add_menu_highlight = 0;
         match ix {

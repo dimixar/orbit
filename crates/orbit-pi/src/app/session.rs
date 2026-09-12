@@ -1,5 +1,5 @@
-use super::*;
 use super::helpers::*;
+use super::*;
 
 impl OrbitApp {
     pub(super) fn submit(&mut self, text: String, cx: &mut Context<Self>) {
@@ -200,7 +200,12 @@ impl OrbitApp {
         self.submit(text, cx);
     }
 
-    pub(super) fn on_send_click(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_send_click(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.commit_autocomplete_if_open(cx) {
             return;
         }
@@ -208,7 +213,12 @@ impl OrbitApp {
         self.submit(text, cx);
     }
 
-    pub(super) fn on_abort(&mut self, _: &crate::AbortRun, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_abort(
+        &mut self,
+        _: &crate::AbortRun,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Escape backs out of the topmost surface: the command palette (when
         // focus somehow sits outside it), the autocomplete menu first, then
         // settings, popovers, then a running agent.
@@ -282,7 +292,12 @@ impl OrbitApp {
         cx.notify();
     }
 
-    pub(super) fn on_abort_mouse(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_abort_mouse(
+        &mut self,
+        _: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.on_abort(&crate::AbortRun, window, cx);
     }
 
@@ -388,7 +403,12 @@ impl OrbitApp {
     /// transcript keep going in the background — events drain every tick),
     /// and a parked target resumes exactly where it left off. Idle sessions
     /// are torn down and reload from disk when reopened.
-    pub(super) fn switch_to_session(&mut self, session: SessionInfo, push: bool, cx: &mut Context<Self>) {
+    pub(super) fn switch_to_session(
+        &mut self,
+        session: SessionInfo,
+        push: bool,
+        cx: &mut Context<Self>,
+    ) {
         if self.current_session_path.as_ref() == Some(&session.path) {
             return;
         }
@@ -489,7 +509,12 @@ impl OrbitApp {
         self.switch_to_session(session, true, cx);
     }
 
-    pub(super) fn on_history_back(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_history_back(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.history_index > 0 {
             self.history_index -= 1;
             if let Some(session) = self.session_history.get(self.history_index).cloned() {
@@ -500,7 +525,12 @@ impl OrbitApp {
         cx.notify();
     }
 
-    pub(super) fn on_history_forward(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_history_forward(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.history_index + 1 < self.session_history.len() {
             self.history_index += 1;
             if let Some(session) = self.session_history.get(self.history_index).cloned() {
@@ -511,7 +541,12 @@ impl OrbitApp {
         cx.notify();
     }
 
-    pub(super) fn on_info_click(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_info_click(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // The top-bar info affordance shows the active session's details.
         self.session_details_open = !self.session_details_open;
         cx.notify();
@@ -529,7 +564,12 @@ impl OrbitApp {
 
     /// Top-bar GitHub affordance: same destination as the session-details
     /// **Commit or push** row.
-    pub(super) fn on_open_git_click(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_open_git_click(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.open_git(cx);
     }
 
@@ -810,12 +850,22 @@ impl OrbitApp {
             )
     }
 
-    pub(super) fn on_toggle_sidebar(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_toggle_sidebar(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.sidebar_visible = !self.sidebar_visible;
         cx.notify();
     }
 
-    pub(super) fn on_toggle_side_pane(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_toggle_side_pane(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.sidepane.update(cx, |pane, cx| pane.toggle(cx));
         cx.notify();
     }
@@ -845,11 +895,21 @@ impl OrbitApp {
         })
     }
 
-    pub(super) fn on_composer_click(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_composer_click(
+        &mut self,
+        _: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.input.read(cx).focus(window);
     }
 
-    pub(super) fn on_refresh(&mut self, _: &crate::RefreshSessions, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_refresh(
+        &mut self,
+        _: &crate::RefreshSessions,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.sessions = sessions::load_sessions();
         self.sync_session_menu(cx);
         // ⌘R on the Usage page refreshes the analytics too.
@@ -882,13 +942,23 @@ impl OrbitApp {
     /// `cmd-up` / `cmd-down`: jump between user turns — the keyboard mirror
     /// of the navigation rail. Jumping is also using the rail, so it
     /// dismisses the one-time rail hint.
-    pub(super) fn on_prev_turn(&mut self, _: &crate::PrevTurn, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_prev_turn(
+        &mut self,
+        _: &crate::PrevTurn,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.transcript.jump_turn(-1);
         self.transcript.dismiss_rail_hint();
         cx.notify();
     }
 
-    pub(super) fn on_next_turn(&mut self, _: &crate::NextTurn, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_next_turn(
+        &mut self,
+        _: &crate::NextTurn,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.transcript.jump_turn(1);
         self.transcript.dismiss_rail_hint();
         cx.notify();

@@ -15,19 +15,23 @@ use gpui::{
     FontWeight, Hsla, IntoElement, MouseButton, Render, SharedString, Window,
 };
 use gpui_component::table::Table;
-use gpui_component::{Size as KitSize, Sizable as _};
+use gpui_component::tooltip::Tooltip;
+use gpui_component::{Sizable as _, Size as KitSize};
 
 use super::aggregate::{
-    Breakdown, ChartMetric, Direction, GroupRow, Insight, LatencyStats, Tone, Totals,
-    UsageSnapshot,
+    Breakdown, ChartMetric, Direction, GroupRow, Insight, LatencyMetric, LatencyStats, Tone,
+    Totals, UsageSnapshot,
 };
 use super::chart;
 use super::filters::{self, FilterOption};
 use super::format;
-use super::model::{Granularity, RangePreset, TokenCounts, ToolClass, UsageFilter, UsageIndex};
-use super::page::{MenuKind, UsagePage};
-use crate::theme::{self, Theme};
+use super::model::{
+    next_bucket, Granularity, RangePreset, TimeFocus, TokenCounts, ToolClass, UsageFilter,
+    UsageIndex,
+};
+use super::page::{MenuKind, SessionQueryResult, UsagePage};
 use crate::app::icon;
+use crate::theme::{self, Theme};
 
 /// Inner column width for a data surface (§58): wide enough for a full table,
 /// narrow enough that the eye does not have to travel a metre.
@@ -42,7 +46,6 @@ const FOUR_KPI_MIN: f32 = 880.;
 /// the header, so a table never ends by cutting a row in half. All three scroll
 /// internally rather than growing without bound.
 const ROW_H: f32 = 26.;
-const SESSION_TABLE_H: f32 = ROW_H * 13.;
 const BUCKET_TABLE_H: f32 = ROW_H * 11.;
 const FAILURE_TABLE_H: f32 = ROW_H * 10.;
 /// Ranked rows per breakdown panel before the tail is pooled into "more".
@@ -90,7 +93,7 @@ impl Render for UsagePage {
                             .pb(px(56.))
                             .flex()
                             .flex_col()
-                            .children(self.scope_bar(theme, cx))
+                            .children(self.active_filter_bar(theme, cx))
                             .child(
                                 div()
                                     .w_full()
@@ -205,7 +208,9 @@ impl UsagePage {
             enabled,
             theme,
             move |_, window, cx| {
-                entity.update(cx, |page, cx| page.toggle_menu(MenuKind::Export, window, cx));
+                entity.update(cx, |page, cx| {
+                    page.toggle_menu(MenuKind::Export, window, cx)
+                });
             },
         );
         if !open {
@@ -328,41 +333,8 @@ impl UsagePage {
                 ));
         }
 
-        if filter.errors_only {
-            let entity = cx.entity();
-            bar = bar.child(filters::toggle_chip(
-                "usage-errors-only",
-                "Failed requests",
-                theme,
-                move |_, _, cx| {
-                    entity.update(cx, |page, cx| page.set_errors_only(false, cx));
-                },
-            ));
-        }
-        if filter.cached_only {
-            let entity = cx.entity();
-            bar = bar.child(filters::toggle_chip(
-                "usage-cached-only",
-                "Cached only",
-                theme,
-                move |_, _, cx| {
-                    entity.update(cx, |page, cx| page.set_cached_only(false, cx));
-                },
-            ));
-        }
-        if filter.has_narrowing() {
-            let entity = cx.entity();
-            bar = bar.child(div().flex_1()).child(filters::text_button(
-                "usage-clear-filters",
-                "Clear filters",
-                None,
-                true,
-                theme,
-                move |_, _, cx| {
-                    entity.update(cx, |page, cx| page.clear_filters(cx));
-                },
-            ));
-        }
+        // Active narrowings are shown once, as removable chips, under the
+        // filter row (§45); the filter row itself stays a set of controls.
         bar.into_any_element()
     }
 
@@ -400,13 +372,9 @@ impl UsagePage {
             },
         );
         if !open {
-            return filters::chip_with_menu(
-                id,
-                chip,
-                false,
-                Corner::TopLeft,
-                || div().into_any_element(),
-            );
+            return filters::chip_with_menu(id, chip, false, Corner::TopLeft, || {
+                div().into_any_element()
+            });
         }
         let entity = cx.entity();
         let panel = filters::multi_menu(self, kind, ranked, all, selected, cx, theme);
@@ -414,92 +382,146 @@ impl UsagePage {
         filters::chip_with_menu(id, chip, true, Corner::TopLeft, move || panel)
     }
 
-    /// Breadcrumb for the active scope (§68/§69), with the two ways out: clear
-    /// the scope, or open the session it names.
-    fn scope_bar(&self, theme: Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// The active-filter bar (§45): every narrowing filter as a removable
+    /// chip, so the user always knows why the numbers changed. Only shown when
+    /// something beyond the date range is applied.
+    fn active_filter_bar(&self, theme: Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let filter = self.filter();
         let index = self.index()?;
-        let mut crumbs: Vec<String> = Vec::new();
-        if let Some(session) = filter.session {
-            // A scope whose session just disappeared is cleared by the page's
-            // next prune; until then it simply contributes no crumb.
-            if let Some(entry) = index.try_session(session) {
-                crumbs.push(format!("Session: {}", session_title(entry)));
-            }
-        }
-        if filter.workspaces.len() == 1 {
-            if let Some(entry) = index.workspaces.get(filter.workspaces[0] as usize) {
-                crumbs.push(format!("Workspace: {}", entry.label));
-            }
-        }
-        if filter.models.len() == 1 {
-            if let Some(entry) = index.models.get(filter.models[0] as usize) {
-                crumbs.push(format!("Model: {}", entry.label));
-            }
-        }
-        if crumbs.is_empty() {
+        if !filter.has_narrowing() {
             return None;
         }
+        let mut chips: Vec<AnyElement> = Vec::new();
 
-        let mut bar = div()
-            .id("usage-scope")
-            .w_full()
-            .pt(px(16.))
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .text_size(theme.ui_px(11.5))
-            .child(
-                div()
-                    .text_color(theme.text_2)
-                    .font_weight(FontWeight::MEDIUM)
-                    .child("Usage"),
-            );
-        for crumb in crumbs {
-            bar = bar
-                .child(div().text_color(theme.text_3).child("/"))
-                .child(div().text_color(theme.text).child(crumb));
+        if let Some(focus) = filter.focus {
+            let entity = cx.entity();
+            chips.push(filters::toggle_chip(
+                "usage-chip-focus".to_string(),
+                focus.label(),
+                theme,
+                move |_, _, cx| {
+                    entity.update(cx, |page, cx| page.set_focus(None, cx));
+                },
+            ));
         }
         if let Some(session) = filter.session {
-            let entity = cx.entity();
-            bar = bar.child(
-                div()
-                    .id("usage-scope-open")
-                    .ml(px(4.))
-                    .px(px(6.))
-                    .h(px(20.))
-                    .rounded(px(5.))
-                    .flex()
-                    .items_center()
-                    .gap(px(4.))
-                    .cursor_pointer()
-                    .text_color(theme.text_2)
-                    .hover(|style| style.bg(theme.bg_hover).text_color(theme.text))
-                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                        entity.update(cx, |page, cx| page.open_session(window, cx, session));
-                    })
-                    .child("Open session")
-                    .child(icon("icons/arrow-up-right.svg", 10., theme.text_3)),
-            );
+            if let Some(entry) = index.try_session(session) {
+                let label = format!("Session: {}", session_title(entry));
+                let entity = cx.entity();
+                chips.push(filters::toggle_chip(
+                    "usage-chip-session".to_string(),
+                    label,
+                    theme,
+                    move |_, _, cx| {
+                        entity.update(cx, |page, cx| page.set_session_scope(None, cx));
+                    },
+                ));
+            }
         }
+        for id in filter.workspaces.iter().copied() {
+            let Some(entry) = index.workspaces.get(id as usize) else {
+                continue;
+            };
+            let entity = cx.entity();
+            chips.push(filters::toggle_chip(
+                format!("usage-chip-workspace-{id}"),
+                format!("Workspace: {}", entry.label),
+                theme,
+                move |_, _, cx| {
+                    entity.update(cx, |page, cx| {
+                        page.toggle_filter_value(MenuKind::Workspace, id, cx)
+                    });
+                },
+            ));
+        }
+        for id in filter.providers.iter().copied() {
+            let Some(entry) = index.providers.get(id as usize) else {
+                continue;
+            };
+            let entity = cx.entity();
+            chips.push(filters::toggle_chip(
+                format!("usage-chip-provider-{id}"),
+                format!("Provider: {}", entry.label),
+                theme,
+                move |_, _, cx| {
+                    entity.update(cx, |page, cx| {
+                        page.toggle_filter_value(MenuKind::Provider, id, cx)
+                    });
+                },
+            ));
+        }
+        for id in filter.models.iter().copied() {
+            let Some(entry) = index.models.get(id as usize) else {
+                continue;
+            };
+            let entity = cx.entity();
+            chips.push(filters::toggle_chip(
+                format!("usage-chip-model-{id}"),
+                format!("Model: {}", entry.label),
+                theme,
+                move |_, _, cx| {
+                    entity.update(cx, |page, cx| {
+                        page.toggle_filter_value(MenuKind::Model, id, cx)
+                    });
+                },
+            ));
+        }
+        if filter.errors_only {
+            let entity = cx.entity();
+            chips.push(filters::toggle_chip(
+                "usage-chip-errors".to_string(),
+                "Failed requests",
+                theme,
+                move |_, _, cx| {
+                    entity.update(cx, |page, cx| page.set_errors_only(false, cx));
+                },
+            ));
+        }
+        if filter.cached_only {
+            let entity = cx.entity();
+            chips.push(filters::toggle_chip(
+                "usage-chip-cached".to_string(),
+                "Cached only",
+                theme,
+                move |_, _, cx| {
+                    entity.update(cx, |page, cx| page.set_cached_only(false, cx));
+                },
+            ));
+        }
+
         let entity = cx.entity();
-        bar = bar.child(
-            div()
-                .id("usage-scope-clear")
-                .px(px(6.))
-                .h(px(20.))
-                .rounded(px(5.))
-                .flex()
-                .items_center()
-                .cursor_pointer()
-                .text_color(theme.text_3)
-                .hover(|style| style.bg(theme.bg_hover).text_color(theme.text_2))
-                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                    entity.update(cx, |page, cx| page.clear_filters(cx));
-                })
-                .child("Clear scope"),
+        let clear_all = filters::text_button(
+            "usage-chips-clear",
+            "Clear all",
+            None,
+            true,
+            theme,
+            move |_, _, cx| {
+                entity.update(cx, |page, cx| page.clear_filters(cx));
+            },
         );
-        Some(bar.into_any_element())
+
+        Some(
+            div()
+                .id("usage-active-filters")
+                .w_full()
+                .pt(px(14.))
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .pr(px(2.))
+                        .text_size(theme.ui_px(11.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_3)
+                        .child("FILTERS"),
+                )
+                .children(chips)
+                .child(clear_all)
+                .into_any_element(),
+        )
     }
 
     // ── page states ────────────────────────────────────────────────────────
@@ -585,8 +607,10 @@ impl UsagePage {
             return self.empty_store_state(theme, index.unreadable_files);
         }
 
-        let mut sections: Vec<AnyElement> =
-            vec![self.kpi_board(snapshot, theme, kpi_cols, cx), self.secondary_strip(snapshot, theme)];
+        let mut sections: Vec<AnyElement> = vec![
+            self.kpi_board(snapshot, theme, kpi_cols, cx),
+            self.secondary_strip(snapshot, theme),
+        ];
         if !snapshot.insights.is_empty() {
             sections.push(self.insights_panel(&snapshot.insights, theme));
         }
@@ -601,7 +625,7 @@ impl UsagePage {
             theme,
             cx,
         );
-        let composition = self.composition_panel(snapshot, theme);
+        let composition = self.composition_panel(snapshot, theme, cx);
         let workspace_panel = self.breakdown_panel(
             "workspace-usage",
             "Workspace usage",
@@ -731,7 +755,13 @@ impl UsagePage {
                     .flex_col()
                     .gap(px(12.))
                     .child(bar(140., 12.))
-                    .child(div().h(px(168.)).w_full().rounded(px(8.)).bg(theme.bg_raised)),
+                    .child(
+                        div()
+                            .h(px(168.))
+                            .w_full()
+                            .rounded(px(8.))
+                            .bg(theme.bg_raised),
+                    ),
             )
             .into_any_element()
     }
@@ -871,12 +901,15 @@ impl UsagePage {
                     .flex()
                     .flex_col()
                     .gap(px(7.))
-                    .when(row_ix > 0, |cell| cell.border_t_1().border_color(theme.border))
+                    .when(row_ix > 0, |cell| {
+                        cell.border_t_1().border_color(theme.border)
+                    })
                     .when(col_ix + 1 < chunk.len(), |cell| {
                         cell.border_r_1().border_color(theme.border)
                     })
                     .when(cell.click.is_some(), |cell| {
-                        cell.cursor_pointer().hover(|style| style.bg(theme.bg_hover))
+                        cell.cursor_pointer()
+                            .hover(|style| style.bg(theme.bg_hover))
                     })
                     .child(
                         div()
@@ -902,8 +935,10 @@ impl UsagePage {
                 if let Some(click) = cell.click {
                     element = element.on_mouse_down(MouseButton::Left, move |_, _, cx| {
                         entity.update(cx, |page, cx| match click {
+                            // Drill-down: jump to the failed requests, or point
+                            // the main chart at the metric the card names (§79).
                             KpiClick::ErrorsOnly => page.set_errors_only(true, cx),
-                            KpiClick::CachedOnly => page.set_cached_only(true, cx),
+                            KpiClick::Metric(metric) => page.set_metric(metric, cx),
                         });
                     });
                 }
@@ -911,12 +946,9 @@ impl UsagePage {
             }
             // Pad a short final row so its cells keep the grid's column widths.
             for _ in chunk.len()..cols {
-                row = row.child(
-                    div()
-                        .flex_1()
-                        .min_w(px(150.))
-                        .when(row_ix > 0, |cell| cell.border_t_1().border_color(theme.border)),
-                );
+                row = row.child(div().flex_1().min_w(px(150.)).when(row_ix > 0, |cell| {
+                    cell.border_t_1().border_color(theme.border)
+                }));
             }
             board = board.child(row);
         }
@@ -933,7 +965,7 @@ impl UsagePage {
             value: format::count(totals.requests),
             sub: delta_sub(snapshot, ChartMetric::Requests, "model requests in range"),
             tone: CellTone::Normal,
-            click: None,
+            click: Some(KpiClick::Metric(ChartMetric::Requests)),
         });
         cells.push(KpiCell {
             label: "Total tokens".into(),
@@ -943,14 +975,14 @@ impl UsagePage {
                 None => "no requests".into(),
             },
             tone: CellTone::Normal,
-            click: None,
+            click: Some(KpiClick::Metric(ChartMetric::Tokens)),
         });
         cells.push(KpiCell {
             label: "Input tokens".into(),
             value: format::compact(totals.tokens.input),
             sub: share_sub(totals.tokens.input, totals.tokens.total),
             tone: CellTone::Normal,
-            click: None,
+            click: Some(KpiClick::Metric(ChartMetric::Input)),
         });
         cells.push(KpiCell {
             label: "Output tokens".into(),
@@ -960,7 +992,7 @@ impl UsagePage {
                 _ => format!("{} reasoning", format::compact(totals.reasoning)),
             },
             tone: CellTone::Normal,
-            click: None,
+            click: Some(KpiClick::Metric(ChartMetric::Output)),
         });
         cells.push(match snapshot.cache.hit_rate {
             Some(rate) => KpiCell {
@@ -972,7 +1004,8 @@ impl UsagePage {
                     format::compact(snapshot.cache.cache_write)
                 ),
                 tone: CellTone::Normal,
-                click: (snapshot.cache.cache_read > 0).then_some(KpiClick::CachedOnly),
+                // Focus the cache analytics: plot cache volume over time.
+                click: Some(KpiClick::Metric(ChartMetric::Cache)),
             },
             None => KpiCell {
                 label: "Cache hit rate".into(),
@@ -996,7 +1029,7 @@ impl UsagePage {
                     format!("{} measured", format::count(snapshot.latency.samples))
                 },
                 tone: CellTone::Normal,
-                click: None,
+                click: Some(KpiClick::Metric(ChartMetric::Latency)),
             },
             None => KpiCell {
                 label: "Avg response".into(),
@@ -1048,7 +1081,7 @@ impl UsagePage {
             } else {
                 CellTone::Normal
             },
-            click: None,
+            click: (coverage > 0.0).then_some(KpiClick::Metric(ChartMetric::Cost)),
         });
         cells
     }
@@ -1060,7 +1093,10 @@ impl UsagePage {
         let mut items: Vec<(String, String)> = vec![
             ("Agent turns".into(), format::count(snapshot.summary.turns)),
             ("Sessions".into(), format::count(snapshot.summary.sessions)),
-            ("Tool calls".into(), format::count(snapshot.summary.tool_runs)),
+            (
+                "Tool calls".into(),
+                format::count(snapshot.summary.tool_runs),
+            ),
             (
                 "Bash commands".into(),
                 format::count(snapshot.summary.bash_runs),
@@ -1173,10 +1209,17 @@ impl UsagePage {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let metric = self.metric();
+        let latency_metric = self.latency_metric();
         let by = snapshot.series.granularity.label();
         let meta = match metric {
-            ChartMetric::Cost => format!("{} total · by {by}", format::cost(metric.total(&snapshot.summary.totals))),
-            ChartMetric::Latency => format!("average per bucket · by {by}"),
+            ChartMetric::Cost => format!(
+                "{} total · by {by}",
+                format::cost(metric.total(&snapshot.summary.totals))
+            ),
+            ChartMetric::Latency => format!(
+                "{} per bucket · by {by}",
+                latency_metric.label().to_lowercase()
+            ),
             _ => format!(
                 "{} total · by {by}",
                 format::compact(metric.total(&snapshot.summary.totals) as u64)
@@ -1238,24 +1281,135 @@ impl UsagePage {
             );
         }
 
+        // Latency register selector (§20): only offered when the window has
+        // enough observations for percentiles to be meaningful.
+        let latency_selector = (metric == ChartMetric::Latency).then(|| {
+            let mut segment = div()
+                .flex()
+                .items_center()
+                .gap(px(2.))
+                .p(px(2.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.bg_raised);
+            for choice in LatencyMetric::ALL {
+                let available = choice.available(&snapshot.latency);
+                let active = choice == latency_metric;
+                let entity = cx.entity();
+                segment = segment.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "usage-latency-{}",
+                            choice.as_str()
+                        )))
+                        .h(px(24.))
+                        .px(px(9.))
+                        .rounded(px(6.))
+                        .flex()
+                        .items_center()
+                        .text_size(theme.ui_px(11.5))
+                        .when(active, |tab| {
+                            tab.bg(theme.bg_main)
+                                .text_color(theme.text)
+                                .font_weight(FontWeight::MEDIUM)
+                        })
+                        .when(!active, |tab| tab.text_color(theme.text_3))
+                        .when(available && !active, |tab| {
+                            tab.cursor_pointer()
+                                .hover(|style| style.bg(theme.bg_hover).text_color(theme.text_2))
+                                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                    entity
+                                        .update(cx, |page, cx| page.set_latency_metric(choice, cx));
+                                })
+                        })
+                        .child(choice.label()),
+                );
+            }
+            segment.into_any_element()
+        });
+
+        // "View data" (§52): the same series as a precise table, so the chart's
+        // values are always available without hover.
+        let data_open = self.is_chart_data_open();
+        let view_data = filters::text_button(
+            "usage-view-data",
+            if data_open { "Hide data" } else { "View data" },
+            None,
+            true,
+            theme,
+            {
+                let entity = cx.entity();
+                move |_, _, cx| {
+                    entity.update(cx, |page, cx| page.toggle_chart_data(cx));
+                }
+            },
+        );
+
+        let controls = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(tabs)
+            .children(latency_selector)
+            .child(view_data);
+
         let hover = self.hover_bucket();
         let entity = cx.entity();
         let on_hover = move |bucket: Option<usize>, _: &mut Window, cx: &mut App| {
             entity.update(cx, |page, cx| page.set_hover_bucket(bucket, cx));
         };
 
-        let mut content = div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .child(chart::timeline(
-                "usage-timeline",
-                &snapshot.series,
-                metric,
-                hover,
-                theme,
-                on_hover,
-            ));
+        // Pre-compute each bucket's width so the click handler (which must be
+        // `'static`) can scope the page without touching the snapshot.
+        let granularity = snapshot.series.granularity;
+        let focus_points: Vec<TimeFocus> = snapshot
+            .series
+            .points
+            .iter()
+            .map(|point| TimeFocus {
+                start_ms: point.start_ms,
+                end_ms: next_bucket(point.start_ms, granularity),
+                granularity,
+            })
+            .collect();
+        let selected = self.filter().focus.and_then(|focus| {
+            snapshot
+                .series
+                .points
+                .iter()
+                .position(|p| p.start_ms == focus.start_ms)
+        });
+        let select_entity = cx.entity();
+        let on_select = move |ix: usize, _: &mut Window, cx: &mut App| {
+            let Some(focus) = focus_points.get(ix).copied() else {
+                return;
+            };
+            select_entity.update(cx, |page, cx| {
+                // Clicking the selected bucket again clears the scope (§73).
+                let next = if page.filter().focus == Some(focus) {
+                    None
+                } else {
+                    Some(focus)
+                };
+                page.set_focus(next, cx);
+            });
+        };
+
+        let mut content = div().w_full().flex().flex_col().child(chart::timeline(
+            "usage-timeline",
+            &snapshot.series,
+            metric,
+            latency_metric,
+            hover,
+            selected,
+            theme,
+            on_hover,
+            on_select,
+        ));
+        if data_open {
+            content = content.child(self.chart_data_table(snapshot, metric, latency_metric, theme));
+        }
         if snapshot.latency.samples > 0 {
             content = content.child(self.latency_line(snapshot, theme));
         }
@@ -1273,10 +1427,114 @@ impl UsagePage {
             "usage-timeline-section",
             "Usage over time",
             Some(meta),
-            Some(tabs.into_any_element()),
+            Some(controls.into_any_element()),
             content.into_any_element(),
             theme,
         )
+    }
+
+    /// The chart's data as a compact, precise table (§52).
+    fn chart_data_table(
+        &self,
+        snapshot: &UsageSnapshot,
+        metric: ChartMetric,
+        latency_metric: LatencyMetric,
+        theme: Theme,
+    ) -> AnyElement {
+        let mut body = div()
+            .id("usage-chart-data-body")
+            .flex()
+            .flex_col()
+            .max_h(px(240.))
+            .overflow_y_scroll();
+        let header = |label: &str, right: bool| {
+            div()
+                .when(right, |cell| cell.text_align(gpui::TextAlign::Right))
+                .text_size(theme.ui_px(10.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text_3)
+                .child(label.to_uppercase())
+                .into_any_element()
+        };
+        body = body.child(
+            div()
+                .w_full()
+                .px(px(4.))
+                .py(px(4.))
+                .border_b_1()
+                .border_color(theme.border)
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .child(div().flex_1().min_w_0().child(header("Time", false)))
+                .child(
+                    div()
+                        .w(px(90.))
+                        .flex_none()
+                        .child(header(metric.label(), true)),
+                )
+                .child(div().w(px(72.)).flex_none().child(header("Requests", true)))
+                .child(div().w(px(80.)).flex_none().child(header("Tokens", true))),
+        );
+        for point in &snapshot.series.points {
+            let row = |value: String, width: f32, color: Hsla, numeric: bool| {
+                div()
+                    .w(px(width))
+                    .flex_none()
+                    .when(numeric, |cell| cell.text_align(gpui::TextAlign::Right))
+                    .font(num_font())
+                    .text_size(theme.ui_px(11.))
+                    .text_color(color)
+                    .child(value)
+                    .into_any_element()
+            };
+            body = body.child(
+                div()
+                    .w_full()
+                    .px(px(4.))
+                    .py(px(3.))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text_2)
+                            .child(point.stamp.clone()),
+                    )
+                    .child(row(
+                        chart::format_point(metric, latency_metric, point),
+                        90.,
+                        theme.text,
+                        true,
+                    ))
+                    .child(row(
+                        format::exact(point.totals.requests),
+                        72.,
+                        theme.text_3,
+                        true,
+                    ))
+                    .child(row(
+                        format::compact(point.totals.tokens.total),
+                        80.,
+                        theme.text_3,
+                        true,
+                    )),
+            );
+        }
+        div()
+            .w_full()
+            .pt(px(8.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_raised)
+            .overflow_hidden()
+            .child(body)
+            .into_any_element()
     }
 
     /// Response-time readout (§36): average, then percentiles once there are
@@ -1345,7 +1603,9 @@ impl UsagePage {
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let rows = ranked_rows(breakdown, RANKED_ROWS);
+        let expanded = self.is_breakdown_expanded(id);
+        let limit = if expanded { usize::MAX } else { RANKED_ROWS };
+        let rows = ranked_rows(breakdown, limit);
         let mut content = div().flex().flex_col().gap(px(2.));
         if rows.is_empty() {
             content = content.child(empty_line("No usage in this range.", theme));
@@ -1353,7 +1613,37 @@ impl UsagePage {
         for row in rows {
             content = content.child(self.breakdown_row(&row, kind, theme, cx));
         }
-        section(id, title, Some(meta), None, content.into_any_element(), theme)
+        // Expand/collapse when the breakdown has more rows than the ranked top
+        // (§13/§15); the tail is never hidden without a way to see it.
+        let toggle = (breakdown.rows.len() > RANKED_ROWS).then(|| {
+            let entity = cx.entity();
+            filters::text_button(
+                match id {
+                    "model-usage" => "usage-model-expand",
+                    "workspace-usage" => "usage-workspace-expand",
+                    _ => "usage-provider-expand",
+                },
+                if expanded { "Show less" } else { "Show all" },
+                if expanded {
+                    Some("icons/chevron-up.svg")
+                } else {
+                    Some("icons/chevron-down.svg")
+                },
+                true,
+                theme,
+                move |_, _, cx| {
+                    entity.update(cx, |page, cx| page.toggle_breakdown(id, cx));
+                },
+            )
+        });
+        section(
+            id,
+            title,
+            Some(meta),
+            toggle,
+            content.into_any_element(),
+            theme,
+        )
     }
 
     fn breakdown_row(
@@ -1366,11 +1656,13 @@ impl UsagePage {
         let entity = cx.entity();
         let target = row.id;
         let clickable = target.is_some();
+        let tooltip = row.tooltip_text();
         div()
             .id(SharedString::from(format!(
                 "usage-breakdown-{kind}-{}",
                 row.label
             )))
+            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
             .px(px(8.))
             .py(px(5.))
             .rounded(px(6.))
@@ -1378,7 +1670,8 @@ impl UsagePage {
             .items_center()
             .gap(px(10.))
             .when(clickable, |line| {
-                line.cursor_pointer().hover(|style| style.bg(theme.bg_hover))
+                line.cursor_pointer()
+                    .hover(|style| style.bg(theme.bg_hover))
             })
             .child(
                 div()
@@ -1460,14 +1753,34 @@ impl UsagePage {
     /// Token composition: input / output / cache read / cache write, as one
     /// stacked bar plus its four rows. The four categories sum to the total,
     /// so nothing is double-counted (§23).
-    fn composition_panel(&self, snapshot: &UsageSnapshot, theme: Theme) -> AnyElement {
+    fn composition_panel(
+        &self,
+        snapshot: &UsageSnapshot,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let tokens = snapshot.summary.totals.tokens;
         let total = tokens.total;
-        let slices: [(&str, u64, Hsla); 4] = [
-            ("Input", tokens.input, theme.accent),
-            ("Output", tokens.output, theme.accent.opacity(0.62)),
-            ("Cache read", tokens.cache_read, theme.accent.opacity(0.40)),
-            ("Cache write", tokens.cache_write, theme.accent.opacity(0.22)),
+        let slices: [(&str, u64, Hsla, ChartMetric); 4] = [
+            ("Input", tokens.input, theme.accent, ChartMetric::Input),
+            (
+                "Output",
+                tokens.output,
+                theme.accent.opacity(0.62),
+                ChartMetric::Output,
+            ),
+            (
+                "Cache read",
+                tokens.cache_read,
+                theme.accent.opacity(0.40),
+                ChartMetric::Cache,
+            ),
+            (
+                "Cache write",
+                tokens.cache_write,
+                theme.accent.opacity(0.22),
+                ChartMetric::Cache,
+            ),
         ];
         let meta = if total == 0 {
             "no tokens in range".to_string()
@@ -1482,22 +1795,44 @@ impl UsagePage {
             .overflow_hidden()
             .flex()
             .bg(theme.trough);
-        for (_, value, color) in slices {
+        for (_, value, color, _) in slices {
             if value == 0 || total == 0 {
                 continue;
             }
-            stack = stack.child(div().h_full().w(relative(value as f32 / total as f32)).bg(color));
+            stack = stack.child(
+                div()
+                    .h_full()
+                    .w(relative(value as f32 / total as f32))
+                    .bg(color),
+            );
         }
 
         let mut content = div().flex().flex_col().gap(px(10.)).child(stack);
-        for (label, value, color) in slices {
+        for (label, value, color, metric) in slices {
+            // Clicking a component points the main chart at it (§19); hover
+            // surfaces the exact figure (§42).
+            let entity = cx.entity();
+            let share = if total == 0 {
+                "—".to_string()
+            } else {
+                format::share(value as f64 / total as f64)
+            };
+            let tooltip = format!("{label}: {} tokens · {share}", format::exact(value));
             content = content.child(
                 div()
+                    .id(SharedString::from(format!("usage-composition-{label}")))
+                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                     .px(px(8.))
                     .py(px(4.))
+                    .rounded(px(6.))
                     .flex()
                     .items_center()
                     .gap(px(10.))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.bg_hover))
+                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        entity.update(cx, |page, cx| page.set_metric(metric, cx));
+                    })
                     .child(div().size(px(8.)).rounded(px(2.)).flex_none().bg(color))
                     .child(
                         div()
@@ -1523,11 +1858,7 @@ impl UsagePage {
                             .text_size(theme.ui_px(11.5))
                             .text_color(theme.text_3)
                             .text_align(gpui::TextAlign::Right)
-                            .child(if total == 0 {
-                                "—".to_string()
-                            } else {
-                                format::share(value as f64 / total as f64)
-                            }),
+                            .child(share),
                     )
                     .into_any_element(),
             );
@@ -1633,27 +1964,23 @@ impl UsagePage {
         }
 
         content = content.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(2.))
-                .children(
-                    [
-                        ("Cache reads", format::compact(cache.cache_read)),
-                        ("Cache writes", format::compact(cache.cache_write)),
-                        ("Uncached input", format::compact(cache.uncached_input)),
-                        (
-                            "Requests served from cache",
-                            format!(
-                                "{} of {}",
-                                format::count(cache.cached_requests),
-                                format::count(snapshot.summary.totals.requests)
-                            ),
+            div().flex().flex_col().gap(px(2.)).children(
+                [
+                    ("Cache reads", format::compact(cache.cache_read)),
+                    ("Cache writes", format::compact(cache.cache_write)),
+                    ("Uncached input", format::compact(cache.uncached_input)),
+                    (
+                        "Requests served from cache",
+                        format!(
+                            "{} of {}",
+                            format::count(cache.cached_requests),
+                            format::count(snapshot.summary.totals.requests)
                         ),
-                    ]
-                    .into_iter()
-                    .map(|(label, value)| stat_row(label, &value, theme)),
-                ),
+                    ),
+                ]
+                .into_iter()
+                .map(|(label, value)| stat_row(label, &value, theme)),
+            ),
         );
 
         // Hit rate across the window: one bar per bucket, so a drop is visible.
@@ -1760,7 +2087,13 @@ impl UsagePage {
             .by_class
             .iter()
             .filter(|(_, count)| *count > 0)
-            .map(|(class, count)| (class.label().to_string(), *count, class_color(*class, theme)))
+            .map(|(class, count)| {
+                (
+                    class.label().to_string(),
+                    *count,
+                    class_color(*class, theme),
+                )
+            })
             .collect();
         let total: u64 = families.iter().map(|(_, count, _)| count).sum();
         let mut stack = div()
@@ -2009,55 +2342,240 @@ impl UsagePage {
     ) -> AnyElement {
         let (session_table, _) = self.tables(window, cx);
         self.sync_tables(cx);
+        let result = self.session_page(cx);
         let search = self.search().clone();
-        let shown = self.session_rows(cx).len();
-        let total = self
+        let all = self
             .snapshot()
             .map(|snapshot| snapshot.sessions.len())
             .unwrap_or(0);
-        let meta = if shown == total {
-            format!("{} sessions", format::count(total as u64))
+        let meta = if result.total == all {
+            format!("{} sessions", format::count(all as u64))
         } else {
             format!(
                 "{} of {} sessions",
-                format::count(shown as u64),
-                format::count(total as u64)
+                format::count(result.total as u64),
+                format::count(all as u64)
             )
         };
+
+        let search_box = div()
+            .w(px(232.))
+            .h(px(26.))
+            .px(px(8.))
+            .rounded(px(6.))
+            .bg(theme.bg_main)
+            .border_1()
+            .border_color(theme.border)
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(icon("icons/search.svg", 12., theme.text_3))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(theme.ui_px(12.))
+                    .child(search),
+            )
+            .into_any_element();
+        let header_right = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(search_box)
+            .child(self.columns_control(theme, cx));
+
+        // The viewport shows at most 20 rows; a page of 25+ scrolls within it,
+        // exactly like a desktop data grid (§38).
+        let visible_rows = result.page_size.min(20) as f32;
+        let table_h = ROW_H * visible_rows + 28.;
+        let footer = self.pagination_footer(&result, theme, cx);
 
         section(
             "usage-sessions",
             "Sessions",
             Some(meta),
-            Some(
-                div()
-                    .w(px(200.))
-                    .h(px(26.))
-                    .px(px(8.))
-                    .rounded(px(6.))
-                    .bg(theme.bg_main)
-                    .border_1()
-                    .border_color(theme.border)
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(icon("icons/search.svg", 12., theme.text_3))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(theme.ui_px(12.))
-                            .child(search),
-                    )
-                    .into_any_element(),
-            ),
+            Some(header_right.into_any_element()),
             div()
-                .h(px(SESSION_TABLE_H))
                 .w_full()
-                .child(table_element(&session_table))
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .h(px(table_h))
+                        .w_full()
+                        .child(table_element(&session_table)),
+                )
+                .children(self.totals_line(&result, theme))
+                .child(footer)
                 .into_any_element(),
             theme,
         )
+    }
+
+    /// The column-visibility control for the sessions table (§41).
+    fn columns_control(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.menu() == Some(MenuKind::Columns);
+        let entity = cx.entity();
+        let chip = filters::chip(
+            "usage-columns-chip",
+            "Columns".to_string(),
+            "icons/panel-right.svg",
+            !self.hidden_columns().is_empty(),
+            theme,
+            move |_, window, cx| {
+                entity.update(cx, |page, cx| {
+                    page.toggle_menu(MenuKind::Columns, window, cx)
+                });
+            },
+        );
+        if !open {
+            return filters::chip_with_menu(
+                "usage-columns-anchor",
+                chip,
+                false,
+                Corner::TopRight,
+                || div().into_any_element(),
+            );
+        }
+        let panel = filters::columns_menu(self, cx, theme);
+        filters::chip_with_menu(
+            "usage-columns-anchor",
+            chip,
+            true,
+            Corner::TopRight,
+            move || panel,
+        )
+    }
+
+    /// The footer summary (§53): totals over the whole filtered set, clearly
+    /// distinguished from the totals on the visible page.
+    fn totals_line(&self, result: &SessionQueryResult, theme: Theme) -> Option<AnyElement> {
+        let snapshot = self.snapshot()?;
+        let totals = &snapshot.summary.totals;
+        let page_requests: u64 = result.rows.iter().map(|row| row.totals.requests).sum();
+        let page_tokens: u64 = result.rows.iter().map(|row| row.totals.tokens.total).sum();
+
+        let mut filtered = format!(
+            "Filtered totals: {} requests · {} tokens",
+            format::count(totals.requests),
+            format::compact(totals.tokens.total)
+        );
+        if totals.cost_coverage() > 0.0 {
+            filtered.push_str(&format!(" · {}", format::cost(totals.cost_usd)));
+        }
+        let page = format!(
+            "this page: {} requests · {} tokens",
+            format::count(page_requests),
+            format::compact(page_tokens)
+        );
+
+        Some(
+            div()
+                .w_full()
+                .pt(px(8.))
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .text_size(theme.ui_px(10.5))
+                .child(div().text_color(theme.text_3).child(filtered))
+                .child(div().flex_1())
+                .child(div().text_color(theme.text_3).child(page))
+                .into_any_element(),
+        )
+    }
+
+    /// The sessions footer (§27/§75): range, rows-per-page, and page stepping.
+    fn pagination_footer(
+        &self,
+        result: &SessionQueryResult,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let pages = result.page_count();
+        let current = result.page;
+        let summary = if result.total == 0 {
+            "No sessions match".to_string()
+        } else {
+            format!(
+                "Showing {}–{} of {}",
+                format::count(result.first_row() as u64),
+                format::count(result.last_row() as u64),
+                format::count(result.total as u64)
+            )
+        };
+
+        let size_open = self.menu() == Some(MenuKind::PageSize);
+        let entity = cx.entity();
+        let size_chip = filters::chip(
+            "usage-page-size-chip",
+            result.page_size.to_string(),
+            "icons/chevron-down.svg",
+            false,
+            theme,
+            move |_, window, cx| {
+                entity.update(cx, |page, cx| {
+                    page.toggle_menu(MenuKind::PageSize, window, cx)
+                });
+            },
+        );
+        let size_panel = size_open.then(|| filters::page_size_menu(self, cx, theme));
+        let size_control = filters::chip_with_menu(
+            "usage-page-size-anchor",
+            size_chip,
+            size_open,
+            Corner::TopRight,
+            move || size_panel.unwrap_or_else(|| div().into_any_element()),
+        );
+
+        let prev = filters::text_button(
+            "usage-page-prev",
+            "Previous",
+            Some("icons/chevron-left.svg"),
+            current > 1,
+            theme,
+            {
+                let entity = cx.entity();
+                move |_, _, cx| {
+                    entity.update(cx, |page, cx| page.set_page(current.saturating_sub(1), cx));
+                }
+            },
+        );
+        let next = filters::text_button(
+            "usage-page-next",
+            "Next",
+            Some("icons/chevron-right.svg"),
+            current < pages,
+            theme,
+            {
+                let entity = cx.entity();
+                move |_, _, cx| {
+                    entity.update(cx, |page, cx| page.set_page(current + 1, cx));
+                }
+            },
+        );
+
+        div()
+            .w_full()
+            .pt(px(10.))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .text_size(theme.ui_px(11.5))
+            .child(div().text_color(theme.text_3).child(summary))
+            .child(div().flex_1())
+            .child(div().text_color(theme.text_3).child("Rows per page"))
+            .child(size_control)
+            .child(prev)
+            .child(
+                div()
+                    .px(px(4.))
+                    .font(num_font())
+                    .text_color(theme.text_2)
+                    .child(format!("{current} / {pages}")),
+            )
+            .child(next)
+            .into_any_element()
     }
 }
 
@@ -2182,7 +2700,12 @@ fn stat_row(label: &str, value: &str, theme: Theme) -> AnyElement {
         .items_center()
         .gap(px(12.))
         .text_size(theme.ui_px(11.5))
-        .child(div().flex_1().text_color(theme.text_3).child(label.to_string()))
+        .child(
+            div()
+                .flex_1()
+                .text_color(theme.text_3)
+                .child(label.to_string()),
+        )
         .child(
             div()
                 .font(num_font())
@@ -2244,11 +2767,30 @@ struct BreakdownRow {
     value: String,
     fraction: f64,
     color: fn(&Theme) -> Hsla,
+    /// Exact figures for the hover detail (§15/§16/§17).
+    requests: u64,
+    tokens: u64,
+    avg_tokens: Option<f64>,
 }
 
 impl BreakdownRow {
     fn color(&self, theme: &Theme) -> Hsla {
         (self.color)(theme)
+    }
+
+    /// A compact, exact hover readout.
+    fn tooltip_text(&self) -> String {
+        let mut text = format!(
+            "{} · {} requests · {} tokens",
+            self.label,
+            format::exact(self.requests),
+            format::exact(self.tokens)
+        );
+        if let Some(avg) = self.avg_tokens {
+            text.push_str(&format!(" · {} avg/request", format::compact(avg as u64)));
+        }
+        text.push_str(&format!(" · {}", format::share(self.fraction)));
+        text
     }
 }
 
@@ -2270,6 +2812,9 @@ fn ranked_rows(breakdown: &Breakdown, limit: usize) -> Vec<BreakdownRow> {
                 row.share
             },
             color: series_color(ix),
+            requests: row.totals.requests,
+            tokens: row.totals.tokens.total,
+            avg_tokens: row.totals.tokens_per_request(),
         });
     }
     let tail: Vec<&GroupRow> = breakdown.rows.iter().skip(limit).collect();
@@ -2291,6 +2836,9 @@ fn ranked_rows(breakdown: &Breakdown, limit: usize) -> Vec<BreakdownRow> {
                 0.0
             },
             color: |theme: &Theme| theme.text_3.opacity(0.5),
+            requests,
+            tokens,
+            avg_tokens: (requests > 0).then(|| tokens as f64 / requests as f64),
         });
     }
     rows
@@ -2402,7 +2950,11 @@ fn unavailable_reason(unavailable: &[&str]) -> String {
     if reasons.is_empty() {
         String::new()
     } else {
-        format!("{} not shown: {}", unavailable.join(", "), reasons.join("; "))
+        format!(
+            "{} not shown: {}",
+            unavailable.join(", "),
+            reasons.join("; ")
+        )
     }
 }
 
@@ -2424,8 +2976,10 @@ enum CellTone {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum KpiClick {
+    /// Focus the failures: show only failed requests.
     ErrorsOnly,
-    CachedOnly,
+    /// Point the main chart at the metric this card measures.
+    Metric(ChartMetric),
 }
 
 // ── export ─────────────────────────────────────────────────────────────────

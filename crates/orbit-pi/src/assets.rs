@@ -56,3 +56,41 @@ pub fn register_zed_fonts(cx: &mut gpui::App) -> anyhow::Result<()> {
     }
     cx.text_system().add_fonts(fonts)
 }
+
+/// Recursively collect every `.ttf` / `.otf` under an embedded directory.
+fn collect_fonts(dir: &Dir<'_>, out: &mut Vec<String>) {
+    for entry in dir.entries() {
+        if let Some(sub) = entry.as_dir() {
+            collect_fonts(sub, out);
+        } else if let Some(file) = entry.as_file() {
+            let path = file.path();
+            let is_font = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("ttf") || e.eq_ignore_ascii_case("otf"))
+                .unwrap_or(false);
+            if is_font {
+                out.push(path.to_string_lossy().into_owned());
+            }
+        }
+    }
+}
+
+/// Load Orbit's curated font catalog (`fonts/bundled/**`) so the Interface
+/// and Code font pickers can resolve every named family without an OS
+/// dependency. Call once at startup, after the Zed faces.
+pub fn register_bundled_fonts(cx: &mut gpui::App) -> anyhow::Result<()> {
+    let Some(dir) = ASSETS.get_dir("fonts/bundled") else {
+        return Ok(());
+    };
+    let mut paths = Vec::new();
+    collect_fonts(dir, &mut paths);
+    paths.sort();
+    let mut fonts = Vec::new();
+    for path in paths {
+        if let Some(bytes) = cx.asset_source().load(&path)? {
+            fonts.push(bytes);
+        }
+    }
+    cx.text_system().add_fonts(fonts)
+}

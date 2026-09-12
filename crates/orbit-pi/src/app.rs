@@ -28,18 +28,20 @@ use std::{
 use base64::Engine as _;
 use gpui::{
     anchored, deferred, div, img, linear_color_stop, linear_gradient, list, point, prelude::*, px,
-    radians, relative, svg, uniform_list,
-    AnchoredPositionMode, Animation, AnimationExt, AnyElement, App, ClipboardItem, Context, Corner,
-    CursorStyle, DragMoveEvent, ElementId, Entity, ExternalPaths, FocusHandle, Focusable,
-    FontWeight, Hsla, ImageSource, IntoElement, ListAlignment, ListState, MouseButton,
-    MouseDownEvent, MouseUpEvent, ObjectFit, Pixels, Render, SharedString,
-    StatefulInteractiveElement, Subscription, TextAlign, Transformation, Window, WindowControlArea,
+    radians, relative, svg, uniform_list, AnchoredPositionMode, Animation, AnimationExt,
+    AnyElement, App, ClipboardItem, Context, Corner, CursorStyle, DragMoveEvent, ElementId, Entity,
+    ExternalPaths, FocusHandle, Focusable, FontWeight, Hsla, ImageSource, IntoElement,
+    ListAlignment, ListState, MouseButton, MouseDownEvent, MouseUpEvent, ObjectFit, Pixels, Render,
+    SharedString, StatefulInteractiveElement, Subscription, TextAlign, Transformation, Window,
+    WindowControlArea,
 };
-use orbit_rpc::{CommandBody, ContextUsage, Event, PendingQueue, PiClient, SessionState, SessionUsage};
+use orbit_rpc::{
+    CommandBody, ContextUsage, Event, PendingQueue, PiClient, SessionState, SessionUsage,
+};
 use serde_json::Value;
 
-use crate::branch_picker::BranchPicker;
 use crate::auth::{AuthEffect, AuthManager, AuthSupport, LoginPhase, ProviderStatus};
+use crate::branch_picker::BranchPicker;
 use crate::checkpoint;
 use crate::command_palette::{self, CommandPalette, PaletteCommand, PaletteSnapshot};
 use crate::composer::ComposerInput;
@@ -49,7 +51,6 @@ use crate::mentions::{self, AcEntry, SharedAutocomplete, SlashCommand, Trigger, 
 use crate::model_selector::{
     provider_icon, thinking_display, thinking_icon, ModelSelector, PickerKind,
 };
-use crate::model_selector_match::is_model_selected;
 use crate::onboarding::{self, Dependency};
 use crate::platform::{self, ExternalApp};
 use crate::providers::{self, CustomProvider};
@@ -432,6 +433,8 @@ pub(crate) struct ModelEntry {
     pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) provider: String,
+    /// Provider-reported context window in tokens, when the catalog exposes it.
+    pub(crate) context_window: Option<u64>,
 }
 
 impl OrbitApp {
@@ -1032,12 +1035,13 @@ enum RuntimeState {
 enum SettingsSelect {
     Theme,
     Language,
-    UiFont,
-    CodeFont,
+    InterfaceScale,
+    TerminalFont,
+    EditorFont,
+    SpacingDensity,
     UiFontFamily,
     CodeFontFamily,
 }
-
 
 // ── feature modules ───────────────────────────────────────────────────────
 // `app.rs` keeps the `OrbitApp` model, the shared types, and the controller

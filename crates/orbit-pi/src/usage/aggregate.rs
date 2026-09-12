@@ -56,8 +56,7 @@ impl Totals {
     /// Average generation time in milliseconds, over requests that had a
     /// measurable duration. `None` when nothing was measurable.
     pub fn avg_duration_ms(&self) -> Option<f64> {
-        (self.duration_samples > 0)
-            .then(|| self.duration_ms as f64 / self.duration_samples as f64)
+        (self.duration_samples > 0).then(|| self.duration_ms as f64 / self.duration_samples as f64)
     }
 
     /// Average tokens per request.
@@ -305,21 +304,15 @@ pub struct SeriesPoint {
     /// Full timestamp for the tooltip header.
     pub stamp: String,
     pub totals: Totals,
+    /// Response-time distribution for this bucket, so the latency chart can
+    /// switch between average and percentiles without re-reading records.
+    pub latency: LatencyStats,
 }
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct TimeSeries {
     pub granularity: Granularity,
     pub points: Vec<SeriesPoint>,
-}
-
-impl TimeSeries {
-    pub fn max(&self, metric: ChartMetric) -> f64 {
-        self.points
-            .iter()
-            .map(|point| metric.value(&point.totals))
-            .fold(0.0, f64::max)
-    }
 }
 
 // ── breakdowns ─────────────────────────────────────────────────────────────
@@ -387,10 +380,17 @@ fn sorted_by_total(
 #[derive(Clone, PartialEq, Debug)]
 pub struct SessionRow {
     pub session: u16,
+    /// pi's own session id, for search, context-menu copy, and drill-down.
+    pub id: String,
     pub title: String,
     pub workspace: String,
+    /// Provider of the session's top model — searchable and shown as a cell.
+    pub provider: String,
+    pub provider_id: u16,
     /// The model with the most tokens in this session.
     pub top_model: String,
+    /// Interning id of [`Self::top_model`], for context-menu filtering.
+    pub top_model_id: Option<u16>,
     /// How many distinct models the session used.
     pub models: usize,
     /// Some request in this session reported cache traffic, so a zero here is
@@ -461,8 +461,7 @@ pub struct ToolRow {
 
 impl ToolRow {
     pub fn avg_duration_ms(&self) -> Option<f64> {
-        (self.duration_samples > 0)
-            .then(|| self.duration_ms as f64 / self.duration_samples as f64)
+        (self.duration_samples > 0).then(|| self.duration_ms as f64 / self.duration_samples as f64)
     }
 
     pub fn error_rate(&self) -> Option<f64> {
@@ -521,6 +520,66 @@ impl LatencyStats {
 
     pub fn has_percentiles(&self) -> bool {
         self.samples >= Self::MIN_SAMPLES
+    }
+}
+
+/// Which response-time register the latency chart plots (§20). Percentiles are
+/// only offered once there are enough observations to be meaningful.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LatencyMetric {
+    Average,
+    P50,
+    P95,
+    P99,
+}
+
+impl LatencyMetric {
+    pub const ALL: [Self; 4] = [Self::Average, Self::P50, Self::P95, Self::P99];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Average => "Average",
+            Self::P50 => "P50",
+            Self::P95 => "P95",
+            Self::P99 => "P99",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Average => "average",
+            Self::P50 => "p50",
+            Self::P95 => "p95",
+            Self::P99 => "p99",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.as_str() == raw.trim())
+    }
+
+    /// The plotted value for one bucket. Percentiles return `None` until the
+    /// bucket has [`LatencyStats::MIN_SAMPLES`] observations; the chart then
+    /// plots a real gap rather than a fabricated zero.
+    pub fn value(self, stats: &LatencyStats) -> Option<f64> {
+        if stats.samples == 0 {
+            return None;
+        }
+        match self {
+            Self::Average => Some(stats.avg_ms),
+            Self::P50 if stats.has_percentiles() => Some(stats.p50_ms as f64),
+            Self::P95 if stats.has_percentiles() => Some(stats.p95_ms as f64),
+            Self::P99 if stats.has_percentiles() => Some(stats.p99_ms as f64),
+            _ => None,
+        }
+    }
+
+    /// Whether the window as a whole supports this register.
+    pub fn available(self, stats: &LatencyStats) -> bool {
+        match self {
+            Self::Average => stats.samples > 0,
+            _ => stats.has_percentiles(),
+        }
     }
 }
 
@@ -597,10 +656,9 @@ impl UsageSnapshot {
         let mut effective_range = filter.range.clone();
         if filter.range.preset == RangePreset::All {
             if let Some((oldest, _)) = index.span() {
-                effective_range.start_ms = effective_range.start_ms.max(bucket_start(
-                    oldest,
-                    effective_range.granularity(),
-                ));
+                effective_range.start_ms = effective_range
+                    .start_ms
+                    .max(bucket_start(oldest, effective_range.granularity()));
             }
         }
         let mut summary = UsageSummary::default();
@@ -616,6 +674,9 @@ impl UsageSnapshot {
         let mut per_session_tools: HashMap<u16, (u64, u64)> = HashMap::new();
         let mut buckets: HashMap<i64, Totals> = HashMap::new();
         let mut durations: Vec<u32> = Vec::new();
+        // Durations per chart bucket, so the latency chart can switch between
+        // average and percentiles for the same points (§20).
+        let mut bucket_durations: HashMap<i64, Vec<u32>> = HashMap::new();
         let mut cache = CacheStats::default();
         let mut per_session_cache: std::collections::HashSet<u16> =
             std::collections::HashSet::new();
@@ -629,10 +690,7 @@ impl UsageSnapshot {
                 continue;
             }
             index.add_request(&mut summary.totals, record);
-            index.add_request(
-                models.entry(record.model).or_default(),
-                record,
-            );
+            index.add_request(models.entry(record.model).or_default(), record);
             index.add_request(
                 providers
                     .entry(index.model(record.model).provider)
@@ -651,14 +709,11 @@ impl UsageSnapshot {
                 .or_default()
                 .entry(record.model)
                 .or_default() += record.tokens.total;
-            index.add_request(
-                buckets
-                    .entry(bucket_start(record.ts_ms, series.granularity))
-                    .or_default(),
-                record,
-            );
+            let bucket = bucket_start(record.ts_ms, series.granularity);
+            index.add_request(buckets.entry(bucket).or_default(), record);
             if let Some(duration) = record.duration_ms {
                 durations.push(duration);
+                bucket_durations.entry(bucket).or_default().push(duration);
             }
             if record.tokens.cache_read > 0 || record.tokens.cache_write > 0 {
                 per_session_cache.insert(record.session);
@@ -728,11 +783,7 @@ impl UsageSnapshot {
             }
         }
         let mut tool_list: Vec<ToolRow> = tool_rows.into_values().collect();
-        tool_list.sort_by(|a, b| {
-            b.calls
-                .cmp(&a.calls)
-                .then_with(|| a.label.cmp(&b.label))
-        });
+        tool_list.sort_by(|a, b| b.calls.cmp(&a.calls).then_with(|| a.label.cmp(&b.label)));
 
         // Errors: provider failures come from the request records, tool
         // failures from the tool runs. `provider` is counted from the rows this
@@ -745,7 +796,7 @@ impl UsageSnapshot {
             rows: Vec::new(),
         };
         for row in &index.errors {
-            if !filter.range.contains(row.ts_ms) {
+            if !filter.matches_time(row.ts_ms) {
                 continue;
             }
             if filter.session.is_some_and(|only| row.session != only) {
@@ -792,24 +843,35 @@ impl UsageSnapshot {
             .map(|(session, totals)| {
                 let entry = index.session(session);
                 let model_totals = per_session_models.remove(&session).unwrap_or_default();
-                let top_model = model_totals
+                let top = model_totals
                     .iter()
                     .max_by_key(|(model, tokens)| (**tokens, **model))
-                    .map(|(model, _)| {
-                        let (provider, name) = index.model_pair(*model);
+                    .map(|(model, _)| *model);
+                let top_model = top
+                    .map(|model| {
+                        let (provider, name) = index.model_pair(model);
                         format!("{name} · {provider}")
                     })
                     .unwrap_or_else(|| "—".into());
-                let (tool_runs, tool_errors) = per_session_tools.remove(&session).unwrap_or_default();
+                let provider = top
+                    .map(|model| index.provider_of(model).label.clone())
+                    .unwrap_or_else(|| "—".into());
+                let provider_id = top.map(|model| index.model(model).provider).unwrap_or(0);
+                let (tool_runs, tool_errors) =
+                    per_session_tools.remove(&session).unwrap_or_default();
                 SessionRow {
                     session,
+                    id: entry.id.clone(),
                     title: if entry.title.is_empty() {
                         format!("Session {}", &entry.id.chars().take(8).collect::<String>())
                     } else {
                         entry.title.clone()
                     },
                     workspace: index.workspace_of_session(session).label.clone(),
+                    provider,
+                    provider_id,
                     top_model,
+                    top_model_id: top,
                     models: model_totals.len(),
                     cache_capable: per_session_cache.contains(&session),
                     started_ms: entry.started_ms,
@@ -828,21 +890,25 @@ impl UsageSnapshot {
                 .total
                 .cmp(&a.totals.tokens.total)
                 .then_with(|| a.title.cmp(&b.title))
-                .then_with(|| index.session(a.session).id.cmp(&index.session(b.session).id))
+                .then_with(|| {
+                    index
+                        .session(a.session)
+                        .id
+                        .cmp(&index.session(b.session).id)
+                })
         });
 
         // Breakdowns.
-        let models = breakdown(
-            models,
-            |id| {
-                let entry = index.model(id);
-                (
-                    entry.label.clone(),
-                    Some(index.provider_of(id).label.clone()),
-                )
-            },
-        );
-        let providers = breakdown(providers, |id| (index.providers[id as usize].label.clone(), None));
+        let models = breakdown(models, |id| {
+            let entry = index.model(id);
+            (
+                entry.label.clone(),
+                Some(index.provider_of(id).label.clone()),
+            )
+        });
+        let providers = breakdown(providers, |id| {
+            (index.providers[id as usize].label.clone(), None)
+        });
         let workspaces = breakdown(workspaces, |id| {
             let entry = &index.workspaces[id as usize];
             // The label is the folder's own name; the parent folder is the
@@ -858,11 +924,14 @@ impl UsageSnapshot {
         let mut guard = 0;
         while start < end && guard < 4_000 {
             let totals = buckets.remove(&start).unwrap_or_default();
+            let latency =
+                LatencyStats::from_samples(bucket_durations.remove(&start).unwrap_or_default());
             series.points.push(SeriesPoint {
                 start_ms: start,
                 label: bucket_label(start, granularity),
                 stamp: stamp_label(start, granularity),
                 totals,
+                latency,
             });
             start = next_bucket(start, granularity);
             guard += 1;
@@ -907,6 +976,9 @@ impl UsageSnapshot {
             .map(|prev| {
                 let previous_filter = UsageFilter {
                     range: prev,
+                    // The focus bucket lives inside the *current* window, so it
+                    // can never apply to a comparison against the window before.
+                    focus: None,
                     ..filter.clone()
                 };
                 summary_only(index, &previous_filter)
@@ -957,7 +1029,6 @@ impl UsageSnapshot {
             metric.total(&previous.totals),
         )
     }
-
 
     /// Nothing to show for this filter: no requests and no tool activity.
     ///
@@ -1032,9 +1103,9 @@ fn breakdown(
             share: 0.0,
         });
     }
-    breakdown.rows.sort_by(|a, b| {
-        sorted_by_total(&a.totals, &b.totals, &a.label, &b.label, a.id, b.id)
-    });
+    breakdown
+        .rows
+        .sort_by(|a, b| sorted_by_total(&a.totals, &b.totals, &a.label, &b.label, a.id, b.id));
     breakdown.finish();
     breakdown
 }
@@ -1114,7 +1185,11 @@ fn derive_insights(snapshot: &UsageSnapshot, index: &UsageIndex) -> Vec<Insight>
                             before,
                             now
                         ),
-                        tone: if change > 0.0 { Tone::Positive } else { Tone::Warning },
+                        tone: if change > 0.0 {
+                            Tone::Positive
+                        } else {
+                            Tone::Warning
+                        },
                     });
                 }
             }

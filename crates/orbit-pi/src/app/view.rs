@@ -1,6 +1,6 @@
-use super::*;
 use super::helpers::*;
 use super::sidebar::*;
+use super::*;
 
 impl Render for OrbitApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -58,8 +58,10 @@ impl Render for OrbitApp {
         let viewport = window.viewport_size();
         // The right side pane is hidden while settings/onboarding own the
         // main area (same rule as the sessions sidebar).
-        let pane_visible =
-            self.sidepane.read(cx).is_open() && !self.settings_open && !self.usage_open && self.dependencies_ready();
+        let pane_visible = self.sidepane.read(cx).is_open()
+            && !self.settings_open
+            && !self.usage_open
+            && self.dependencies_ready();
         let pane_width = if pane_visible {
             self.sidepane.read(cx).width()
         } else {
@@ -95,7 +97,8 @@ impl Render for OrbitApp {
         // its tables and grids never overflow the column it is given.
         if self.usage_open {
             let width = f32::from(main_width);
-            self.usage.update(cx, |page, cx| page.set_main_width(width, cx));
+            self.usage
+                .update(cx, |page, cx| page.set_main_width(width, cx));
         }
 
         // ── top-bar left controls: sidebar toggle + session history ──
@@ -336,7 +339,7 @@ impl Render for OrbitApp {
                                                 ix,
                                                 &this,
                                                 agent_running,
-                                                &                                                running_paths,
+                                                &running_paths,
                                                 session_menu.as_ref().as_ref(),
                                                 workspace_menu.as_ref().as_ref(),
                                                 *theme::get(cx),
@@ -535,16 +538,16 @@ impl Render for OrbitApp {
                                             })
                                             .rounded_xl()
                                             .shadow(theme.composer_shadow())
-                                            .px_3()
-                                            .pt_2()
-                                            .pb_2()
+                                            .px(theme.space(12.))
+                                            .pt(theme.space(8.))
+                                            .pb(theme.space(8.))
                                             // Base interface font for the input
                                             // (scales with the UI font-size
                                             // setting); the editor inherits it.
                                             .text_size(theme.ui_px(14.))
                                             .flex()
                                             .flex_col()
-                                            .gap_2()
+                                            .gap(theme.space(8.))
                                             .on_mouse_up(
                                                 MouseButton::Left,
                                                 cx.listener(Self::on_composer_click),
@@ -655,7 +658,11 @@ impl OrbitApp {
     /// fact on the left; model / thinking chips and the round send button on
     /// the right. `compact` (narrow window) drops the access pill and clamps
     /// the model label so Send always stays reachable.
-    pub(super) fn composer_row(&self, compact: bool, cx: &Context<Self>) -> impl IntoElement + use<> {
+    pub(super) fn composer_row(
+        &self,
+        compact: bool,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
         div()
             .flex()
             .items_center()
@@ -1502,7 +1509,11 @@ impl OrbitApp {
 
     /// Status bar under the composer: workspace / transport / branch on the
     /// left, used-context percent + ring on the right.
-    pub(super) fn status_bar(&self, workspace_label: &str, cx: &Context<Self>) -> impl IntoElement + use<> {
+    pub(super) fn status_bar(
+        &self,
+        workspace_label: &str,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
         let theme = *theme::get(cx);
         let cwd = self
             .current_workspace
@@ -1694,7 +1705,11 @@ impl OrbitApp {
     /// The quiet nav row under the primary button: opens the command
     /// palette. Ghost style — hover is the only affordance; the ⌘P hint
     /// mirrors the ⌘N hint on the button above.
-    pub(super) fn sidebar_search_row(&self, theme: Theme, cx: &Context<Self>) -> impl IntoElement + use<> {
+    pub(super) fn sidebar_search_row(
+        &self,
+        theme: Theme,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
         div()
             .id("sidebar-search")
             .w_full()
@@ -1730,7 +1745,12 @@ impl OrbitApp {
     }
 
     /// ⌘U: open the Usage page, or leave it if it is already open.
-    pub(super) fn on_toggle_usage(&mut self, _: &crate::ToggleUsage, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_toggle_usage(
+        &mut self,
+        _: &crate::ToggleUsage,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.usage_open {
             self.close_usage(cx);
         } else {
@@ -1741,7 +1761,11 @@ impl OrbitApp {
     /// Sidebar nav row for the Usage page — a destination, not an action, so
     /// it carries the same shape as Settings and marks the active state with
     /// an `active` fill rather than accent color alone.
-    pub(super) fn sidebar_usage_row(&self, theme: Theme, cx: &Context<Self>) -> impl IntoElement + use<> {
+    pub(super) fn sidebar_usage_row(
+        &self,
+        theme: Theme,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
         let active = self.usage_open;
         div()
             .id("sidebar-usage")
@@ -1755,14 +1779,15 @@ impl OrbitApp {
             .cursor_pointer()
             .when(active, |row| row.bg(theme.active))
             .hover(|s| s.bg(if active { theme.active } else { theme.bg_hover }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(Self::on_usage_nav_click),
-            )
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_usage_nav_click))
             .child(icon(
                 "icons/usage-total.svg",
                 13.,
-                if active { theme.active_fg } else { theme.text_3 },
+                if active {
+                    theme.active_fg
+                } else {
+                    theme.text_3
+                },
             ))
             .child(
                 div()
@@ -1770,7 +1795,11 @@ impl OrbitApp {
                     .min_w_0()
                     .truncate()
                     .text_size(theme.ui_px(12.5))
-                    .text_color(if active { theme.active_fg } else { theme.text_2 })
+                    .text_color(if active {
+                        theme.active_fg
+                    } else {
+                        theme.text_2
+                    })
                     .child("Usage"),
             )
     }
@@ -1844,13 +1873,7 @@ impl OrbitApp {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(
-                        div()
-                            .size(px(6.))
-                            .flex_none()
-                            .rounded_full()
-                            .bg(theme.warn),
-                    )
+                    .child(div().size(px(6.)).flex_none().rounded_full().bg(theme.warn))
                     .child(
                         div()
                             .flex_1()
@@ -2047,9 +2070,12 @@ impl OrbitApp {
                         .cursor_pointer()
                         .text_color(theme.text_2)
                         .hover(|s| s.bg(theme.overlay).text_color(theme.text))
-                        .on_mouse_up(MouseButton::Left, cx.listener(move |_, _, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
-                        }))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(move |_, _, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
+                            }),
+                        )
                         .child(icon("icons/copy.svg", 12., theme.text_2)),
                 )
                 .child(
@@ -2073,7 +2099,12 @@ impl OrbitApp {
 
     /// Discard the pending queue without aborting the run. The composer text
     /// stays untouched (unlike Escape, which restores queued text).
-    pub(super) fn on_clear_queue(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_clear_queue(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.restore_queue_on_clear = false;
         self.send(CommandBody::ClearQueue, "clear_queue");
         cx.notify();

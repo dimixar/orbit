@@ -596,7 +596,10 @@ pub fn context_control<V: 'static>(
 
     let popup_el: Option<AnyElement> = match popup {
         ContextPopup::None => None,
-        ContextPopup::Hover => Some(popup_above_ring(HOVER_W, compact_card(usage, session, theme))),
+        ContextPopup::Hover => Some(popup_above_ring(
+            HOVER_W,
+            compact_card(usage, session, theme),
+        )),
         ContextPopup::Details => {
             let close = this_close.clone();
             let outside = this_outside;

@@ -423,12 +423,14 @@ impl ComposerInput {
         let line_lens: Vec<usize> = self.last_lines.iter().map(|line| line.len()).collect();
         if let Some((i, local)) = line_at_offset(&self.last_line_starts, &line_lens, offset) {
             let line = &self.last_lines[i];
-            return line.position_for_index(local, line_height).unwrap_or_else(|| {
-                point(
-                    line.width(),
-                    line.wrap_boundaries().len() as f32 * line_height,
-                )
-            });
+            return line
+                .position_for_index(local, line_height)
+                .unwrap_or_else(|| {
+                    point(
+                        line.width(),
+                        line.wrap_boundaries().len() as f32 * line_height,
+                    )
+                });
         }
         point(px(0.), px(0.))
     }
@@ -634,8 +636,7 @@ fn line_at_offset(
         .zip(line_lens)
         .enumerate()
         .find_map(|(i, (&start, &len))| {
-            (offset <= start + len || i == last)
-                .then(|| (i, offset.saturating_sub(start).min(len)))
+            (offset <= start + len || i == last).then(|| (i, offset.saturating_sub(start).min(len)))
         })
 }
 

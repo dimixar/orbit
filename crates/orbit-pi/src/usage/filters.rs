@@ -19,7 +19,7 @@ use super::format;
 use super::model::{
     local_day_start, local_month_start, next_bucket, Granularity, RangePreset, UsageIndex,
 };
-use super::page::{ExportFormat, MenuKind, UsagePage};
+use super::page::{ExportFormat, MenuKind, SessionSort, UsagePage, PAGE_SIZES};
 use crate::theme::Theme;
 use crate::{app::icon, composer::ComposerInput};
 
@@ -67,24 +67,42 @@ pub fn chip(
     theme: Theme,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let foreground = if active { theme.active_fg } else { theme.text_2 };
+    let foreground = if active {
+        theme.active_fg
+    } else {
+        theme.text_2
+    };
     div()
         .id(ElementId::Name(SharedString::from(id)))
         .h(px(28.))
         .px(px(9.))
         .rounded(px(7.))
         .border_1()
-        .border_color(if active { theme.border_strong } else { theme.border })
-        .bg(if active { theme.active } else { theme.bg_raised })
+        .border_color(if active {
+            theme.border_strong
+        } else {
+            theme.border
+        })
+        .bg(if active {
+            theme.active
+        } else {
+            theme.bg_raised
+        })
         .flex()
         .items_center()
         .gap(px(6.))
         .cursor_pointer()
-        .hover(|style| {
-            style.bg(if active { theme.active } else { theme.bg_hover })
-        })
+        .hover(|style| style.bg(if active { theme.active } else { theme.bg_hover }))
         .on_mouse_down(MouseButton::Left, on_click)
-        .child(icon(icon_path, 12., if active { theme.active_fg } else { theme.text_3 }))
+        .child(icon(
+            icon_path,
+            12.,
+            if active {
+                theme.active_fg
+            } else {
+                theme.text_3
+            },
+        ))
         .child(
             div()
                 .max_w(px(180.))
@@ -93,7 +111,15 @@ pub fn chip(
                 .text_color(foreground)
                 .child(label),
         )
-        .child(icon("icons/chevron-down.svg", 10., if active { theme.active_fg } else { theme.text_3 }))
+        .child(icon(
+            "icons/chevron-down.svg",
+            10.,
+            if active {
+                theme.active_fg
+            } else {
+                theme.text_3
+            },
+        ))
 }
 
 /// The popover shell shared by every filter menu. A click outside closes it,
@@ -246,11 +272,7 @@ fn footer_row(
         .cursor_pointer()
         .text_size(theme.ui_px(11.5))
         .text_color(theme.text_3)
-        .hover(|style| {
-            style
-                .bg(theme.bg_hover)
-                .text_color(theme.text_2)
-        })
+        .hover(|style| style.bg(theme.bg_hover).text_color(theme.text_2))
         .on_mouse_down(MouseButton::Left, on_click)
         .child(label.to_string())
         .into_any_element()
@@ -309,43 +331,44 @@ pub fn multi_menu(
     let highlight = page.menu_highlight();
 
     let mut children: Vec<AnyElement> = vec![search_row(page.menu_query(), theme)];
-    let list: Vec<AnyElement> = std::iter::once((None, "All".to_string(), None::<String>, selected.is_empty()))
-        .chain(rows.iter().map(|option| {
-            (
-                Some(option.id),
-                option.label.clone(),
-                option.sub.clone(),
-                selected.contains(&option.id),
-            )
-        }))
-        .enumerate()
-        .map(|(ix, (id, label, sub, is_selected))| {
-            let entity = cx.entity();
-            let target = id;
-            row(
-                ElementId::NamedInteger("usage-menu-row".into(), ix as u64),
-                &label,
-                sub.as_deref(),
-                is_selected,
-                ix == highlight,
-                theme,
-                move |_, _, cx| {
-                    entity.update(cx, |page, cx| match target {
-                        Some(id) => page.toggle_filter_value(kind, id, cx),
-                        None => page.clear_dimension(kind, cx),
-                    });
-                },
-                {
-                    let entity = cx.entity();
-                    move |entered, _, cx| {
-                        if *entered {
-                            entity.update(cx, |page, cx| page.set_menu_highlight(ix, cx));
+    let list: Vec<AnyElement> =
+        std::iter::once((None, "All".to_string(), None::<String>, selected.is_empty()))
+            .chain(rows.iter().map(|option| {
+                (
+                    Some(option.id),
+                    option.label.clone(),
+                    option.sub.clone(),
+                    selected.contains(&option.id),
+                )
+            }))
+            .enumerate()
+            .map(|(ix, (id, label, sub, is_selected))| {
+                let entity = cx.entity();
+                let target = id;
+                row(
+                    ElementId::NamedInteger("usage-menu-row".into(), ix as u64),
+                    &label,
+                    sub.as_deref(),
+                    is_selected,
+                    ix == highlight,
+                    theme,
+                    move |_, _, cx| {
+                        entity.update(cx, |page, cx| match target {
+                            Some(id) => page.toggle_filter_value(kind, id, cx),
+                            None => page.clear_dimension(kind, cx),
+                        });
+                    },
+                    {
+                        let entity = cx.entity();
+                        move |entered, _, cx| {
+                            if *entered {
+                                entity.update(cx, |page, cx| page.set_menu_highlight(ix, cx));
+                            }
                         }
-                    }
-                },
-            )
-        })
-        .collect();
+                    },
+                )
+            })
+            .collect();
     children.push(
         div()
             .id("usage-menu-list")
@@ -385,8 +408,6 @@ pub fn multi_menu(
     panel("usage-filter-menu", 268., theme, children, page)
 }
 
-
-
 /// The export popover: the two things the page can write, and what each
 /// contains. Both respect the current filters.
 pub fn export_menu(cx: &mut gpui::Context<UsagePage>, theme: Theme) -> AnyElement {
@@ -424,12 +445,99 @@ pub fn export_menu(cx: &mut gpui::Context<UsagePage>, theme: Theme) -> AnyElemen
     panel("usage-export-menu", 268., theme, children, page)
 }
 
-/// The date-range menu: presets, then a compact calendar for custom windows.
-pub fn range_menu(
+/// The rows-per-page picker (§26): one choice, applied immediately.
+pub fn page_size_menu(
     page: &UsagePage,
     cx: &mut gpui::Context<UsagePage>,
     theme: Theme,
 ) -> AnyElement {
+    let current = page.page_size();
+    let mut children: Vec<AnyElement> = vec![menu_title("Rows per page", theme)];
+    for size in PAGE_SIZES {
+        let selected = size == current;
+        let entity = cx.entity();
+        children.push(row(
+            ElementId::NamedInteger("usage-page-size".into(), size as u64),
+            &size.to_string(),
+            None,
+            selected,
+            false,
+            theme,
+            move |_, _, cx| {
+                entity.update(cx, |page, cx| page.set_page_size(size, cx));
+            },
+            |_, _, _| {},
+        ));
+    }
+    let page = cx.entity();
+    panel("usage-page-size-menu", 180., theme, children, page)
+}
+
+/// The column-visibility picker (§41). The title column is fixed; every other
+/// column can be turned off, and the choice is persisted.
+pub fn columns_menu(
+    page: &UsagePage,
+    cx: &mut gpui::Context<UsagePage>,
+    theme: Theme,
+) -> AnyElement {
+    let mut children: Vec<AnyElement> = vec![menu_title("Columns", theme)];
+    // The display order of the table's own plan, minus the fixed title/open.
+    let columns: [SessionSort; 11] = [
+        SessionSort::Workspace,
+        SessionSort::Provider,
+        SessionSort::Model,
+        SessionSort::Started,
+        SessionSort::Duration,
+        SessionSort::Requests,
+        SessionSort::Input,
+        SessionSort::Output,
+        SessionSort::Cache,
+        SessionSort::Tokens,
+        SessionSort::Errors,
+    ];
+    for column in columns {
+        let selected = page.column_visible(column);
+        let entity = cx.entity();
+        children.push(row(
+            ElementId::Name(SharedString::from(format!(
+                "usage-column-{}",
+                column.as_str()
+            ))),
+            column.label(),
+            None,
+            selected,
+            false,
+            theme,
+            move |_, _, cx| {
+                entity.update(cx, |page, cx| page.toggle_column(column, cx));
+            },
+            |_, _, _| {},
+        ));
+    }
+    let entity = cx.entity();
+    let show_all = footer_row("usage-columns-all", "Show all", theme, move |_, _, cx| {
+        entity.update(cx, |page, cx| page.show_all_columns(cx));
+    });
+    children.push(menu_footer(theme, show_all, div().into_any_element()));
+    let page = cx.entity();
+    panel("usage-columns-menu", 220., theme, children, page)
+}
+
+/// A small heading at the top of a menu.
+fn menu_title(label: &str, theme: Theme) -> AnyElement {
+    div()
+        .px(px(12.))
+        .pt(px(8.))
+        .pb(px(4.))
+        .text_size(theme.ui_px(10.5))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(theme.text_3)
+        .child(label.to_uppercase())
+        .into_any_element()
+}
+
+/// The date-range menu: presets, then a compact calendar for custom windows.
+pub fn range_menu(page: &UsagePage, cx: &mut gpui::Context<UsagePage>, theme: Theme) -> AnyElement {
     let current = page.filter().range.clone();
     let mut children: Vec<AnyElement> = Vec::new();
     let mut rows: Vec<AnyElement> = Vec::new();
@@ -439,7 +547,10 @@ pub fn range_menu(
         // The custom row names the action, not the range it would replace.
         let label = preset.label().to_string();
         rows.push(row(
-            ElementId::Name(SharedString::from(format!("usage-range-{}", preset.as_str()))),
+            ElementId::Name(SharedString::from(format!(
+                "usage-range-{}",
+                preset.as_str()
+            ))),
             &label,
             preset_summary(preset),
             selected,
@@ -460,7 +571,14 @@ pub fn range_menu(
     }
     // The calendar appears in place once "Custom…" is chosen.
     if page.calendar_open() {
-        rows.push(div().h(px(1.)).mx(px(8.)).my(px(4.)).bg(theme.border).into_any_element());
+        rows.push(
+            div()
+                .h(px(1.))
+                .mx(px(8.))
+                .my(px(4.))
+                .bg(theme.border)
+                .into_any_element(),
+        );
         rows.push(calendar(page, cx, theme));
     }
     children.push(
@@ -491,7 +609,9 @@ fn preset_summary(preset: RangePreset) -> Option<&'static str> {
 /// A compact month calendar for the custom range. Two clicks set the window:
 /// the first is the start, the second the end (a reversed pair is normalised).
 fn calendar(page: &UsagePage, cx: &mut gpui::Context<UsagePage>, theme: Theme) -> AnyElement {
-    let month_ms = page.calendar_month().unwrap_or_else(|| page.filter().range.start_ms);
+    let month_ms = page
+        .calendar_month()
+        .unwrap_or_else(|| page.filter().range.start_ms);
     let first = local_month_start(month_ms);
     let (start, end) = page.custom_bounds();
     let today = local_day_start(super::collect::now_ms());
@@ -568,20 +688,21 @@ fn calendar(page: &UsagePage, cx: &mut gpui::Context<UsagePage>, theme: Theme) -
                 .child(icon("icons/chevron-right.svg", 12., theme.text_3)),
         );
 
-    let weekdays = div()
-        .flex()
-        .px(px(8.))
-        .pb(px(2.))
-        .children(["M", "T", "W", "T", "F", "S", "S"].map(|day| {
-            div()
-                .flex_1()
-                .flex()
-                .justify_center()
-                .text_size(theme.ui_px(10.))
-                .text_color(theme.text_3)
-                .child(day)
-                .into_any_element()
-        }));
+    let weekdays =
+        div()
+            .flex()
+            .px(px(8.))
+            .pb(px(2.))
+            .children(["M", "T", "W", "T", "F", "S", "S"].map(|day| {
+                div()
+                    .flex_1()
+                    .flex()
+                    .justify_center()
+                    .text_size(theme.ui_px(10.))
+                    .text_color(theme.text_3)
+                    .child(day)
+                    .into_any_element()
+            }));
 
     let mut grid = div().flex().flex_col().px(px(8.)).pb(px(6.));
     let day_ix = 1i64;
@@ -603,7 +724,10 @@ fn calendar(page: &UsagePage, cx: &mut gpui::Context<UsagePage>, theme: Theme) -
                 let entity = cx.entity();
                 week = week.child(
                     div()
-                        .id(ElementId::NamedInteger("usage-cal-day".into(), day_number as u64))
+                        .id(ElementId::NamedInteger(
+                            "usage-cal-day".into(),
+                            day_number as u64,
+                        ))
                         .flex_1()
                         .h(px(24.))
                         .rounded(px(5.))
@@ -615,7 +739,9 @@ fn calendar(page: &UsagePage, cx: &mut gpui::Context<UsagePage>, theme: Theme) -
                         .when(selected, |cell| {
                             cell.bg(theme.active).text_color(theme.active_fg)
                         })
-                        .when(in_range, |cell| cell.bg(theme.overlay).text_color(theme.text))
+                        .when(in_range, |cell| {
+                            cell.bg(theme.overlay).text_color(theme.text)
+                        })
                         .when(!selected && !in_range, |cell| {
                             cell.text_color(if day_ms == today {
                                 theme.accent
@@ -660,7 +786,11 @@ fn calendar(page: &UsagePage, cx: &mut gpui::Context<UsagePage>, theme: Theme) -
 }
 
 /// The chip label for a multi-select dimension.
-pub fn selection_label(all: &str, selected: &[u16], label_of: impl Fn(u16) -> Option<String>) -> String {
+pub fn selection_label(
+    all: &str,
+    selected: &[u16],
+    label_of: impl Fn(u16) -> Option<String>,
+) -> String {
     match selected.len() {
         0 => all.to_string(),
         1 => label_of(selected[0]).unwrap_or_else(|| all.to_string()),
@@ -671,13 +801,14 @@ pub fn selection_label(all: &str, selected: &[u16], label_of: impl Fn(u16) -> Op
 /// A small "narrowed" indicator chip used for the boolean filters that are
 /// switched on (errors only / cached only), with an inline clear ×.
 pub fn toggle_chip(
-    id: &'static str,
-    label: &str,
+    id: String,
+    label: impl Into<String>,
     theme: Theme,
     on_clear: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
+    let clear_id = format!("{id}-clear");
     div()
-        .id(id)
+        .id(ElementId::Name(SharedString::from(id)))
         .h(px(28.))
         .pl(px(9.))
         .pr(px(6.))
@@ -690,10 +821,10 @@ pub fn toggle_chip(
         .gap(px(6.))
         .text_size(theme.ui_px(12.))
         .text_color(theme.active_fg)
-        .child(label.to_string())
+        .child(label.into())
         .child(
             div()
-                .id(ElementId::Name(SharedString::from(format!("{id}-clear"))))
+                .id(ElementId::Name(SharedString::from(clear_id)))
                 .size(px(16.))
                 .rounded(px(4.))
                 .flex()

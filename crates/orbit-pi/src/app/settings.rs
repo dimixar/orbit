@@ -1,5 +1,5 @@
-use super::*;
 use super::helpers::*;
+use super::*;
 
 impl OrbitApp {
     // ── settings surface ───────────────────────────────────────────
@@ -140,9 +140,10 @@ impl OrbitApp {
                             .px(px(24.))
                             .pt(px(44.))
                             .pb(px(12.))
-                            .when(self.settings_section == SettingsSection::Providers, |header| {
-                                header.border_b_1().border_color(theme.border)
-                            })
+                            .when(
+                                self.settings_section == SettingsSection::Providers,
+                                |header| header.border_b_1().border_color(theme.border),
+                            )
                             .flex()
                             .flex_col()
                             .gap_3()
@@ -165,7 +166,7 @@ impl OrbitApp {
                                     .pb(px(12.))
                                     .flex()
                                     .flex_col()
-                                    .gap_3()
+                                    .gap(theme.space(12.))
                                     .children(self.error_banner(theme, cx))
                                     .children(self.settings_rows(&this, theme, cx)),
                             ),
@@ -275,40 +276,7 @@ impl OrbitApp {
                     "Choose the language used throughout Orbit.",
                     Some(self.language_select(theme, this.clone(), cx)),
                 ),
-                self.card(
-                    theme,
-                    "UI font size",
-                    "Text size across the interface and messages.",
-                    Some(self.font_size_select(
-                        SettingsSelect::UiFont,
-                        theme,
-                        this.clone(),
-                        cx,
-                    )),
-                ),
-                self.card(
-                    theme,
-                    "Code font size",
-                    "Text size in the file editor, diffs, code blocks, and tool output.",
-                    Some(self.font_size_select(
-                        SettingsSelect::CodeFont,
-                        theme,
-                        this.clone(),
-                        cx,
-                    )),
-                ),
-                self.card(
-                    theme,
-                    "UI font",
-                    "Typeface for the interface and messages.",
-                    Some(self.font_family_select(SettingsSelect::UiFontFamily, theme, this.clone(), cx)),
-                ),
-                self.card(
-                    theme,
-                    "Code font",
-                    "Typeface for code blocks, diffs, and tool output.",
-                    Some(self.font_family_select(SettingsSelect::CodeFontFamily, theme, this.clone(), cx)),
-                ),
+                self.density_type_card(theme, this.clone(), cx),
                 self.card(
                     theme,
                     "Show sidebar",
@@ -755,15 +723,7 @@ impl OrbitApp {
         // models.json providers pi hasn't loaded yet.
         for provider in &self.custom_providers {
             if !views.iter().any(|view| view.id == provider.id) {
-                views.push(self.provider_view_for(
-                    &provider.id,
-                    None,
-                    false,
-                    true,
-                    &[],
-                    "",
-                    false,
-                ));
+                views.push(self.provider_view_for(&provider.id, None, false, true, &[], "", false));
             }
         }
         // Providers the running pi advertises through `auth.list` but no other
@@ -805,11 +765,7 @@ impl OrbitApp {
             .iter()
             .filter(|model| model.provider == id)
             .count();
-        let catalog_count = self
-            .provider_catalog_counts
-            .get(id)
-            .copied()
-            .unwrap_or(0);
+        let catalog_count = self.provider_catalog_counts.get(id).copied().unwrap_or(0);
         let custom_count = custom.map(|provider| provider.model_ids.len()).unwrap_or(0);
         let env_hit = env_names
             .iter()
@@ -983,7 +939,9 @@ impl OrbitApp {
         let method = session.method.clone();
         let mut buttons = div().flex().flex_wrap().items_center().gap_2();
         match session.phase {
-            LoginPhase::Connecting | LoginPhase::AwaitingBrowser | LoginPhase::AwaitingDeviceCode => {
+            LoginPhase::Connecting
+            | LoginPhase::AwaitingBrowser
+            | LoginPhase::AwaitingDeviceCode => {
                 if let Some(device) = &session.device_code {
                     let open = device
                         .verification_uri_complete
@@ -1121,40 +1079,40 @@ impl OrbitApp {
                     .child(status_label),
             );
 
-        let header = div()
-            .flex()
-            .items_start()
-            .gap_3()
-            .child(tile)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(theme.ui_px(14.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .truncate()
-                            .child(view.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .font_family(theme::code_font_family())
-                            .text_size(theme.code_px(10.5))
-                            .text_color(theme.text_3)
-                            .truncate()
-                            .child(view.id.clone()),
-                    ),
-            );
+        let header = div().flex().items_start().gap_3().child(tile).child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(theme.ui_px(14.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .truncate()
+                        .child(view.name.clone()),
+                )
+                .child(
+                    div()
+                        .font_family(theme::code_font_family())
+                        .text_size(theme.code_px(10.5))
+                        .text_color(theme.text_3)
+                        .truncate()
+                        .child(view.id.clone()),
+                ),
+        );
 
         // Status and source badges share a row under the name so the name
         // column keeps the card's full width (a right-aligned pill in the
         // header squeezes it on narrow columns).
-        let mut badges = div().flex().flex_wrap().items_center().gap_1p5().child(status_pill);
+        let mut badges = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_1p5()
+            .child(status_pill);
         if view.oauth {
             badges = badges.child(self.provider_badge(
                 "OAuth",
@@ -1179,7 +1137,11 @@ impl OrbitApp {
             } else {
                 "Provider"
             },
-            if view.custom { theme.accent } else { theme.text_3 },
+            if view.custom {
+                theme.accent
+            } else {
+                theme.text_3
+            },
             if view.custom {
                 theme.accent.opacity(0.12)
             } else {
@@ -1422,12 +1384,7 @@ impl OrbitApp {
                     },
                 ));
             }
-            let mut actions = div()
-                .w_full()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(primary);
+            let mut actions = div().w_full().flex().flex_col().gap_2().child(primary);
             if view.custom || connected {
                 actions = actions.child(secondary);
             }
@@ -1455,7 +1412,13 @@ impl OrbitApp {
     }
 
     /// A small status/source pill on a provider card.
-    pub(super) fn provider_badge(&self, label: &str, fg: Hsla, bg: Hsla, theme: Theme) -> AnyElement {
+    pub(super) fn provider_badge(
+        &self,
+        label: &str,
+        fg: Hsla,
+        bg: Hsla,
+        theme: Theme,
+    ) -> AnyElement {
         div()
             .h(px(20.))
             .px(px(7.))
@@ -1621,42 +1584,39 @@ impl OrbitApp {
     ) -> Option<AnyElement> {
         let editor = self.provider_key_editor.as_ref()?;
 
-        let mut body = div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1p5()
-                    .child(
-                        div()
-                            .text_size(theme.ui_px(12.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text_2)
-                            .child("API key"),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .px_2p5()
-                            .py_1p5()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.bg_main)
-                            .text_size(theme.ui_px(13.))
-                            .child(editor.key.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_size(theme.ui_px(11.))
-                            .text_color(theme.text_3)
-                            .child("A literal key, `$ENV_VAR`, or `!command` — stored in auth.json (0600)."),
+        let mut body = div().w_full().flex().flex_col().gap_3().child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1p5()
+                .child(
+                    div()
+                        .text_size(theme.ui_px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_2)
+                        .child("API key"),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .px_2p5()
+                        .py_1p5()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.bg_main)
+                        .text_size(theme.ui_px(13.))
+                        .child(editor.key.clone()),
+                )
+                .child(
+                    div()
+                        .text_size(theme.ui_px(11.))
+                        .text_color(theme.text_3)
+                        .child(
+                        "A literal key, `$ENV_VAR`, or `!command` — stored in auth.json (0600).",
                     ),
-            );
+                ),
+        );
         if !editor.note.is_empty() {
             body = body.child(
                 div()
@@ -1967,7 +1927,11 @@ impl OrbitApp {
             .flex_col()
             .gap_3p5()
             .child(identity)
-            .child(field("Display name", Some("Optional."), editor.name.clone()))
+            .child(field(
+                "Display name",
+                Some("Optional."),
+                editor.name.clone(),
+            ))
             .child(field(
                 "Base URL",
                 Some("Required for custom endpoints. Empty keeps pi's default."),
@@ -2118,7 +2082,11 @@ impl OrbitApp {
                         .text_size(theme.ui_px(12.))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.send_fg)
-                        .child(if editing { "Save changes" } else { "Add provider" }),
+                        .child(if editing {
+                            "Save changes"
+                        } else {
+                            "Add provider"
+                        }),
                 )
         };
         card = card.child(
@@ -2193,8 +2161,8 @@ impl OrbitApp {
             .border_1()
             .border_color(theme.border)
             .rounded_lg()
-            .px(px(14.))
-            .py(px(12.))
+            .px(theme.space(14.))
+            .py(theme.space(12.))
             .flex()
             .items_center()
             .gap_3()
@@ -2643,34 +2611,32 @@ impl OrbitApp {
     pub(super) fn follow_up_mode_toggle(&self, theme: Theme, this: Entity<OrbitApp>) -> AnyElement {
         let all = self.follow_up_mode == "all";
         let (one_id, all_id) = ("follow-up-mode-one", "follow-up-mode-all");
-        let button = |label: &'static str,
-                      value_all: bool,
-                      id: &'static str,
-                      this: Entity<OrbitApp>| {
-            let active = all == value_all;
-            div()
-                .id(id)
-                .h(px(28.))
-                .px(px(10.))
-                .rounded_md()
-                .flex()
-                .items_center()
-                .text_size(theme.ui_px(12.))
-                .font_weight(FontWeight::MEDIUM)
-                .cursor_pointer()
-                .when(active, |b| b.bg(theme.send_bg).text_color(theme.send_fg))
-                .when(!active, |b| {
-                    b.border_1()
-                        .border_color(theme.border)
-                        .bg(theme.bg_raised)
-                        .text_color(theme.text_2)
-                        .hover(|s| s.bg(theme.bg_hover))
-                })
-                .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-                    this.update(cx, |app, cx| app.set_follow_up_mode(value_all, cx));
-                })
-                .child(label)
-        };
+        let button =
+            |label: &'static str, value_all: bool, id: &'static str, this: Entity<OrbitApp>| {
+                let active = all == value_all;
+                div()
+                    .id(id)
+                    .h(px(28.))
+                    .px(px(10.))
+                    .rounded_md()
+                    .flex()
+                    .items_center()
+                    .text_size(theme.ui_px(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .cursor_pointer()
+                    .when(active, |b| b.bg(theme.send_bg).text_color(theme.send_fg))
+                    .when(!active, |b| {
+                        b.border_1()
+                            .border_color(theme.border)
+                            .bg(theme.bg_raised)
+                            .text_color(theme.text_2)
+                            .hover(|s| s.bg(theme.bg_hover))
+                    })
+                    .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                        this.update(cx, |app, cx| app.set_follow_up_mode(value_all, cx));
+                    })
+                    .child(label)
+            };
         div()
             .flex()
             .items_center()
@@ -2788,7 +2754,12 @@ impl OrbitApp {
     }
 
     /// One label/value row inside a Runtime card.
-    pub(super) fn runtime_detail(&self, theme: Theme, label: &str, value: AnyElement) -> AnyElement {
+    pub(super) fn runtime_detail(
+        &self,
+        theme: Theme,
+        label: &str,
+        value: AnyElement,
+    ) -> AnyElement {
         div()
             .flex()
             .items_center()
@@ -2859,18 +2830,22 @@ impl OrbitApp {
         _cx: &Context<Self>,
     ) -> AnyElement {
         let label = crate::dither::configured_label();
-        let mut controls = div().flex().items_center().gap_2().child(self.runtime_button(
-            "background-choose",
-            if label.is_some() {
-                "Replace…"
-            } else {
-                "Choose image…"
-            },
-            false,
-            theme,
-            this.clone(),
-            OrbitApp::background_choose,
-        ));
+        let mut controls = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(self.runtime_button(
+                "background-choose",
+                if label.is_some() {
+                    "Replace…"
+                } else {
+                    "Choose image…"
+                },
+                false,
+                theme,
+                this.clone(),
+                OrbitApp::background_choose,
+            ));
         if label.is_some() {
             controls = controls.child(self.runtime_button(
                 "background-reset",
@@ -2896,7 +2871,10 @@ impl OrbitApp {
     pub(super) fn background_choose(&mut self, cx: &mut Context<Self>) {
         let picked = rfd::FileDialog::new()
             .set_title("Choose a background image")
-            .add_filter("Images", &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff"])
+            .add_filter(
+                "Images",
+                &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff"],
+            )
             .pick_file();
         let Some(path) = picked else {
             return;
@@ -2946,7 +2924,12 @@ impl OrbitApp {
     }
 
     /// Theme dropdown on Appearance — lists every selectable palette.
-    pub(super) fn theme_select(&self, theme: Theme, this: Entity<OrbitApp>, cx: &Context<Self>) -> AnyElement {
+    pub(super) fn theme_select(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let all = ThemeId::ALL;
         let selected = all.iter().position(|id| *id == theme.theme_id).unwrap_or(0);
         self.select_control(
@@ -2986,36 +2969,152 @@ impl OrbitApp {
         )
     }
 
-    /// The UI / code font-size dropdowns (`14 px`, …).
-    pub(super) fn font_size_select(
+    // ── Appearance → Density & type ────────────────────────────────────
+
+    /// Waku's grouped "Density & type" card: typefaces on the first row,
+    /// their sizes / densities beneath, laid out two-up so the whole
+    /// surface reads as one instrument cluster rather than six cards.
+    pub(super) fn density_type_card(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let field = |label: &'static str, control: AnyElement| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(theme.space(6.))
+                .min_w_0()
+                .child(
+                    div()
+                        .text_size(theme.ui_px(11.5))
+                        .text_color(theme.text_2)
+                        .child(label),
+                )
+                .child(control)
+                .into_any_element()
+        };
+        let pair = |left: AnyElement, right: AnyElement| {
+            div()
+                .flex()
+                .gap(theme.space(16.))
+                .child(div().flex_1().min_w_0().child(left))
+                .child(div().flex_1().min_w_0().child(right))
+        };
+        div()
+            .bg(theme.bg_composer)
+            .border_1()
+            .border_color(theme.border)
+            .rounded_lg()
+            .p(theme.space(14.))
+            .flex()
+            .flex_col()
+            .gap(theme.space(14.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child("Density & type"),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.text_2)
+                            .child("Typefaces, sizes, and how much air the workbench keeps."),
+                    ),
+            )
+            .child(pair(
+                field(
+                    "Interface Font",
+                    self.font_family_select(SettingsSelect::UiFontFamily, theme, this.clone(), cx),
+                ),
+                field(
+                    "Code Font",
+                    self.font_family_select(
+                        SettingsSelect::CodeFontFamily,
+                        theme,
+                        this.clone(),
+                        cx,
+                    ),
+                ),
+            ))
+            .child(pair(
+                field(
+                    "Interface Font Size",
+                    self.preset_select(SettingsSelect::InterfaceScale, theme, this.clone(), cx),
+                ),
+                field(
+                    "Terminal Font Size",
+                    self.preset_select(SettingsSelect::TerminalFont, theme, this.clone(), cx),
+                ),
+            ))
+            .child(pair(
+                field(
+                    "Editor Font Size",
+                    self.preset_select(SettingsSelect::EditorFont, theme, this.clone(), cx),
+                ),
+                field(
+                    "Spacing Density",
+                    self.preset_select(SettingsSelect::SpacingDensity, theme, this.clone(), cx),
+                ),
+            ))
+            .into_any_element()
+    }
+
+    /// The percentage / px preset dropdowns in the Density & type card.
+    pub(super) fn preset_select(
         &self,
         kind: SettingsSelect,
         theme: Theme,
         this: Entity<OrbitApp>,
         cx: &Context<Self>,
     ) -> AnyElement {
-        use crate::theme::{CODE_FONT_SIZES, UI_FONT_SIZES};
-        let (sizes, current) = match kind {
-            SettingsSelect::UiFont => (UI_FONT_SIZES.to_vec(), theme.ui.ui_font_size),
-            SettingsSelect::CodeFont => (CODE_FONT_SIZES.to_vec(), theme.ui.code_font_size),
+        use crate::theme::{FONT_SIZES, INTERFACE_SCALES, SPACING_DENSITIES};
+        let (values, current, suffix): (Vec<f32>, f32, &str) = match kind {
+            SettingsSelect::InterfaceScale => (
+                INTERFACE_SCALES.iter().map(|v| *v as f32).collect(),
+                theme.ui.interface_scale as f32,
+                "%",
+            ),
+            SettingsSelect::TerminalFont => {
+                (FONT_SIZES.to_vec(), theme.ui.terminal_font_size, "px")
+            }
+            SettingsSelect::EditorFont => (FONT_SIZES.to_vec(), theme.ui.editor_font_size, "px"),
+            SettingsSelect::SpacingDensity => (
+                SPACING_DENSITIES.iter().map(|v| *v as f32).collect(),
+                theme.ui.spacing_density as f32,
+                "%",
+            ),
             SettingsSelect::Language
             | SettingsSelect::Theme
             | SettingsSelect::UiFontFamily
             | SettingsSelect::CodeFontFamily => unreachable!(),
         };
-        let selected = sizes.iter().position(|s| *s == current).unwrap_or(0);
+        let selected = values
+            .iter()
+            .position(|v| (*v - current).abs() < 0.01)
+            .unwrap_or(0);
         self.select_control(
             match kind {
-                SettingsSelect::UiFont => "ui-font-select",
-                SettingsSelect::CodeFont => "code-font-select",
-                SettingsSelect::Language
-                | SettingsSelect::Theme
-                | SettingsSelect::UiFontFamily
-                | SettingsSelect::CodeFontFamily => "language-select",
+                SettingsSelect::InterfaceScale => "interface-scale-select",
+                SettingsSelect::TerminalFont => "terminal-font-select",
+                SettingsSelect::EditorFont => "editor-font-select",
+                SettingsSelect::SpacingDensity => "spacing-density-select",
+                _ => "settings-select",
             },
             kind,
-            format!("{} px", current as u32),
-            sizes.iter().map(|s| format!("{} px", *s as u32)).collect(),
+            format!("{} {}", current as u32, suffix),
+            values
+                .iter()
+                .map(|v| format!("{} {}", *v as u32, suffix))
+                .collect(),
             selected,
             theme,
             this,
@@ -3023,7 +3122,7 @@ impl OrbitApp {
         )
     }
 
-    /// The UI / code font-family dropdowns (installed + bundled faces).
+    /// The Interface / Code font-family dropdowns — Orbit's curated catalog.
     pub(super) fn font_family_select(
         &self,
         kind: SettingsSelect,
@@ -3031,24 +3130,30 @@ impl OrbitApp {
         this: Entity<OrbitApp>,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let fonts = theme::available_fonts(cx);
+        use crate::theme::{FontChoice, CODE_FONTS, UI_FONTS};
         let prefs = theme::font_prefs();
-        let (id, current) = match kind {
-            SettingsSelect::UiFontFamily => ("ui-font-family-select", prefs.ui_font_family.clone()),
-            SettingsSelect::CodeFontFamily => {
-                ("code-font-family-select", prefs.code_font_family.clone())
-            }
+        let (id, current, choices): (&'static str, SharedString, &[FontChoice]) = match kind {
+            SettingsSelect::UiFontFamily => (
+                "ui-font-family-select",
+                prefs.ui_font_family.clone(),
+                &UI_FONTS,
+            ),
+            SettingsSelect::CodeFontFamily => (
+                "code-font-family-select",
+                prefs.code_font_family.clone(),
+                &CODE_FONTS,
+            ),
             _ => unreachable!(),
         };
-        let selected = fonts
+        let selected = choices
             .iter()
-            .position(|f| f.as_str() == current.as_ref())
+            .position(|f| f.family == current.as_ref())
             .unwrap_or(0);
         self.select_control(
             id,
             kind,
-            current.to_string(),
-            fonts,
+            theme::font_choice_label(current.as_ref()),
+            choices.iter().map(|f| f.label.to_string()).collect(),
             selected,
             theme,
             this,
@@ -3284,7 +3389,12 @@ impl OrbitApp {
     }
 
     /// Apply a dropdown choice to the persisted UI customization.
-    pub(super) fn apply_settings_select(&mut self, kind: SettingsSelect, ix: usize, cx: &mut Context<Self>) {
+    pub(super) fn apply_settings_select(
+        &mut self,
+        kind: SettingsSelect,
+        ix: usize,
+        cx: &mut Context<Self>,
+    ) {
         match kind {
             SettingsSelect::Theme => {
                 let id = ThemeId::ALL.get(ix).copied().unwrap_or(ThemeId::Orbit);
@@ -3292,15 +3402,19 @@ impl OrbitApp {
                 return;
             }
             SettingsSelect::UiFontFamily | SettingsSelect::CodeFontFamily => {
-                let fonts = theme::available_fonts(cx);
-                let Some(family) = fonts.get(ix) else {
+                use crate::theme::{CODE_FONTS, UI_FONTS};
+                let choices = match kind {
+                    SettingsSelect::UiFontFamily => &UI_FONTS[..],
+                    SettingsSelect::CodeFontFamily => &CODE_FONTS[..],
+                    _ => unreachable!(),
+                };
+                let Some(choice) = choices.get(ix) else {
                     return;
                 };
-                let family = family.clone();
                 let mut prefs = theme::font_prefs();
                 match kind {
-                    SettingsSelect::UiFontFamily => prefs.ui_font_family = family.into(),
-                    SettingsSelect::CodeFontFamily => prefs.code_font_family = family.into(),
+                    SettingsSelect::UiFontFamily => prefs.ui_font_family = choice.family.into(),
+                    SettingsSelect::CodeFontFamily => prefs.code_font_family = choice.family.into(),
                     _ => unreachable!(),
                 }
                 theme::set_font_prefs(prefs);
@@ -3308,7 +3422,7 @@ impl OrbitApp {
             }
             _ => {}
         }
-        use crate::theme::{Language, CODE_FONT_SIZES, UI_FONT_SIZES};
+        use crate::theme::{Language, FONT_SIZES, INTERFACE_SCALES, SPACING_DENSITIES};
         let mut ui = theme::get(cx).ui;
         match kind {
             SettingsSelect::Language => {
@@ -3318,11 +3432,17 @@ impl OrbitApp {
                     Language::System
                 };
             }
-            SettingsSelect::UiFont => {
-                ui.ui_font_size = UI_FONT_SIZES.get(ix).copied().unwrap_or(14.);
+            SettingsSelect::InterfaceScale => {
+                ui.interface_scale = INTERFACE_SCALES.get(ix).copied().unwrap_or(100);
             }
-            SettingsSelect::CodeFont => {
-                ui.code_font_size = CODE_FONT_SIZES.get(ix).copied().unwrap_or(13.);
+            SettingsSelect::TerminalFont => {
+                ui.terminal_font_size = FONT_SIZES.get(ix).copied().unwrap_or(13.);
+            }
+            SettingsSelect::EditorFont => {
+                ui.editor_font_size = FONT_SIZES.get(ix).copied().unwrap_or(13.);
+            }
+            SettingsSelect::SpacingDensity => {
+                ui.spacing_density = SPACING_DENSITIES.get(ix).copied().unwrap_or(100);
             }
             SettingsSelect::Theme
             | SettingsSelect::UiFontFamily
@@ -3348,7 +3468,12 @@ impl OrbitApp {
         self.open_settings(cx);
     }
 
-    pub(super) fn on_settings_gear_click(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_settings_gear_click(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Toggle: the gear sits in the sessions sidebar, which stays visible
         // while settings is open, so clicking it again should go back.
         if self.settings_open {
@@ -3362,7 +3487,12 @@ impl OrbitApp {
         cx.notify();
     }
 
-    pub(super) fn on_settings_back(&mut self, _: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_settings_back(
+        &mut self,
+        _: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.settings_open = false;
         self.provider_editor = None;
         self.provider_key_editor = None;
@@ -3372,7 +3502,11 @@ impl OrbitApp {
 
     /// Switch sections, loading models.json when Providers is shown so CLI
     /// edits appear without a restart.
-    pub(super) fn set_settings_section(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+    pub(super) fn set_settings_section(
+        &mut self,
+        section: SettingsSection,
+        cx: &mut Context<Self>,
+    ) {
         self.settings_section = section;
         self.provider_remove_confirm = None;
         self.provider_editor = None;
@@ -3542,14 +3676,21 @@ impl OrbitApp {
     }
 
     /// Sign in with OAuth by handing `pi /login <id>` to the user's terminal.
-    pub(super) fn provider_oauth_login(&mut self, id: String, name: String, cx: &mut Context<Self>) {
+    pub(super) fn provider_oauth_login(
+        &mut self,
+        id: String,
+        name: String,
+        cx: &mut Context<Self>,
+    ) {
         // The id reaches a shell script; only builtin ids are ever passed, but
         // validate anyway so a hand-edited file can never inject a command.
         if !id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         {
-            self.set_status(format!("Refusing to run login for invalid provider id {id}"));
+            self.set_status(format!(
+                "Refusing to run login for invalid provider id {id}"
+            ));
             cx.notify();
             return;
         }
@@ -3575,7 +3716,9 @@ impl OrbitApp {
         if self.auth.support() == AuthSupport::Supported {
             self.auth.on_logout_response(true, &id);
             self.send(
-                CommandBody::AuthLogout { provider: id.clone() },
+                CommandBody::AuthLogout {
+                    provider: id.clone(),
+                },
                 "auth.logout",
             );
             self.set_status(format!("Signing out of {id}…"));
@@ -3602,9 +3745,11 @@ impl OrbitApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let existing = provider_id
-            .as_ref()
-            .and_then(|id| self.custom_providers.iter().find(|provider| &provider.id == id));
+        let existing = provider_id.as_ref().and_then(|id| {
+            self.custom_providers
+                .iter()
+                .find(|provider| &provider.id == id)
+        });
         let in_catalog = provider_id.as_ref().is_some_and(|id| {
             self.available_models
                 .iter()
@@ -3662,7 +3807,11 @@ impl OrbitApp {
                 .with_element_id("provider-editor-api-key")
                 .with_key_context("Composer Picker")
                 .with_max_lines(1)
-                .with_placeholder(if had_api_key { "••••••••" } else { "sk-…" })
+                .with_placeholder(if had_api_key {
+                    "••••••••"
+                } else {
+                    "sk-…"
+                })
         });
         let models_input = cx.new(|cx| {
             ComposerInput::new(cx)
@@ -3700,8 +3849,8 @@ impl OrbitApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let closed = self.provider_editor.take().is_some()
-            | self.provider_key_editor.take().is_some();
+        let closed =
+            self.provider_editor.take().is_some() | self.provider_key_editor.take().is_some();
         if closed {
             cx.notify();
         }
@@ -3727,8 +3876,8 @@ impl OrbitApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let closed = self.provider_editor.take().is_some()
-            | self.provider_key_editor.take().is_some();
+        let closed =
+            self.provider_editor.take().is_some() | self.provider_key_editor.take().is_some();
         if closed {
             cx.notify();
         }

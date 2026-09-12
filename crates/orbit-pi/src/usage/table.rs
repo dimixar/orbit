@@ -10,18 +10,19 @@
 //! Only the presentation lives here — no metric is computed in a delegate.
 
 use gpui::{
-    div, prelude::*, px, AnyElement, App, Context, Div, FontWeight, Hsla, IntoElement,
-    MouseButton, Pixels, SharedString, Stateful, WeakEntity, Window,
+    div, prelude::*, px, AnyElement, App, Context, Div, FontWeight, Hsla, IntoElement, MouseButton,
+    Pixels, SharedString, Stateful, WeakEntity, Window,
 };
+use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use gpui_component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_component::PixelsExt as _;
 
 use super::aggregate::{BucketRow, SessionRow};
 use super::format;
 use super::model::Granularity;
-use super::page::{BucketSort, SessionSort, UsagePage};
-use crate::theme::{self, Theme};
+use super::page::{BucketSort, MenuKind, SessionSort, UsagePage};
 use crate::app::icon;
+use crate::theme::{self, Theme};
 
 /// Width the "open in chat" affordance gets.
 const OPEN_W: f32 = 38.;
@@ -39,7 +40,7 @@ pub struct SessionTable {
 
 impl SessionTable {
     pub fn new(page: WeakEntity<UsagePage>, width: f32, sort: SessionSort, desc: bool) -> Self {
-        let (columns, keys) = columns_for(width, sort, desc);
+        let (columns, keys) = columns_for(width, sort, desc, &[]);
         Self {
             page,
             columns,
@@ -57,10 +58,16 @@ impl SessionTable {
         true
     }
 
-    /// Re-derive the column set for a new width or sort. Returns true when the
-    /// columns changed and the table needs a refresh.
-    pub fn set_layout(&mut self, width: f32, sort: SessionSort, desc: bool) -> bool {
-        let (columns, keys) = columns_for(width, sort, desc);
+    /// Re-derive the column set for a new width, sort, or visibility plan.
+    /// Returns true when the columns changed and the table needs a refresh.
+    pub fn set_layout(
+        &mut self,
+        width: f32,
+        sort: SessionSort,
+        desc: bool,
+        hidden: &[SessionSort],
+    ) -> bool {
+        let (columns, keys) = columns_for(width, sort, desc, hidden);
         if self.keys == keys && self.columns.len() == columns.len() {
             return false;
         }
@@ -131,17 +138,15 @@ impl TableDelegate for SessionTable {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let theme = *theme::get(cx);
-        let numeric = self
-            .keys
-            .get(col_ix)
-            .copied()
-            .flatten()
-            .is_some_and(|key| {
-                !matches!(
-                    key,
-                    SessionSort::Title | SessionSort::Workspace | SessionSort::Model
-                )
-            });
+        let numeric = self.keys.get(col_ix).copied().flatten().is_some_and(|key| {
+            !matches!(
+                key,
+                SessionSort::Title
+                    | SessionSort::Workspace
+                    | SessionSort::Provider
+                    | SessionSort::Model
+            )
+        });
         let width = self.columns[col_ix].width;
         header_cell(&self.columns[col_ix].name, numeric, theme, width)
     }
@@ -154,6 +159,98 @@ impl TableDelegate for SessionTable {
         _: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
         div().id(("usage-session-row", row_ix)).group("usage-row")
+    }
+
+    /// Row context menu (§43): only actions that are actually wired.
+    fn context_menu(
+        &mut self,
+        row_ix: usize,
+        menu: PopupMenu,
+        _window: &mut Window,
+        _cx: &mut Context<TableState<Self>>,
+    ) -> PopupMenu {
+        let Some(row) = self.rows.get(row_ix) else {
+            return menu;
+        };
+        let session = row.session;
+        let session_id = row.id.clone();
+        let provider_id = row.provider_id;
+        let model_id = row.top_model_id;
+        let provider_label = row.provider.clone();
+        let model_label = row.top_model.clone();
+        let page = self.page.clone();
+
+        let open_page = page.clone();
+        let open = PopupMenuItem::new("Open session").on_click(move |_, window, cx| {
+            open_page
+                .update(cx, |page, cx| page.open_session(window, cx, session))
+                .ok();
+        });
+
+        let copy_page = page.clone();
+        let copy_id = session_id.clone();
+        let copy = PopupMenuItem::new("Copy session ID").on_click(move |_, _, cx| {
+            let _ = &copy_page;
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_id.clone()));
+        });
+
+        let scope_page = page.clone();
+        let scope = PopupMenuItem::new("Scope to this session").on_click(move |_, _, cx| {
+            scope_page
+                .update(cx, |page, cx| page.set_session_scope(Some(session), cx))
+                .ok();
+        });
+
+        let provider_page = page.clone();
+        let provider = PopupMenuItem::new(format!("Filter by provider: {provider_label}"))
+            .on_click(move |_, _, cx| {
+                provider_page
+                    .update(cx, |page, cx| {
+                        page.toggle_filter_value(MenuKind::Provider, provider_id, cx)
+                    })
+                    .ok();
+            });
+
+        let model_item = model_id.map(|model_id| {
+            let model_page = page.clone();
+            PopupMenuItem::new(format!("Filter by model: {model_label}")).on_click(
+                move |_, _, cx| {
+                    model_page
+                        .update(cx, |page, cx| {
+                            page.toggle_filter_value(MenuKind::Model, model_id, cx)
+                        })
+                        .ok();
+                },
+            )
+        });
+
+        let workspace_page = page.clone();
+        let workspace = PopupMenuItem::new("Filter by workspace").on_click(move |_, _, cx| {
+            workspace_page
+                .update(cx, |page, cx| {
+                    let workspace = page
+                        .index()
+                        .and_then(|index| index.try_session(session).map(|entry| entry.workspace));
+                    if let Some(workspace) = workspace {
+                        page.toggle_filter_value(MenuKind::Workspace, workspace, cx);
+                    }
+                })
+                .ok();
+        });
+
+        let mut menu = menu
+            .min_w(px(220.))
+            .item(open)
+            .item(scope)
+            .item(PopupMenuItem::separator())
+            .item(copy)
+            .item(PopupMenuItem::separator())
+            .item(provider)
+            .item(workspace);
+        if let Some(model_item) = model_item {
+            menu = menu.item(model_item);
+        }
+        menu
     }
 
     fn render_empty(
@@ -175,48 +272,53 @@ fn columns_for(
     width: f32,
     sort: SessionSort,
     desc: bool,
+    hidden: &[SessionSort],
 ) -> (Vec<Column>, Vec<Option<SessionSort>>) {
     // Room the table steals for its scrollbar, hairlines and cell padding.
     const CHROME: f32 = 48.;
     const GAPS: f32 = 12.;
     const TITLE_MIN: f32 = 180.;
     let budget = (width - CHROME).max(360.);
+    let hidden = |key: SessionSort| hidden.contains(&key);
 
-    let mut plan: Vec<(SessionSort, f32)> = vec![(SessionSort::Title, 0.)];
-    let mut fixed = 0.;
-    let push = |plan: &mut Vec<(SessionSort, f32)>, fixed: &mut f32, key, w| {
-        plan.push((key, w));
-        *fixed += w;
-    };
-    push(&mut plan, &mut fixed, SessionSort::Workspace, 110.);
-    push(&mut plan, &mut fixed, SessionSort::Model, 156.);
-    if budget - fixed - TITLE_MIN >= 88. + GAPS {
-        push(&mut plan, &mut fixed, SessionSort::Started, 88.);
-    }
-    push(&mut plan, &mut fixed, SessionSort::Duration, 92.);
-    push(&mut plan, &mut fixed, SessionSort::Requests, 92.);
-    push(&mut plan, &mut fixed, SessionSort::Tokens, 82.);
-    push(&mut plan, &mut fixed, SessionSort::Errors, 82.);
+    // The full plan in display order: `true` marks a column that is dropped
+    // when the window is too narrow (and can also be hidden by the user).
+    let mut plan: Vec<(SessionSort, f32, bool)> = vec![
+        (SessionSort::Title, 0., false),
+        (SessionSort::Workspace, 110., false),
+        (SessionSort::Provider, 110., false),
+        (SessionSort::Model, 156., false),
+        (SessionSort::Started, 88., true),
+        (SessionSort::Duration, 92., false),
+        (SessionSort::Requests, 92., false),
+        (SessionSort::Input, 70., true),
+        (SessionSort::Output, 76., true),
+        (SessionSort::Cache, 72., true),
+        (SessionSort::Tokens, 82., false),
+        (SessionSort::Errors, 82., false),
+    ];
+    // User-hidden columns first (§41); the title is never removable.
+    plan.retain(|(key, _, _)| *key == SessionSort::Title || !hidden(*key));
 
-    // The three per-bucket token columns are the first thing to go when the
-    // window is narrow: the totals still say everything essential.
-    let extras = (70. + 76. + 72.) + 3. * GAPS;
-    let tail = 2. * GAPS; // the extras sit before tokens/errors
-    if budget - fixed - OPEN_W - GAPS - extras - tail - TITLE_MIN >= 0. {
-        let at = plan
-            .iter()
-            .position(|(key, _)| *key == SessionSort::Tokens)
-            .unwrap_or(plan.len());
-        plan.splice(
-            at..at,
-            [
-                (SessionSort::Input, 70.),
-                (SessionSort::Output, 76.),
-                (SessionSort::Cache, 72.),
-            ],
-        );
-        fixed += extras - tail;
+    // Width the always-present columns consume.
+    let mut fixed: f32 = plan
+        .iter()
+        .filter(|(key, _, optional)| !*optional && *key != SessionSort::Title)
+        .map(|(_, width, _)| *width)
+        .sum();
+    // Optional columns are added in priority order while the title can still
+    // breathe: the per-bucket token columns are the first to go.
+    let mut keep_optional: Vec<SessionSort> = Vec::new();
+    for (key, column_width, optional) in &plan {
+        if !*optional {
+            continue;
+        }
+        if fixed + column_width + OPEN_W + GAPS + TITLE_MIN <= budget {
+            fixed += column_width;
+            keep_optional.push(*key);
+        }
     }
+    plan.retain(|(key, _, optional)| !*optional || keep_optional.contains(key));
 
     let title_w = (budget - fixed - OPEN_W - GAPS).clamp(TITLE_MIN, 460.);
 
@@ -234,10 +336,13 @@ fn columns_for(
 
     let mut columns = Vec::with_capacity(plan.len() + 1);
     let mut keys = Vec::with_capacity(plan.len() + 1);
-    for (key, column_width) in plan {
+    for (key, column_width, _) in plan {
         let numeric = !matches!(
             key,
-            SessionSort::Title | SessionSort::Workspace | SessionSort::Model
+            SessionSort::Title
+                | SessionSort::Workspace
+                | SessionSort::Provider
+                | SessionSort::Model
         );
         let width = if column_width > 0.0 {
             column_width
@@ -273,6 +378,7 @@ fn session_cell(row: &SessionRow, key: SessionSort, theme: Theme, width: Pixels)
     let (text, color, numeric) = match key {
         SessionSort::Title => (row.title.clone(), theme.text, false),
         SessionSort::Workspace => (row.workspace.clone(), theme.text_2, false),
+        SessionSort::Provider => (row.provider.clone(), theme.text_2, false),
         SessionSort::Model => (row.top_model.clone(), theme.text_2, false),
         SessionSort::Started => (
             super::model::bucket_label(row.ended_ms, Granularity::Day),
@@ -281,16 +387,8 @@ fn session_cell(row: &SessionRow, key: SessionSort, theme: Theme, width: Pixels)
         ),
         SessionSort::Duration => (format::span_ms(row.duration_ms()), theme.text_3, true),
         SessionSort::Requests => (format::count(totals.requests), theme.text_2, true),
-        SessionSort::Input => (
-            format::compact(totals.tokens.input),
-            theme.text_3,
-            true,
-        ),
-        SessionSort::Output => (
-            format::compact(totals.tokens.output),
-            theme.text_3,
-            true,
-        ),
+        SessionSort::Input => (format::compact(totals.tokens.input), theme.text_3, true),
+        SessionSort::Output => (format::compact(totals.tokens.output), theme.text_3, true),
         SessionSort::Cache => (
             // "0" would claim the provider reported no cache reuse; "—" says
             // nothing was reported at all.
@@ -453,7 +551,12 @@ pub struct BucketTable {
 }
 
 impl BucketTable {
-    pub fn new(page: WeakEntity<UsagePage>, sort: BucketSort, desc: bool, granularity: Granularity) -> Self {
+    pub fn new(
+        page: WeakEntity<UsagePage>,
+        sort: BucketSort,
+        desc: bool,
+        granularity: Granularity,
+    ) -> Self {
         let (columns, keys) = bucket_columns(sort, desc);
         Self {
             columns,
@@ -727,11 +830,7 @@ impl FailureTable {
     }
 }
 
-fn failure_columns(
-    sort: FailureSort,
-    desc: bool,
-    width: f32,
-) -> (Vec<Column>, Vec<FailureSort>) {
+fn failure_columns(sort: FailureSort, desc: bool, width: f32) -> (Vec<Column>, Vec<FailureSort>) {
     let sort_state = |key: FailureSort| {
         if key == sort {
             if desc {

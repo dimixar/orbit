@@ -259,7 +259,12 @@ impl AuthManager {
     // ── responses ──────────────────────────────────────────────────────
 
     /// Apply the `auth.list` response.
-    pub fn on_list_response(&mut self, success: bool, data: Option<&serde_json::Value>, error: Option<&str>) {
+    pub fn on_list_response(
+        &mut self,
+        success: bool,
+        data: Option<&serde_json::Value>,
+        error: Option<&str>,
+    ) {
         if !success {
             let message = error.unwrap_or("auth.list failed");
             if is_unsupported_error(message) {
@@ -319,9 +324,7 @@ impl AuthManager {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("none")
                 .to_string(),
-            expires_at: status
-                .get("expiresAt")
-                .and_then(serde_json::Value::as_i64),
+            expires_at: status.get("expiresAt").and_then(serde_json::Value::as_i64),
             account: status
                 .get("account")
                 .and_then(serde_json::Value::as_str)
@@ -429,7 +432,9 @@ impl AuthManager {
                     });
                 }
             }
-            AuthEvent::LoginUrl { session_id, url, .. } => {
+            AuthEvent::LoginUrl {
+                session_id, url, ..
+            } => {
                 if let Some(session) = self.session_mut(&session_id) {
                     session.url = Some(url.clone());
                     if !session.phase.is_terminal() {
@@ -803,7 +808,10 @@ mod tests {
         assert_eq!(session.phase, LoginPhase::AwaitingDeviceCode);
         let device = session.device_code.as_ref().unwrap();
         assert_eq!(device.user_code, "ABCD-1234");
-        assert!(session.url.is_none(), "device flow must not auto-open a URL");
+        assert!(
+            session.url.is_none(),
+            "device flow must not auto-open a URL"
+        );
     }
 
     #[test]
@@ -818,10 +826,7 @@ mod tests {
         });
         let session = auth.login().unwrap();
         assert_eq!(session.phase, LoginPhase::Error);
-        assert_eq!(
-            session.error.as_ref().unwrap().0,
-            AuthErrorCode::Network
-        );
+        assert_eq!(session.error.as_ref().unwrap().0, AuthErrorCode::Network);
         assert!(!auth.is_busy());
     }
 
@@ -919,7 +924,10 @@ mod tests {
         assert_eq!(auth.support(), AuthSupport::Unknown);
         assert!(auth.providers().is_empty());
         assert_eq!(auth.login().unwrap().phase, LoginPhase::Cancelled);
-        assert_eq!(auth.login().unwrap().message.as_deref(), Some("interrupted by restart"));
+        assert_eq!(
+            auth.login().unwrap().message.as_deref(),
+            Some("interrupted by restart")
+        );
 
         // On reconnect the fresh list shows the provider authenticated:
         // the interrupted attempt is reconciled to a success.

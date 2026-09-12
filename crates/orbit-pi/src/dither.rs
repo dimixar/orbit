@@ -29,12 +29,7 @@ const LEVELS: u32 = 4;
 const CONTRAST: f32 = 1.3;
 
 /// Bayer 4×4 ordered-dither thresholds (0..15).
-const BAYER: [[u8; 4]; 4] = [
-    [0, 8, 2, 10],
-    [12, 4, 14, 6],
-    [3, 11, 1, 9],
-    [15, 7, 13, 5],
-];
+const BAYER: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
 
 // ── paths & config ─────────────────────────────────────────────────────────
 
@@ -219,7 +214,9 @@ fn quantize(channel: u8, threshold: f32) -> u8 {
     } else {
         base
     };
-    ((level.clamp(0., levels) / levels) * 255.).round().clamp(0., 255.) as u8
+    ((level.clamp(0., levels) / levels) * 255.)
+        .round()
+        .clamp(0., 255.) as u8
 }
 
 fn contrast(value: f32) -> f32 {
@@ -248,10 +245,15 @@ mod tests {
         let source = solid(16, 16, 128);
         let out = dither(&source, 4);
         assert_eq!(out.dimensions(), (16, 16));
-        let levels: Vec<u8> = (0..LEVELS).map(|level| (level * 255 / (LEVELS - 1)) as u8).collect();
+        let levels: Vec<u8> = (0..LEVELS)
+            .map(|level| (level * 255 / (LEVELS - 1)) as u8)
+            .collect();
         for pixel in out.pixels() {
             for channel in &pixel.0[..3] {
-                assert!(levels.contains(channel), "{channel} is not a quantized level");
+                assert!(
+                    levels.contains(channel),
+                    "{channel} is not a quantized level"
+                );
             }
         }
         // A mid-gray sits between two levels, so it must dither: more than
@@ -337,10 +339,8 @@ mod tests {
 
     #[test]
     fn choose_rejects_unreadable_files() {
-        let dir = std::env::temp_dir().join(format!(
-            "orbit-dither-bad-{}",
-            std::process::id() as u64
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("orbit-dither-bad-{}", std::process::id() as u64));
         std::fs::create_dir_all(&dir).unwrap();
         let bogus = dir.join("not-an-image.txt");
         std::fs::write(&bogus, "hello").unwrap();
@@ -357,11 +357,11 @@ mod tests {
         for (x, y, pixel) in source.enumerate_pixels_mut() {
             let ramp = (x as f32 / 479. * 255.) as u8;
             let band = match y / 54 {
-                0 => [ramp, ramp / 2, ramp / 3],           // warm
-                1 => [ramp / 3, ramp, ramp / 2],           // green
-                2 => [40, 190, 200],                       // teal
-                3 => [210, 60, 70],                        // red
-                _ => [ramp / 2, ramp / 3, ramp],           // violet
+                0 => [ramp, ramp / 2, ramp / 3], // warm
+                1 => [ramp / 3, ramp, ramp / 2], // green
+                2 => [40, 190, 200],             // teal
+                3 => [210, 60, 70],              // red
+                _ => [ramp / 2, ramp / 3, ramp], // violet
             };
             *pixel = image::Rgba([band[0], band[1], band[2], 255]);
         }
