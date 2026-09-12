@@ -10,10 +10,14 @@ use std::{
     fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
-    time::SystemTime,
+    sync::mpsc::{self, Receiver},
+    time::{Duration, SystemTime},
 };
 
+use notify_debouncer_mini::{notify::RecommendedWatcher, Debouncer};
 use serde_json::Value;
+
+use crate::watch::debounced_watch;
 
 #[derive(Debug, Clone)]
 pub struct SessionInfo {
@@ -48,8 +52,14 @@ fn dirs_home() -> PathBuf {
 /// top of the sidebar and older ones follow — matching the age label
 /// each row displays.
 pub fn load_sessions() -> Vec<SessionInfo> {
+    load_sessions_in(&sessions_dir())
+}
+
+/// Load every session under `dir` — the scan body of [`load_sessions`],
+/// shared with [`SessionWatcher`] so a watched store reloads the same way.
+fn load_sessions_in(dir: &Path) -> Vec<SessionInfo> {
     let mut out = Vec::new();
-    let Ok(groups) = fs::read_dir(sessions_dir()) else {
+    let Ok(groups) = fs::read_dir(dir) else {
         return out;
     };
     for group in groups.flatten() {
@@ -72,6 +82,67 @@ pub fn load_sessions() -> Vec<SessionInfo> {
             .then_with(|| b.path.cmp(&a.path))
     });
     out
+}
+
+/// Only session files matter — header/group-directory events are ignored.
+fn is_session_file(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "jsonl")
+}
+
+/// Debounced watcher over pi's session store.
+///
+/// pi (and the CLI, and any other Orbit window) writes session files
+/// directly, so the sidebar has no RPC event to hang a refresh on. OS file
+/// events are coalesced by the debouncer, then the directory scan runs on a
+/// dedicated thread — the app only ever drains a finished list on the
+/// heartbeat, so no I/O ever blocks a frame.
+pub struct SessionWatcher {
+    /// Keeps the debounced backend alive; dropping it stops the watch.
+    _debouncer: Debouncer<RecommendedWatcher>,
+    reloads: Receiver<Vec<SessionInfo>>,
+}
+
+impl SessionWatcher {
+    /// Watch the default pi session store. Returns `None` when the store is
+    /// absent or the platform backend cannot start; the manual refresh paths
+    /// (`cmd-r`, turn settle) still cover that case.
+    pub fn start() -> Option<Self> {
+        Self::watch(&sessions_dir(), Duration::from_millis(500))
+    }
+
+    fn watch(dir: &Path, debounce: Duration) -> Option<Self> {
+        let (debouncer, changed) = debounced_watch(dir, debounce, is_session_file)?;
+
+        let (reload_tx, reloads) = mpsc::channel();
+        let scan_dir = dir.to_path_buf();
+        std::thread::Builder::new()
+            .name("orbit-session-watch".into())
+            .spawn(move || {
+                while changed.recv().is_ok() {
+                    // Collapse a burst of appends into one scan.
+                    while changed.try_recv().is_ok() {}
+                    if reload_tx.send(load_sessions_in(&scan_dir)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .ok()?;
+
+        Some(Self {
+            _debouncer: debouncer,
+            reloads,
+        })
+    }
+
+    /// The newest session snapshot when the store changed since the last
+    /// call; `None` when nothing new landed.
+    pub fn take_reload(&self) -> Option<Vec<SessionInfo>> {
+        let mut latest = None;
+        while let Ok(sessions) = self.reloads.try_recv() {
+            latest = Some(sessions);
+        }
+        latest
+    }
 }
 
 fn read_session(path: &Path) -> Option<SessionInfo> {
@@ -287,6 +358,43 @@ mod tests {
         });
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].path, older_created);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_watcher_reloads_a_changed_store() {
+        let dir = std::env::temp_dir().join("orbit-session-watch-test");
+        let _ = fs::remove_dir_all(&dir);
+        // Mirror pi's store: `<store>/<workspace-slug>/<timestamp>.jsonl`.
+        fs::create_dir_all(dir.join("ws")).unwrap();
+        let write = |name: &str, title: &str| {
+            fs::write(
+                dir.join("ws").join(name),
+                format!(
+                    "{{\"type\":\"session\",\"id\":\"{title}\",\"cwd\":\"/tmp/ws\"}}\n\
+                     {{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":\"{title}\"}}}}\n"
+                ),
+            )
+            .unwrap();
+        };
+        write("2026-01-01T00-00-00-000Z_a.jsonl", "hi");
+
+        let watcher =
+            SessionWatcher::watch(&dir, Duration::from_millis(50)).expect("watcher starts");
+        write("2026-01-02T00-00-00-000Z_b.jsonl", "yo");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut reloaded = None;
+        while std::time::Instant::now() < deadline {
+            if let Some(sessions) = watcher.take_reload() {
+                reloaded = Some(sessions);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let sessions = reloaded.expect("watcher reported the new session");
+        assert_eq!(sessions.len(), 2);
+        assert!(sessions.iter().any(|s| s.title == "yo"));
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -12,6 +12,8 @@ use std::sync::{OnceLock, RwLock};
 use gpui::{hsla, point, px, rgb, App, BoxShadow, Global, Hsla, Pixels, SharedString};
 use serde_json::Value;
 
+use crate::highlight::TokenClass;
+
 /// Dark or light appearance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeMode {
@@ -24,17 +26,46 @@ pub enum ThemeMode {
 pub enum ThemeId {
     Orbit,
     OrbitLight,
+    /// Ported Zed community themes (all dark).
+    Vague,
+    Batsignal,
+    Ashwood,
+    Obsidian,
+    MatteBlack,
+    AdwaitaPastel,
+    Ashen,
+    Discord,
 }
 
 impl ThemeId {
-    /// Selectable themes, in the order shown in the settings dropdown.
-    pub const ALL: [ThemeId; 2] = [Self::Orbit, Self::OrbitLight];
+    /// Selectable themes, in the order shown in the settings dropdown
+    /// (the two Orbit palettes first, then the ported Zed themes).
+    pub const ALL: [ThemeId; 10] = [
+        Self::Orbit,
+        Self::OrbitLight,
+        Self::Vague,
+        Self::Batsignal,
+        Self::Ashwood,
+        Self::Obsidian,
+        Self::MatteBlack,
+        Self::AdwaitaPastel,
+        Self::Ashen,
+        Self::Discord,
+    ];
 
     /// Persisted key; also accepts legacy theme names (mapped to Orbit).
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Orbit => "orbit",
             Self::OrbitLight => "orbit-light",
+            Self::Vague => "vague",
+            Self::Batsignal => "batsignal-dark",
+            Self::Ashwood => "ashwood",
+            Self::Obsidian => "obsidian-dark",
+            Self::MatteBlack => "matte-black",
+            Self::AdwaitaPastel => "adwaita-pastel-dark",
+            Self::Ashen => "ashen",
+            Self::Discord => "discord-dark",
         }
     }
 
@@ -53,6 +84,15 @@ impl ThemeId {
             | "flexoki-dark" => Some(Self::Orbit),
             // Current key, plus legacy light theme names → Orbit Light.
             "orbit-light" | "light" | "one-light" | "flexoki-light" => Some(Self::OrbitLight),
+            // Ported Zed community themes (aliases included).
+            "vague" => Some(Self::Vague),
+            "batsignal-dark" | "batsignal" => Some(Self::Batsignal),
+            "ashwood" => Some(Self::Ashwood),
+            "obsidian-dark" | "obsidian" => Some(Self::Obsidian),
+            "matte-black" | "matte-black-theme" => Some(Self::MatteBlack),
+            "adwaita-pastel-dark" | "adwaita-pastel" => Some(Self::AdwaitaPastel),
+            "ashen" => Some(Self::Ashen),
+            "discord-dark" | "dark-discord" | "discord" => Some(Self::Discord),
             _ => None,
         }
     }
@@ -62,13 +102,29 @@ impl ThemeId {
         match self {
             Self::Orbit => "Orbit",
             Self::OrbitLight => "Orbit Light",
+            Self::Vague => "Vague",
+            Self::Batsignal => "Batsignal (Dark)",
+            Self::Ashwood => "Ashwood",
+            Self::Obsidian => "Obsidian Dark",
+            Self::MatteBlack => "Matte Black",
+            Self::AdwaitaPastel => "Adwaita Pastel Dark",
+            Self::Ashen => "Ashen",
+            Self::Discord => "Discord Dark",
         }
     }
 
     pub fn appearance(self) -> ThemeMode {
         match self {
             Self::OrbitLight => ThemeMode::Light,
-            Self::Orbit => ThemeMode::Dark,
+            Self::Orbit
+            | Self::Vague
+            | Self::Batsignal
+            | Self::Ashwood
+            | Self::Obsidian
+            | Self::MatteBlack
+            | Self::AdwaitaPastel
+            | Self::Ashen
+            | Self::Discord => ThemeMode::Dark,
         }
     }
 
@@ -126,6 +182,17 @@ pub struct Theme {
     pub assistant_text: Hsla,
     pub code_bg: Hsla,
     pub code_text: Hsla,
+    /// Syntax token colors (transcript code blocks + the review diff). A
+    /// palette sets these explicitly so a ported editor theme keeps its own
+    /// syntax identity instead of borrowing the UI's semantic roles.
+    pub syn_string: Hsla,
+    pub syn_number: Hsla,
+    pub syn_function: Hsla,
+    pub syn_type: Hsla,
+    pub syn_comment: Hsla,
+    pub syn_literal: Hsla,
+    pub syn_meta: Hsla,
+    pub syn_operator: Hsla,
     /// Inline-code chip wash (text uses [`Self::accent`]).
     pub inline_code_bg: Hsla,
     pub tool_border: Hsla,
@@ -377,6 +444,14 @@ struct Palette {
     assistant_text: u32,
     code_bg: u32,
     code_text: u32,
+    syn_string: u32,
+    syn_number: u32,
+    syn_function: u32,
+    syn_type: u32,
+    syn_comment: u32,
+    syn_literal: u32,
+    syn_meta: u32,
+    syn_operator: u32,
     tool_border: u32,
     tool_meta: u32,
     ring_track: u32,
@@ -411,6 +486,15 @@ const ORBIT: Palette = Palette {
     assistant_text: 0xE2E2E2,
     code_bg: 0x151515,
     code_text: 0xE2E2E2,
+    // Syntax is semantic here: strings green, numbers amber, meta red.
+    syn_string: 0x62C987,
+    syn_number: 0xE0B36A,
+    syn_function: 0xE2E2E2,
+    syn_type: 0xE2E2E2,
+    syn_comment: 0xA3A3A3,
+    syn_literal: 0xE2795B,
+    syn_meta: 0xE2726A,
+    syn_operator: 0x7D7D7D,
     tool_border: 0x2A2A2A,
     tool_meta: 0xA3A3A3,
     ring_track: 0x232323,
@@ -445,6 +529,14 @@ const ORBIT_LIGHT: Palette = Palette {
     assistant_text: 0x242424,
     code_bg: 0xE6E6E6,
     code_text: 0x242424,
+    syn_string: 0x2F8F52,
+    syn_number: 0xA66B20,
+    syn_function: 0x242424,
+    syn_type: 0x242424,
+    syn_comment: 0x666666,
+    syn_literal: 0xC85F44,
+    syn_meta: 0xC64A42,
+    syn_operator: 0x858585,
     tool_border: 0xE2E2E2,
     tool_meta: 0x666666,
     ring_track: 0xECECEC,
@@ -454,10 +546,364 @@ const ORBIT_LIGHT: Palette = Palette {
     trough: 0xECECEC,
 };
 
+/// Vague (dark): a low-contrast, near-monochrome editor palette ported from
+/// the Zed theme `Vague` (<https://github.com/vague-theme/vague-zed>), tuned
+/// to Orbit's semantic roles. Muted blue is the lone accent; syntax uses the
+/// theme's own token colors rather than the UI's greens/ambers.
+const VAGUE: Palette = Palette {
+    bg_main: 0x141415,
+    bg_sidebar: 0x141415,
+    bg_raised: 0x252530,
+    bg_hover: 0x1C1C24,
+    active: 0x252530,
+    active_fg: 0xCDCDCD,
+    border: 0x252530,
+    text: 0xCDCDCD,
+    text_2: 0x878787,
+    text_3: 0x606079,
+    ok_green: 0x7FA563,
+    stop_red: 0xD8647E,
+    stop_red_hover: 0xE08398,
+    add_green: 0x7FA563,
+    del_red: 0xD8647E,
+    accent: 0x6E94B2,
+    menu_bg: 0x252530,
+    send_bg: 0xCDCDCD,
+    send_bg_hover: 0xD7D7D7,
+    send_fg: 0x141415,
+    assistant_text: 0xCDCDCD,
+    code_bg: 0x18181F,
+    code_text: 0xCDCDCD,
+    syn_string: 0xE8B589,
+    syn_number: 0xE0A363,
+    syn_function: 0xC48282,
+    syn_type: 0x9BB4BC,
+    syn_comment: 0x606079,
+    syn_literal: 0xE0A363,
+    syn_meta: 0xAEAED1,
+    syn_operator: 0x90A0B5,
+    tool_border: 0x252530,
+    tool_meta: 0x878787,
+    ring_track: 0x252530,
+    ring_fill: 0xCDCDCD,
+    warn: 0xF3BE7C,
+    crit: 0xD8647E,
+    trough: 0x252530,
+};
+
+/// Batsignal (Dark): ported from the Zed community theme of the same name
+/// (via zed-themes.com). Dark appearance.
+const BATSIGNAL: Palette = Palette {
+    bg_main: 0x000000,
+    bg_sidebar: 0x000000,
+    bg_raised: 0x0F0F0F,
+    bg_hover: 0x0F0F0F,
+    active: 0x0F0F0F,
+    active_fg: 0xB3B3B3,
+    border: 0x121212,
+    text: 0xB3B3B3,
+    text_2: 0x767676,
+    text_3: 0x5E5E5E,
+    ok_green: 0x62C987,
+    stop_red: 0xF44747,
+    stop_red_hover: 0xF66868,
+    add_green: 0x62C987,
+    del_red: 0xF44747,
+    accent: 0xFFFF00,
+    menu_bg: 0x0F0F0F,
+    send_bg: 0xB3B3B3,
+    send_bg_hover: 0x989898,
+    send_fg: 0x000000,
+    assistant_text: 0xB3B3B3,
+    code_bg: 0x070707,
+    code_text: 0xB3B3B3,
+    syn_string: 0xAAAAAA,
+    syn_number: 0xAAAAAA,
+    syn_function: 0xFFFF00,
+    syn_type: 0xB3B3B3,
+    syn_comment: 0x606060,
+    syn_literal: 0xAAAAAA,
+    syn_meta: 0x777777,
+    syn_operator: 0xB3B3B3,
+    tool_border: 0x121212,
+    tool_meta: 0x767676,
+    ring_track: 0x0F0F0F,
+    ring_fill: 0xB3B3B3,
+    warn: 0xCD9731,
+    crit: 0xF44747,
+    trough: 0x0F0F0F,
+};
+
+/// Ashwood: ported from the Zed community theme of the same name
+/// (via zed-themes.com). Dark appearance.
+const ASHWOOD: Palette = Palette {
+    bg_main: 0x111111,
+    bg_sidebar: 0x151515,
+    bg_raised: 0x191919,
+    bg_hover: 0x232323,
+    active: 0x594242,
+    active_fg: 0xE1E1E1,
+    border: 0x3A3A3A,
+    text: 0xA9A9A9,
+    text_2: 0x7E7E7E,
+    text_3: 0x656565,
+    ok_green: 0x62C987,
+    stop_red: 0xC4909A,
+    stop_red_hover: 0xCFA4AC,
+    add_green: 0x62C987,
+    del_red: 0xC4909A,
+    accent: 0xAAAAAA,
+    menu_bg: 0x191919,
+    send_bg: 0xA9A9A9,
+    send_bg_hover: 0x909090,
+    send_fg: 0x111111,
+    assistant_text: 0xA9A9A9,
+    code_bg: 0x161616,
+    code_text: 0xA9A9A9,
+    syn_string: 0x8DBBA3,
+    syn_number: 0xABB6E0,
+    syn_function: 0xC0B0DF,
+    syn_type: 0xABB6E0,
+    syn_comment: 0x8D909C,
+    syn_literal: 0xABB6E0,
+    syn_meta: 0xC0B0DF,
+    syn_operator: 0xDEA8B3,
+    tool_border: 0x3A3A3A,
+    tool_meta: 0x7E7E7E,
+    ring_track: 0x191919,
+    ring_fill: 0xA9A9A9,
+    warn: 0xE99696,
+    crit: 0xC4909A,
+    trough: 0x191919,
+};
+
+/// Obsidian Dark: ported from the Zed community theme of the same name
+/// (via zed-themes.com). Dark appearance.
+const OBSIDIAN: Palette = Palette {
+    bg_main: 0x161616,
+    bg_sidebar: 0x101010,
+    bg_raised: 0x222222,
+    bg_hover: 0x282828,
+    active: 0x2E2E2E,
+    active_fg: 0xDEDEDE,
+    border: 0x222222,
+    text: 0xDEDEDE,
+    text_2: 0x888888,
+    text_3: 0x686868,
+    ok_green: 0x3DBA6F,
+    stop_red: 0xD96B6B,
+    stop_red_hover: 0xE08686,
+    add_green: 0x3DBA6F,
+    del_red: 0xD96B6B,
+    accent: 0x3DBA6F,
+    menu_bg: 0x222222,
+    send_bg: 0xDEDEDE,
+    send_bg_hover: 0xBDBDBD,
+    send_fg: 0x161616,
+    assistant_text: 0xDEDEDE,
+    code_bg: 0x101010,
+    code_text: 0xDEDEDE,
+    syn_string: 0x5AAD7A,
+    syn_number: 0x3DBA6F,
+    syn_function: 0xE2E2E2,
+    syn_type: 0xAAAAAA,
+    syn_comment: 0x646464,
+    syn_literal: 0x3DBA6F,
+    syn_meta: 0x3DBA6F,
+    syn_operator: 0x888888,
+    tool_border: 0x222222,
+    tool_meta: 0x888888,
+    ring_track: 0x222222,
+    ring_fill: 0xDEDEDE,
+    warn: 0xC8964A,
+    crit: 0xD96B6B,
+    trough: 0x222222,
+};
+
+/// Matte Black: ported from the Zed community theme of the same name
+/// (via zed-themes.com). Dark appearance.
+const MATTE_BLACK: Palette = Palette {
+    bg_main: 0x1A1A1A,
+    bg_sidebar: 0x1A1A1A,
+    bg_raised: 0x252525,
+    bg_hover: 0x3A3A3A,
+    active: 0x3A3A3A,
+    active_fg: 0xE0E0E0,
+    border: 0x2A2A2A,
+    text: 0xE0E0E0,
+    text_2: 0x888888,
+    text_3: 0x6A6A6A,
+    ok_green: 0x69F0AE,
+    stop_red: 0xFF5252,
+    stop_red_hover: 0xFF7171,
+    add_green: 0x69F0AE,
+    del_red: 0xFF5252,
+    accent: 0x40C4FF,
+    menu_bg: 0x252525,
+    send_bg: 0xE0E0E0,
+    send_bg_hover: 0xBEBEBE,
+    send_fg: 0x1A1A1A,
+    assistant_text: 0xE0E0E0,
+    code_bg: 0x252525,
+    code_text: 0xE0E0E0,
+    syn_string: 0xC3E88D,
+    syn_number: 0xFF7043,
+    syn_function: 0x0D7FD8,
+    syn_type: 0xD4A574,
+    syn_comment: 0x737373,
+    syn_literal: 0xFF9E80,
+    syn_meta: 0x80D8FF,
+    syn_operator: 0xD0D0D0,
+    tool_border: 0x2A2A2A,
+    tool_meta: 0x888888,
+    ring_track: 0x252525,
+    ring_fill: 0xE0E0E0,
+    warn: 0xFFD740,
+    crit: 0xFF5252,
+    trough: 0x252525,
+};
+
+/// Adwaita Pastel Dark: ported from the Zed community theme of the same name
+/// (via zed-themes.com). Dark appearance.
+const ADWAITA_PASTEL: Palette = Palette {
+    bg_main: 0x1E1E1E,
+    bg_sidebar: 0x303030,
+    bg_raised: 0x303030,
+    bg_hover: 0x444444,
+    active: 0x444444,
+    active_fg: 0xE7E7E7,
+    border: 0x4F4F4F,
+    text: 0xE7E7E7,
+    text_2: 0xC7C7C7,
+    text_3: 0x808080,
+    ok_green: 0x57E389,
+    stop_red: 0xED333B,
+    stop_red_hover: 0xF0585E,
+    add_green: 0x57E389,
+    del_red: 0xED333B,
+    accent: 0x1E78E4,
+    menu_bg: 0x303030,
+    send_bg: 0xE7E7E7,
+    send_bg_hover: 0xC4C4C4,
+    send_fg: 0x1E1E1E,
+    assistant_text: 0xE7E7E7,
+    code_bg: 0x303030,
+    code_text: 0xE7E7E7,
+    syn_string: 0xA6E3A1,
+    syn_number: 0xFAB387,
+    syn_function: 0x89B4FA,
+    syn_type: 0xF9E2AF,
+    syn_comment: 0x7F849C,
+    syn_literal: 0xFAB387,
+    syn_meta: 0xF9E2AF,
+    syn_operator: 0x89DCEB,
+    tool_border: 0x4F4F4F,
+    tool_meta: 0xC7C7C7,
+    ring_track: 0x303030,
+    ring_fill: 0xE7E7E7,
+    warn: 0xF8E45C,
+    crit: 0xED333B,
+    trough: 0x303030,
+};
+
+/// Ashen: ported from the Zed community theme of the same name
+/// (via zed-themes.com). Dark appearance.
+const ASHEN: Palette = Palette {
+    bg_main: 0x121212,
+    bg_sidebar: 0x121212,
+    bg_raised: 0x212121,
+    bg_hover: 0x323232,
+    active: 0x323232,
+    active_fg: 0xC0C0C0,
+    border: 0x323232,
+    text: 0xB4B4B4,
+    text_2: 0x949494,
+    text_3: 0x656565,
+    ok_green: 0x629C7D,
+    stop_red: 0xC53030,
+    stop_red_hover: 0xCF5555,
+    add_green: 0x629C7D,
+    del_red: 0xC53030,
+    accent: 0xDF6464,
+    menu_bg: 0x212121,
+    send_bg: 0xB4B4B4,
+    send_bg_hover: 0x999999,
+    send_fg: 0x121212,
+    assistant_text: 0xB4B4B4,
+    code_bg: 0x151515,
+    code_text: 0xB4B4B4,
+    syn_string: 0xDF6464,
+    syn_number: 0x4A8B8B,
+    syn_function: 0xE5E5E5,
+    syn_type: 0xC4693D,
+    syn_comment: 0x737373,
+    syn_literal: 0x4A8B8B,
+    syn_meta: 0xA7A7A7,
+    syn_operator: 0xD87C4A,
+    tool_border: 0x323232,
+    tool_meta: 0x949494,
+    ring_track: 0x212121,
+    ring_fill: 0xB4B4B4,
+    warn: 0xE5A72A,
+    crit: 0xC53030,
+    trough: 0x212121,
+};
+
+/// Discord Dark: ported from the Zed community theme of the same name
+/// (via zed-themes.com). Dark appearance.
+const DISCORD: Palette = Palette {
+    bg_main: 0x121214,
+    bg_sidebar: 0x121214,
+    bg_raised: 0x1A1A1E,
+    bg_hover: 0x242428,
+    active: 0x242428,
+    active_fg: 0xB5B4B4,
+    border: 0x222225,
+    text: 0xB5B4B4,
+    text_2: 0x959DA5,
+    text_3: 0x6D6D73,
+    ok_green: 0x4D9375,
+    stop_red: 0xCB7676,
+    stop_red_hover: 0xD48F8F,
+    add_green: 0x4D9375,
+    del_red: 0xCB7676,
+    accent: 0x5197ED,
+    menu_bg: 0x1A1A1E,
+    send_bg: 0xB5B4B4,
+    send_bg_hover: 0x9A9999,
+    send_fg: 0x121214,
+    assistant_text: 0xB5B4B4,
+    code_bg: 0x1A1A1E,
+    code_text: 0xB5B4B4,
+    syn_string: 0xC98A7D,
+    syn_number: 0x4C9A91,
+    syn_function: 0x80A665,
+    syn_type: 0x5D99A9,
+    syn_comment: 0x687668,
+    syn_literal: 0x4D9375,
+    syn_meta: 0xB8A965,
+    syn_operator: 0xCB7676,
+    tool_border: 0x222225,
+    tool_meta: 0x959DA5,
+    ring_track: 0x1A1A1E,
+    ring_fill: 0xB5B4B4,
+    warn: 0xE6CC77,
+    crit: 0xCB7676,
+    trough: 0x1A1A1E,
+};
+
 fn palette(id: ThemeId) -> Palette {
     match id {
         ThemeId::Orbit => ORBIT,
         ThemeId::OrbitLight => ORBIT_LIGHT,
+        ThemeId::Vague => VAGUE,
+        ThemeId::Batsignal => BATSIGNAL,
+        ThemeId::Ashwood => ASHWOOD,
+        ThemeId::Obsidian => OBSIDIAN,
+        ThemeId::MatteBlack => MATTE_BLACK,
+        ThemeId::AdwaitaPastel => ADWAITA_PASTEL,
+        ThemeId::Ashen => ASHEN,
+        ThemeId::Discord => DISCORD,
     }
 }
 
@@ -492,6 +938,30 @@ impl Theme {
     /// code font-size setting (`code_font_size / 13`, the Waku default).
     pub fn code_px(&self, value: f32) -> Pixels {
         px(value * (self.ui.code_font_size / 13.))
+    }
+
+    /// Paint color for one syntax token, shared by transcript code blocks
+    /// and the review diff so both read as the same editor. Each palette
+    /// carries its own `syn_*` colors (so a ported editor theme keeps its
+    /// syntax identity); comments are explicitly legible on the code wash.
+    pub fn token_color(self, class: TokenClass) -> Hsla {
+        match class {
+            TokenClass::Keyword => self.accent,
+            TokenClass::Literal => self.syn_literal,
+            TokenClass::String => self.syn_string,
+            TokenClass::Comment => self.syn_comment,
+            TokenClass::Number => self.syn_number,
+            TokenClass::Type => self.syn_type,
+            TokenClass::Function => self.syn_function,
+            TokenClass::Meta => self.syn_meta,
+            // Terminal vocabulary: command, flag, path, control operator.
+            TokenClass::Command => self.accent,
+            TokenClass::Flag => self.syn_number,
+            TokenClass::Path => self.text,
+            TokenClass::Operator => self.syn_operator,
+            TokenClass::Added => self.add_green,
+            TokenClass::Removed => self.del_red,
+        }
     }
 
     /// Build a full [`Theme`] from its appearance + raw palette tokens.
@@ -533,6 +1003,14 @@ impl Theme {
             assistant_text: hex(p.assistant_text),
             code_bg: hex(p.code_bg),
             code_text: hex(p.code_text),
+            syn_string: hex(p.syn_string),
+            syn_number: hex(p.syn_number),
+            syn_function: hex(p.syn_function),
+            syn_type: hex(p.syn_type),
+            syn_comment: hex(p.syn_comment),
+            syn_literal: hex(p.syn_literal),
+            syn_meta: hex(p.syn_meta),
+            syn_operator: hex(p.syn_operator),
             inline_code_bg: accent.opacity(0.10),
             tool_border: hex(p.tool_border),
             tool_meta: hex(p.tool_meta),
@@ -673,8 +1151,11 @@ mod tests {
     #[test]
     fn parse_theme_id() {
         assert_eq!(ThemeId::parse("orbit"), Some(ThemeId::Orbit));
+        assert_eq!(ThemeId::parse("vague"), Some(ThemeId::Vague));
         assert_eq!(ThemeId::parse("orbit-light"), Some(ThemeId::OrbitLight));
         assert_eq!(ThemeId::parse("system"), None);
+        assert_eq!(ThemeId::Vague.as_str(), "vague");
+        assert_eq!(ThemeId::Vague.appearance(), ThemeMode::Dark);
         // Legacy theme names map onto Orbit / Orbit Light.
         assert_eq!(ThemeId::parse("dark"), Some(ThemeId::Orbit));
         assert_eq!(ThemeId::parse("light"), Some(ThemeId::OrbitLight));
@@ -683,6 +1164,81 @@ mod tests {
         assert_eq!(ThemeId::parse("zedokai"), Some(ThemeId::Orbit));
         assert_eq!(ThemeId::parse("flexoki-dark"), Some(ThemeId::Orbit));
         assert_eq!(ThemeId::parse("flexoki-light"), Some(ThemeId::OrbitLight));
+        // Ported Zed themes + their aliases.
+        assert_eq!(ThemeId::parse("batsignal-dark"), Some(ThemeId::Batsignal));
+        assert_eq!(ThemeId::parse("batsignal"), Some(ThemeId::Batsignal));
+        assert_eq!(ThemeId::parse("ashwood"), Some(ThemeId::Ashwood));
+        assert_eq!(ThemeId::parse("obsidian-dark"), Some(ThemeId::Obsidian));
+        assert_eq!(ThemeId::parse("obsidian"), Some(ThemeId::Obsidian));
+        assert_eq!(ThemeId::parse("matte-black"), Some(ThemeId::MatteBlack));
+        assert_eq!(ThemeId::parse("matte-black-theme"), Some(ThemeId::MatteBlack));
+        assert_eq!(
+            ThemeId::parse("adwaita-pastel-dark"),
+            Some(ThemeId::AdwaitaPastel)
+        );
+        assert_eq!(ThemeId::parse("ashen"), Some(ThemeId::Ashen));
+        assert_eq!(ThemeId::parse("discord-dark"), Some(ThemeId::Discord));
+        // Every selectable theme round-trips through its persisted key.
+        for id in ThemeId::ALL {
+            assert_eq!(ThemeId::parse(id.as_str()), Some(id));
+        }
+    }
+
+    #[test]
+    fn ported_zed_themes_are_dark_and_labelled() {
+        let ported = [
+            ThemeId::Batsignal,
+            ThemeId::Ashwood,
+            ThemeId::Obsidian,
+            ThemeId::MatteBlack,
+            ThemeId::AdwaitaPastel,
+            ThemeId::Ashen,
+            ThemeId::Discord,
+        ];
+        for id in ported {
+            assert_eq!(id.appearance(), ThemeMode::Dark);
+            assert_eq!(Theme::for_id(id).mode, ThemeMode::Dark);
+            assert!(!id.label().is_empty());
+        }
+        assert_eq!(ThemeId::Batsignal.label(), "Batsignal (Dark)");
+        assert_eq!(ThemeId::Obsidian.label(), "Obsidian Dark");
+        assert_eq!(ThemeId::AdwaitaPastel.label(), "Adwaita Pastel Dark");
+        assert_eq!(ThemeId::Discord.label(), "Discord Dark");
+    }
+
+    /// Every palette must keep its foreground readable against the surfaces
+    /// it is painted on — the ported Zed themes are normalised into the same
+    /// contrast band as Orbit so none reads as washed out or blown out.
+    #[test]
+    fn every_theme_has_readable_foregrounds() {
+        fn rel_lum(v: u32) -> f64 {
+            let f = |c: u32| {
+                let c = c as f64 / 255.;
+                if c <= 0.03928 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * f((v >> 16) & 0xff) + 0.7152 * f((v >> 8) & 0xff) + 0.0722 * f(v & 0xff)
+        }
+        fn contrast(a: u32, b: u32) -> f64 {
+            let (l1, l2) = (rel_lum(a), rel_lum(b));
+            let (hi, lo) = if l1 > l2 { (l1, l2) } else { (l2, l1) };
+            (hi + 0.05) / (lo + 0.05)
+        }
+        for id in ThemeId::ALL {
+            let p = palette(id);
+            assert!(contrast(p.text, p.bg_main) >= 4.5, "{id:?}: body text on bg");
+            assert!(
+                contrast(p.text, p.bg_raised) >= 3.5,
+                "{id:?}: body text on raised"
+            );
+            assert!(contrast(p.active_fg, p.active) >= 4.5, "{id:?}: active row");
+            assert!(contrast(p.text_2, p.bg_main) >= 3.0, "{id:?}: secondary text");
+            assert!(contrast(p.text_3, p.bg_main) >= 2.5, "{id:?}: tertiary text");
+            assert!(contrast(p.send_fg, p.send_bg) >= 4.5, "{id:?}: send button");
+        }
     }
 
     #[test]
@@ -759,5 +1315,22 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn vague_keeps_its_own_syntax_palette() {
+        let vague = Theme::for_id(ThemeId::Vague);
+        let orbit = Theme::dark();
+        assert_eq!(vague.mode, ThemeMode::Dark);
+        // Vague's syntax is its own identity — warm strings, muted-blue
+        // keywords — not Orbit's semantic green/amber reuse.
+        assert_ne!(
+            vague.token_color(TokenClass::String),
+            orbit.token_color(TokenClass::String)
+        );
+        assert_eq!(vague.token_color(TokenClass::String), hex(0xE8B589));
+        assert_eq!(vague.token_color(TokenClass::Keyword), hex(0x6E94B2));
+        assert_eq!(vague.token_color(TokenClass::Function), hex(0xC48282));
+        assert_eq!(vague.token_color(TokenClass::Type), hex(0x9BB4BC));
     }
 }

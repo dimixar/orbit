@@ -1,0 +1,305 @@
+use super::*;
+use super::helpers::*;
+
+impl OrbitApp {
+    /// Record a status message; the status bar surfaces it briefly (see
+    /// [`STATUS_MESSAGE_TTL`]). Internal RPC chatter never calls this —
+    /// only user-meaningful facts and failures.
+    pub(super) fn set_status(&mut self, message: impl Into<String>) {
+        self.status = message.into();
+        self.status_at = Some(Instant::now());
+    }
+
+    /// Record a command / protocol / extension error. Unlike the transient
+    /// status line, errors persist (in a red banner) until dismissed or
+    /// superseded, so a failure is never silently lost.
+    pub(super) fn set_error(&mut self, message: impl Into<String>) {
+        self.error = Some(message.into());
+    }
+
+    /// Dismiss the current error banner.
+    pub(super) fn dismiss_error(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.error = None;
+        cx.notify();
+    }
+
+    /// A successful command clears the banner it previously raised (e.g. a
+    /// retried `set_model`), so a fixed error doesn't linger.
+    pub(super) fn clear_error_for(&mut self, command: &str) {
+        if let Some(error) = &self.error {
+            if error.starts_with(&humanize_command(command)) {
+                self.error = None;
+            }
+        }
+    }
+
+    /// Surface a failed command's `error` — the docs' `success: false`
+    /// contract. A `parse` command is pi's response to unparseable input.
+    pub(super) fn on_command_failure(
+        &mut self,
+        command: &str,
+        error: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        if command == "parse" {
+            self.set_error(format!(
+                "Protocol error: {}",
+                error.unwrap_or("pi could not parse the request")
+            ));
+            return;
+        }
+        // A rejected follow-up/steer never entered pi's queue: drop the
+        // optimistic chip and hand the text back so nothing is lost.
+        if matches!(command, "follow_up" | "steer") {
+            if let Some(text) = self.pending_follow_up.take() {
+                if let Some(pos) = self.queue.follow_up.iter().position(|t| *t == text) {
+                    self.queue.follow_up.remove(pos);
+                }
+                if self.input.read(cx).text().trim().is_empty() {
+                    self.input.update(cx, |input, cx| input.set_text(text, cx));
+                }
+            }
+        }
+        let detail = error.unwrap_or("pi reported an unspecified error");
+        self.set_error(format!("{}: {detail}", humanize_command(command)));
+    }
+
+    /// Send a command to pi. Returns `false` when the write failed (or
+    /// there is no process) so callers can keep the user's input intact.
+    pub(super) fn send(&mut self, body: CommandBody, label: &str) -> bool {
+        let Some(client) = self.client.as_ref() else {
+            self.set_status("pi is not running");
+            return false;
+        };
+        match client.send(body) {
+            Ok(_) => true,
+            Err(err) => {
+                self.set_error(format!("Failed to send {label}: {err}"));
+                false
+            }
+        }
+    }
+
+    /// Re-fetch the model catalog and thinking levels for the current session.
+    pub(super) fn refresh_catalogs(&mut self) {
+        self.send(CommandBody::GetAvailableModels, "get_available_models");
+        self.send(
+            CommandBody::GetAvailableThinkingLevels,
+            "get_available_thinking_levels",
+        );
+        self.send(CommandBody::GetCommands, "get_commands");
+    }
+
+    /// Re-fetch the current context-window estimate. Cheap; call after
+    /// settle, session switch, compaction, and model changes — never per tick.
+    pub(super) fn refresh_context_stats(&mut self) {
+        self.send(CommandBody::GetSessionStats, "get_session_stats");
+    }
+
+    /// Make `client` the active pi process, resetting uptime / exit state.
+    pub(super) fn adopt_client(&mut self, client: PiClient) {
+        self.runtime = RuntimeStatus {
+            started_at: Some(Instant::now()),
+            alive: true,
+            exited: false,
+            error: None,
+        };
+        self.client = Some(client);
+        // Re-probe provider-auth capabilities against the new process and
+        // reconcile any login the restart interrupted.
+        self.probe_auth();
+    }
+
+    /// Tear down the active pi process (dropping `PiClient` kills the child).
+    pub(super) fn drop_client(&mut self) {
+        self.client = None;
+        self.runtime = RuntimeStatus::default();
+        // A login in flight dies with its process; remember the provider so
+        // the next `auth.list` can reconcile a completion that happened while
+        // Orbit was reconnecting.
+        self.auth.on_disconnect();
+    }
+
+    /// Ask pi for provider auth capabilities. Harmless on a pi that doesn't
+    /// implement `auth.*`: the failed `auth.list` response marks auth
+    /// unsupported and the Providers page keeps the file/Terminal fallback.
+    pub(super) fn probe_auth(&mut self) {
+        let wanted = self.auth.on_reconnect();
+        self.send(CommandBody::AuthList, "auth.list");
+        for provider in wanted {
+            self.send(CommandBody::AuthStatus { provider }, "auth.status");
+        }
+    }
+
+    /// Refresh capabilities and per-provider status against the *current*
+    /// process without clearing what the card already knows. Used when the
+    /// Providers page opens and on Refresh.
+    pub(super) fn refresh_auth(&mut self) {
+        if self.auth.support() == AuthSupport::Unsupported {
+            return;
+        }
+        self.send(CommandBody::AuthList, "auth.list");
+        if self.auth.is_busy() {
+            // A login is mid-flight; don't disturb it with status refreshes.
+            return;
+        }
+        let providers: Vec<String> = self
+            .auth
+            .providers()
+            .iter()
+            .map(|provider| provider.id.clone())
+            .collect();
+        for provider in providers {
+            self.send(CommandBody::AuthStatus { provider }, "auth.status");
+        }
+    }
+
+    /// Perform the side effects the [`AuthManager`] emitted. The manager does
+    /// no I/O; opening the browser and sending cancels happen here.
+    pub(super) fn handle_auth_effects(&mut self, effects: Vec<AuthEffect>, cx: &mut Context<Self>) {
+        if effects.is_empty() {
+            return;
+        }
+        for effect in effects {
+            match effect {
+                AuthEffect::OpenUrl(url) => {
+                    if let Err(err) = platform::open_url(&url) {
+                        self.set_status(format!("Could not open the browser: {err}"));
+                    }
+                }
+                AuthEffect::CancelLogin(session_id) => {
+                    self.send(
+                        CommandBody::AuthCancel { session_id },
+                        "auth.cancel",
+                    );
+                }
+                AuthEffect::RefreshProviders => {
+                    // The login/logout already took effect in pi; no restart
+                    // banner is needed on the RPC path.
+                    self.provider_auth_dirty = false;
+                    self.send(CommandBody::AuthList, "auth.list");
+                    self.refresh_catalogs();
+                    self.reload_custom_providers(cx);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Start a provider login through the RPC namespace. `method` comes from
+    /// the provider's discovered capability, never a hardcoded flow.
+    pub(super) fn auth_start_login(&mut self, provider: String, name: String, method: String, cx: &mut Context<Self>) {
+        match self.auth.support() {
+            AuthSupport::Unsupported => {
+                // pi has no auth RPC: hand the login to the Terminal the way
+                // the page has always done.
+                self.provider_oauth_login(provider, name, cx);
+                return;
+            }
+            _ => {}
+        }
+        let session_id = self.auth.start_login(&provider, &method);
+        self.send(
+            CommandBody::AuthLogin {
+                provider,
+                method,
+                session_id: Some(session_id),
+            },
+            "auth.login",
+        );
+        cx.notify();
+    }
+
+    /// Cancel the active login and tell pi to tear its flow down.
+    pub(super) fn auth_cancel_login(&mut self, cx: &mut Context<Self>) {
+        if let Some(session_id) = self.auth.cancel_login() {
+            self.send(CommandBody::AuthCancel { session_id }, "auth.cancel");
+        }
+        cx.notify();
+    }
+
+    pub(super) fn runtime_state(&self) -> RuntimeState {
+        if self.client.is_none() {
+            if self.runtime.error.is_some() {
+                RuntimeState::Failed
+            } else {
+                RuntimeState::Stopped
+            }
+        } else if self.runtime.exited || !self.runtime.alive {
+            RuntimeState::Exited
+        } else {
+            RuntimeState::Running
+        }
+    }
+
+    /// Spawn the pi process (Start button). No-op while one is running.
+    pub(super) fn runtime_start(&mut self, cx: &mut Context<Self>) {
+        if self.client.is_some() {
+            return;
+        }
+        let cwd = self
+            .current_workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        match PiClient::spawn(&cwd, None) {
+            Ok(client) => {
+                self.adopt_client(client);
+                self.send(CommandBody::GetState, "get_state");
+                self.refresh_catalogs();
+                self.set_status("pi process started");
+            }
+            Err(err) => {
+                let message = format!("pi spawn failed: {err}");
+                self.client = None;
+                self.runtime.error = Some(message.clone());
+                self.set_status(message);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Stop the pi process (Stop button).
+    pub(super) fn runtime_stop(&mut self, cx: &mut Context<Self>) {
+        if self.client.is_none() {
+            return;
+        }
+        self.drop_client();
+        self.busy = false;
+        self.set_status("pi process stopped");
+        cx.notify();
+    }
+
+    /// Stop then start the pi process (Restart button).
+    pub(super) fn runtime_restart(&mut self, cx: &mut Context<Self>) {
+        self.drop_client();
+        self.runtime_start(cx);
+    }
+
+    /// Register the active client under the session file pi reports. The
+    /// startup process has no known path until pi's first state/stats
+    /// response; a `new_session` re-keys it the same way (the handler clears
+    /// `current_session_path` and the next response adopts the new file).
+    /// An explicit switch never re-keys — its path is already claimed.
+    pub(super) fn adopt_session_file(&mut self, file: PathBuf) {
+        if self.current_session_path.is_none() {
+            self.current_session_path = Some(file);
+        }
+    }
+
+    /// Park a background session, evicting a settled one if over the cap.
+    /// Running sessions are never evicted.
+    pub(super) fn park(&mut self, path: PathBuf, parked: ParkedSession) {
+        if self.lives.len() >= MAX_LIVE_SESSIONS {
+            let victim = self
+                .lives
+                .iter()
+                .find(|(_, p)| !p.busy)
+                .map(|(k, _)| k.clone());
+            if let Some(victim) = victim {
+                self.lives.remove(&victim);
+            }
+        }
+        self.lives.insert(path, parked);
+    }
+}

@@ -28,6 +28,9 @@ pub struct MessageScrollerState {
     /// First row currently visible in the viewport — the "reader is here"
     /// hint that drives the navigation rail's active tick.
     visible_start: Rc<Cell<usize>>,
+    /// New content arrived while the reader was away from the live edge —
+    /// the jump-to-latest control says so until they return.
+    unread: Rc<Cell<bool>>,
 }
 
 impl MessageScrollerState {
@@ -50,7 +53,22 @@ impl MessageScrollerState {
             list,
             following_tail,
             visible_start,
+            unread: Rc::new(Cell::new(false)),
         }
+    }
+
+    /// Record that content changed. When the reader is away from the live
+    /// edge this flags the jump-to-latest control; while following, it's a
+    /// no-op (the content is already in view).
+    pub fn note_activity(&self) {
+        if !self.is_following_tail() {
+            self.unread.set(true);
+        }
+    }
+
+    /// True when content changed while the reader was scrolled up.
+    pub fn has_unread(&self) -> bool {
+        self.unread.get()
     }
 
     /// First row currently in view (viewport-top hint for the rail).
@@ -83,6 +101,7 @@ impl MessageScrollerState {
 
     /// Reset to `item_count` rows and resume tail following.
     pub fn reset(&self, item_count: usize) {
+        self.unread.set(false);
         self.list.reset(item_count);
         self.scroll_to_end();
     }
@@ -137,6 +156,7 @@ impl MessageScrollerState {
 
     /// Resume tail following and scroll to the latest row.
     pub fn scroll_to_end(&self) {
+        self.unread.set(false);
         self.following_tail.set(true);
         self.list.scroll_to(ListOffset {
             item_ix: self.item_count(),
@@ -202,6 +222,10 @@ fn render_bottom_fade(theme: Theme) -> impl IntoElement {
 }
 
 fn render_jump_button(state: MessageScrollerState, theme: Theme) -> impl IntoElement {
+    // Content arrived while the reader was scrolled up: the round jump
+    // affordance grows a "New activity" label so the stream's continued
+    // progress is visible from anywhere in the transcript.
+    let unread = state.has_unread();
     div()
         .id(ElementId::Name("message-scroller-jump-layer".into()))
         .absolute()
@@ -215,7 +239,9 @@ fn render_jump_button(state: MessageScrollerState, theme: Theme) -> impl IntoEle
             // Waku's floating round scroll-to-bottom affordance.
             div()
                 .id(ElementId::Name("message-scroller-jump".into()))
-                .size(px(32.))
+                .h(px(32.))
+                .when(unread, |button| button.px(px(12.)))
+                .when(!unread, |button| button.w(px(32.)))
                 .rounded_full()
                 .border_1()
                 .border_color(theme.border_strong)
@@ -223,6 +249,7 @@ fn render_jump_button(state: MessageScrollerState, theme: Theme) -> impl IntoEle
                 .flex()
                 .items_center()
                 .justify_center()
+                .gap(px(6.))
                 .cursor_pointer()
                 .shadow(theme.card_shadow())
                 .hover(|style| style.bg(theme.bg_raised))
@@ -236,7 +263,16 @@ fn render_jump_button(state: MessageScrollerState, theme: Theme) -> impl IntoEle
                         .flex_none()
                         .size(px(16.))
                         .text_color(theme.text),
-                ),
+                )
+                .when(unread, |button| {
+                    button.child(
+                        div()
+                            .text_size(px(11.5))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child("New activity"),
+                    )
+                }),
         )
 }
 

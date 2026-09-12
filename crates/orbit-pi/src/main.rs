@@ -31,6 +31,8 @@ mod sidepane;
 mod theme;
 mod transcript;
 mod transcript_view;
+mod usage;
+mod watch;
 mod workspace_picker;
 
 use std::time::Duration;
@@ -73,6 +75,7 @@ actions!(
         NewSession,
         RefreshSessions,
         OpenSettings,
+        ToggleUsage,
         ToggleCommandPalette,
         ToggleModelMenu,
         ToggleThinkingMenu,
@@ -126,6 +129,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-n", NewSession, None),
         KeyBinding::new("cmd-r", RefreshSessions, None),
         KeyBinding::new("cmd-,", OpenSettings, None),
+        // The Usage page is a destination: cmd-u matches the sidebar row.
+        KeyBinding::new("cmd-u", ToggleUsage, None),
         KeyBinding::new("cmd-p", ToggleCommandPalette, None),
         KeyBinding::new("cmd-period", AbortRun, None),
         // Transcript accelerators (work regardless of focus):
@@ -163,6 +168,12 @@ fn main() {
     application.run(|cx: &mut App| {
         bind_keys(cx);
         theme::init(cx);
+        // GPUI Kit's component layer (data table + plot), then project Orbit's
+        // palette onto it so its widgets look like this app rather than
+        // another product.
+        usage::kit::init(cx);
+        let theme = *theme::get(cx);
+        usage::kit::sync(cx, &theme);
         // Bundle Zed's UI/mono faces so `.ZedSans`/`.ZedMono` resolve to
         // real fonts (IBM Plex Sans / Lilex) without OS dependencies.
         assets::register_zed_fonts(cx).expect("failed to register Zed fonts");

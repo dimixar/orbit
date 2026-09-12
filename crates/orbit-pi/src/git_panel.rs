@@ -167,6 +167,21 @@ impl GitPanel {
         cx.notify();
     }
 
+    /// Reload the page when the workspace changes under it (file edit, stage,
+    /// commit, checkout). A no-op while the page is closed.
+    ///
+    /// Only status + branch are re-read: `refresh_all` grows the History/Graph
+    /// page window, and this fires on every debounced tree change, so growing
+    /// here would inflate pagination during a run. Those tabs still refresh on
+    /// open, on their own actions, and via the panel's refresh button.
+    pub fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.open {
+            self.refresh_status(cx);
+            self.refresh_branch(cx);
+            cx.notify();
+        }
+    }
+
     /// Keep the panel's workspace and agent in sync with the app.
     pub fn set_context(
         &mut self,

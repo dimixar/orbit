@@ -26,7 +26,6 @@ use gpui::{
 use crate::app::{file_glyph, icon, nerd_font_family};
 use crate::composer::ComposerInput;
 use crate::git;
-use crate::highlight::TokenClass;
 use crate::review::{self, ExpansionDirection, GapPosition, LineKind, Snapshot, Source};
 use crate::theme::{self, Theme, ThemeMode};
 
@@ -1524,7 +1523,7 @@ fn code_text(line: &review::Line, theme: Theme) -> StyledText {
             runs.push(run(start - offset, base, &font));
         }
         if end > start {
-            runs.push(run(end - start, token_color(token.class, theme), &font));
+            runs.push(run(end - start, theme.token_color(token.class), &font));
         }
         offset = offset.max(end);
     }
@@ -1555,21 +1554,6 @@ fn mono_font() -> Font {
         fallbacks: None,
         weight: FontWeight::NORMAL,
         style: FontStyle::Normal,
-    }
-}
-
-fn token_color(class: TokenClass, theme: Theme) -> Hsla {
-    match class {
-        TokenClass::Keyword => theme.accent,
-        TokenClass::Literal => theme.accent,
-        TokenClass::String => theme.ok_green,
-        TokenClass::Comment => theme.text_3,
-        TokenClass::Number => theme.warn,
-        TokenClass::Type => theme.text,
-        TokenClass::Function => theme.text,
-        TokenClass::Meta => theme.crit,
-        TokenClass::Added => theme.add_green,
-        TokenClass::Removed => theme.del_red,
     }
 }
 

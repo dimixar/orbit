@@ -13,12 +13,19 @@ osx_minimum_system_version = "13.0"
 
 [dependencies]
 gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+# GPUI Kit's component layer, on the same gpui release this app pins
+# (`gpui-component 0.5.1` → `gpui ^0.2.2`). See the usage page's table/chart.
+gpui-component = { version = "0.5.1", default-features = false }
 # Native open/folder dialogs (NSOpenPanel on macOS) for folder selection
 rfd = "0.15"
 orbit-rpc = { path = "../orbit-rpc" }
 serde_json = { workspace = true }
 unicode-segmentation = "1"
 include_dir = "0.7"
+# Watch pi's on-disk session store so sessions written by the CLI or another
+# Orbit window refresh the sidebar live (debounced FSEvents on macOS, the
+# notify backend elsewhere). Scans run off-thread; the UI only drains a list.
+notify-debouncer-mini = { version = "0.7", features = ["macos_fsevent"] }
 anyhow = { workspace = true }
 # Local-time formatting for response-footer timestamps
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

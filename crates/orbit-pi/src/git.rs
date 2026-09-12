@@ -30,9 +30,17 @@ pub struct ReviewDiff {
 const MAX_HYDRATED_PATCH_BYTES: usize = 32 * 1024 * 1024;
 
 /// A `git` invocation rooted at `cwd`, inheriting the environment.
+///
+/// `GIT_OPTIONAL_LOCKS=0` is essential here: without it, read-only commands
+/// like `git status`/`git diff` refresh the index stat cache as a side effect,
+/// writing `.git/index`. The workspace watcher keeps `.git/index`, so that
+/// write would re-trigger a refresh forever. Optional locks disabled only
+/// suppress opportunistic sub-operations; staging/commit still take their
+/// required locks.
 pub(crate) fn command(cwd: &Path) -> Command {
     let mut command = Command::new("git");
     command.current_dir(cwd);
+    command.env("GIT_OPTIONAL_LOCKS", "0");
     command
 }
 
@@ -939,14 +947,30 @@ mod tests {
         assert!(status.success(), "git {args:?} failed");
     }
 
+    /// Reads must not take optional index locks, or `git status` rewrites
+    /// `.git/index` and the workspace watcher re-fires endlessly.
+    #[test]
+    fn git_runs_without_optional_locks() {
+        let envs: Vec<_> = command(Path::new("."))
+            .get_envs()
+            .map(|(key, value)| (key.to_os_string(), value.map(|v| v.to_os_string())))
+            .collect();
+        assert!(
+            envs.iter().any(|(key, value)| key == "GIT_OPTIONAL_LOCKS"
+                && value.as_deref() == Some(OsStr::new("0"))),
+            "GIT_OPTIONAL_LOCKS=0 must be set on every git invocation"
+        );
+    }
+
     fn repository() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // A pid+nanos sum can collide on a coarse clock, letting parallel
+        // tests share (and tear down) one repo; a counter is unique per run.
+        static NEXT: AtomicU64 = AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
-            "orbit-git-collect-{}",
-            std::process::id() as u64
-                + std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos() as u64
+            "orbit-git-collect-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
         git_ok(&root, &["init", "--quiet", "--initial-branch=main"]);

@@ -20,10 +20,10 @@ use std::{
 };
 
 use gpui::{
-    deferred, div, img, linear_color_stop, linear_gradient, list, point, prelude::*, px, relative, svg,
-    AnyElement, App, ClipboardItem, ElementId, Font, FontFeatures, FontStyle, FontWeight, Hsla,
-    ImageSource, InteractiveText, ObjectFit, Pixels, ScrollHandle, SharedString,
-    StrikethroughStyle, StyledText, TextRun, UnderlineStyle, Window,
+    deferred, div, img, linear_color_stop, linear_gradient, list, point, prelude::*, px,
+    svg, AnyElement, App, ClipboardItem, ElementId, Font, FontFeatures, FontStyle, FontWeight,
+    Hsla, ImageSource, InteractiveText, ObjectFit, Pixels, ScrollHandle, SharedString,
+    StrikethroughStyle, StyledText, TextAlign, TextRun, UnderlineStyle, Window,
 };
 
 use std::ops::Range;
@@ -35,6 +35,7 @@ use serde_json::Value;
 use orbit_rpc::MessageUsage;
 
 use crate::context_meter::format_tokens;
+use crate::highlight::{self, Token};
 use crate::message_scroller::{self, MessageScrollerState};
 use crate::theme::{self, Theme};
 use crate::transcript::{ChatMessage, Step, ToolCall};
@@ -45,6 +46,9 @@ use crate::transcript::{ChatMessage, Step, ToolCall};
 pub(crate) type ReviewOpener = Rc<dyn Fn(&mut Window, &mut App)>;
 
 /// Waku `CONTENT_MAX_WIDTH` (the `max-w-[760px]` transcript column).
+/// Orbit uses 960 so fenced code and tables can use the full pane; body
+/// line-height (14/26) keeps prose readable without a nested measure cap
+/// that mis-measured wrapped markdown and stacked lines on top of each other.
 const CONTENT_MAX_WIDTH: f32 = 960.0;
 /// Extra space before a follow-up user message (Waku `pt-8`).
 const FOLLOWUP_TURN_TOP_GAP: f32 = 32.0;
@@ -72,14 +76,36 @@ const NAVIGATION_RAIL_PREVIEW_WIDTH: f32 = 320.0;
 const NAVIGATION_RAIL_PREVIEW_MAX_HEIGHT: f32 = 126.0;
 /// Detail JSON/outputs are truncated to keep one virtualized row bounded.
 const DETAIL_TEXT_CAP: usize = 4000;
+/// Tool *output* gets a much larger budget than arguments — logs are the
+/// point of the Output section. The collapsed preview keeps the row small;
+/// expanding paints up to [`OUTPUT_EXPANDED_PAINT_LINES`] lines.
+const OUTPUT_TEXT_CAP: usize = 100_000;
+/// A detail section taller than this collapses to a preview…
+const OUTPUT_COLLAPSE_LINES: usize = 16;
+/// …showing this many lines collapsed.
+const OUTPUT_PREVIEW_LINES: usize = 12;
+/// Even expanded, one virtualized row paints at most this many output lines
+/// (the copy button always carries the full captured text).
+const OUTPUT_EXPANDED_PAINT_LINES: usize = 400;
+/// A settled code block taller than this collapses to a preview…
+const CODE_COLLAPSE_LINES: usize = 28;
+/// …showing this many lines collapsed. Live (streaming) rows never collapse
+/// — a growing block's edge must stay visible.
+const CODE_PREVIEW_LINES: usize = 24;
 /// Code-block copy feedback shares the detail-section feedback map; section
 /// `2` never collides with Arguments (`0`) / Output (`1`).
 const CODE_COPY_SECTION: u8 = 2;
-const CODE_COPY_BUTTON: f32 = 24.0;
+const CODE_COPY_BUTTON: f32 = 28.0;
 
 type ExpandedActivities = Rc<RefCell<HashMap<(usize, usize), bool>>>;
 type ExpandedTools = Rc<RefCell<HashSet<(usize, usize)>>>;
 type CopiedSections = Rc<RefCell<HashMap<(usize, usize, u8), Instant>>>;
+/// Tool detail sections expanded past their collapsed preview, keyed
+/// `(message_ix, flat_tool_ix, section)`.
+type ExpandedSections = Rc<RefCell<HashSet<(usize, usize, u8)>>>;
+/// Code blocks expanded past their collapsed preview, keyed
+/// `(message_ix, prose_salt, block_ix)`.
+type ExpandedBlocks = Rc<RefCell<HashSet<(usize, u64, usize)>>>;
 
 pub(crate) struct TranscriptView {
     pub messages: Rc<RefCell<Vec<ChatMessage>>>,
@@ -94,6 +120,10 @@ pub(crate) struct TranscriptView {
     pub copied: Rc<RefCell<HashMap<usize, Instant>>>,
     /// Per detail-section copy feedback, keyed `(message_ix, tool_ix, section)`.
     pub copied_sections: CopiedSections,
+    /// Tool output sections expanded past their collapsed preview.
+    pub expanded_sections: ExpandedSections,
+    /// Code blocks expanded past their collapsed preview.
+    pub expanded_blocks: ExpandedBlocks,
     /// Rail tick currently hovered (drives the turn preview card).
     pub hovered_turn: Rc<Cell<Option<usize>>>,
     /// Assistant row whose footer usage metric is hovered (drives the
@@ -145,6 +175,8 @@ struct RowPaint {
     scroller: MessageScrollerState,
     expanded_tools: ExpandedTools,
     copied_sections: CopiedSections,
+    expanded_sections: ExpandedSections,
+    expanded_blocks: ExpandedBlocks,
     hovered_usage: Rc<Cell<Option<usize>>>,
 }
 
@@ -166,6 +198,8 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
     let expanded_tools = view.expanded_tools.clone();
     let copied = view.copied.clone();
     let copied_sections = view.copied_sections.clone();
+    let expanded_sections = view.expanded_sections.clone();
+    let expanded_blocks = view.expanded_blocks.clone();
     let hovered_turn = view.hovered_turn.clone();
     let hovered_usage = view.hovered_usage.clone();
     let rail_hint_dismissed = view.rail_hint_dismissed.clone();
@@ -325,6 +359,8 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
             scroller: scroller.clone(),
             expanded_tools: expanded_tools.clone(),
             copied_sections: copied_sections.clone(),
+            expanded_sections: expanded_sections.clone(),
+            expanded_blocks: expanded_blocks.clone(),
             hovered_usage: hovered_usage.clone(),
         })
         .into_any_element()
@@ -818,6 +854,9 @@ fn render_user_bubble(message: &ChatMessage, paint: &RowPaint) -> impl IntoEleme
                         0,
                         theme,
                         paint.copied_sections.clone(),
+                        paint.expanded_blocks.clone(),
+                        true,
+                        paint.scroller.clone(),
                     )),
             )
         })
@@ -869,6 +908,9 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
         .iter()
         .position(|step| !step.text.trim().is_empty());
     let last_step = message.steps.len().saturating_sub(1);
+    // Running count of tools across the message's steps — the flat index
+    // space the per-tool detail/copy keys use (stable across steps).
+    let mut tool_base = 0usize;
 
     for (step_ix, step) in message.steps.iter().enumerate() {
         let before_answer = answer_start.is_none_or(|answer| step_ix < answer);
@@ -889,6 +931,7 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
                 content = content.child(render_step_group(
                     ix,
                     step_ix,
+                    tool_base,
                     step,
                     open,
                     is_live_step,
@@ -897,18 +940,25 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
                     paint.expanded_activities.clone(),
                     paint.expanded_tools.clone(),
                     paint.copied_sections.clone(),
+                    paint.expanded_sections.clone(),
                     paint.scroller.clone(),
                 ));
             }
         }
+        tool_base += step.tools.len();
 
         if !step.text.is_empty() {
+            // Live rows never collapse code blocks — a growing block's tail
+            // edge must stay visible while it streams.
             content = content.child(div().w_full().min_w_0().pt(px(4.)).child(render_prose(
                 &step.text,
                 ix,
                 (step_ix as u64 + 1) * 4096,
                 theme,
                 paint.copied_sections.clone(),
+                paint.expanded_blocks.clone(),
+                !paint.live,
+                paint.scroller.clone(),
             )));
         }
     }
@@ -923,9 +973,17 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
         content = content.child(render_assistant_error(error, theme));
     }
 
+    // A cancelled turn keeps its partial content and says so, quietly —
+    // "Stopped", never an error card (the user asked for the stop).
+    if message.aborted && !paint.live {
+        content = content.child(render_stopped_marker(theme));
+    }
+
     if paint.live {
+        let activity = message.steps.last().and_then(working_activity_label);
         content = content.child(render_working_indicator(
             paint.live_elapsed.unwrap_or(Duration::ZERO),
+            activity,
             theme,
         ));
     }
@@ -1054,6 +1112,7 @@ fn step_activity_title(step: &Step, live: bool) -> String {
 fn render_step_group(
     ix: usize,
     step_ix: usize,
+    tool_base: usize,
     step: &Step,
     open: bool,
     live: bool,
@@ -1062,11 +1121,10 @@ fn render_step_group(
     expanded_activities: ExpandedActivities,
     expanded_tools: ExpandedTools,
     copied_sections: CopiedSections,
+    expanded_sections: ExpandedSections,
     scroller: MessageScrollerState,
 ) -> impl IntoElement {
     let title = step_activity_title(step, live);
-    // Flat tool index keeps per-tool detail/copy keys stable across steps.
-    let tool_base = 0usize;
     let last = step.tools.len().saturating_sub(1);
     let mut group = div()
         .w_full()
@@ -1148,6 +1206,7 @@ fn render_step_group(
                 expanded_tools.borrow().contains(&(ix, flat)),
                 expanded_tools.clone(),
                 copied_sections.clone(),
+                expanded_sections.clone(),
                 scroller.clone(),
             )
         }));
@@ -1171,19 +1230,19 @@ fn render_thinking_body(thinking: &str, live: bool, theme: Theme) -> impl IntoEl
         .border_1()
         .border_color(theme.border_strong)
         .bg(theme.overlay)
-        .px(px(10.))
-        .py(px(6.))
+        .px(px(12.))
+        .py(px(8.))
         .flex()
         .flex_col()
-        .gap(px(4.))
+        .gap(px(5.))
         .child(
             div()
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .text_size(theme.ui_px(12.5))
-                .line_height(theme.ui_px(16.))
-                .child(glyph("icons/spark.svg", 12., theme.text_3))
+                .text_size(theme.ui_px(13.))
+                .line_height(theme.ui_px(17.))
+                .child(glyph("icons/spark.svg", 13., theme.text_3))
                 .child(
                     div()
                         .font_weight(FontWeight::SEMIBOLD)
@@ -1194,8 +1253,8 @@ fn render_thinking_body(thinking: &str, live: bool, theme: Theme) -> impl IntoEl
         .child(
             div()
                 .font_family(theme::code_font_family())
-                .text_size(theme.code_px(10.5))
-                .line_height(theme.code_px(15.))
+                .text_size(theme.code_px(12.))
+                .line_height(theme.code_px(18.))
                 .text_color(theme.tool_meta)
                 .whitespace_normal()
                 .child(detail),
@@ -1213,10 +1272,12 @@ fn render_activity_card(
     tool_open: bool,
     expanded_tools: ExpandedTools,
     copied_sections: CopiedSections,
+    expanded_sections: ExpandedSections,
     scroller: MessageScrollerState,
 ) -> AnyElement {
     let action = activity_action_label(&tool.name);
     let detail = activity_preview(tool);
+    let is_command = tool_command(tool).is_some();
     let has_diff = tool.added > 0 || tool.removed > 0;
     let added = tool.added;
     let removed = tool.removed;
@@ -1239,16 +1300,16 @@ fn render_activity_card(
         .bg(theme.overlay)
         .child(
             div()
-                .h(px(28.))
-                .px(px(8.))
+                .h(px(32.))
+                .px(px(10.))
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .text_size(theme.ui_px(12.5))
-                .line_height(theme.ui_px(16.))
+                .text_size(theme.ui_px(13.))
+                .line_height(theme.ui_px(17.))
                 .when(has_detail, |row| row.cursor_pointer())
                 .hover(|style| style.bg(theme.overlay_strong))
-                .child(glyph(activity_icon(&tool.name), 12., theme.text_3))
+                .child(glyph(activity_icon(&tool.name), 13., theme.text_3))
                 .child(
                     div()
                         .flex_none()
@@ -1257,14 +1318,44 @@ fn render_activity_card(
                         .child(action),
                 )
                 .when(!detail.is_empty(), |row| {
-                    row.child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(theme.tool_meta)
-                            .child(detail),
-                    )
+                    if is_command {
+                        // Terminal preview: a muted prompt sigil then the
+                        // command in the code face, syntax-colored exactly
+                        // like the expanded detail.
+                        let tokens = highlight::tokenize_cached(highlight::Lang::Shell, &detail);
+                        row.child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .font_family(theme::code_font_family())
+                                .text_size(theme.code_px(12.))
+                                .child(div().flex_none().text_color(theme.text_3).child("$"))
+                                .child(
+                                    div().min_w_0().overflow_hidden().whitespace_nowrap().child(
+                                        syntax_styled(
+                                            &detail,
+                                            Some(tokens.as_ref()),
+                                            0,
+                                            theme.tool_meta,
+                                            theme,
+                                        ),
+                                    ),
+                                ),
+                        )
+                    } else {
+                        row.child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.tool_meta)
+                                .child(detail),
+                        )
+                    }
                 })
                 .when(has_diff, |row| {
                     row.child(render_line_delta(added, removed, theme, 12.5))
@@ -1276,7 +1367,7 @@ fn render_activity_card(
                     row.child(glyph("icons/stop.svg", 12., theme.del_red))
                 })
                 .when(complete && !tool.failed, |row| {
-                    row.child(glyph("icons/check.svg", 10., theme.text_3))
+                    row.child(glyph("icons/check.svg", 11., theme.text_3))
                 })
                 .child(glyph(
                     if has_detail && tool_open {
@@ -1287,7 +1378,7 @@ fn render_activity_card(
                         // Placeholder keeps the row height stable either way.
                         "icons/chevron-right.svg"
                     },
-                    10.,
+                    12.,
                     if has_detail {
                         theme.text_3
                     } else {
@@ -1301,6 +1392,7 @@ fn render_activity_card(
         card = card.child(render_tool_error_strip(tool, theme));
     }
     card = card.when(has_detail, |row| {
+        let scroller = scroller.clone();
         row.on_click(move |_, _, cx| {
             let mut open = expanded_tools.borrow_mut();
             if !open.remove(&key) {
@@ -1313,7 +1405,14 @@ fn render_activity_card(
     });
 
     if tool_open && has_detail {
-        card = card.child(render_tool_detail(tool, key, copied_sections, theme));
+        card = card.child(render_tool_detail(
+            tool,
+            key,
+            copied_sections,
+            expanded_sections,
+            scroller.clone(),
+            theme,
+        ));
     }
     card.into_any_element()
 }
@@ -1365,54 +1464,97 @@ fn render_tool_error_strip(tool: &ToolCall, theme: Theme) -> impl IntoElement {
         )
 }
 
-/// The expandable detail card: labeled Arguments / Output sections, each with
-/// its own copy button (Waku `activity_disclosure_sections` parity).
+/// The expandable detail card: a Command (terminal-highlighted shell), or
+/// Arguments (JSON) when the tool is not a shell command, then the Output.
+/// Each section carries its own copy button; tall sections collapse to a
+/// preview so a long log never buries the answer that follows it.
 fn render_tool_detail(
     tool: &ToolCall,
     key: (usize, usize),
     copied_sections: CopiedSections,
+    expanded_sections: ExpandedSections,
+    scroller: MessageScrollerState,
     theme: Theme,
 ) -> impl IntoElement {
-    let sections: [(u8, &str, Option<String>); 2] = [
-        (0, "Arguments", tool.args.as_ref().map(display_value)),
-        (1, "Output", tool.output.as_ref().map(display_value)),
+    // A command tool shows its shell command as terminal input; everything
+    // else shows the JSON arguments. The result is JSON-highlighted when the
+    // tool returned structured data, plain otherwise.
+    let first = match tool_command(tool) {
+        Some(command) => Some(("Command", command, Some(highlight::Lang::Shell), true)),
+        None => tool.args.as_ref().map(|args| {
+            (
+                "Arguments",
+                display_value_capped(args, DETAIL_TEXT_CAP),
+                section_lang(Some(args)),
+                false,
+            )
+        }),
+    };
+    let second = tool.output.as_ref().map(|output| {
+        (
+            "Output",
+            display_value_capped(output, OUTPUT_TEXT_CAP),
+            section_lang(Some(output)),
+            false,
+        )
+    });
+    let sections = [
+        first.map(|(label, content, lang, prompt)| (0u8, label, content, lang, prompt)),
+        second.map(|(label, content, lang, prompt)| (1u8, label, content, lang, prompt)),
     ];
+
     div()
         .w_full()
         .min_w_0()
         .border_t_1()
         .border_color(theme.border_strong)
         .px(px(10.))
-        .py(px(6.))
+        .py(px(8.))
         .flex()
         .flex_col()
-        .gap(px(6.))
+        .gap(px(10.))
         .children(
             sections
                 .into_iter()
-                .filter_map(|(section, label, content)| {
-                    let content = content?;
-                    if content.trim().is_empty() {
-                        return None;
-                    }
-                    Some(render_detail_section(
+                .flatten()
+                .filter(|(_, _, content, _, _)| !content.trim().is_empty())
+                .map(move |(section, label, content, lang, prompt)| {
+                    render_detail_section(
                         key,
                         section,
                         label,
                         content,
+                        lang,
+                        prompt,
                         copied_sections.clone(),
+                        expanded_sections.clone(),
+                        scroller.clone(),
                         theme,
-                    ))
+                    )
                 }),
         )
 }
 
+/// A structured (non-string) value highlights as JSON; strings and scalars
+/// stay plain so raw command output is not mislabeled as a document.
+fn section_lang(value: Option<&Value>) -> Option<highlight::Lang> {
+    match value {
+        Some(Value::String(_)) | None => None,
+        Some(_) => Some(highlight::Lang::Json),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_detail_section(
     key: (usize, usize),
     section: u8,
     label: &str,
     content: String,
+    lang: Option<highlight::Lang>,
+    prompt: bool,
     copied_sections: CopiedSections,
+    expanded_sections: ExpandedSections,
+    scroller: MessageScrollerState,
     theme: Theme,
 ) -> impl IntoElement {
     let copied = copied_sections
@@ -1420,23 +1562,38 @@ fn render_detail_section(
         .get(&(key.0, key.1, section))
         .is_some_and(|at| at.elapsed() < COPY_FEEDBACK);
     let copy_content = content.clone();
-    div()
+    // Tall sections (a test run's log, a big edit's arguments) collapse to a
+    // prefix preview; the toggle remeasures the row. Copy always carries the
+    // full captured text, folded or not.
+    let lines: Vec<&str> = content.split('\n').collect();
+    let foldable = lines.len() > OUTPUT_COLLAPSE_LINES;
+    let expanded =
+        foldable && expanded_sections.borrow().contains(&(key.0, key.1, section));
+    let visible: &[&str] = if foldable && !expanded {
+        &lines[..OUTPUT_PREVIEW_LINES]
+    } else if lines.len() > OUTPUT_EXPANDED_PAINT_LINES {
+        &lines[..OUTPUT_EXPANDED_PAINT_LINES]
+    } else {
+        &lines
+    };
+    let paint_clipped = expanded && lines.len() > OUTPUT_EXPANDED_PAINT_LINES;
+    let card = div()
         .w_full()
         .min_w_0()
         .flex()
         .flex_col()
-        .gap(px(3.))
+        .gap(px(4.))
         .child(
             div()
-                .h(px(18.))
+                .h(px(22.))
                 .flex()
                 .items_center()
                 .justify_between()
                 .child(
                     div()
                         .font_weight(FontWeight::MEDIUM)
-                        .text_size(theme.ui_px(10.5))
-                        .line_height(theme.ui_px(14.))
+                        .text_size(theme.ui_px(11.5))
+                        .line_height(theme.ui_px(15.))
                         .text_color(theme.text_2)
                         .child(label.to_string()),
                 )
@@ -1447,8 +1604,8 @@ fn render_detail_section(
                             ((key.0 as u64) << 16 | key.1 as u64) << 8 | section as u64,
                         ))
                         .flex_none()
-                        .size(px(18.))
-                        .rounded(px(4.))
+                        .size(px(24.))
+                        .rounded(px(6.))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -1460,7 +1617,7 @@ fn render_detail_section(
                             } else {
                                 "icons/copy.svg"
                             },
-                            10.,
+                            12.,
                             if copied { theme.ok_green } else { theme.text_3 },
                         ))
                         .on_click(move |_, _, cx| {
@@ -1476,22 +1633,124 @@ fn render_detail_section(
             div()
                 .w_full()
                 .min_w_0()
-                .font_family(theme::code_font_family())
-                .text_size(theme.code_px(10.5))
-                .line_height(theme.code_px(15.))
-                .text_color(theme.tool_meta)
-                .whitespace_normal()
-                .child(content),
+                .flex()
+                .items_start()
+                .gap(px(8.))
+                .when(prompt, |row| {
+                    row.child(
+                        div()
+                            .flex_none()
+                            .font_family(theme::code_font_family())
+                            .text_size(theme.code_px(13.))
+                            .line_height(theme.code_px(20.))
+                            .text_color(theme.text_3)
+                            .child("$"),
+                    )
+                })
+                .child(render_detail_body(&content, visible, lang, theme)),
+        );
+    if foldable {
+        let total = lines.len();
+        let toggle_label = if expanded {
+            "Show less".to_string()
+        } else {
+            format!("Show all {total} lines")
+        };
+        card.child(
+            div()
+                .id(ElementId::NamedInteger(
+                    "section-fold".into(),
+                    ((key.0 as u64) << 16 | key.1 as u64) << 8 | section as u64,
+                ))
+                .w_full()
+                .h(px(22.))
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .cursor_pointer()
+                .text_size(theme.ui_px(11.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text_3)
+                .hover(|style| style.text_color(theme.text))
+                .child(glyph(
+                    if expanded {
+                        "icons/chevron-down.svg"
+                    } else {
+                        "icons/chevron-right.svg"
+                    },
+                    10.,
+                    theme.text_3,
+                ))
+                .child(toggle_label)
+                .when(paint_clipped, |toggle| {
+                    toggle.child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(theme.text_3)
+                            .child(format!(
+                                "Showing first {OUTPUT_EXPANDED_PAINT_LINES} — copy for the full log"
+                            )),
+                    )
+                })
+                .on_click(move |_, _, cx| {
+                    let fold_key = (key.0, key.1, section);
+                    let mut open = expanded_sections.borrow_mut();
+                    if !open.remove(&fold_key) {
+                        open.insert(fold_key);
+                    }
+                    drop(open);
+                    scroller.remeasure_items(key.0..key.0 + 1);
+                    cx.refresh_windows();
+                }),
         )
+    } else {
+        card
+    }
+}
+
+/// Highlighted, wrapping tool text: one line per row so a long command or
+/// blob wraps inside the card rather than forcing it wide. `visible` is the
+/// prefix slice actually painted (collapse preview / paint cap); token
+/// ranges index lines absolutely, and a prefix slice keeps them aligned.
+fn render_detail_body(
+    content: &str,
+    visible: &[&str],
+    lang: Option<highlight::Lang>,
+    theme: Theme,
+) -> AnyElement {
+    let tokens = lang.map(|lang| highlight::tokenize_cached(lang, content));
+    div()
+        .flex_1()
+        .min_w_0()
+        .font_family(theme::code_font_family())
+        .text_size(theme.code_px(13.))
+        .line_height(theme.code_px(20.))
+        .text_color(theme.code_text)
+        .whitespace_normal()
+        .flex()
+        .flex_col()
+        .children(visible.iter().enumerate().map(move |(line_ix, line)| {
+            div().w_full().min_w_0().child(syntax_styled(
+                line,
+                tokens.as_deref(),
+                line_ix,
+                theme.code_text,
+                theme,
+            ))
+        }))
+        .into_any_element()
 }
 
 /// Arguments / result text: strings as-is, everything else pretty-printed.
-fn display_value(value: &Value) -> String {
+fn display_value_capped(value: &Value, cap: usize) -> String {
     let text = match value {
         Value::String(text) => text.clone(),
         other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
     };
-    cap_chars(&text, DETAIL_TEXT_CAP)
+    cap_chars(&text, cap)
 }
 
 fn cap_chars(text: &str, max: usize) -> String {
@@ -1889,7 +2148,68 @@ fn working_wave_dots(theme: Theme, elapsed_ms: u128) -> impl IntoElement {
         }))
 }
 
-fn render_working_indicator(elapsed: Duration, theme: Theme) -> impl IntoElement {
+/// What the agent is doing right now, for the live indicator: "Running
+/// cargo test", "Reading src/auth.rs", "Thinking…". Derived from the live
+/// step's latest tool so the status names real work, never a bare spinner.
+fn working_activity_label(step: &Step) -> Option<String> {
+    if let Some(tool) = step.tools.last() {
+        let detail = activity_preview(tool);
+        let verb = match tool.name.as_str() {
+            "bash" | "shell" | "terminal" | "exec" | "run" => "Running",
+            "read" => "Reading",
+            "grep" | "find" | "glob" | "search" => "Searching",
+            "edit" | "write" => "Editing",
+            other => {
+                let action = activity_action_label(other);
+                return Some(if detail.is_empty() {
+                    format!("Using {action}")
+                } else {
+                    format!("{action} {detail}")
+                });
+            }
+        };
+        return Some(if detail.is_empty() {
+            verb.to_string()
+        } else {
+            format!("{verb} {detail}")
+        });
+    }
+    if !step.thinking.is_empty() {
+        return Some("Thinking…".into());
+    }
+    None
+}
+
+/// Quiet end-of-turn marker for a cancelled generation: a stop glyph and
+/// "Stopped" in the meta color. Sits where the working indicator was.
+fn render_stopped_marker(theme: Theme) -> impl IntoElement {
+    div()
+        .h(px(22.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(glyph("icons/stop.svg", 11., theme.text_3))
+        .child(
+            div()
+                .text_size(theme.ui_px(13.5))
+                .line_height(theme.ui_px(18.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text_3)
+                .child("Stopped"),
+        )
+}
+
+fn render_working_indicator(
+    elapsed: Duration,
+    activity: Option<String>,
+    theme: Theme,
+) -> impl IntoElement {
+    // Name the current activity when we know it; the elapsed time stays so
+    // a long-running command still reads as progress, not a hang.
+    let label = match activity {
+        Some(activity) => format!("{} · {}", activity, format_working_elapsed(elapsed)),
+        None => format!("Working for {}", format_working_elapsed(elapsed)),
+    };
     div()
         .h(px(22.))
         .flex()
@@ -1898,11 +2218,13 @@ fn render_working_indicator(elapsed: Duration, theme: Theme) -> impl IntoElement
         .child(working_wave_dots(theme, elapsed.as_millis()))
         .child(
             div()
+                .min_w_0()
+                .truncate()
                 .text_size(theme.ui_px(13.5))
                 .line_height(theme.ui_px(18.))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.text_3)
-                .child(format!("Working for {}", format_working_elapsed(elapsed))),
+                .child(label),
         )
 }
 
@@ -1934,13 +2256,32 @@ fn activity_preview(tool: &ToolCall) -> String {
     if let Some(path) = &tool.path {
         return path.clone();
     }
-    if tool.summary.len() > 72 {
-        let mut out: String = tool.summary.chars().take(72).collect();
+    // A command tool's pi summary is the raw JSON arguments; show the shell
+    // command itself in the header instead of `{"command":"…"}`.
+    let summary = tool_command(tool).unwrap_or_else(|| tool.summary.clone());
+    if summary.len() > 72 {
+        let mut out: String = summary.chars().take(72).collect();
         out.push('…');
         out
     } else {
-        tool.summary.clone()
+        summary
     }
+}
+
+/// The shell command a command-running tool was invoked with, when the tool
+/// carries one in its arguments. `None` for edit/read/other tools.
+fn tool_command(tool: &ToolCall) -> Option<String> {
+    if !matches!(
+        tool.name.as_str(),
+        "bash" | "shell" | "terminal" | "exec" | "run"
+    ) {
+        return None;
+    }
+    tool.args
+        .as_ref()?
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 fn render_line_delta(added: u64, removed: u64, theme: Theme, size: f32) -> impl IntoElement {
@@ -2141,10 +2482,17 @@ fn inline_runs(
                 FontStyle::Normal
             };
         }
+        // Inline code and links both take the accent so they read as
+        // interactive/technical at a glance; body text keeps its base color.
+        let color = if span.code || span.link.is_some() {
+            theme.accent
+        } else {
+            base_color
+        };
         runs.push(TextRun {
             len,
             font,
-            color: if span.code { theme.accent } else { base_color },
+            color,
             background_color: span.code.then_some(theme.inline_code_bg),
             underline: span.link.is_some().then(|| UnderlineStyle {
                 thickness: px(1.),
@@ -2176,6 +2524,9 @@ fn ui_font() -> Font {
 }
 
 /// A styled, word-wrapping paragraph. Links open via `cx.open_url`.
+///
+/// Line height must clear inline-code backgrounds: a tight 14/22 measure let
+/// the next wrapped line (and the next block) paint through the previous one.
 fn paragraph_text(
     text: &str,
     size: f32,
@@ -2191,6 +2542,7 @@ fn paragraph_text(
     div()
         .w_full()
         .min_w_0()
+        .whitespace_normal()
         .text_size(theme.ui_px(size))
         .line_height(theme.ui_px(line_height))
         .text_color(color)
@@ -2215,23 +2567,90 @@ fn md_id(ix: usize, salt: u64, block_ix: usize, sub: usize) -> ElementId {
 
 // ── block model ─────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 enum Block {
     Paragraph(Vec<String>),
     Heading(u8, String),
     Code(Option<String>, Vec<String>),
     List(Vec<ListItem>),
     Quote(Vec<String>),
+    /// GitHub-style alert (`> [!NOTE]` …): a labeled, tinted callout.
+    Alert(AlertKind, Vec<String>),
     Rule,
     Table {
         header: Vec<String>,
         rows: Vec<Vec<String>>,
+        aligns: Vec<TableAlign>,
     },
 }
 
+/// GFM column alignment parsed from a table's delimiter row.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum TableAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
+impl TableAlign {
+    fn text_align(self) -> TextAlign {
+        match self {
+            Self::Left => TextAlign::Left,
+            Self::Center => TextAlign::Center,
+            Self::Right => TextAlign::Right,
+        }
+    }
+}
+
+/// Kinds of GitHub alert blockquote (`> [!WARNING]` …). Each maps to one
+/// semantic token color and one icon, so the family stays consistent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AlertKind {
+    Note,
+    Tip,
+    Important,
+    Warning,
+    Caution,
+}
+
+impl AlertKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Note => "Note",
+            Self::Tip => "Tip",
+            Self::Important => "Important",
+            Self::Warning => "Warning",
+            Self::Caution => "Caution",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Self::Note | Self::Important | Self::Warning => "icons/info.svg",
+            Self::Tip => "icons/spark.svg",
+            Self::Caution => "icons/stop.svg",
+        }
+    }
+
+    fn color(self, theme: Theme) -> Hsla {
+        match self {
+            Self::Note | Self::Important => theme.accent,
+            Self::Tip => theme.ok_green,
+            Self::Warning => theme.warn,
+            Self::Caution => theme.crit,
+        }
+    }
+}
+
+#[derive(Clone)]
 struct ListItem {
     depth: usize,
     ordered: bool,
     number: u64,
+    /// GFM task-list state: `Some(true)` checked, `Some(false)` open, `None`
+    /// a plain item. Task items drop the bullet/number for a checkbox.
+    checked: Option<bool>,
     text: String,
 }
 
@@ -2247,8 +2666,9 @@ fn heading_line(trimmed: &str) -> Option<(u8, String)> {
         if let Some(body) = trimmed[level..].strip_prefix(' ') {
             let body = body.trim();
             if !body.is_empty() {
-                // Waku styles h1-h3; deeper levels fall back to body text.
-                return Some((level.min(3) as u8, body.to_string()));
+                // Keep the real level; the renderer gives h4+ a smaller step
+                // rather than flattening everything past h3 to one size.
+                return Some((level as u8, body.to_string()));
             }
         }
     }
@@ -2265,7 +2685,7 @@ fn is_rule(trimmed: &str) -> bool {
     }
 }
 
-fn list_item_line(line: &str) -> Option<(usize, bool, u64, String)> {
+fn list_item_line(line: &str) -> Option<(usize, bool, u64, Option<bool>, String)> {
     let indent = line.len() - line.trim_start().len();
     let t = line.trim_start();
     let (ordered, number, body) = if let Some(rest) = t
@@ -2284,7 +2704,32 @@ fn list_item_line(line: &str) -> Option<(usize, bool, u64, String)> {
             .or_else(|| t[digits..].strip_prefix(") "))?;
         (true, t[..digits].parse().ok()?, after)
     };
-    Some((indent.div_ceil(2).min(2), ordered, number, body.to_string()))
+    let (checked, body) = match task_status(body) {
+        Some((checked, rest)) => (Some(checked), rest),
+        None => (None, body),
+    };
+    Some((
+        indent.div_ceil(2).min(2),
+        ordered,
+        number,
+        checked,
+        body.to_string(),
+    ))
+}
+
+/// Strip a leading GFM task marker (`[ ] `, `[x] `, `[X] `) from an item's
+/// body, returning its state and the remaining text.
+fn task_status(body: &str) -> Option<(bool, &str)> {
+    let rest = body.strip_prefix('[')?;
+    let mut chars = rest.chars();
+    let checked = match chars.next()? {
+        ' ' => false,
+        'x' | 'X' => true,
+        _ => return None,
+    };
+    let after = &rest[1..];
+    let after = after.strip_prefix(']')?;
+    Some((checked, after.strip_prefix(' ').unwrap_or(after)))
 }
 
 fn split_table_row(line: &str) -> Vec<String> {
@@ -2294,10 +2739,47 @@ fn split_table_row(line: &str) -> Vec<String> {
     s.split('|').map(|cell| cell.trim().to_string()).collect()
 }
 
-fn is_table_separator(trimmed: &str) -> bool {
-    trimmed.contains('-')
-        && trimmed.contains('|')
-        && trimmed.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+/// Parse a GFM delimiter row (`| --- | :--: | ---: |`) into per-column
+/// alignment; `None` when the line is not a delimiter row.
+fn table_aligns(trimmed: &str) -> Option<Vec<TableAlign>> {
+    if !trimmed.contains('-') || !trimmed.contains('|') {
+        return None;
+    }
+    if !trimmed.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ')) {
+        return None;
+    }
+    let cells = split_table_row(trimmed);
+    if cells.is_empty() {
+        return None;
+    }
+    Some(
+        cells
+            .iter()
+            .map(|cell| {
+                let left = cell.starts_with(':');
+                let right = cell.ends_with(':');
+                match (left, right) {
+                    (true, true) => TableAlign::Center,
+                    (false, true) => TableAlign::Right,
+                    _ => TableAlign::Left,
+                }
+            })
+            .collect(),
+    )
+}
+
+/// GitHub alert marker on the first quoted line, e.g. `[!WARNING]`.
+fn alert_marker(body: &[String]) -> Option<AlertKind> {
+    let first = body.first()?.trim();
+    let inner = first.strip_prefix("[!")?.strip_suffix(']')?;
+    Some(match inner.trim().to_ascii_uppercase().as_str() {
+        "NOTE" => AlertKind::Note,
+        "TIP" => AlertKind::Tip,
+        "IMPORTANT" => AlertKind::Important,
+        "WARNING" => AlertKind::Warning,
+        "CAUTION" => AlertKind::Caution,
+        _ => return None,
+    })
 }
 
 fn parse_blocks(text: &str) -> Vec<Block> {
@@ -2351,21 +2833,30 @@ fn parse_blocks(text: &str) -> Vec<Block> {
             continue;
         }
 
-        if trimmed.contains('|') && i + 1 < lines.len() && is_table_separator(lines[i + 1].trim()) {
-            flush_paragraph(&mut paragraph, &mut blocks);
-            let header = split_table_row(trimmed);
-            i += 2;
-            let mut rows = Vec::new();
-            while i < lines.len() {
-                let row_line = lines[i].trim();
-                if row_line.is_empty() || !row_line.contains('|') {
-                    break;
+        if trimmed.contains('|') {
+            if let Some(aligns) = lines
+                .get(i + 1)
+                .and_then(|separator| table_aligns(separator.trim()))
+            {
+                flush_paragraph(&mut paragraph, &mut blocks);
+                let header = split_table_row(trimmed);
+                i += 2;
+                let mut rows = Vec::new();
+                while i < lines.len() {
+                    let row_line = lines[i].trim();
+                    if row_line.is_empty() || !row_line.contains('|') {
+                        break;
+                    }
+                    rows.push(split_table_row(row_line));
+                    i += 1;
                 }
-                rows.push(split_table_row(row_line));
-                i += 1;
+                blocks.push(Block::Table {
+                    header,
+                    rows,
+                    aligns,
+                });
+                continue;
             }
-            blocks.push(Block::Table { header, rows });
-            continue;
         }
 
         if trimmed.starts_with('>') {
@@ -2380,17 +2871,29 @@ fn parse_blocks(text: &str) -> Vec<Block> {
                     None => break,
                 }
             }
-            blocks.push(Block::Quote(body));
+            match alert_marker(&body) {
+                Some(kind) => {
+                    body.remove(0);
+                    // Drop the blank separator line GitHub allows after the
+                    // marker so the callout body starts on real content.
+                    while body.first().is_some_and(|line| line.trim().is_empty()) {
+                        body.remove(0);
+                    }
+                    blocks.push(Block::Alert(kind, body));
+                }
+                None => blocks.push(Block::Quote(body)),
+            }
             continue;
         }
 
-        if let Some((depth, ordered, number, body)) = list_item_line(line) {
+        if let Some((depth, ordered, number, checked, body)) = list_item_line(line) {
             flush_paragraph(&mut paragraph, &mut blocks);
             let mut items = Vec::new();
             let mut pending = ListItem {
                 depth,
                 ordered,
                 number,
+                checked,
                 text: body,
             };
             i += 1;
@@ -2409,7 +2912,7 @@ fn parse_blocks(text: &str) -> Vec<Block> {
                     }
                     break;
                 }
-                if let Some((depth, ordered, number, body)) = list_item_line(l) {
+                if let Some((depth, ordered, number, checked, body)) = list_item_line(l) {
                     // A marker-type change starts a new list.
                     if ordered != pending.ordered {
                         break;
@@ -2420,6 +2923,7 @@ fn parse_blocks(text: &str) -> Vec<Block> {
                             depth,
                             ordered,
                             number,
+                            checked,
                             text: body,
                         },
                     ));
@@ -2445,44 +2949,138 @@ fn parse_blocks(text: &str) -> Vec<Block> {
     blocks
 }
 
-/// Waku `.markdown`: 14px/22px body with a 0.9rem rhythm between blocks.
+thread_local! {
+    /// Memoized markdown block parses, keyed by content hash. Every visible
+    /// row re-renders on each heartbeat while a run streams (the live clock
+    /// alone repaints at ~11 Hz); parsing is pure over the source text, so
+    /// each distinct text parses once and rows share the blocks.
+    static BLOCK_PARSE_CACHE: RefCell<HashMap<u64, Rc<Vec<Block>>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Parse markdown into blocks, memoized by content. The cache is small and
+/// cleared when full — a stale-entry miss costs one reparse, never a wrong
+/// render (keyed by the text's full 64-bit hash).
+fn parse_blocks_cached(text: &str) -> Rc<Vec<Block>> {
+    let key = {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(text, &mut hasher);
+        std::hash::Hasher::finish(&hasher)
+    };
+    BLOCK_PARSE_CACHE.with(|cache| {
+        if let Some(hit) = cache.borrow().get(&key) {
+            return hit.clone();
+        }
+        let blocks = Rc::new(parse_blocks(text));
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= 64 {
+            cache.clear();
+        }
+        cache.insert(key, blocks.clone());
+        blocks
+    })
+}
+
+/// Waku `.markdown`: 14px/22px body. Spacing is graded by block pair rather
+/// than one uniform gap, so a heading reads as a section start, a list hugs
+/// the paragraph that introduces it, and consecutive paragraphs breathe.
+///
+/// Prose blocks (paragraphs, headings, lists, quotes, rules) cap at a
+/// comfortable reading width; code, tables, and alerts use the full content
+/// column. `collapsible` is false for live rows — streaming code blocks
+/// never collapse out from under their own growing edge.
+#[allow(clippy::too_many_arguments)]
 fn render_prose(
     text: &str,
     ix: usize,
     salt: u64,
     theme: Theme,
     copied_sections: CopiedSections,
+    expanded_blocks: ExpandedBlocks,
+    collapsible: bool,
+    scroller: MessageScrollerState,
 ) -> impl IntoElement + use<> {
-    let blocks = parse_blocks(text);
+    let blocks = parse_blocks_cached(text);
+    let gaps: Vec<f32> = blocks
+        .iter()
+        .enumerate()
+        .map(|(i, block)| {
+            if i == 0 {
+                0.0
+            } else {
+                block_gap(&blocks[i - 1], block)
+            }
+        })
+        .collect();
     div()
         .w_full()
         .min_w_0()
         .flex()
         .flex_col()
-        .gap(px(14.))
         .children(
             blocks
-                .into_iter()
+                .iter()
                 .enumerate()
                 .map(move |(block_ix, block)| {
-                    render_block(block, ix, salt, block_ix, theme, copied_sections.clone())
-                }),
+                    let gap = gaps[block_ix];
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .when(gap > 0.0, |node| node.mt(px(gap)))
+                        .child(render_block(
+                            block,
+                            ix,
+                            salt,
+                            block_ix,
+                            theme,
+                            copied_sections.clone(),
+                            expanded_blocks.clone(),
+                            collapsible,
+                            scroller.clone(),
+                        ))
+                })
+                .collect::<Vec<_>>(),
         )
 }
 
+/// Vertical space to place *above* `next`, given `prev`. More room above a
+/// heading than below it, tight joins for lists and their introducer, and a
+/// clear break around code and tables (the brief's rhythm table).
+fn block_gap(prev: &Block, next: &Block) -> f32 {
+    use Block::{Alert, Code, Heading, List, Paragraph, Quote, Rule, Table};
+    match (prev, next) {
+        (_, Heading(..)) => 20.0,
+        (Heading(..), _) => 8.0,
+        (Paragraph(..), Paragraph(..)) => 14.0,
+        (_, Code(..)) => 12.0,
+        (Code(..), _) => 14.0,
+        (_, List(..)) => 10.0,
+        (List(..), _) => 14.0,
+        (_, Quote(..)) | (Quote(..), _) => 12.0,
+        (_, Alert(..)) | (Alert(..), _) => 12.0,
+        (_, Table { .. }) | (Table { .. }, _) => 14.0,
+        (Rule, _) => 14.0,
+        _ => 10.0,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_block(
-    block: Block,
+    block: &Block,
     ix: usize,
     salt: u64,
     block_ix: usize,
     theme: Theme,
     copied_sections: CopiedSections,
+    expanded_blocks: ExpandedBlocks,
+    collapsible: bool,
+    scroller: MessageScrollerState,
 ) -> AnyElement {
     match block {
         Block::Paragraph(lines) => paragraph_text(
             &lines.join(" "),
             14.,
-            22.,
+            26.,
             FontWeight::NORMAL,
             theme.assistant_text,
             md_id(ix, salt, block_ix, 0),
@@ -2490,17 +3088,19 @@ fn render_block(
         )
         .into_any_element(),
         Block::Heading(level, text) => {
-            let (size, line_height) = match level {
-                1 => (20., 28.),
-                2 => (18., 28.),
-                _ => (16., 24.),
+            let (size, line_height, color) = match level {
+                1 => (20., 30., theme.text),
+                2 => (18., 28., theme.text),
+                3 => (16., 26., theme.text),
+                4 => (15., 24., theme.text),
+                _ => (14., 24., theme.text_2),
             };
             paragraph_text(
-                &text,
+                text,
                 size,
                 line_height,
                 FontWeight::SEMIBOLD,
-                theme.text,
+                color,
                 md_id(ix, salt, block_ix, 0),
                 theme,
             )
@@ -2508,28 +3108,39 @@ fn render_block(
         }
         Block::Code(language, lines) => render_code_block(
             language.as_deref(),
-            &lines,
+            lines,
             ix,
+            salt,
             block_ix,
             theme,
             copied_sections,
+            expanded_blocks,
+            collapsible,
+            scroller,
         )
         .into_any_element(),
         Block::Rule => div().w_full().h(px(1.)).bg(theme.border).into_any_element(),
+        Block::Alert(kind, lines) => {
+            render_alert(*kind, lines, ix, salt, block_ix, theme).into_any_element()
+        }
         Block::Quote(lines) => div()
             .w_full()
             .min_w_0()
             .border_l_2()
-            .border_color(theme.border_strong)
-            .pl(px(16.))
+            .border_color(theme.text_3)
+            .bg(theme.overlay)
+            .rounded_r(px(8.))
+            .pl(px(14.))
+            .pr(px(12.))
+            .py(px(8.))
             .flex()
             .flex_col()
             .gap(px(4.))
-            .children(lines.into_iter().enumerate().map(move |(sub, line)| {
+            .children(lines.iter().enumerate().map(move |(sub, line)| {
                 paragraph_text(
-                    &line,
+                    line,
                     14.,
-                    22.,
+                    26.,
                     FontWeight::NORMAL,
                     theme.text_2,
                     md_id(ix, salt, block_ix, sub),
@@ -2542,33 +3153,107 @@ fn render_block(
             .min_w_0()
             .flex()
             .flex_col()
-            .gap(px(4.))
+            .gap(px(8.))
             .children(
                 items
-                    .into_iter()
+                    .iter()
                     .enumerate()
                     .map(move |(sub, item)| render_list_item(item, ix, salt, block_ix, sub, theme)),
             )
             .into_any_element(),
-        Block::Table { header, rows } => {
-            render_table(&header, &rows, ix, salt, block_ix, theme).into_any_element()
-        }
+        Block::Table {
+            header,
+            rows,
+            aligns,
+        } => render_table(header, rows, aligns, ix, salt, block_ix, theme).into_any_element(),
     }
 }
 
-/// `ml-5` bullet / numbered item with a hanging indent on wrap.
+/// A GitHub-style callout: a tinted, rounded container with a semantic
+/// icon + label and readable body copy. Deliberately no accent bar — the
+/// tint, icon, and label carry the meaning without a heavy left edge.
+fn render_alert(
+    kind: AlertKind,
+    lines: &[String],
+    ix: usize,
+    salt: u64,
+    block_ix: usize,
+    theme: Theme,
+) -> impl IntoElement {
+    let color = kind.color(theme);
+    div()
+        .w_full()
+        .min_w_0()
+        .rounded(px(10.))
+        .bg(color.opacity(0.08))
+        .px(px(12.))
+        .py(px(10.))
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(glyph(kind.icon(), 14., color))
+                .child(
+                    div()
+                        .text_size(theme.ui_px(12.))
+                        .line_height(theme.ui_px(16.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(color)
+                        .child(kind.label()),
+                ),
+        )
+        .children(lines.iter().enumerate().map(move |(sub, line)| {
+            paragraph_text(
+                line,
+                14.,
+                26.,
+                FontWeight::NORMAL,
+                theme.assistant_text,
+                md_id(ix, salt, block_ix, sub),
+                theme,
+            )
+        }))
+}
+
+/// `ml-5` bullet / numbered item with a hanging indent on wrap. GFM task
+/// items swap the marker for a checkbox and mute checked text.
 fn render_list_item(
-    item: ListItem,
+    item: &ListItem,
     ix: usize,
     salt: u64,
     block_ix: usize,
     sub: usize,
     theme: Theme,
 ) -> AnyElement {
-    let marker = if item.ordered {
-        format!("{}.", item.number)
+    let marker: AnyElement = match item.checked {
+        Some(checked) => task_checkbox(checked, theme),
+        None => {
+            let text = if item.ordered {
+                format!("{}.", item.number)
+            } else {
+                "•".to_string()
+            };
+            div()
+                .text_size(theme.ui_px(14.))
+                .line_height(theme.ui_px(26.))
+                .text_color(if item.ordered {
+                    theme.text
+                } else {
+                    theme.text_3
+                })
+                .child(text)
+                .into_any_element()
+        }
+    };
+    // Completed tasks recede but stay above the 4.5:1 body-contrast floor.
+    let text_color = if item.checked == Some(true) {
+        theme.text_2
     } else {
-        "•".to_string()
+        theme.assistant_text
     };
     div()
         .w_full()
@@ -2580,47 +3265,89 @@ fn render_list_item(
             div()
                 .flex_none()
                 .w(px(20.))
-                .text_size(theme.ui_px(14.))
-                .line_height(theme.ui_px(22.))
-                .text_color(if item.ordered {
-                    theme.text
-                } else {
-                    theme.text_3
-                })
+                .flex()
+                .items_center()
+                .justify_start()
                 .child(marker),
         )
         .child(div().min_w_0().flex_1().child(paragraph_text(
             &item.text,
             14.,
-            22.,
+            26.,
             FontWeight::NORMAL,
-            theme.assistant_text,
+            text_color,
             md_id(ix, salt, block_ix, sub),
             theme,
         )))
         .into_any_element()
 }
 
-/// Rounded bordered mono block (Waku `pre`): 13px/24px body under a slim
-/// header row carrying the language chip (when the fence names one) and
-/// the copy button — the same top-right slot on every code block.
+/// GFM task-list checkbox: accent-filled check when done, hairline empty box
+/// when open. The `send_fg` check color stays legible on the accent in both
+/// appearances.
+fn task_checkbox(checked: bool, theme: Theme) -> AnyElement {
+    let size = 14.0;
+    let mut box_ = div()
+        .flex_none()
+        .size(px(size))
+        .rounded(px(4.))
+        .flex()
+        .items_center()
+        .justify_center();
+    if checked {
+        box_ = box_
+            .bg(theme.accent)
+            .child(glyph("icons/check.svg", 10., theme.send_fg));
+    } else {
+        box_ = box_.border_1().border_color(theme.border_strong);
+    }
+    div()
+        .h(px(26.))
+        .flex()
+        .items_center()
+        .child(box_)
+        .into_any_element()
+}
+
+/// A first-class code block: a title strip naming the language with a copy
+/// affordance, then syntax-highlighted monospace lines that scroll
+/// horizontally rather than wrapping or clipping. Highlight colors come from
+/// [`Theme::token_color`], the same map the review diff uses, so a snippet
+/// reads identically in the transcript and the side pane.
+///
+/// Settled blocks taller than [`CODE_COLLAPSE_LINES`] show a
+/// [`CODE_PREVIEW_LINES`]-line preview with a "Show remaining N lines" bar;
+/// copy always carries the complete code regardless of the fold.
+#[allow(clippy::too_many_arguments)]
 fn render_code_block(
     language: Option<&str>,
     lines: &[String],
     ix: usize,
+    salt: u64,
     block_ix: usize,
     theme: Theme,
     copied_sections: CopiedSections,
+    expanded_blocks: ExpandedBlocks,
+    collapsible: bool,
+    scroller: MessageScrollerState,
 ) -> impl IntoElement {
     let code = lines.join("\n");
+    let tokens = language
+        .and_then(highlight::lang_for_tag)
+        .map(|lang| highlight::tokenize_cached(lang, &code));
+    let label = code_block_label(language);
+    // Block identity within the message: the prose salt scopes the index to
+    // the step/user run it was parsed from, so two steps' third blocks
+    // never share copy feedback, element state, or fold state.
+    let block_key = salt as usize + block_ix;
     let copied = copied_sections
         .borrow()
-        .get(&(ix, block_ix, CODE_COPY_SECTION))
+        .get(&(ix, block_key, CODE_COPY_SECTION))
         .is_some_and(|at| at.elapsed() < COPY_FEEDBACK);
     let copy_button = div()
         .id(ElementId::NamedInteger(
             "copy-code".into(),
-            (ix as u64) << 16 | block_ix as u64,
+            (ix as u64) << 32 | block_key as u64,
         ))
         .flex_none()
         .size(px(CODE_COPY_BUTTON))
@@ -2636,43 +3363,53 @@ fn render_code_block(
             } else {
                 "icons/copy.svg"
             },
-            12.,
+            14.,
             if copied { theme.ok_green } else { theme.text_3 },
         ))
         .on_click(move |_, _, cx| {
             cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
             copied_sections
                 .borrow_mut()
-                .insert((ix, block_ix, CODE_COPY_SECTION), Instant::now());
+                .insert((ix, block_key, CODE_COPY_SECTION), Instant::now());
             cx.refresh_windows();
         });
-    // Header strip: the language chip (when the fence names one) and the
-    // copy button share one row, so the affordance and its context sit in
-    // the same place on every code block.
+    // Title strip: the language name and the copy affordance in one row, so
+    // context and action sit in the same place on every code block.
     let header = div()
         .w_full()
         .min_w_0()
-        .h(px(30.))
-        .px(px(10.))
-        .pt(px(4.))
+        .h(px(34.))
+        .px(px(12.))
         .flex()
         .items_center()
         .gap(px(8.))
-        .when_some(language.map(str::to_uppercase), |row, lang| {
-            row.child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .truncate()
-                    .text_size(theme.ui_px(9.5))
-                    .line_height(theme.ui_px(13.))
-                    .text_color(theme.text_3)
-                    .child(lang),
-            )
-        })
-        .when(!language.is_some(), |row| row.child(div().flex_1()))
+        .bg(theme.overlay)
+        .border_b_1()
+        .border_color(theme.border)
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .truncate()
+                .text_size(theme.ui_px(11.5))
+                .line_height(theme.ui_px(15.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text_3)
+                .child(label),
+        )
         .child(copy_button);
-    div()
+
+    // Long settled blocks fold to a prefix preview; the fold state is keyed
+    // by (message, prose run, block) so steps never collide.
+    let folded = collapsible && lines.len() > CODE_COLLAPSE_LINES;
+    let expanded = folded && expanded_blocks.borrow().contains(&(ix, salt, block_ix));
+    let visible = if folded && !expanded {
+        &lines[..CODE_PREVIEW_LINES]
+    } else {
+        lines
+    };
+
+    let mut card = div()
         .w_full()
         .min_w_0()
         .rounded(px(12.))
@@ -2683,22 +3420,169 @@ fn render_code_block(
         .child(header)
         .child(
             div()
+                .id(ElementId::NamedInteger(
+                    "code-scroll".into(),
+                    (ix as u64) << 32 | block_key as u64,
+                ))
                 .w_full()
                 .min_w_0()
-                .px(px(16.))
-                .pb(px(12.))
-                .font_family(theme::code_font_family())
-                .text_size(theme.code_px(13.))
-                .line_height(theme.code_px(24.))
-                .text_color(theme.code_text)
-                .children(lines.iter().map(|line| {
-                    div().child(if line.is_empty() {
-                        " ".to_string()
+                .flex()
+                .items_start()
+                .overflow_x_scroll()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_none()
+                        .px(px(16.))
+                        .pt(px(8.))
+                        .pb(px(12.))
+                        .font_family(theme::code_font_family())
+                        .text_size(theme.code_px(13.))
+                        .line_height(theme.code_px(21.))
+                        .text_color(theme.code_text)
+                        .children(visible.iter().enumerate().map(|(line_ix, line)| {
+                            code_line(line, tokens.as_deref(), line_ix, theme)
+                        })),
+                ),
+        );
+
+    if folded {
+        let hidden = lines.len() - CODE_PREVIEW_LINES;
+        let label = if expanded {
+            "Show less".to_string()
+        } else {
+            format!("Show remaining {hidden} lines")
+        };
+        card = card.child(
+            div()
+                .id(ElementId::NamedInteger(
+                    "code-fold".into(),
+                    (ix as u64) << 32 | block_key as u64,
+                ))
+                .w_full()
+                .h(px(30.))
+                .px(px(12.))
+                .border_t_1()
+                .border_color(theme.border)
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .cursor_pointer()
+                .text_size(theme.ui_px(11.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text_2)
+                .hover(|style| style.bg(theme.overlay).text_color(theme.text))
+                .child(label)
+                .child(div().flex_1())
+                .child(glyph(
+                    if expanded {
+                        "icons/chevron-down.svg"
                     } else {
-                        line.clone()
-                    })
-                })),
-        )
+                        "icons/chevron-right.svg"
+                    },
+                    11.,
+                    theme.text_3,
+                ))
+                .on_click(move |_, _, cx| {
+                    let key = (ix, salt, block_ix);
+                    let mut open = expanded_blocks.borrow_mut();
+                    if !open.remove(&key) {
+                        open.insert(key);
+                    }
+                    drop(open);
+                    scroller.remeasure_items(ix..ix + 1);
+                    cx.refresh_windows();
+                }),
+        );
+    }
+
+    card
+}
+
+/// Display label for a code block's title strip: a friendly language name
+/// for known fences, the raw tag when the language is unrecognized, and
+/// `Plain text` for a bare fence.
+fn code_block_label(language: Option<&str>) -> String {
+    match language {
+        Some(tag) => highlight::language_label(tag)
+            .map(str::to_string)
+            .unwrap_or_else(|| tag.to_string()),
+        None => "Plain text".to_string(),
+    }
+}
+
+/// One code line as syntax-colored `TextRun`s over the monospace face.
+/// `whitespace_nowrap` keeps indentation exact and lets the block scroll
+/// instead of wrap; an empty line carries a space so its row keeps height.
+fn code_line(
+    text: &str,
+    tokens: Option<&Vec<Vec<Token>>>,
+    line_ix: usize,
+    theme: Theme,
+) -> AnyElement {
+    div()
+        .flex_none()
+        .whitespace_nowrap()
+        .child(syntax_styled(text, tokens, line_ix, theme.code_text, theme))
+        .into_any_element()
+}
+
+/// Build a line of syntax-colored text: plain gaps and token spans over the
+/// monospace face, with an empty line carrying a space so its row keeps
+/// height. Shared by code blocks (no-wrap) and tool detail (wrapping).
+fn syntax_styled(
+    text: &str,
+    tokens: Option<&Vec<Vec<Token>>>,
+    line_ix: usize,
+    base: Hsla,
+    theme: Theme,
+) -> StyledText {
+    let font = mono_font();
+    let display = if text.is_empty() { " " } else { text };
+    let mut runs: Vec<TextRun> = Vec::new();
+    if let Some(spans) = tokens.and_then(|lines| lines.get(line_ix)) {
+        let mut offset = 0usize;
+        for token in spans {
+            let start = token.range.start.min(text.len());
+            let end = token.range.end.min(text.len());
+            if start > offset {
+                runs.push(code_run(start - offset, base, &font));
+            }
+            if end > start {
+                runs.push(code_run(end - start, theme.token_color(token.class), &font));
+            }
+            offset = offset.max(end);
+        }
+        if offset < text.len() {
+            runs.push(code_run(text.len() - offset, base, &font));
+        }
+    }
+    if runs.is_empty() {
+        runs.push(code_run(display.len(), base, &font));
+    }
+    StyledText::new(display.to_string()).with_runs(runs)
+}
+
+fn code_run(len: usize, color: Hsla, font: &Font) -> TextRun {
+    TextRun {
+        len,
+        font: font.clone(),
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    }
+}
+
+fn mono_font() -> Font {
+    Font {
+        family: theme::code_font_family(),
+        features: FontFeatures::default(),
+        fallbacks: None,
+        weight: FontWeight::NORMAL,
+        style: FontStyle::Normal,
+    }
 }
 
 /// GFM table: outer border, semibold header, dividers, content-weighted
@@ -2706,6 +3590,7 @@ fn render_code_block(
 fn render_table(
     header: &[String],
     rows: &[Vec<String>],
+    aligns: &[TableAlign],
     ix: usize,
     salt: u64,
     block_ix: usize,
@@ -2714,10 +3599,13 @@ fn render_table(
     let columns = header
         .len()
         .max(rows.iter().map(Vec::len).max().unwrap_or(0));
-    // Weight each column by its longest cell (bounded) so wide columns win.
-    let mut weights = vec![1usize; columns];
-    for (col, weight) in weights.iter_mut().enumerate() {
-        let mut longest = 1usize;
+    // Column widths are estimated from the longest cell and fixed in px.
+    // Narrow tables lay out as before (the last column absorbs the slack);
+    // wide ones overflow into a horizontal scroller instead of crushing
+    // every column into unreadable wraps.
+    let mut widths = vec![96f32; columns];
+    for (col, width) in widths.iter_mut().enumerate() {
+        let mut longest = 4usize;
         if let Some(cell) = header.get(col) {
             longest = longest.max(cell.chars().count());
         }
@@ -2726,60 +3614,78 @@ fn render_table(
                 longest = longest.max(cell.chars().count());
             }
         }
-        *weight = longest.clamp(1, 60);
+        *width = (longest as f32 * 6.8 + 28.).clamp(96., 340.);
     }
-    let total = weights.iter().sum::<usize>().max(1) as f32;
-    let make_cell =
-        |text: &str, weight: usize, strong: bool, sub: usize, salt: u64, theme: Theme| {
-            div()
-                .flex_basis(relative(weight as f32 / total))
-                .flex_grow()
-                .min_w_0()
-                .px(px(12.))
-                .py(px(8.))
-                .child(paragraph_text(
+    let make_cell = |text: &str,
+                     widths: &[f32],
+                     col: usize,
+                     last: bool,
+                     strong: bool,
+                     align: TableAlign,
+                     sub: usize,
+                     salt: u64,
+                     theme: Theme| {
+        let cell = div()
+            .px(px(12.))
+            .py(px(8.))
+            .text_align(align.text_align())
+            .child(paragraph_text(
+                text,
+                13.,
+                22.,
+                if strong {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::NORMAL
+                },
+                theme.assistant_text,
+                md_id(ix, salt, block_ix, sub),
+                theme,
+            ));
+        if last {
+            // The last column grows to fill a too-wide conversation, so a
+            // narrow table never leaves dead space inside its border.
+            cell.flex_grow().flex_basis(px(0.)).min_w(px(widths[col]))
+        } else {
+            cell.flex_none().w(px(widths[col]))
+        }
+    };
+    let align_at = |col: usize| aligns.get(col).copied().unwrap_or_default();
+    let header_last = header.len().saturating_sub(1);
+    let mut inner = div().flex_none().min_w_full().flex().flex_col();
+    inner = inner.child(
+        div().w_full().flex().bg(theme.overlay).children(
+            header.iter().enumerate().map(|(col, text)| {
+                make_cell(
                     text,
-                    13.,
-                    20.,
-                    if strong {
-                        FontWeight::SEMIBOLD
-                    } else {
-                        FontWeight::NORMAL
-                    },
-                    theme.assistant_text,
-                    md_id(ix, salt, block_ix, sub),
+                    &widths,
+                    col,
+                    col == header_last,
+                    true,
+                    align_at(col),
+                    col,
+                    salt,
                     theme,
-                ))
-        };
-    let mut table = div()
-        .w_full()
-        .min_w_0()
-        .overflow_hidden()
-        .rounded(px(12.))
-        .border_1()
-        .border_color(theme.border);
-    table = table.child(
-        div().w_full().min_w_0().flex().bg(theme.overlay).children(
-            header
-                .iter()
-                .enumerate()
-                .map(|(col, text)| make_cell(text, weights[col], true, col, salt, theme)),
+                )
+            }),
         ),
     );
     for (row_ix, row) in rows.iter().enumerate() {
-        let weights = weights.clone();
-        table = table.child(
+        let row_last = row.len().saturating_sub(1);
+        inner = inner.child(
             div()
                 .w_full()
-                .min_w_0()
                 .flex()
                 .border_t_1()
                 .border_color(theme.border)
-                .children(row.iter().enumerate().map(move |(col, text)| {
+                .children(row.iter().enumerate().map(|(col, text)| {
                     make_cell(
                         text,
-                        weights[col],
+                        &widths,
+                        col,
+                        col == row_last,
                         false,
+                        align_at(col),
                         64 + (row_ix * 64) + col,
                         salt,
                         theme,
@@ -2787,7 +3693,25 @@ fn render_table(
                 })),
         );
     }
-    table.into_any_element()
+    div()
+        .w_full()
+        .min_w_0()
+        .overflow_hidden()
+        .rounded(px(12.))
+        .border_1()
+        .border_color(theme.border)
+        .child(
+            div()
+                .id(ElementId::NamedInteger(
+                    "table-scroll".into(),
+                    ((ix as u64) << 40) | ((salt & 0xffff) << 24) | ((block_ix as u64) << 8),
+                ))
+                .w_full()
+                .min_w_0()
+                .overflow_x_scroll()
+                .child(inner),
+        )
+        .into_any_element()
 }
 /// Waku-style footer stamp for the changed-files summary: `Today 1:15 PM`,
 /// `Yesterday 6:07 PM`, then a short date (`Sep 6`) once past yesterday.
@@ -2870,8 +3794,8 @@ fn render_changed_files(
         let label = workspace_relative_path(path, workspace);
         rows = rows.child(
             div()
-                .h(px(31.))
-                .px(px(12.))
+                .h(px(32.))
+                .px(px(14.))
                 .flex()
                 .items_center()
                 .gap(px(8.))
@@ -2914,8 +3838,8 @@ fn render_changed_files(
             .px(px(10.))
             .rounded(px(7.))
             .border_1()
-            .border_color(theme.border)
-            .bg(theme.bg_composer)
+            .border_color(theme.border_strong)
+            .bg(theme.overlay)
             .flex()
             .items_center()
             .gap(px(4.))
@@ -2923,29 +3847,29 @@ fn render_changed_files(
             .text_size(theme.ui_px(11.5))
             .font_weight(FontWeight::MEDIUM)
             .text_color(theme.text_2)
-            .hover(|style| style.bg(theme.bg_raised))
+            .hover(|style| style.bg(theme.overlay_strong).text_color(theme.text))
             .child(glyph("icons/file-diff.svg", 12., theme.text_3))
             .child("Review")
             .on_click(move |_, window, cx| review(window, cx))
     });
 
     let mut header = div()
-        .min_h(px(58.))
-        .px(px(12.))
-        .py(px(9.))
+        .min_h(px(56.))
+        .px(px(14.))
+        .py(px(10.))
         .flex()
         .items_center()
         .gap(px(10.))
         .child(
             div()
-                .size(px(36.))
+                .size(px(34.))
                 .flex_none()
                 .rounded(px(9.))
-                .bg(theme.bg_raised)
+                .bg(theme.accent.opacity(0.14))
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(glyph("icons/file-diff.svg", 16., theme.text_3)),
+                .child(glyph("icons/file-diff.svg", 15., theme.accent)),
         )
         .child(
             div()
@@ -2956,8 +3880,8 @@ fn render_changed_files(
                 .child(
                     div()
                         .truncate()
-                        .text_size(theme.ui_px(12.5))
-                        .line_height(theme.ui_px(16.))
+                        .text_size(theme.ui_px(13.))
+                        .line_height(theme.ui_px(17.))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text)
                         .child(title),
@@ -2990,8 +3914,9 @@ fn render_changed_files(
         .min_w_0()
         .rounded(px(12.))
         .border_1()
-        .border_color(theme.border)
-        .bg(theme.overlay)
+        .border_color(theme.border_strong)
+        .bg(theme.bg_raised)
+        .shadow(theme.card_shadow())
         .overflow_hidden()
         .child(header)
         .child(rows);
@@ -3012,7 +3937,7 @@ fn render_changed_files(
                 message_ix as u64,
             ))
             .h(px(34.))
-            .px(px(12.))
+            .px(px(14.))
             .border_t_1()
             .border_color(theme.border)
             .flex()
@@ -3022,7 +3947,7 @@ fn render_changed_files(
             .text_size(theme.ui_px(11.5))
             .font_weight(FontWeight::MEDIUM)
             .text_color(theme.text_2)
-            .hover(|style| style.bg(theme.overlay_strong).text_color(theme.text))
+            .hover(|style| style.bg(theme.bg_hover).text_color(theme.text))
             .child(label);
         if clipped {
             toggle = toggle.child(
@@ -3254,6 +4179,43 @@ mod tests {
     }
 
     #[test]
+    fn command_tools_surface_the_shell_command_not_json() {
+        let bash = ToolCall {
+            name: "bash".into(),
+            summary: r#"{"command":"ls -la"}"#.into(),
+            path: None,
+            added: 0,
+            removed: 0,
+            id: None,
+            args: Some(serde_json::json!({ "command": "ls -la" })),
+            output: None,
+            failed: false,
+        };
+        assert_eq!(tool_command(&bash).as_deref(), Some("ls -la"));
+        // The header preview shows the command, not the raw JSON summary.
+        assert_eq!(activity_preview(&bash), "ls -la");
+        // Non-command tools do not fabricate a command.
+        let edit = ToolCall {
+            name: "edit".into(),
+            ..bash.clone()
+        };
+        assert_eq!(tool_command(&edit), None);
+    }
+
+    #[test]
+    fn section_lang_only_highlights_structured_values() {
+        assert_eq!(section_lang(None), None);
+        assert_eq!(
+            section_lang(Some(&Value::String("raw output".into()))),
+            None
+        );
+        assert_eq!(
+            section_lang(Some(&serde_json::json!({ "a": 1 }))),
+            Some(highlight::Lang::Json)
+        );
+    }
+
+    #[test]
     fn first_error_line_picks_first_nonempty_string() {
         assert_eq!(
             first_error_line(&Value::String(
@@ -3282,6 +4244,7 @@ mod tests {
                 images: Vec::new(),
                 finished_at: None,
                 error: None,
+                aborted: false,
             },
             ChatMessage {
                 user: false,
@@ -3293,6 +4256,7 @@ mod tests {
                 images: Vec::new(),
                 finished_at: None,
                 error: None,
+                aborted: false,
             },
             ChatMessage {
                 user: true,
@@ -3304,6 +4268,7 @@ mod tests {
                 images: Vec::new(),
                 finished_at: None,
                 error: None,
+                aborted: false,
             },
             ChatMessage {
                 user: false,
@@ -3315,6 +4280,7 @@ mod tests {
                 images: Vec::new(),
                 finished_at: None,
                 error: None,
+                aborted: false,
             },
         ];
         assert_eq!(active_user_index(&messages, Some(1), None), Some(0));
@@ -3335,6 +4301,7 @@ mod tests {
                 images: Vec::new(),
                 finished_at: None,
                 error: None,
+                aborted: false,
             },
             ChatMessage {
                 user: false,
@@ -3346,6 +4313,7 @@ mod tests {
                 images: Vec::new(),
                 finished_at: None,
                 error: None,
+                aborted: false,
             },
             ChatMessage {
                 user: true,
@@ -3357,6 +4325,7 @@ mod tests {
                 images: Vec::new(),
                 finished_at: None,
                 error: None,
+                aborted: false,
             },
             ChatMessage {
                 user: false,
@@ -3368,6 +4337,7 @@ mod tests {
                 images: Vec::new(),
                 finished_at: None,
                 error: None,
+                aborted: false,
             },
         ];
         // Reader scrolled back to the first turn: the tick for turn 0 is
@@ -3450,11 +4420,73 @@ mod tests {
             parse_blocks("---\n\n> quoted\n> lines\n\n| a | b |\n| --- | --- |\n| 1 | 2 |");
         assert!(matches!(blocks[0], Block::Rule));
         assert!(matches!(&blocks[1], Block::Quote(lines) if lines.len() == 2));
-        let Block::Table { header, rows } = &blocks[2] else {
+        let Block::Table { header, rows, .. } = &blocks[2] else {
             panic!("expected table");
         };
         assert_eq!(header, &["a", "b"]);
         assert_eq!(rows, &[vec!["1".to_string(), "2".to_string()]]);
+    }
+
+    #[test]
+    fn parse_blocks_reads_task_list_state() {
+        let blocks = parse_blocks("- [ ] open\n- [x] done\n- plain");
+        let Block::List(items) = &blocks[0] else {
+            panic!("expected list");
+        };
+        assert_eq!(items[0].checked, Some(false));
+        assert_eq!(items[0].text, "open");
+        assert_eq!(items[1].checked, Some(true));
+        assert_eq!(items[1].text, "done");
+        assert_eq!(items[2].checked, None);
+        assert_eq!(items[2].text, "plain");
+    }
+
+    #[test]
+    fn parse_blocks_reads_table_alignment() {
+        let blocks = parse_blocks("| a | b | c |\n| :-- | :-: | --: |\n| 1 | 2 | 3 |");
+        let Block::Table { aligns, .. } = &blocks[0] else {
+            panic!("expected table");
+        };
+        assert_eq!(
+            aligns,
+            &[TableAlign::Left, TableAlign::Center, TableAlign::Right]
+        );
+    }
+
+    #[test]
+    fn parse_blocks_detects_github_alerts() {
+        let blocks = parse_blocks("> [!WARNING]\n> This overwrites the file.");
+        let Block::Alert(kind, lines) = &blocks[0] else {
+            panic!("expected alert");
+        };
+        assert_eq!(*kind, AlertKind::Warning);
+        assert_eq!(lines, &["This overwrites the file.".to_string()]);
+        // A plain blockquote stays a quote.
+        let quote = parse_blocks("> just a quote");
+        assert!(matches!(&quote[0], Block::Quote(_)));
+        // An unknown marker is body text, not an alert.
+        let unknown = parse_blocks("> [!SOMETHING]\n> x");
+        assert!(matches!(&unknown[0], Block::Quote(_)));
+    }
+
+    #[test]
+    fn code_block_label_prefers_friendly_names() {
+        assert_eq!(code_block_label(Some("ts")), "TypeScript");
+        assert_eq!(code_block_label(Some("rs")), "Rust");
+        // Unknown fence: keep the raw tag rather than dropping context.
+        assert_eq!(code_block_label(Some("brainfuck")), "brainfuck");
+        // Bare fence: a generic label keeps the header consistent.
+        assert_eq!(code_block_label(None), "Plain text");
+    }
+
+    #[test]
+    fn block_rhythm_separates_headings_more_than_paragraphs() {
+        let para = || Block::Paragraph(vec!["x".into()]);
+        let heading = || Block::Heading(2, "h".into());
+        let list = || Block::List(Vec::new());
+        assert!(block_gap(&para(), &heading()) > block_gap(&para(), &para()));
+        assert!(block_gap(&heading(), &para()) < block_gap(&para(), &heading()));
+        assert!(block_gap(&para(), &list()) < block_gap(&list(), &para()));
     }
 
     #[test]
@@ -3483,6 +4515,7 @@ mod tests {
                 images: Vec::new(),
                 finished_at: None,
                 error: None,
+                aborted: false,
             },
             ChatMessage {
                 user: false,
@@ -3494,6 +4527,7 @@ mod tests {
                 images: Vec::new(),
                 finished_at: None,
                 error: None,
+                aborted: false,
             },
             ChatMessage {
                 user: true,
@@ -3505,10 +4539,79 @@ mod tests {
                 images: Vec::new(),
                 finished_at: None,
                 error: None,
+                aborted: false,
             },
         ];
         assert!(!starts_followup_turn(&messages, 0));
         assert!(!starts_followup_turn(&messages, 1));
         assert!(starts_followup_turn(&messages, 2));
+    }
+
+    #[test]
+    fn working_indicator_names_the_live_tool() {
+        let bash = ToolCall {
+            name: "bash".into(),
+            summary: r#"{"command":"cargo test"}"#.into(),
+            path: None,
+            added: 0,
+            removed: 0,
+            id: None,
+            args: Some(serde_json::json!({ "command": "cargo test" })),
+            output: None,
+            failed: false,
+        };
+        let step = Step {
+            tools: vec![bash],
+            ..Step::default()
+        };
+        assert_eq!(
+            working_activity_label(&step).as_deref(),
+            Some("Running cargo test")
+        );
+
+        let read = ToolCall {
+            name: "read".into(),
+            summary: "src/auth.rs".into(),
+            path: Some("src/auth.rs".into()),
+            added: 0,
+            removed: 0,
+            id: None,
+            args: Some(serde_json::json!({ "path": "src/auth.rs" })),
+            output: None,
+            failed: false,
+        };
+        let step = Step {
+            tools: vec![read],
+            ..Step::default()
+        };
+        assert_eq!(
+            working_activity_label(&step).as_deref(),
+            Some("Reading src/auth.rs")
+        );
+
+        // Thinking-only work reads as thinking; an empty step yields no
+        // label so the caller falls back to the generic working form.
+        let thinking = Step {
+            thinking: "reasoning".into(),
+            ..Step::default()
+        };
+        assert_eq!(
+            working_activity_label(&thinking).as_deref(),
+            Some("Thinking…")
+        );
+        assert_eq!(working_activity_label(&Step::default()), None);
+    }
+
+    #[test]
+    fn parse_cache_returns_the_same_blocks_for_the_same_text() {
+        let text = "# Title\n\nSome **bold** prose.\n\n- one\n- two\n";
+        let first = parse_blocks_cached(text);
+        let second = parse_blocks_cached(text);
+        // Same content, shared allocation — the streaming hot path must not
+        // re-parse an unchanged message every frame.
+        assert!(Rc::ptr_eq(&first, &second));
+        assert!(matches!(first[0], Block::Heading(1, _)));
+        let third = parse_blocks_cached("# Title\n\nchanged\n");
+        assert!(!Rc::ptr_eq(&first, &third));
     }
 }

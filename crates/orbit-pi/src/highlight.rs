@@ -16,7 +16,11 @@
 //!
 //! Adapted from Waku (https://github.com/egoist/waku), MIT licensed.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
+use std::rc::Rc;
 
 /// Paint class for a token. `Plain` is implicit — unmatched spans keep the
 /// block's foreground color.
@@ -34,6 +38,14 @@ pub enum TokenClass {
     Function,
     /// `@decorator`, `#[attribute]`, preprocessor lines, `$variable`.
     Meta,
+    /// Shell command word — the first word of a pipeline segment.
+    Command,
+    /// Shell option/flag (`-r`, `--force`, `-A6`).
+    Flag,
+    /// A filesystem path (`src/main.rs`, `~/.cargo/env`, `/dev/null`).
+    Path,
+    /// Shell control operator (`|`, `&&`, `>`, `2>&1`, `;`).
+    Operator,
     /// Diff insertions and deletions.
     Added,
     Removed,
@@ -101,6 +113,52 @@ pub fn lang_for_tag(tag: &str) -> Option<Lang> {
         "html" | "htm" | "xml" | "svg" | "vue" | "svelte" => Lang::Html,
         "sql" | "postgres" | "postgresql" | "mysql" | "sqlite" => Lang::Sql,
         "diff" | "patch" => Lang::Diff,
+        _ => return None,
+    })
+}
+
+/// Human-readable label for a fenced-code info string, so a block header
+/// reads `TypeScript` / `Rust` rather than the raw fence tag. `None` when the
+/// tag is not a language we know, so the caller can fall back to the tag.
+pub fn language_label(tag: &str) -> Option<&'static str> {
+    let tag = tag.trim().to_ascii_lowercase();
+    Some(match tag.as_str() {
+        "rust" | "rs" => "Rust",
+        "js" | "javascript" | "mjs" | "cjs" | "node" => "JavaScript",
+        "jsx" => "JSX",
+        "ts" | "typescript" | "mts" | "cts" => "TypeScript",
+        "tsx" => "TSX",
+        "py" | "python" | "python3" => "Python",
+        "go" | "golang" => "Go",
+        "c" | "h" => "C",
+        "cc" | "cpp" | "c++" | "cxx" | "hpp" => "C++",
+        "cs" | "csharp" | "c#" => "C#",
+        "java" => "Java",
+        "kt" | "kotlin" => "Kotlin",
+        "ruby" | "rb" | "gemfile" | "rake" => "Ruby",
+        "swift" => "Swift",
+        "json" | "jsonc" | "json5" => "JSON",
+        "yaml" | "yml" => "YAML",
+        "toml" => "TOML",
+        "ini" | "cfg" => "INI",
+        "sh" | "shell" | "shellscript" | "console" => "Shell",
+        "bash" => "Bash",
+        "zsh" => "Zsh",
+        "fish" => "Fish",
+        "dockerfile" | "docker" => "Dockerfile",
+        "makefile" | "make" => "Makefile",
+        "sql" | "postgres" | "postgresql" | "mysql" | "sqlite" => "SQL",
+        "html" | "htm" => "HTML",
+        "xml" => "XML",
+        "svg" => "SVG",
+        "vue" => "Vue",
+        "svelte" => "Svelte",
+        "css" => "CSS",
+        "scss" => "SCSS",
+        "sass" => "Sass",
+        "less" => "Less",
+        "md" | "markdown" => "Markdown",
+        "diff" | "patch" => "Diff",
         _ => return None,
     })
 }
@@ -766,6 +824,9 @@ pub fn tokenize_line(lang: Lang, line: &str, carry: Carry) -> (Vec<Token>, Carry
     if lang == Lang::Diff {
         return (diff_line(line), Carry::None);
     }
+    if lang == Lang::Shell {
+        return shell_line(line);
+    }
 
     let bytes = line.as_bytes();
     let mut tokens: Vec<Token> = Vec::new();
@@ -943,6 +1004,38 @@ pub fn tokenize(lang: Lang, code: &str) -> Vec<Vec<Token>> {
         .collect()
 }
 
+/// Cached tokens for one whole code block, keyed by `(language, content hash)`.
+type BlockCache = HashMap<(Lang, u64), Rc<Vec<Vec<Token>>>>;
+
+thread_local! {
+    /// Bounded whole-block token cache. A streaming row repaints on every
+    /// tick, and its earlier code blocks are unchanged; the cache keeps the
+    /// re-lex to the block that actually grew.
+    static BLOCK_CACHE: RefCell<BlockCache> = RefCell::new(HashMap::new());
+}
+
+/// [`tokenize`] with a per-thread memo, returning a shared handle so a cache
+/// hit copies no token data.
+pub fn tokenize_cached(lang: Lang, code: &str) -> Rc<Vec<Vec<Token>>> {
+    let key = {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        code.hash(&mut hasher);
+        (lang, hasher.finish())
+    };
+    BLOCK_CACHE.with(|cache| {
+        if let Some(hit) = cache.borrow().get(&key) {
+            return hit.clone();
+        }
+        let tokens = Rc::new(tokenize(lang, code));
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= 256 {
+            cache.clear();
+        }
+        cache.insert(key, tokens.clone());
+        tokens
+    })
+}
+
 fn push(tokens: &mut Vec<Token>, range: Range<usize>, class: TokenClass) {
     if range.start >= range.end {
         return;
@@ -1037,6 +1130,167 @@ fn identifier_length(rest: &str, spec: &LangSpec) -> usize {
 
 fn next_non_space(rest: &str) -> Option<char> {
     rest.chars().find(|ch| !ch.is_whitespace())
+}
+
+/// Control operators, longest first so overlapping prefixes resolve right.
+const SHELL_OPERATORS: &[&str] = &[
+    "2>>", "2>&1", "2>", "1>>", "1>&2", "1>", "&>>", "&>", ">>", ">&", "|&", "||", "&&", ">", "<",
+    "|", ";", "&", "(", ")", "{", "}", "!",
+];
+
+/// Shell / terminal tokenizer. Rather than one flat identifier class, each
+/// word is classified by the role a terminal would show it in — command,
+/// flag, path — so `cargo build --release -p orbit-pi` reads the way a
+/// syntax-highlighted prompt does. Quotes, `$variables`, comments, and
+/// control operators are handled explicitly.
+fn shell_line(line: &str) -> (Vec<Token>, Carry) {
+    let mut tokens: Vec<Token> = Vec::new();
+    let mut index = 0usize;
+    // The first word, and the first after every `|` / `&&` / `||` / `;`,
+    // is the command.
+    let mut expect_command = true;
+
+    while index < line.len() {
+        let rest = &line[index..];
+        let ch = rest.chars().next().expect("rest is non-empty");
+
+        if ch.is_whitespace() {
+            index += ch.len_utf8();
+            continue;
+        }
+
+        if ch == '#' {
+            push(&mut tokens, index..line.len(), TokenClass::Comment);
+            break;
+        }
+
+        if let Some(op) = SHELL_OPERATORS
+            .iter()
+            .copied()
+            .find(|op| rest.starts_with(op))
+        {
+            index += op.len();
+            push(&mut tokens, index - op.len()..index, TokenClass::Operator);
+            // A new pipeline segment starts a command; a redirection is
+            // followed by a file, so it does not.
+            if matches!(op, "|" | "|&" | "||" | "&&" | ";" | "&" | "(") {
+                expect_command = true;
+            }
+            continue;
+        }
+
+        if ch == '$' {
+            let len = shell_variable_len(rest);
+            push(&mut tokens, index..index + len, TokenClass::Meta);
+            index += len;
+            continue;
+        }
+
+        if ch == '"' || ch == '\'' {
+            let end = shell_string_end(line, index, ch);
+            push(&mut tokens, index..end, TokenClass::String);
+            index = end;
+            expect_command = false;
+            continue;
+        }
+
+        let len = shell_word_len(rest);
+        if len == 0 {
+            index += ch.len_utf8();
+            continue;
+        }
+        if let Some(class) = shell_word_class(&rest[..len], &mut expect_command) {
+            push(&mut tokens, index..index + len, class);
+        }
+        index += len;
+    }
+
+    (tokens, Carry::None)
+}
+
+/// Classify a shell word and advance the command expectation. `KEY=value`
+/// prefixes do not consume it, so `FOO=1 cargo run` still marks `cargo`.
+fn shell_word_class(word: &str, expect_command: &mut bool) -> Option<TokenClass> {
+    if word.contains('=') && !word.starts_with('-') && !word.starts_with('/') {
+        return Some(TokenClass::Type);
+    }
+    if *expect_command {
+        *expect_command = false;
+        return Some(TokenClass::Command);
+    }
+    if word.starts_with('-') && word.len() > 1 {
+        return Some(TokenClass::Flag);
+    }
+    if word.starts_with('~')
+        || word.starts_with("./")
+        || word.starts_with("../")
+        || word.starts_with('/')
+        || word.contains('/')
+    {
+        return Some(TokenClass::Path);
+    }
+    None
+}
+
+/// Length of a `$name`, `${name}`, or `$?`-style variable at the start of `rest`.
+fn shell_variable_len(rest: &str) -> usize {
+    let bytes = rest.as_bytes();
+    if bytes.get(1) == Some(&b'{') {
+        return rest.find('}').map_or(rest.len(), |close| close + 1);
+    }
+    let mut len = 1;
+    while len < bytes.len() {
+        match bytes[len] {
+            b'a'..=b'z'
+            | b'A'..=b'Z'
+            | b'0'..=b'9'
+            | b'_'
+            | b'?'
+            | b'#'
+            | b'@'
+            | b'*'
+            | b'!'
+            | b'$' => len += 1,
+            _ => break,
+        }
+    }
+    len
+}
+
+/// End offset of a quoted shell string opened at `start` (the quote index).
+fn shell_string_end(line: &str, start: usize, quote: char) -> usize {
+    let bytes = line.as_bytes();
+    let quote = quote as u8;
+    let mut index = start + 1;
+    while index < bytes.len() {
+        // Double quotes honor backslash escapes; single quotes are literal.
+        if quote == b'"' && bytes[index] == b'\\' {
+            index += 2;
+            continue;
+        }
+        if bytes[index] == quote {
+            return index + 1;
+        }
+        index += 1;
+    }
+    line.len()
+}
+
+/// Length of an unquoted shell word at the start of `rest`.
+fn shell_word_len(rest: &str) -> usize {
+    let mut length = 0;
+    for (offset, ch) in rest.char_indices() {
+        if ch.is_whitespace()
+            || matches!(
+                ch,
+                '|' | '&' | ';' | '<' | '>' | '(' | ')' | '{' | '}' | '"' | '\'' | '`'
+            )
+        {
+            break;
+        }
+        length = offset + ch.len_utf8();
+    }
+    length
 }
 
 /// Diff hunks are line-classified, not lexed.
@@ -1154,8 +1408,53 @@ mod tests {
         assert_eq!(
             spans(Lang::Shell, "echo $HOME # trailing"),
             vec![
+                ("echo", TokenClass::Command),
                 ("$HOME", TokenClass::Meta),
                 ("# trailing", TokenClass::Comment),
+            ]
+        );
+    }
+
+    #[test]
+    fn shell_classifies_commands_flags_and_paths() {
+        assert_eq!(
+            spans(Lang::Shell, "cargo build --release -p orbit-pi"),
+            vec![
+                ("cargo", TokenClass::Command),
+                ("--release", TokenClass::Flag),
+                ("-p", TokenClass::Flag),
+            ]
+        );
+        assert_eq!(
+            spans(Lang::Shell, "cd ~/.cargo/env && source ./setup.sh"),
+            vec![
+                ("cd", TokenClass::Command),
+                ("~/.cargo/env", TokenClass::Path),
+                ("&&", TokenClass::Operator),
+                ("source", TokenClass::Command),
+                ("./setup.sh", TokenClass::Path),
+            ]
+        );
+    }
+
+    #[test]
+    fn shell_marks_operators_redirections_and_assignments() {
+        assert_eq!(
+            spans(Lang::Shell, "grep -E \"x\" in 2>&1 | head"),
+            vec![
+                ("grep", TokenClass::Command),
+                ("-E", TokenClass::Flag),
+                ("\"x\"", TokenClass::String),
+                ("2>&1", TokenClass::Operator),
+                ("|", TokenClass::Operator),
+                ("head", TokenClass::Command),
+            ]
+        );
+        assert_eq!(
+            spans(Lang::Shell, "FOO=1 cargo run"),
+            vec![
+                ("FOO=1", TokenClass::Type),
+                ("cargo", TokenClass::Command),
             ]
         );
     }
@@ -1237,6 +1536,17 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn block_cache_reuses_and_matches_tokenize() {
+        let code = "fn main() {\n    let x = 1;\n}";
+        let first = tokenize_cached(Lang::Rust, code);
+        let second = tokenize_cached(Lang::Rust, code);
+        assert!(Rc::ptr_eq(&first, &second));
+        assert_eq!(*first, tokenize(Lang::Rust, code));
+        // The same text under another language is a separate entry.
+        assert!(!Rc::ptr_eq(&first, &tokenize_cached(Lang::Script, code)));
     }
 
     /// Streaming feeds every prefix of a code block through the lexer, so no

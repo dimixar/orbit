@@ -49,6 +49,9 @@ pub struct ChatMessage {
     /// (`stopReason: "error"` + `errorMessage`). Rendered inline so a failed
     /// turn is never an empty row.
     pub error: Option<String>,
+    /// The turn was cancelled (`stopReason: "aborted"`). The partial answer
+    /// stays; a quiet marker says the generation was stopped.
+    pub aborted: bool,
 }
 
 impl ChatMessage {
@@ -141,6 +144,7 @@ impl ChatMessage {
             elapsed: None,
             finished_at: None,
             error: None,
+            aborted: false,
         }
     }
 
@@ -152,6 +156,8 @@ impl ChatMessage {
         let role = value.get("role")?.as_str()?;
         let user = role == "user";
         let error = message_error(value);
+        let aborted = !user
+            && value.get("stopReason").and_then(Value::as_str) == Some("aborted");
         let mut message = ChatMessage {
             user,
             steps: vec![Step::default()],
@@ -159,6 +165,7 @@ impl ChatMessage {
             elapsed: None,
             finished_at: parse_timestamp(value.get("timestamp")),
             error,
+            aborted,
         };
         let step = message.steps.last_mut().expect("one step");
 
@@ -262,6 +269,25 @@ fn tool_result_parts(value: &Value) -> Option<(String, Option<Value>, bool)> {
     Some((id, output, failed))
 }
 
+/// Normalize a `tool_execution_*` result payload for display. pi wraps
+/// results as `{"content": [{"type":"text","text":…}], "details":…}` — the
+/// transcript shows the joined text, never the raw envelope (protocol data
+/// is presentation-sanitized). Payloads with no text blocks (structured
+/// results) pass through unchanged so they still highlight as JSON.
+fn normalize_tool_result(value: &Value) -> Value {
+    match value {
+        Value::String(_) => value.clone(),
+        Value::Object(_) => {
+            let text = tool_result_output(value);
+            match text {
+                Some(text) => text,
+                None => value.clone(),
+            }
+        }
+        _ => value.clone(),
+    }
+}
+
 /// Tool result payloads: joined text blocks; images are skipped.
 fn tool_result_output(value: &Value) -> Option<Value> {
     let blocks = value.get("content").and_then(Value::as_array)?;
@@ -323,6 +349,7 @@ fn merge_step(slot: &mut ChatMessage, step: ChatMessage) {
     let elapsed = step.elapsed;
     let finished_at = step.finished_at;
     let error = step.error.clone();
+    let aborted = step.aborted;
     slot.steps.push(step.into_step());
     if elapsed.is_some() {
         slot.elapsed = elapsed;
@@ -333,6 +360,9 @@ fn merge_step(slot: &mut ChatMessage, step: ChatMessage) {
     // A step that ended in an error labels the whole row.
     if error.is_some() {
         slot.error = error;
+    }
+    if aborted {
+        slot.aborted = true;
     }
 }
 
@@ -486,6 +516,13 @@ pub(crate) fn changed_files(message: &ChatMessage) -> Vec<(String, u64, u64)> {
 type ExpandedActivities = Rc<RefCell<HashMap<(usize, usize), bool>>>;
 type ExpandedTools = Rc<RefCell<HashSet<(usize, usize)>>>;
 type CopiedSections = Rc<RefCell<HashMap<(usize, usize, u8), Instant>>>;
+/// Tool detail sections expanded past their collapsed preview, keyed
+/// `(message_ix, flat_tool_ix, section)`.
+type ExpandedSections = Rc<RefCell<HashSet<(usize, usize, u8)>>>;
+/// Code blocks expanded past their collapsed preview, keyed
+/// `(message_ix, prose_salt, block_ix)` — the salt scopes the block index to
+/// the step/user prose run it was parsed from.
+type ExpandedBlocks = Rc<RefCell<HashSet<(usize, u64, usize)>>>;
 
 /// How long the one-time rail hint stays up before dismissing itself.
 const RAIL_HINT_TTL: Duration = Duration::from_secs(10);
@@ -560,6 +597,10 @@ pub struct Transcript {
     expanded_tools: ExpandedTools,
     /// Per detail-section copy feedback, keyed `(message_ix, tool_ix, section)`.
     copied_sections: CopiedSections,
+    /// Tool output sections expanded past their collapsed preview.
+    expanded_sections: ExpandedSections,
+    /// Code blocks expanded past their collapsed preview.
+    expanded_blocks: ExpandedBlocks,
     /// `toolCallId` -> `(message_ix, tool_ix)` so `tool_execution_end` results
     /// land on the right row.
     tool_positions: Rc<RefCell<HashMap<String, (usize, usize, usize)>>>,
@@ -599,6 +640,8 @@ impl Transcript {
             expanded_tools: Rc::new(RefCell::new(HashSet::new())),
             copied: Rc::new(RefCell::new(HashMap::new())),
             copied_sections: Rc::new(RefCell::new(HashMap::new())),
+            expanded_sections: Rc::new(RefCell::new(HashSet::new())),
+            expanded_blocks: Rc::new(RefCell::new(HashSet::new())),
             tool_positions: Rc::new(RefCell::new(HashMap::new())),
             hovered_turn: Rc::new(Cell::new(None)),
             hovered_usage: Rc::new(Cell::new(None)),
@@ -650,6 +693,8 @@ impl Transcript {
         self.expanded_tools.borrow_mut().clear();
         self.copied.borrow_mut().clear();
         self.copied_sections.borrow_mut().clear();
+        self.expanded_sections.borrow_mut().clear();
+        self.expanded_blocks.borrow_mut().clear();
         self.tool_positions.borrow_mut().clear();
         self.hovered_turn.set(None);
         self.rail_scroll.set_offset(point(px(0.), px(0.)));
@@ -674,6 +719,8 @@ impl Transcript {
         self.expanded_tools.borrow_mut().clear();
         self.copied.borrow_mut().clear();
         self.copied_sections.borrow_mut().clear();
+        self.expanded_sections.borrow_mut().clear();
+        self.expanded_blocks.borrow_mut().clear();
         self.tool_positions.borrow_mut().clear();
         self.hovered_turn.set(None);
         self.rail_scroll.set_offset(point(px(0.), px(0.)));
@@ -689,6 +736,7 @@ impl Transcript {
             Event::MessageUpdate { assistant, .. } => self.on_message_update(assistant),
             Event::MessageEnd { value } => self.on_message_end(value),
             Event::ToolExecutionStart { value } => self.on_tool_execution(value, false),
+            Event::ToolExecutionUpdate { value } => self.on_tool_execution_update(value),
             Event::ToolExecutionEnd { value } => self.on_tool_execution(value, true),
             // A settled run closes its working clock; the next run re-arms it.
             Event::AgentSettled => {
@@ -960,6 +1008,7 @@ impl Transcript {
                 // on the row (merge_step does this for non-stream paths).
                 let step_elapsed = final_message.elapsed.take();
                 let settled_error = final_message.error.take();
+                let settled_aborted = final_message.aborted;
                 let mut settled_step = final_message.into_step();
                 // Re-attach results pi captured live (its settled blocks omit
                 // them).
@@ -986,6 +1035,9 @@ impl Transcript {
                 }
                 if settled_error.is_some() {
                     slot.error = settled_error;
+                }
+                if settled_aborted {
+                    slot.aborted = true;
                 }
                 if slot.finished_at.is_none() {
                     slot.finished_at = Some(now_millis());
@@ -1095,8 +1147,8 @@ impl Transcript {
                 let before = (tool.output.clone(), tool.failed);
                 tool.output = value
                     .get("result")
-                    .cloned()
-                    .or_else(|| value.get("partialResult").cloned());
+                    .or_else(|| value.get("partialResult"))
+                    .map(normalize_tool_result);
                 tool.failed = value
                     .get("isError")
                     .and_then(Value::as_bool)
@@ -1186,6 +1238,54 @@ impl Transcript {
         true
     }
 
+    /// `tool_execution_update` streams the accumulated `partialResult` —
+    /// replace the call's output in place so an open detail card follows the
+    /// command's progress. The row only remeasures when the growing output
+    /// is visible (the tool's detail card is open); a closed card's height
+    /// does not change, so streaming output never churns the list layout.
+    fn on_tool_execution_update(&mut self, value: &Value) -> bool {
+        let Some(id) = value.get("toolCallId").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(partial) = value.get("partialResult") else {
+            return false;
+        };
+        let Some(&(mix, step_ix, tool_ix)) = self.tool_positions.borrow().get(id) else {
+            return false;
+        };
+        let output = normalize_tool_result(partial);
+        let mut messages = self.messages.borrow_mut();
+        let Some(message) = messages.get_mut(mix) else {
+            return false;
+        };
+        // Flat tool index across the message's steps — the detail/copy key
+        // space the view uses.
+        let flat_ix = message
+            .steps
+            .iter()
+            .take(step_ix)
+            .map(|step| step.tools.len())
+            .sum::<usize>()
+            + tool_ix;
+        let Some(tool) = message
+            .steps
+            .get_mut(step_ix)
+            .and_then(|step| step.tools.get_mut(tool_ix))
+        else {
+            return false;
+        };
+        if tool.output.as_ref() == Some(&output) {
+            return false;
+        }
+        tool.output = Some(output);
+        let detail_open = self.expanded_tools.borrow().contains(&(mix, flat_ix));
+        drop(messages);
+        if detail_open {
+            self.remeasure_row(mix);
+        }
+        true
+    }
+
     /// Mutate the assistant message currently being streamed. A turn's
     /// steps share one row: with no stream target, a previous assistant row
     /// continues (with a step mark) instead of stacking a new one. Returns
@@ -1238,11 +1338,13 @@ impl Transcript {
 
     fn insert_row(&self) {
         self.scroller.append(1);
+        self.scroller.note_activity();
     }
 
     /// Same item count, new height — do not insert a blank row.
     fn remeasure_row(&self, ix: usize) {
         self.scroller.remeasure_items(ix..ix + 1);
+        self.scroller.note_activity();
     }
 
     /// Recover if stream updates previously inserted extra list slots.
@@ -1388,6 +1490,7 @@ impl Transcript {
             elapsed: None,
             finished_at: None,
             error: None,
+            aborted: false,
         });
         drop(messages);
         self.insert_row();
@@ -1501,6 +1604,8 @@ impl Transcript {
                 expanded_tools: self.expanded_tools.clone(),
                 copied: self.copied.clone(),
                 copied_sections: self.copied_sections.clone(),
+                expanded_sections: self.expanded_sections.clone(),
+                expanded_blocks: self.expanded_blocks.clone(),
                 hovered_turn: self.hovered_turn.clone(),
                 hovered_usage: self.hovered_usage.clone(),
                 rail_hint_dismissed: self.rail_hint_dismissed.clone(),
@@ -2112,6 +2217,7 @@ mod tests {
             elapsed: None,
             finished_at: None,
             error: None,
+            aborted: false,
         };
         assert_eq!(
             changed_files(&message),
@@ -2335,6 +2441,120 @@ mod tests {
             Some("contents")
         );
         assert!(!tool.failed);
+    }
+
+    #[test]
+    fn tool_execution_update_streams_accumulated_output() {
+        let mut transcript = Transcript::new();
+        transcript.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": ""}),
+        });
+        transcript.apply_event(&Event::ToolExecutionStart {
+            value: json!({
+                "toolCallId": "t1",
+                "toolName": "bash",
+                "args": {"command": "cargo test"}
+            }),
+        });
+        // The accumulated partialResult replaces the display each update.
+        transcript.apply_event(&Event::ToolExecutionUpdate {
+            value: json!({
+                "toolCallId": "t1",
+                "toolName": "bash",
+                "partialResult": {
+                    "content": [{"type": "text", "text": "running 1 test\n"}],
+                    "details": {"truncation": null}
+                }
+            }),
+        });
+        transcript.apply_event(&Event::ToolExecutionUpdate {
+            value: json!({
+                "toolCallId": "t1",
+                "toolName": "bash",
+                "partialResult": {
+                    "content": [{"type": "text", "text": "running 1 test\nrunning 2 tests\n"}]
+                }
+            }),
+        });
+        let messages = transcript.messages.borrow();
+        let tool = messages[0].tools().next().unwrap();
+        // The envelope is normalized away — the output is the joined text.
+        assert_eq!(
+            tool.output.as_ref().and_then(Value::as_str),
+            Some("running 1 test\nrunning 2 tests\n")
+        );
+    }
+
+    #[test]
+    fn tool_execution_end_normalizes_the_result_envelope() {
+        let mut transcript = Transcript::new();
+        transcript.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": ""}),
+        });
+        transcript.apply_event(&Event::ToolExecutionStart {
+            value: json!({
+                "toolCallId": "t1",
+                "toolName": "bash",
+                "args": {"command": "ls"}
+            }),
+        });
+        transcript.apply_event(&Event::ToolExecutionEnd {
+            value: json!({
+                "toolCallId": "t1",
+                "result": {
+                    "content": [{"type": "text", "text": "a.rs\nb.rs"}],
+                    "details": {}
+                },
+                "isError": false
+            }),
+        });
+        let messages = transcript.messages.borrow();
+        let tool = messages[0].tools().next().unwrap();
+        assert_eq!(
+            tool.output.as_ref().and_then(Value::as_str),
+            Some("a.rs\nb.rs")
+        );
+    }
+
+    #[test]
+    fn structured_results_keep_their_json_form() {
+        // A tool whose result has no text blocks (structured data) keeps the
+        // payload so the detail card highlights it as JSON.
+        let value = normalize_tool_result(&json!({"rows": [1, 2, 3]}));
+        assert_eq!(value, json!({"rows": [1, 2, 3]}));
+        let text = normalize_tool_result(&json!("plain"));
+        assert_eq!(text, json!("plain"));
+    }
+
+    #[test]
+    fn aborted_stop_reason_marks_the_turn() {
+        let mut transcript = Transcript::new();
+        transcript.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": ""}),
+        });
+        transcript.apply_event(&Event::MessageUpdate {
+            usage: None,
+            assistant: Some(AssistantMessageEvent::TextDelta {
+                delta: "partial answer".into(),
+            }),
+        });
+        transcript.apply_event(&Event::MessageEnd {
+            value: json!({
+                "role": "assistant",
+                "content": [{"type": "text", "text": "partial answer"}],
+                "stopReason": "aborted"
+            }),
+        });
+        let messages = transcript.messages.borrow();
+        assert!(messages[0].aborted);
+        assert_eq!(messages[0].text(), "partial answer");
+        assert!(messages[0].error.is_none());
+        // A completed turn is not marked.
+        let settled = ChatMessage::from_value(&json!({
+            "role": "assistant", "content": "done", "stopReason": "stop"
+        }))
+        .unwrap();
+        assert!(!settled.aborted);
     }
 
     #[test]
