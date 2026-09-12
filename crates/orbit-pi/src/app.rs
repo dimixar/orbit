@@ -1182,6 +1182,7 @@ impl ProviderView {
         self.auth.map(|auth| match auth.kind {
             providers::AuthKind::OAuth => "oauth",
             providers::AuthKind::ApiKey => "api_key",
+            providers::AuthKind::OllamaSession => "session",
         })
     }
 }

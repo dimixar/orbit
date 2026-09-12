@@ -238,7 +238,7 @@ test("ollama with a real cloud key maps the monthly credit fraction", async () =
 test("ollama with a session parses the legacy settings page", async () => {
   await withAuth(
     {
-      ollama: {
+      "ollama-cloud-session": {
         type: "ollama_cloud_session",
         session: "__Secure-session=abc123",
       },
@@ -265,7 +265,7 @@ test("ollama with a session parses the legacy settings page", async () => {
 test("ollama expired session degrades to a sign-in error, not a crash", async () => {
   await withAuth(
     {
-      ollama: {
+      "ollama-cloud-session": {
         type: "ollama_cloud_session",
         session: "__Secure-session=expired",
       },
@@ -287,7 +287,7 @@ test("ollama expired session degrades to a sign-in error, not a crash", async ()
 test("ollama changed markup reports an error instead of a fake zero", async () => {
   await withAuth(
     {
-      ollama: {
+      "ollama-cloud-session": {
         type: "ollama_cloud_session",
         session: "__Secure-session=abc123",
       },
@@ -300,6 +300,48 @@ test("ollama changed markup reports an error instead of a fake zero", async () =
       assert.equal(report.kind, "unsupported");
       assert.match(report.error, /layout changed/i);
       assert.deepEqual(report.windows, []);
+    },
+  );
+});
+
+test("ollama reads a legacy session stored under the provider id", async () => {
+  await withAuth(
+    {
+      ollama: {
+        type: "ollama_cloud_session",
+        session: "__Secure-session=legacy",
+      },
+    },
+    async () => {
+      const { orbitQuotaReport } = loadHandler({
+        fetch: htmlFetch(
+          `<h2>Cloud Usage</h2> (Pro)
+        <div aria-label="Session usage 5% used"></div>`,
+        ),
+      });
+      const report = await orbitQuotaReport("ollama");
+      assert.equal(report.kind, "subscription");
+      assert.equal(report.windows.find((w) => w.id === "session").usedPercent, 5);
+    },
+  );
+});
+
+test("ollama real cloud key wins when a session is also stored", async () => {
+  await withAuth(
+    {
+      ollama: { type: "api_key", key: "real-cloud-key" },
+      "ollama-cloud-session": {
+        type: "ollama_cloud_session",
+        session: "__Secure-session=abc123",
+      },
+    },
+    async () => {
+      const { orbitQuotaReport } = loadHandler({
+        fetch: jsonFetch({ limits: { monthly: { usage: 0.5 } } }),
+      });
+      const report = await orbitQuotaReport("ollama");
+      assert.equal(report.kind, "subscription");
+      assert.ok(report.windows.find((w) => w.id === "monthly"));
     },
   );
 });

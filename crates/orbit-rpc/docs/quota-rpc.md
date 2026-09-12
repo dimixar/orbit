@@ -157,11 +157,14 @@ user-supplied session cookie and parses it behind an isolated
 `OllamaCloudParser` (an unstable integration that returns a structured `error`
 instead of throwing when the markup changes).
 
-The credential is explicit and comes from `auth.json` (never a browser cookie):
+The credential is explicit and comes from `auth.json` (never a browser cookie).
+The session lives under its own key so it can never shadow the `ollama` provider
+credential — pi treats any stored credential under a provider id as
+authoritative, so an unknown type there would break the local endpoint:
 
 ```json
-{"type":"api_key","key":"<real ollama.com key>"}
-{"type":"ollama_cloud_session","session":"__Secure-session=…"}
+"ollama":               {"type":"api_key","key":"<real ollama.com key>"}
+"ollama-cloud-session": {"type":"ollama_cloud_session","session":"__Secure-session=…"}
 ```
 
 The server must never send the local `models.json` placeholder

@@ -1873,6 +1873,7 @@ impl OrbitApp {
                 .child(match kind {
                     "oauth" => "OAuth (auth.json)".to_string(),
                     "api_key" => "API key (auth.json)".to_string(),
+                    "session" => "Usage session (auth.json)".to_string(),
                     other => other.to_string(),
                 });
             if let Some(status) = &view.live_status {
@@ -5153,6 +5154,14 @@ impl OrbitApp {
     /// removes it live; otherwise fall back to dropping the auth.json entry
     /// (env credentials are outside Orbit's reach and left alone).
     pub(super) fn provider_sign_out(&mut self, id: String, cx: &mut Context<Self>) {
+        // The Ollama Cloud session lives under its own auth.json key, which
+        // pi's provider logout does not know about; clear it so Disconnect
+        // drops the whole credential.
+        if id == "ollama" {
+            if let Err(err) = providers::remove_ollama_session() {
+                self.provider_auth_error = Some(err);
+            }
+        }
         if self.auth.support() == AuthSupport::Supported {
             self.auth.on_logout_response(true, &id);
             self.send(

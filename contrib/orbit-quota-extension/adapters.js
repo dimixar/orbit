@@ -679,11 +679,15 @@ async function orbitQuotaGoogle() {
 //
 // Credentials are user-supplied and explicit. We NEVER read browser cookies
 // and never touch pi's local models.json placeholder (the literal API key
-// `ollama` pointing at 127.0.0.1). Accepted auth.json shapes for provider id
-// `ollama`:
+// `ollama` pointing at 127.0.0.1). Accepted auth.json shapes:
 //
-//   {"type":"api_key","key":"<real ollama.com key>"}          → current model
-//   {"type":"ollama_cloud_session","session":"<cookie header>"} → legacy page
+//   "ollama"                {"type":"api_key","key":"<real key>"}          → current model
+//   "ollama-cloud-session"  {"type":"ollama_cloud_session","session":"<cookie>"} → legacy page
+//
+// The session lives under its own key, never the `ollama` provider id: pi's
+// auth resolver treats any stored credential under a provider id as
+// authoritative, so an unknown type there shadows the local endpoint's
+// placeholder key and yields "Provider is not configured: ollama".
 //
 // The session value is a `Cookie:` header (e.g. `__Secure-session=…`). It is
 // only ever sent to https://ollama.com and never logged.
@@ -691,8 +695,16 @@ async function orbitQuotaGoogle() {
 const OLLAMA_USAGE_URL = "https://ollama.com/api/usage";
 const OLLAMA_SETTINGS_URL = "https://ollama.com/settings";
 
+/** auth.json key holding the session cookie; never a provider id. */
+const OLLAMA_SESSION_KEY = "ollama-cloud-session";
+
 /** The local-server placeholder pi writes into models.json; never a cloud key. */
 const OLLAMA_LOCAL_PLACEHOLDER = "ollama";
+
+/** The cookie header from a stored session entry, if any. */
+function orbitOllamaSession(entry) {
+  return entry && typeof entry.session === "string" ? entry.session.trim() : "";
+}
 
 /**
  * Is this stored api_key entry a real Ollama Cloud key? The local server uses
@@ -908,11 +920,11 @@ async function orbitOllamaCloudSettings(session) {
  */
 async function orbitQuotaOllama(id) {
   const { stored } = await orbitQuotaResolved(id);
+  const auth = await orbitQuotaReadAuth();
   const cloudKey = orbitOllamaCloudKey(stored);
+  // New key first; fall back to a legacy entry stored under the provider id.
   const session =
-    stored && stored.type === "ollama_cloud_session" && typeof stored.session === "string"
-      ? stored.session.trim()
-      : "";
+    orbitOllamaSession(auth[OLLAMA_SESSION_KEY]) || orbitOllamaSession(stored);
 
   if (cloudKey) return orbitOllamaCloudApi(cloudKey);
   if (session) return orbitOllamaCloudSettings(session);

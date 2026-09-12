@@ -78,11 +78,13 @@ handles both:
   that page with a user-supplied session cookie and parses it via
   `OllamaCloudParser`.
 
-Credentials are **explicit and user-supplied**, stored in `auth.json` (0600):
+Credentials are **explicit and user-supplied**, stored in `auth.json` (0600).
+The session lives under its own key so it never shadows the `ollama` provider
+credential:
 
 ```json
-{"type":"api_key","key":"<real ollama.com key>"}             // current model
-{"type":"ollama_cloud_session","session":"__Secure-session=…"} // legacy page
+"ollama":               {"type":"api_key","key":"<real ollama.com key>"}             // current model
+"ollama-cloud-session": {"type":"ollama_cloud_session","session":"__Secure-session=…"} // legacy page
 ```
 
 The adapter never reads browser cookies, never sends the local `models.json`
