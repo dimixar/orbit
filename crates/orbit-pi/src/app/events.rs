@@ -12,6 +12,10 @@ impl OrbitApp {
             cx.notify();
         }
         self.tick_background(cx);
+        // A banner click routes back to the session it announced.
+        if let Some(path) = notifications::take_clicked_session() {
+            self.activate_session_from_notification(PathBuf::from(path), cx);
+        }
         // Background update checks and the install handoff report here.
         self.drain_updater_events(cx);
         // Sessions can be written by the CLI or another Orbit window; the
@@ -98,6 +102,9 @@ impl OrbitApp {
                 // user's reply on the modal unblocks pi.
                 Event::ExtensionUiRequest { id, method, value } => {
                     self.handle_extension_ui_request(id.clone(), method, value, cx);
+                    // A dialog blocks the run until answered — the one state a
+                    // user who walked away cannot otherwise discover.
+                    self.notify_input_needed(method, value);
                     cx.notify();
                 }
                 Event::SessionInfoChanged { name } => {
@@ -186,6 +193,15 @@ impl OrbitApp {
                     self.poll_quota_entries();
                     // Capture the turn's end checkpoint, then refresh Review.
                     self.finish_turn(cx);
+                    // The run ended: announce it if the user is elsewhere.
+                    self.notify_turn_finished(
+                        self.current_session_path.as_deref(),
+                        self.current_title
+                            .clone()
+                            .or_else(|| self.session_name.clone())
+                            .as_deref(),
+                        self.transcript.latest_turn_summary().as_ref(),
+                    );
                 }
                 Event::CompactionStart { .. } => {
                     // The run-status strip carries the in-progress state;
@@ -283,13 +299,28 @@ impl OrbitApp {
         let mut changed = false;
         let mut any_busy = false;
         let mut dead: Vec<PathBuf> = Vec::new();
+        // Settles to announce once the `lives` borrow (and the map itself)
+        // are no longer held.
+        let mut finished: Vec<(PathBuf, Option<String>, Option<transcript::TurnSummary>)> =
+            Vec::new();
         for (path, parked) in self.lives.iter_mut() {
             for event in parked.client.drain_events() {
                 match &event {
                     Event::AgentStart => parked.busy = true,
                     // `agent_settled` is the real settle (queued steering /
                     // follow-up / retry can continue past `agent_end`).
-                    Event::AgentSettled | Event::ProcessExited => parked.busy = false,
+                    Event::AgentSettled => {
+                        parked.busy = false;
+                        finished.push((
+                            path.clone(),
+                            self.sessions
+                                .iter()
+                                .find(|session| session.path == *path)
+                                .map(|session| session.title.clone()),
+                            parked.transcript.latest_turn_summary(),
+                        ));
+                    }
+                    Event::ProcessExited => parked.busy = false,
                     // A parked session has no visible dialog surface; cancel
                     // so its blocked run can settle (an active session renders
                     // the dialog in `tick` above).
@@ -321,6 +352,11 @@ impl OrbitApp {
         }
         for path in dead {
             self.lives.remove(&path);
+        }
+        // A parked run that settled while the user was elsewhere still wants
+        // saying; `post_notification` suppresses it when the window is up.
+        for (path, title, summary) in finished {
+            self.notify_turn_finished(Some(&path), title.as_deref(), summary.as_ref());
         }
         if changed || any_busy {
             // Repaint while a background run is live (sidebar loader phase,
@@ -711,6 +747,84 @@ impl OrbitApp {
         }
         if !pasted.is_empty() {
             cx.notify();
+        }
+    }
+
+    /// Post the "turn finished" notification for a settle. Nothing is posted
+    /// while the window is frontmost, and a turn the user aborted holds no
+    /// news. `session` is the file path that a click routes back to.
+    pub(super) fn notify_turn_finished(
+        &self,
+        session: Option<&Path>,
+        title: Option<&str>,
+        summary: Option<&transcript::TurnSummary>,
+    ) {
+        let Some(summary) = summary else { return };
+        if summary.aborted {
+            return;
+        }
+        let (subtitle, fallback) = if summary.failed {
+            ("Agent error", "The turn ended with an error.")
+        } else {
+            ("Turn finished", "pi finished the turn.")
+        };
+        let body = if summary.body.trim().is_empty() {
+            fallback
+        } else {
+            summary.body.as_str()
+        };
+        self.post_notification(session, title, subtitle, body);
+    }
+
+    /// A run is blocked on an extension dialog — the one event a user cannot
+    /// discover once they have left the window.
+    fn notify_input_needed(&self, method: &str, value: &Value) {
+        if !matches!(method, "select" | "confirm" | "input" | "editor") {
+            return;
+        }
+        let title = self
+            .current_title
+            .clone()
+            .or_else(|| self.session_name.clone());
+        let body = value
+            .get("title")
+            .or_else(|| value.get("message"))
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or("pi is waiting for your answer.");
+        self.post_notification(
+            self.current_session_path.as_deref(),
+            title.as_deref(),
+            "Waiting for your answer",
+            body,
+        );
+    }
+
+    /// Deliver a background notification through every enabled channel.
+    /// Nothing is posted while the window is frontmost: the transcript is the
+    /// notification then, and a banner over a window you are reading is noise.
+    fn post_notification(
+        &self,
+        session: Option<&Path>,
+        title: Option<&str>,
+        subtitle: &str,
+        body: &str,
+    ) {
+        if self.window_active {
+            return;
+        }
+        let prefs = self.notification_prefs;
+        if !prefs.desktop && !prefs.sound {
+            return;
+        }
+        if prefs.desktop {
+            let title = title
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or("Orbit Pi");
+            notifications::notify(session, title, subtitle, body);
+        }
+        if prefs.sound {
+            notifications::play_sound();
         }
     }
 

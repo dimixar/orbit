@@ -91,6 +91,17 @@ impl ChatMessage {
     }
 }
 
+/// The newest assistant turn, summarized for a background notification.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TurnSummary {
+    /// The turn's answer text, or the agent error that ended it.
+    pub body: String,
+    /// `stopReason: "error"` — the provider or agent failed the turn.
+    pub failed: bool,
+    /// The user stopped the turn; there is nothing to announce.
+    pub aborted: bool,
+}
+
 /// One tool call row: name, args summary, and the file path it operates on
 /// (when the tool is file-oriented — drives the devicons glyph).
 #[derive(Clone)]
@@ -1424,6 +1435,40 @@ impl Transcript {
         Some((ix, messages[ix].text()))
     }
 
+    /// Summarize the turn that just settled for a background notification:
+    /// the newest assistant message's answer (or the agent error that ended
+    /// it) and whether the user aborted it. A user message newer than the
+    /// newest answer means this run produced none — the summary stays empty
+    /// rather than reporting the previous turn's text.
+    pub fn latest_turn_summary(&self) -> Option<TurnSummary> {
+        let messages = self.messages.borrow();
+        let Some(ix) = messages.iter().rposition(|message| !message.user) else {
+            // A settle with no assistant message at all (the run failed
+            // before any text); still worth a quiet "turn finished" ping.
+            return Some(TurnSummary::default());
+        };
+        if ix + 1 != messages.len() {
+            return Some(TurnSummary::default());
+        }
+        let message = &messages[ix];
+        if message.aborted {
+            return Some(TurnSummary {
+                aborted: true,
+                ..TurnSummary::default()
+            });
+        }
+        let text = message.text();
+        Some(TurnSummary {
+            body: if text.trim().is_empty() {
+                message.error.clone().unwrap_or_default()
+            } else {
+                text
+            },
+            failed: message.error.is_some(),
+            aborted: false,
+        })
+    }
+
     /// Pin the per-message copy feedback (green check) as if the footer
     /// button had been clicked.
     pub fn mark_copied(&self, ix: usize) {
@@ -2529,6 +2574,75 @@ mod tests {
         assert_eq!(value, json!({"rows": [1, 2, 3]}));
         let text = normalize_tool_result(&json!("plain"));
         assert_eq!(text, json!("plain"));
+    }
+
+    #[test]
+    fn turn_summary_prefers_the_answer_and_skips_aborted() {
+        let mut t = Transcript::new();
+        // No assistant turn yet: an empty summary, not a stale one.
+        assert_eq!(t.latest_turn_summary(), Some(TurnSummary::default()));
+
+        t.apply_event(&Event::MessageStart {
+            value: json!({"role": "user", "content": "fix it"}),
+        });
+        t.apply_event(&Event::MessageEnd {
+            value: json!({"role": "user", "content": "fix it"}),
+        });
+        // A user turn with no answer yet must not report the previous turn.
+        assert_eq!(t.latest_turn_summary(), Some(TurnSummary::default()));
+
+        t.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": ""}),
+        });
+        t.apply_event(&Event::MessageUpdate {
+            usage: None,
+            assistant: Some(AssistantMessageEvent::TextDelta {
+                delta: "done".into(),
+            }),
+        });
+        t.apply_event(&Event::MessageEnd {
+            value: json!({
+                "role": "assistant",
+                "content": [{"type": "text", "text": "done"}],
+                "stopReason": "stop"
+            }),
+        });
+        let summary = t.latest_turn_summary().expect("summary");
+        assert_eq!(summary.body, "done");
+        assert!(!summary.failed && !summary.aborted);
+
+        // A user aborted the turn: nothing to announce.
+        t.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": ""}),
+        });
+        t.apply_event(&Event::MessageEnd {
+            value: json!({
+                "role": "assistant",
+                "content": [{"type": "text", "text": "half"}],
+                "stopReason": "aborted"
+            }),
+        });
+        assert!(t.latest_turn_summary().expect("summary").aborted);
+    }
+
+    #[test]
+    fn turn_summary_reports_the_agent_error() {
+        let mut t = Transcript::new();
+        t.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": ""}),
+        });
+        t.apply_event(&Event::MessageEnd {
+            value: json!({
+                "role": "assistant",
+                "content": [],
+                "stopReason": "error",
+                "errorMessage": "rate limited"
+            }),
+        });
+        let summary = t.latest_turn_summary().expect("summary");
+        assert_eq!(summary.body, "rate limited");
+        assert!(summary.failed);
+        assert!(!summary.aborted);
     }
 
     #[test]

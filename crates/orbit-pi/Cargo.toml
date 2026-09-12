@@ -57,6 +57,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSBitmapImageRep",
     "NSImage",
     "NSImageRep",
+    "NSSound",
     "NSWorkspace",
     "block2",
     "objc2-core-graphics",
@@ -64,10 +65,28 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSArray",
+    "NSBundle",
     "NSDictionary",
     "NSString",
     "NSURL",
 ] }
+# App-attributed notification banners: `UNUserNotificationCenter` is the only
+# supported API — `osascript` banners belong to Script Editor, and the
+# deprecated `NSUserNotification` is not exposed by objc2-app-kit. Same
+# objc2 0.6 / block2 0.6 generation already in the tree. `block2` is a direct
+# dependency here because the authorization/settings calls take blocks.
+objc2-user-notifications = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationResponse",
+    "UNNotificationSettings",
+    "UNNotificationTrigger",
+    "UNNotification",
+    "UNUserNotificationCenter",
+] }
+block2 = "0.6"
 url = "2.5"
 
 [target.'cfg(unix)'.dependencies]

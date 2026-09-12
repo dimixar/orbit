@@ -652,6 +652,26 @@ impl OrbitApp {
         }
     }
 
+    /// Open the session a clicked notification announced, by session-file
+    /// path. The banner may outlive its session (deleted, or the list is
+    /// stale); a missing target is a no-op rather than an error.
+    pub(super) fn activate_session_from_notification(
+        &mut self,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_window_pending = true;
+        let mut target = self.sessions.iter().find(|s| s.path == path).cloned();
+        if target.is_none() {
+            self.sessions = sessions::load_sessions();
+            target = self.sessions.iter().find(|s| s.path == path).cloned();
+        }
+        if let Some(session) = target {
+            self.switch_to_session(session, true, cx);
+        }
+        cx.notify();
+    }
+
     /// The top-bar info popover: active session's environment + identifiers.
     pub(super) fn render_session_details_popup(&self, cx: &Context<Self>) -> Option<AnyElement> {
         if !self.session_details_open {

@@ -4,6 +4,13 @@ use super::*;
 
 impl Render for OrbitApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A clicked banner asks for the window; bring it forward on the frame
+        // that follows the click (macOS activates the app, but a minimized
+        // window would otherwise stay behind).
+        if self.activate_window_pending {
+            self.activate_window_pending = false;
+            window.activate_window();
+        }
         let theme = *theme::get(cx);
         // `/`-command and `@`-file menu state derives from the composer text
         // every frame, so typing opens/closes/filters it without extra sync.
@@ -1567,10 +1574,53 @@ impl OrbitApp {
                 let open = self.branch_picker.is_some();
                 let pending = self.branch_operation_pending;
                 div()
-                    .relative()
+                    .flex()
+                    .items_center()
+                    .gap_4()
                     .child(
                         div()
-                            .id("status-branch")
+                            .relative()
+                            .child(
+                                div()
+                                    .id("status-branch")
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .px(px(4.))
+                                    .py(px(2.))
+                                    .rounded_md()
+                                    .when(!pending, |chip| chip.cursor_pointer())
+                                    .when(open, |chip| {
+                                        chip.bg(theme.active).text_color(theme.active_fg)
+                                    })
+                                    .when(!open && !pending, |chip| {
+                                        chip.hover(|s| s.bg(theme.overlay).text_color(theme.text_2))
+                                    })
+                                    .when(pending, |chip| chip.opacity(0.6))
+                                    .on_mouse_up(
+                                        MouseButton::Left,
+                                        cx.listener(|app, _, window, cx| {
+                                            if !app.branch_operation_pending {
+                                                app.toggle_branch_picker(window, cx);
+                                            }
+                                        }),
+                                    )
+                                    .child(icon("icons/branch.svg", 12., theme.text_3))
+                                    .child(branch.name.clone())
+                                    .children(branch.ahead_behind.map(|(ahead, behind)| {
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .child(format!("↑{ahead}"))
+                                            .child(format!("↓{behind}"))
+                                    })),
+                            )
+                            .children(self.branch_picker_popup()),
+                    )
+                    .children(branch.other_branches.map(|count| {
+                        div()
+                            .id("status-branch-count")
                             .flex()
                             .items_center()
                             .gap_1p5()
@@ -1593,18 +1643,9 @@ impl OrbitApp {
                                     }
                                 }),
                             )
-                            .child(icon("icons/branch.svg", 12., theme.text_3))
-                            .child(branch.name.clone())
-                            .children((branch.ahead > 0 || branch.behind > 0).then(|| {
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1p5()
-                                    .child(format!("↑{}", branch.ahead))
-                                    .child(format!("↓{}", branch.behind))
-                            })),
-                    )
-                    .children(self.branch_picker_popup())
+                            .child(icon("icons/git-fork.svg", 12., theme.text_3))
+                            .child(format!("{count} more"))
+                    }))
                     .into_any_element()
             }))
             .child(div().flex_1())

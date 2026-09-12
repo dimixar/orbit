@@ -24,6 +24,7 @@ mod mentions;
 mod message_scroller;
 mod model_selector;
 mod model_selector_match;
+mod notifications;
 mod onboarding;
 mod platform;
 mod plugins;
@@ -251,8 +252,11 @@ fn main() {
                 |window, cx| {
                     let app: Entity<OrbitApp> = cx.new(|cx| OrbitApp::new(cx));
 
-                    // Focus the composer so typing works immediately.
+                    // Focus the composer so typing works immediately; track
+                    // window focus so background notifications know whether
+                    // the user is already looking at the transcript.
                     app.update(cx, |app, cx| {
+                        app.watch_window_activation(window, cx);
                         let handle = app.input.read(cx).focus_handle(cx);
                         window.focus(&handle);
                     });

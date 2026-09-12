@@ -54,6 +54,7 @@ use crate::mentions::{self, AcEntry, SharedAutocomplete, SlashCommand, Trigger, 
 use crate::model_selector::{
     provider_icon, thinking_display, thinking_icon, ModelSelector, PickerKind,
 };
+use crate::notifications;
 use crate::onboarding::{self, Dependency};
 use crate::platform::{self, ExternalApp};
 use crate::plugins::{PackageScope, PluginPackage};
@@ -140,14 +141,16 @@ struct RetryDetail {
     error: String,
 }
 
-/// The status bar's branch chip: the checked-out branch plus how far it has
-/// diverged from its upstream (`ahead_behind`; zero when in sync or with no
-/// upstream).
+/// The status bar's branch chip: the checked-out branch and its divergence
+/// from upstream. `ahead_behind` is `None` without an upstream — unknown is
+/// not the same fact as `↑0 ↓0`.
 #[derive(PartialEq)]
 struct BranchStatus {
     name: String,
-    ahead: usize,
-    behind: usize,
+    ahead_behind: Option<(usize, usize)>,
+    /// Local branches other than the current one (`None` when the list could
+    /// not be read).
+    other_branches: Option<usize>,
 }
 
 pub struct OrbitApp {
@@ -264,6 +267,22 @@ pub struct OrbitApp {
     settings_select_highlight: Option<usize>,
     /// Scroll handle for the settings dropdown's option list.
     settings_select_scroll: UniformListScrollHandle,
+    /// Settings → General: which notification channels are on (persisted to
+    /// `~/.orbit-pi/notifications.json`), plus the last macOS permission
+    /// read. The read drives the honest "blocked" / "unbundled" rows — a
+    /// switch the OS is blocking must not look like it is working.
+    notification_prefs: notifications::Prefs,
+    notification_auth: notifications::DesktopAuth,
+    notification_auth_pending: bool,
+    /// Whether this window is frontmost. Notifications are held while it is:
+    /// the transcript itself is the notification then.
+    window_active: bool,
+    /// A banner click asked for the window; the next paint brings it forward
+    /// (`tick` has no `Window` to activate with).
+    activate_window_pending: bool,
+    /// Keeps the window-activation observer alive (registered from `main`
+    /// once the window exists).
+    _window_activation: Option<Subscription>,
     /// Visited sessions, oldest first — drives the top-bar back/forward
     /// navigation. `history_index` points at the active entry.
     session_history: Vec<SessionInfo>,
@@ -684,6 +703,12 @@ impl OrbitApp {
             settings_filter: settings_filter,
             settings_select_highlight: None,
             settings_select_scroll: UniformListScrollHandle::new(),
+            notification_prefs: notifications::Prefs::load(),
+            notification_auth: notifications::DesktopAuth::Unknown,
+            notification_auth_pending: false,
+            window_active: true,
+            activate_window_pending: false,
+            _window_activation: None,
             session_history: Vec::new(),
             history_index: 0,
             collapsed_workspaces: HashSet::new(),
@@ -833,7 +858,26 @@ impl OrbitApp {
         // The branch chip tracks the launch workspace even before a session
         // is open.
         app.refresh_branch_status(cx);
+        // Route banner clicks back to their session (bundle builds only).
+        notifications::init();
+        // A first launch with notifications on shows macOS's permission
+        // prompt, the way any native app announces them. Unbundled runs
+        // no-op here; the settings row reports that state instead.
+        if app.notification_prefs.desktop {
+            notifications::request_permission();
+        }
         app
+    }
+
+    /// Track whether the window is frontmost — the gate on background
+    /// notifications. Registered from `main` after the window exists;
+    /// `observe_window_activation` invokes the callback once at
+    /// registration, so the field starts truthful.
+    pub(super) fn watch_window_activation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.window_active = window.is_window_active();
+        self._window_activation = Some(cx.observe_window_activation(window, |app, window, _| {
+            app.window_active = window.is_window_active();
+        }));
     }
 
     /// Sidebar view of the session store: the sessions on disk plus a
@@ -889,11 +933,15 @@ impl OrbitApp {
                 .background_executor()
                 .spawn(async move {
                     crate::git::current_branch(&cwd).map(|name| {
-                        let (ahead, behind) = crate::git::ahead_behind(&cwd).unwrap_or((0, 0));
+                        // The picker's own list, so the count and the popup it
+                        // opens always agree.
+                        let other_branches = crate::git::list_branches(&cwd).ok().map(|branches| {
+                            branches.iter().filter(|branch| **branch != name).count()
+                        });
                         BranchStatus {
                             name,
-                            ahead,
-                            behind,
+                            ahead_behind: crate::git::ahead_behind(&cwd),
+                            other_branches,
                         }
                     })
                 })

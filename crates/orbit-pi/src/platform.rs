@@ -278,6 +278,33 @@ fn is_safe_browser_url(url: &str) -> bool {
     trimmed.starts_with("https://") || trimmed.starts_with("http://")
 }
 
+/// Open System Settings → Notifications so the user can unblock Orbit's
+/// banners. macOS 13+ (the app's floor) uses the Notifications extension
+/// URL; the legacy `com.apple.preference` pane is the older fallback.
+#[cfg(target_os = "macos")]
+pub fn open_notification_settings() -> Result<(), String> {
+    const PANES: [&str; 2] = [
+        "x-apple.systempreferences:com.apple.Notifications-Settings.extension",
+        "x-apple.systempreferences:com.apple.preference.notifications",
+    ];
+    for pane in PANES {
+        let opened = std::process::Command::new("/usr/bin/open")
+            .arg(pane)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if opened {
+            return Ok(());
+        }
+    }
+    Err("could not open System Settings".into())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn open_notification_settings() -> Result<(), String> {
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::is_safe_browser_url;

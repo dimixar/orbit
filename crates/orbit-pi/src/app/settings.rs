@@ -224,7 +224,7 @@ impl OrbitApp {
         let (title, subtitle) = match self.settings_section {
             SettingsSection::General => (
                 "General",
-                "How Orbit connects to the pi agent and stores your data.",
+                "App behavior, local data, and notifications.",
             ),
             SettingsSection::Runtime => (
                 "Runtime",
@@ -313,6 +313,7 @@ impl OrbitApp {
                     ),
                 ];
                 rows.extend(self.updater_rows(theme, this.clone(), cx));
+                rows.push(self.notification_rows(theme, this.clone()));
                 rows
             }
             SettingsSection::Runtime => self.runtime_rows(theme, this.clone(), cx),
@@ -3078,6 +3079,124 @@ impl OrbitApp {
             .into_any_element()
     }
 
+    // ── Settings → General: notifications ──────────────────────────────
+
+    /// The notification board: two real channels plus the honest system
+    /// state when macOS is blocking banners or the build is unbundled. A
+    /// switch the OS ignores must not look like it is working.
+    pub(super) fn notification_rows(&self, theme: Theme, this: Entity<OrbitApp>) -> AnyElement {
+        let mut rows = vec![
+            self.setting_row(
+                theme,
+                "Desktop notifications",
+                Some(
+                    "Show a system banner when a run finishes while Orbit is in the background, or when pi is waiting for your answer.",
+                ),
+                None,
+                Some(self.settings_toggle(
+                    "notification-desktop-toggle",
+                    self.notification_prefs.desktop,
+                    theme,
+                    this.clone(),
+                    Self::toggle_desktop_notifications,
+                )),
+            ),
+            self.setting_row(
+                theme,
+                "Notification sound",
+                Some("Play the system alert sound when a background run finishes or pi is waiting for your answer."),
+                None,
+                Some(self.settings_toggle(
+                    "notification-sound-toggle",
+                    self.notification_prefs.sound,
+                    theme,
+                    this.clone(),
+                    Self::toggle_notification_sound,
+                )),
+            ),
+        ];
+        if self.notification_prefs.desktop {
+            match self.notification_auth {
+                notifications::DesktopAuth::Denied => rows.push(self.setting_row(
+                    theme,
+                    "Blocked in System Settings",
+                    Some("macOS is not allowing Orbit Pi to post notifications."),
+                    None,
+                    Some(self.runtime_button(
+                        "notification-open-settings",
+                        "Open System Settings",
+                        false,
+                        theme,
+                        this,
+                        |_, _| {
+                            let _ = platform::open_notification_settings();
+                        },
+                    )),
+                )),
+                notifications::DesktopAuth::Unbundled => rows.push(self.setting_row(
+                    theme,
+                    "Developer build",
+                    Some(
+                        "Orbit is running from a bare binary, so banners are posted as Script Editor and clicks cannot open their session. The packaged app posts them as Orbit Pi.",
+                    ),
+                    None,
+                    None,
+                )),
+                notifications::DesktopAuth::Granted | notifications::DesktopAuth::Unknown => {}
+            }
+        }
+        self.settings_section(theme, "Notifications", rows)
+    }
+
+    /// Flip the desktop channel, ask for permission on the way on, and
+    /// re-read the OS state so the board never shows a stale state.
+    pub(super) fn toggle_desktop_notifications(&mut self, cx: &mut Context<Self>) {
+        self.notification_prefs.desktop = !self.notification_prefs.desktop;
+        notifications::Prefs::persist(self.notification_prefs);
+        if self.notification_prefs.desktop {
+            notifications::request_permission();
+            self.refresh_notification_auth(cx);
+        } else {
+            self.notification_auth = notifications::DesktopAuth::Unknown;
+        }
+        cx.notify();
+    }
+
+    /// Flip the sound channel; turning it on previews the sound so the
+    /// switch is heard before it matters.
+    pub(super) fn toggle_notification_sound(&mut self, cx: &mut Context<Self>) {
+        self.notification_prefs.sound = !self.notification_prefs.sound;
+        notifications::Prefs::persist(self.notification_prefs);
+        if self.notification_prefs.sound {
+            notifications::play_sound();
+        }
+        cx.notify();
+    }
+
+    /// Read macOS's banner permission without blocking the UI. Called when
+    /// General opens and after the desktop switch flips on.
+    pub(super) fn refresh_notification_auth(&mut self, cx: &mut Context<Self>) {
+        if self.notification_auth_pending || !self.notification_prefs.desktop {
+            return;
+        }
+        self.notification_auth_pending = true;
+        cx.spawn(async move |this, cx| {
+            // The framework answers on a background queue; the blocking read
+            // runs off the UI thread.
+            let auth = cx
+                .background_executor()
+                .spawn(async { notifications::permission() })
+                .await;
+            this.update(cx, |app, cx| {
+                app.notification_auth = auth;
+                app.notification_auth_pending = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     // ── Settings → Runtime ─────────────────────────────────────────────
 
     /// The Runtime section: the live pi process, its details, and
@@ -4682,6 +4801,7 @@ impl OrbitApp {
         self.provider_key_editor = None;
         self.plugin_remove_confirm = None;
         match section {
+            SettingsSection::General => self.refresh_notification_auth(cx),
             SettingsSection::Providers => {
                 self.reload_custom_providers(cx);
                 self.refresh_auth();
