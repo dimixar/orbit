@@ -98,3 +98,50 @@ fn routes_quota_list_and_parses_reports() {
         other => panic!("expected quota.list response, got {other:?}"),
     }
 }
+
+#[test]
+fn forwards_extension_paths_as_pi_flags() {
+    // A fake pi that records its argv, so the test proves Orbit's bundled
+    // quota bridge reaches the child process without any settings writes.
+    let dir = tempdir::TempDir::new("orbit-extension-args").expect("temp dir");
+    let argv_file = dir.path().join("argv.txt");
+    let bin = dir.path().join("fake-pi");
+    std::fs::write(
+        &bin,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\n",
+            argv_file.display()
+        ),
+    )
+    .expect("write fake pi");
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod fake pi");
+
+    let extension = dir.path().join("orbit-quota-bridge.js");
+    let _client = PiClient::spawn_with_bin_and_extensions(
+        bin.to_str().unwrap(),
+        &std::env::temp_dir(),
+        None,
+        std::slice::from_ref(&extension),
+    )
+    .expect("spawn fake pi");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let argv = loop {
+        if let Ok(argv) = std::fs::read_to_string(&argv_file) {
+            break argv;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fake pi never recorded its argv"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let args: Vec<&str> = argv.lines().collect();
+    assert!(args.contains(&"--mode") && args.contains(&"rpc"));
+    let flag = args
+        .iter()
+        .position(|arg| *arg == "--extension")
+        .expect("--extension flag");
+    assert_eq!(args[flag + 1], extension.to_string_lossy());
+}

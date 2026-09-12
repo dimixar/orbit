@@ -5,6 +5,7 @@
 //! on data arrival or on a state change, never on a paint (§51): the render
 //! path reads `snapshot()` and formats.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -12,7 +13,6 @@ use std::time::{Duration, Instant};
 use gpui::{
     point, px, App, AppContext, Context, Entity, Focusable, ScrollHandle, Subscription, Window,
 };
-use gpui_component::table::{TableEvent, TableState};
 use serde_json::Value;
 
 use crate::composer::ComposerInput;
@@ -20,7 +20,7 @@ use crate::composer::ComposerInput;
 use super::aggregate::{BucketRow, ChartMetric, LatencyMetric, SessionRow, UsageSnapshot};
 use super::collect::{now_ms, UsageScanner};
 use super::model::*;
-use super::table::{BucketTable, FailureRow, FailureSort, FailureTable, SessionTable};
+use super::table::{FailureRow, FailureSort, TableKind};
 
 /// Page sizes offered by the sessions table footer (§26).
 pub const PAGE_SIZES: [usize; 4] = [10, 25, 50, 100];
@@ -388,19 +388,18 @@ pub struct UsagePage {
     error: Option<String>,
     status: Option<(String, Instant)>,
 
-    /// The two framework-owned tables. The page keeps their delegates in step
-    /// with the current snapshot and sort state.
-    session_table: Option<Entity<TableState<SessionTable>>>,
-    bucket_table: Option<Entity<TableState<BucketTable>>>,
-    failure_table: Option<Entity<TableState<FailureTable>>>,
-    /// Row/column changed since the delegates were last refreshed.
-    tables_dirty: bool,
+    /// Per-column width overrides, keyed by table then column id. Empty until
+    /// the user drags a divider; the computed plan is the default.
+    widths: HashMap<TableKind, HashMap<&'static str, f32>>,
+    /// The divider currently being dragged, if any:
+    /// `(table, column id, pointer x at drag start, width at drag start)`.
+    resizing: Option<(TableKind, &'static str, f32, f32)>,
+    /// The session row whose right-click menu is open, if any (§43).
+    context_row: Option<usize>,
     /// Re-render when the session search or the menu filter changes: those
     /// inputs live in their own entities, so the page has to watch them.
     _search_sub: Subscription,
     _menu_query_sub: Subscription,
-    /// Row-event subscriptions for the tables.
-    _table_subs: Vec<Subscription>,
     /// Width of the main area, refreshed by the shell each render.
     main_width: f32,
 
@@ -447,7 +446,6 @@ impl UsagePage {
             // The search narrows the sessions table, so its rows are stale and
             // the page must return to the first page of the new result (§28).
             page.page = 1;
-            page.tables_dirty = true;
             cx.notify();
         });
         let menu_query_sub = cx.observe(&menu_query, |_, _, cx| cx.notify());
@@ -488,13 +486,11 @@ impl UsagePage {
             last_updated_ms: None,
             error: None,
             status: None,
-            session_table: None,
-            bucket_table: None,
-            failure_table: None,
-            tables_dirty: true,
+            widths: HashMap::new(),
+            resizing: None,
+            context_row: None,
             _search_sub: search_sub,
             _menu_query_sub: menu_query_sub,
-            _table_subs: Vec::new(),
             main_width: 1000.,
             on_open_session: None,
             on_close: None,
@@ -522,6 +518,7 @@ impl UsagePage {
 
     pub fn close(&mut self, _cx: &mut Context<Self>) {
         self.menu = None;
+        self.context_row = None;
         self.hover_bucket = None;
     }
 
@@ -620,7 +617,6 @@ impl UsagePage {
     /// Recompute the snapshot. Only ever called when `dirty` (§51).
     fn recompute(&mut self) {
         self.dirty = false;
-        self.tables_dirty = true;
         let Some(index) = self.index.clone() else {
             self.snapshot = None;
             return;
@@ -658,88 +654,56 @@ impl UsagePage {
     pub fn set_main_width(&mut self, width: f32, cx: &mut Context<Self>) {
         if (self.main_width - width).abs() > 0.5 {
             self.main_width = width;
-            // Column widths follow the available width.
-            self.tables_dirty = true;
             cx.notify();
         }
     }
 
-    // ── tables (gpui-component) ────────────────────────────────────────────
+    // ── tables ─────────────────────────────────────────────────────────────
 
-    /// Create the tables on first render (they need a window) and hand back
-    /// their states.
-    pub(super) fn tables(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> (
-        Entity<TableState<SessionTable>>,
-        Entity<TableState<BucketTable>>,
-    ) {
-        if self.session_table.is_none() {
-            let page = cx.entity().downgrade();
-            let (width, sort, desc) = (self.main_width, self.session_sort, self.session_sort_desc);
-            let state = cx.new(|cx| {
-                TableState::new(SessionTable::new(page, width, sort, desc), window, cx)
-                    .row_selectable(true)
-            });
-            let sub = cx.subscribe_in(
-                &state,
-                window,
-                |page: &mut Self, _state, event: &TableEvent, window, cx| {
-                    page.on_table_event(event, window, cx);
-                },
-            );
-            self._table_subs.push(sub);
-            self.session_table = Some(state);
-        }
-        if self.bucket_table.is_none() {
-            let page = cx.entity().downgrade();
-            let (sort, desc) = (self.bucket_sort, self.bucket_sort_desc);
-            let state = cx.new(|cx| {
-                TableState::new(
-                    BucketTable::new(page, sort, desc, Granularity::Day),
-                    window,
-                    cx,
-                )
-            });
-            let sub = cx.subscribe_in(
-                &state,
-                window,
-                |page: &mut Self, _state, event: &TableEvent, window, cx| {
-                    page.on_table_event(event, window, cx);
-                },
-            );
-            self._table_subs.push(sub);
-            self.bucket_table = Some(state);
-        }
-        if self.failure_table.is_none() {
-            let page = cx.entity().downgrade();
-            let state = cx.new(|cx| TableState::new(FailureTable::new(page), window, cx));
-            let sub = cx.subscribe_in(
-                &state,
-                window,
-                |page: &mut Self, _state, event: &TableEvent, window, cx| {
-                    page.on_table_event(event, window, cx);
-                },
-            );
-            self._table_subs.push(sub);
-            self.failure_table = Some(state);
-        }
-        (
-            self.session_table.clone().expect("created above"),
-            self.bucket_table.clone().expect("created above"),
-        )
+    /// The width a column has been dragged to, or its computed default.
+    pub fn col_width(&self, table: TableKind, id: &'static str, default: f32) -> f32 {
+        self.widths
+            .get(&table)
+            .and_then(|widths| widths.get(id))
+            .copied()
+            .unwrap_or(default)
     }
 
-    /// Create (if needed) and hand back the failures table.
-    pub(super) fn failure_table(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Entity<TableState<FailureTable>> {
-        self.tables(window, cx);
-        self.failure_table.clone().expect("created above")
+    /// A divider drag began: remember where it started, so every move is
+    /// measured from the same origin.
+    pub fn begin_resize(&mut self, table: TableKind, id: &'static str, x: f32, width: f32) {
+        self.resizing = Some((table, id, x, width));
+    }
+
+    /// A divider is being dragged: the column takes the pointer's delta from the
+    /// width it had at drag start.
+    pub fn drag_resize(&mut self, x: f32, cx: &mut Context<Self>) {
+        let Some((table, id, start_x, start_width)) = self.resizing else {
+            return;
+        };
+        let width = (start_width + (x - start_x)).max(super::table::MIN_COL_W);
+        self.widths.entry(table).or_default().insert(id, width);
+        cx.notify();
+    }
+
+    pub fn end_resize(&mut self) {
+        self.resizing = None;
+    }
+
+    /// The session row whose right-click menu is open, if any.
+    pub fn context_row(&self) -> Option<usize> {
+        self.context_row
+    }
+
+    pub fn open_context_menu(&mut self, row: usize, cx: &mut Context<Self>) {
+        self.context_row = Some(row);
+        cx.notify();
+    }
+
+    pub fn close_context_menu(&mut self, cx: &mut Context<Self>) {
+        if self.context_row.take().is_some() {
+            cx.notify();
+        }
     }
 
     /// Failures in the range, resolved against the index and ordered by the
@@ -792,84 +756,7 @@ impl UsagePage {
         }
         self.failure_sort = sort;
         self.failure_sort_desc = desc;
-        self.tables_dirty = true;
         cx.notify();
-    }
-
-    /// Push the current rows and column plan into the delegates. Runs before
-    /// the tables paint, and only when something they show actually changed.
-    pub(super) fn sync_tables(&mut self, cx: &mut Context<Self>) {
-        if !self.tables_dirty {
-            return;
-        }
-        self.tables_dirty = false;
-
-        let width = self.table_width();
-        let (sort, desc) = (self.session_sort, self.session_sort_desc);
-        // Only the current page reaches the table (§26/§56).
-        let rows = self.session_page(cx).rows;
-        let hidden = self.hidden_columns.clone();
-        if let Some(state) = self.session_table.clone() {
-            state.update(cx, |state, cx| {
-                let delegate = state.delegate_mut();
-                let mut changed = delegate.set_rows(rows);
-                changed |= delegate.set_layout(width, sort, desc, &hidden);
-                if changed {
-                    state.refresh(cx);
-                }
-            });
-        }
-
-        let granularity = self
-            .snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.buckets.granularity)
-            .unwrap_or(Granularity::Day);
-        let rows = self.bucket_rows();
-        let (sort, desc) = (self.bucket_sort, self.bucket_sort_desc);
-        if let Some(state) = self.failure_table.clone() {
-            let failures = self.failure_rows();
-            let (sort, desc) = (self.failure_sort, self.failure_sort_desc);
-            state.update(cx, |state, cx| {
-                let delegate = state.delegate_mut();
-                let mut changed = delegate.set_rows(failures);
-                changed |= delegate.set_layout(sort, desc, width);
-                if changed {
-                    state.refresh(cx);
-                }
-            });
-        }
-        if let Some(state) = self.bucket_table.clone() {
-            state.update(cx, |state, cx| {
-                let delegate = state.delegate_mut();
-                let mut changed = delegate.set_rows(rows, granularity);
-                changed |= delegate.set_sort(sort, desc);
-                if changed {
-                    state.refresh(cx);
-                }
-            });
-        }
-    }
-
-    /// Row events from either table: the row order is the page's own, so a
-    /// row index maps back onto the same [`SessionRow`] list the delegate draws.
-    fn on_table_event(&mut self, event: &TableEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let ix = match event {
-            TableEvent::SelectRow(ix) | TableEvent::DoubleClickedRow(ix) => *ix,
-            _ => return,
-        };
-        let rows = self.session_page(cx).rows;
-        let Some(row) = rows.get(ix) else {
-            return;
-        };
-        let session = row.session;
-        match event {
-            // A single click scopes the whole page to that session (§68).
-            TableEvent::SelectRow(_) => self.set_session_scope(Some(session), cx),
-            // A double click goes further and opens it in the chat (§29).
-            TableEvent::DoubleClickedRow(_) => self.open_session(window, cx, session),
-            _ => {}
-        }
     }
 
     /// The directory this page reads (pi's own session store).
@@ -1097,11 +984,14 @@ impl UsagePage {
 
     /// Any click outside a popover closes it.
     pub fn dismiss_menus(&mut self, cx: &mut Context<Self>) {
-        if self.menu.is_none() {
+        let had_menu = self.menu.take().is_some();
+        let had_context = self.context_row.take().is_some();
+        if !had_menu && !had_context {
             return;
         }
-        self.menu = None;
-        self.dismissed_at = Some(Instant::now());
+        if had_menu {
+            self.dismissed_at = Some(Instant::now());
+        }
         self.calendar_open = false;
         cx.notify();
     }
@@ -1219,6 +1109,7 @@ impl UsagePage {
     }
 
     pub fn set_session_scope(&mut self, session: Option<u16>, cx: &mut Context<Self>) {
+        self.context_row = None;
         let mut filter = self.filter.clone();
         filter.session = session;
         self.set_filter(filter, cx);
@@ -1242,15 +1133,10 @@ impl UsagePage {
         self.set_filter(filter, cx);
     }
 
-    /// The table delegate knows the exact ordering it was asked for (its header
-    /// cycles through three states), so it sets both key and direction instead
-    /// of toggling.
-    pub fn set_session_sort_from_table(
-        &mut self,
-        sort: SessionSort,
-        desc: bool,
-        cx: &mut Context<Self>,
-    ) {
+    /// A header click on the sessions table. The header cycles through three
+    /// states, so it hands the page both the key and the direction instead of
+    /// toggling.
+    pub fn set_session_sort(&mut self, sort: SessionSort, desc: bool, cx: &mut Context<Self>) {
         if self.session_sort == sort && self.session_sort_desc == desc {
             return;
         }
@@ -1258,25 +1144,17 @@ impl UsagePage {
         self.session_sort_desc = desc;
         // Re-ordering changes what lands on page 1, so return to it (§29).
         self.page = 1;
-        self.clear_session_selection(cx);
-        self.tables_dirty = true;
         self.persist();
         cx.notify();
     }
 
     /// Same for the breakdown table.
-    pub fn set_bucket_sort_from_table(
-        &mut self,
-        sort: BucketSort,
-        desc: bool,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_bucket_sort(&mut self, sort: BucketSort, desc: bool, cx: &mut Context<Self>) {
         if self.bucket_sort == sort && self.bucket_sort_desc == desc {
             return;
         }
         self.bucket_sort = sort;
         self.bucket_sort_desc = desc;
-        self.tables_dirty = true;
         cx.notify();
     }
 
@@ -1286,12 +1164,19 @@ impl UsagePage {
         self.page_size
     }
 
-    /// Drop the table's selected row. The framework tracks selection by row
-    /// index, so it has to be cleared whenever those indices are re-based.
-    fn clear_session_selection(&mut self, cx: &mut Context<Self>) {
-        if let Some(state) = self.session_table.clone() {
-            state.update(cx, |state, cx| state.clear_selection(cx));
-        }
+    /// The sessions table's current sort key and direction.
+    pub fn session_sort_state(&self) -> (SessionSort, bool) {
+        (self.session_sort, self.session_sort_desc)
+    }
+
+    /// The breakdown table's current sort key and direction.
+    pub fn bucket_sort_state(&self) -> (BucketSort, bool) {
+        (self.bucket_sort, self.bucket_sort_desc)
+    }
+
+    /// The failures table's current sort key and direction.
+    pub fn failure_sort_state(&self) -> (FailureSort, bool) {
+        (self.failure_sort, self.failure_sort_desc)
     }
 
     /// Jump to a page, clamped to the current result set.
@@ -1301,8 +1186,6 @@ impl UsagePage {
             return;
         }
         self.page = page;
-        self.clear_session_selection(cx);
-        self.tables_dirty = true;
         cx.notify();
     }
 
@@ -1312,8 +1195,6 @@ impl UsagePage {
         }
         self.page_size = size;
         self.page = 1;
-        self.clear_session_selection(cx);
-        self.tables_dirty = true;
         self.persist();
         self.menu = None;
         cx.notify();
@@ -1331,7 +1212,6 @@ impl UsagePage {
             }
             None => self.hidden_columns.push(column),
         }
-        self.tables_dirty = true;
         self.persist();
         cx.notify();
     }
@@ -1342,7 +1222,6 @@ impl UsagePage {
             return;
         }
         self.hidden_columns.clear();
-        self.tables_dirty = true;
         self.persist();
         cx.notify();
     }

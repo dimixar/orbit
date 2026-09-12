@@ -370,13 +370,13 @@ impl Language {
 }
 
 /// Waku General-settings customization: language, type sizes, and density.
-/// Interface size and spacing density are percentages; the terminal and
-/// editor sizes are px with the Waku defaults (13 / 13).
+/// Every size is px with the Waku defaults (UI 14, terminal / editor 13);
+/// only spacing density remains a percentage.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UiPrefs {
     pub language: Language,
-    /// Interface type scale, percent (Waku's "Interface Font Size").
-    pub interface_scale: u32,
+    /// Interface text size, px (Waku's "UI font size").
+    pub ui_font_size: f32,
     /// Terminal / tool-output size, px (Waku's "Terminal Font Size").
     pub terminal_font_size: f32,
     /// Editor / diff / code-block size, px (Waku's "Editor Font Size").
@@ -385,10 +385,11 @@ pub struct UiPrefs {
     pub spacing_density: u32,
 }
 
-/// Selectable interface type scales, percent.
-pub const INTERFACE_SCALES: [u32; 11] = [80, 85, 90, 95, 100, 105, 110, 115, 120, 125, 130];
-/// Selectable terminal / editor font sizes, px.
-pub const FONT_SIZES: [f32; 6] = [11., 12., 13., 14., 15., 16.];
+/// The interface text size authored against, px. Chrome sizes scale relative
+/// to this, exactly like Waku's `sp()` authored at its default UI font size.
+pub const DEFAULT_UI_FONT_SIZE: f32 = 14.;
+/// Selectable interface / terminal / editor font sizes, px.
+pub const FONT_SIZES: [f32; 8] = [11., 12., 13., 14., 15., 16., 18., 20.];
 /// Selectable spacing densities, percent.
 pub const SPACING_DENSITIES: [u32; 9] = [80, 85, 90, 95, 100, 105, 110, 115, 120];
 
@@ -396,7 +397,7 @@ impl Default for UiPrefs {
     fn default() -> Self {
         Self {
             language: Language::System,
-            interface_scale: 100,
+            ui_font_size: DEFAULT_UI_FONT_SIZE,
             terminal_font_size: 13.,
             editor_font_size: 13.,
             spacing_density: 100,
@@ -421,16 +422,16 @@ impl UiPrefs {
             .unwrap_or_default()
     }
 
-    /// Nearest selectable interface scale, for migrating legacy px sizes.
-    fn nearest_scale(value: u32) -> u32 {
-        *INTERFACE_SCALES
+    /// Nearest selectable font size, for migrating legacy percentage scales.
+    fn nearest_size(value: f32) -> f32 {
+        *FONT_SIZES
             .iter()
-            .min_by_key(|s| s.abs_diff(value))
+            .min_by(|a, b| (*a - value).abs().partial_cmp(&(*b - value).abs()).unwrap())
             .unwrap()
     }
 
-    /// Parse prefs from JSON, falling back to defaults per field. Legacy
-    /// `ui_font_size` / `code_font_size` px keys migrate to the new scales.
+    /// Parse prefs from JSON, falling back to defaults per field. A legacy
+    /// `interface_scale` percentage migrates onto the equivalent px size.
     fn from_value(value: &Value) -> Self {
         let mut prefs = Self::default();
         if let Some(language) = value
@@ -440,14 +441,14 @@ impl UiPrefs {
         {
             prefs.language = language;
         }
-        if let Some(scale) = value.get("interface_scale").and_then(Value::as_u64) {
-            let scale = scale as u32;
-            if INTERFACE_SCALES.contains(&scale) {
-                prefs.interface_scale = scale;
+        if let Some(size) = value.get("ui_font_size").and_then(Value::as_f64) {
+            let size = size as f32;
+            if FONT_SIZES.contains(&size) {
+                prefs.ui_font_size = size;
             }
-        } else if let Some(px) = value.get("ui_font_size").and_then(Value::as_f64) {
-            let pct = (px as f32 / 14. * 100.).round() as u32;
-            prefs.interface_scale = Self::nearest_scale(pct);
+        } else if let Some(scale) = value.get("interface_scale").and_then(Value::as_u64) {
+            let px = scale as f32 / 100. * DEFAULT_UI_FONT_SIZE;
+            prefs.ui_font_size = Self::nearest_size(px);
         }
         if let Some(size) = value.get("terminal_font_size").and_then(Value::as_f64) {
             if FONT_SIZES.contains(&(size as f32)) {
@@ -482,7 +483,7 @@ impl UiPrefs {
             path,
             serde_json::json!({
                 "language": self.language.as_str(),
-                "interface_scale": self.interface_scale,
+                "ui_font_size": self.ui_font_size,
                 "terminal_font_size": self.terminal_font_size,
                 "editor_font_size": self.editor_font_size,
                 "spacing_density": self.spacing_density,
@@ -2109,10 +2110,12 @@ impl Theme {
         self
     }
 
-    /// Scale an interface text size by the Interface Font Size setting
-    /// (`interface_scale / 100`).
+    /// Scale an interface text size by the UI font size setting, the way
+    /// Waku's `sp()` rems resolve against its UI font size (`ui_font_size /
+    /// DEFAULT_UI_FONT_SIZE`). Chrome sizes are authored at the 14px default,
+    /// so at the default setting this resolves to the authored pixel value.
     pub fn ui_px(&self, value: f32) -> Pixels {
-        px(value * (self.ui.interface_scale as f32 / 100.))
+        px(value * (self.ui.ui_font_size / DEFAULT_UI_FONT_SIZE))
     }
 
     /// Scale an editor-surface size (code blocks, diffs) by the Editor font
@@ -2155,6 +2158,27 @@ impl Theme {
             TokenClass::Added => self.add_green,
             TokenClass::Removed => self.del_red,
         }
+    }
+
+    /// Paint color for a `/command` token in the composer. Commands are
+    /// actions, so they take the accent — the role terminal command words
+    /// and syntax keywords already carry.
+    pub fn mention_command(self) -> Hsla {
+        self.accent
+    }
+
+    /// Paint color for an `@file` mention in the composer. Files take the
+    /// accent's complement, so an `@reference` never reads as a `/command`
+    /// while still riding the palette's tuned chroma and lightness. Palettes
+    /// with no chroma (Ashwood, Mono) stay monochrome and separate by ink.
+    pub fn mention_file(self) -> Hsla {
+        if self.accent.s < 0.15 {
+            return self.accent.opacity(0.7);
+        }
+        let mut color = self.accent;
+        color.h = (color.h + 0.5).fract();
+        color.s = color.s.max(0.5);
+        color
     }
 
     /// Build a full [`Theme`] from its appearance + raw palette tokens.
@@ -2365,6 +2389,24 @@ mod tests {
         }
     }
 
+    /// Composer mention tokens stay legible and distinct from each other in
+    /// every palette, including the monochrome ones (Ashwood, Mono) where the
+    /// split is by ink rather than hue.
+    #[test]
+    fn mention_token_colors_are_distinct_across_palettes() {
+        for id in ThemeId::ALL {
+            let theme = Theme::for_id(id);
+            let command = theme.mention_command();
+            let file = theme.mention_file();
+            assert!(
+                command != file,
+                "mention colors collide in {id:?}: {command:?}"
+            );
+            assert!(command.a > 0., "command token is transparent in {id:?}");
+            assert!(file.a > 0., "file token is transparent in {id:?}");
+        }
+    }
+
     #[test]
     fn ported_zed_themes_are_dark_and_labelled() {
         let ported = [
@@ -2483,14 +2525,14 @@ mod tests {
         use serde_json::json;
         let prefs = UiPrefs::from_value(&json!({
             "language": "en",
-            "interface_scale": 500,
+            "ui_font_size": 500,
             "terminal_font_size": 15,
             "editor_font_size": 12,
             "spacing_density": 100,
         }));
-        // 500% isn't selectable — falls back to the default; the rest apply.
+        // 500px isn't selectable — falls back to the default; the rest apply.
         assert_eq!(prefs.language, Language::English);
-        assert_eq!(prefs.interface_scale, 100);
+        assert_eq!(prefs.ui_font_size, 14.);
         assert_eq!(prefs.terminal_font_size, 15.);
         assert_eq!(prefs.editor_font_size, 12.);
         assert_eq!(prefs.spacing_density, 100);
@@ -2499,12 +2541,12 @@ mod tests {
             UiPrefs::from_value(&json!({"language": 3})),
             UiPrefs::default()
         );
-        // Legacy px keys migrate onto the new percentage / px scales.
+        // Legacy percentage / px keys migrate onto the px scales.
         let legacy = UiPrefs::from_value(&json!({
-            "ui_font_size": 16,
+            "interface_scale": 115,
             "code_font_size": 15,
         }));
-        assert_eq!(legacy.interface_scale, 115);
+        assert_eq!(legacy.ui_font_size, 16.);
         assert_eq!(legacy.editor_font_size, 15.);
     }
 
@@ -2519,11 +2561,11 @@ mod tests {
         assert_eq!(theme.code_px(13.), px(13.));
         assert_eq!(theme.term_px(13.), px(13.));
         assert_eq!(theme.space(12.), px(12.));
-        theme.ui.interface_scale = 125;
+        theme.ui.ui_font_size = 18.;
         theme.ui.editor_font_size = 11.;
         theme.ui.terminal_font_size = 15.;
         theme.ui.spacing_density = 75;
-        assert_eq!(theme.ui_px(14.), px(17.5));
+        assert_eq!(theme.ui_px(14.), px(18.));
         assert!(close(theme.code_px(13.), px(11.)));
         assert!(close(theme.term_px(13.), px(15.)));
         assert_eq!(theme.space(10.), px(7.5));

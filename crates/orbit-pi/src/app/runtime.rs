@@ -110,6 +110,9 @@ impl OrbitApp {
             error: None,
         };
         self.client = Some(client);
+        // A new process starts a new session stream: entry ids from the old
+        // process mean nothing here.
+        self.reset_quota_entries();
         // Re-probe provider-auth capabilities against the new process and
         // reconcile any login the restart interrupted.
         self.probe_auth();
@@ -124,6 +127,49 @@ impl OrbitApp {
         // Orbit was reconnecting.
         self.auth.on_disconnect();
         self.quota.on_disconnect();
+        self.reset_quota_entries();
+    }
+
+    /// Forget the bridge cursor and schedule an immediate poll. Called when
+    /// the active session (and therefore the entry-id space) changes.
+    pub(super) fn reset_quota_entries(&mut self) {
+        self.quota_entries_cursor = None;
+        self.quota_entries_inflight = false;
+        self.quota_entries_bootstrap = QUOTA_ENTRY_BOOTSTRAP_POLLS;
+        self.quota_entries_next_poll = Instant::now();
+    }
+
+    /// Poll the active process for new quota-bridge session entries, at most
+    /// once per [`QUOTA_ENTRY_POLL_INTERVAL`]. The bridge appends a snapshot
+    /// only when the numbers change, so a quiet account returns no entries.
+    pub(super) fn poll_quota_entries(&mut self) {
+        if self.quota_bridge.extension().is_none() {
+            return;
+        }
+        if self.quota_entries_inflight || self.quota_entries_next_poll > Instant::now() {
+            return;
+        }
+        if !self.client.as_mut().is_some_and(|client| client.is_alive()) {
+            return;
+        }
+        self.quota_entries_inflight = true;
+        let interval = if self.quota_entries_bootstrap > 0 {
+            self.quota_entries_bootstrap -= 1;
+            QUOTA_ENTRY_BOOTSTRAP_INTERVAL
+        } else {
+            QUOTA_ENTRY_POLL_INTERVAL
+        };
+        self.quota_entries_next_poll = Instant::now() + interval;
+        let sent = self.send(
+            CommandBody::GetEntries {
+                since: self.quota_entries_cursor.clone(),
+            },
+            "get_entries",
+        );
+        if !sent {
+            // No response is coming; unblock the next attempt.
+            self.quota_entries_inflight = false;
+        }
     }
 
     /// Ask pi for provider auth capabilities. Harmless on a pi that doesn't
@@ -264,7 +310,7 @@ impl OrbitApp {
             .clone()
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
-        match PiClient::spawn(&cwd, None) {
+        match self.quota_bridge.spawn(&cwd) {
             Ok(client) => {
                 self.adopt_client(client);
                 self.send(CommandBody::GetState, "get_state");

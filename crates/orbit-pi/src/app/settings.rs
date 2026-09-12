@@ -1,6 +1,26 @@
 use super::helpers::*;
 use super::*;
 
+/// A Plugins-page button action, dispatched through one entry point.
+#[derive(Clone)]
+pub(super) enum PluginAction {
+    Install,
+    Update { source: String },
+    Remove { source: String },
+    ConfirmRemove { source: String, project: bool },
+    CancelRemove,
+    SetScope { project: bool },
+    Refresh,
+}
+
+/// The operation a background plugin task runs.
+#[derive(Clone, Copy)]
+enum PluginOp {
+    Install,
+    Update,
+    Remove,
+}
+
 impl OrbitApp {
     // ── settings surface ───────────────────────────────────────────
     // Waku-style: left nav (Back + sections), right column of setting
@@ -11,7 +31,7 @@ impl OrbitApp {
     pub(super) fn render_settings(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let this = cx.entity();
         let theme = *theme::get(cx);
-        let sections: [(SettingsSection, &'static str, &'static str); 6] = [
+        let sections: [(SettingsSection, &'static str, &'static str); 8] = [
             (SettingsSection::General, "icons/settings.svg", "General"),
             (
                 SettingsSection::Runtime,
@@ -19,6 +39,8 @@ impl OrbitApp {
                 "Runtime",
             ),
             (SettingsSection::Agent, "icons/spark.svg", "Agent"),
+            (SettingsSection::Skills, "icons/magic-wand.svg", "Skills"),
+            (SettingsSection::Plugins, "icons/extensions.svg", "Plugins"),
             (
                 SettingsSection::Appearance,
                 "icons/contrast.svg",
@@ -122,59 +144,80 @@ impl OrbitApp {
                             })),
                     ),
             )
-            // ── content column: fixed header + scrolling body ──
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .flex()
-                    .flex_col()
-                    // The title (and, on Providers, the search/toolbar) stay
-                    // pinned; gpui has no sticky positioning, so they live
-                    // outside the scroll container.
-                    .child(
-                        div()
-                            .w_full()
-                            .flex_shrink_0()
-                            .px(px(24.))
-                            .pt(px(44.))
-                            .pb(px(12.))
-                            .when(
-                                self.settings_section == SettingsSection::Providers,
-                                |header| header.border_b_1().border_color(theme.border),
-                            )
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .child(self.settings_header(theme))
-                            .children(
-                                (self.settings_section == SettingsSection::Providers)
-                                    .then(|| self.provider_toolbar(theme, this.clone(), cx)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("settings-content")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .child(
-                                div()
-                                    .w_full()
-                                    .px(px(24.))
-                                    .pb(px(12.))
-                                    .flex()
-                                    .flex_col()
-                                    .gap(theme.space(12.))
-                                    .children(self.error_banner(theme, cx))
-                                    .children(self.settings_rows(&this, theme, cx)),
-                            ),
-                    ),
-            )
+            // ── content column ──
+            // Skills owns a full-bleed master-detail surface; every other
+            // section is a fixed header + a scrolling column of cards.
+            .child(if self.settings_section == SettingsSection::Skills {
+                self.render_skills_page(theme, this.clone(), cx)
+            } else {
+                self.settings_body(theme, this.clone(), cx)
+            })
             // ── provider editor modals (models.json + API key) ──
             .children(self.provider_editor_layer(theme, this.clone(), cx))
             .children(self.provider_key_layer(theme, this, cx))
+    }
+
+    /// The standard settings content column: a pinned header (title +
+    /// section toolbar) over a scrolling body of cards.
+    fn settings_body(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            // The title (and, on Providers/Plugins, the toolbar) stay pinned;
+            // gpui has no sticky positioning, so they live outside the scroll
+            // container.
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(CONTENT_MAX_W))
+                    .mx_auto()
+                    .flex_shrink_0()
+                    .px(px(24.))
+                    .pt(px(44.))
+                    .pb(px(12.))
+                    .when(
+                        matches!(
+                            self.settings_section,
+                            SettingsSection::Providers | SettingsSection::Plugins
+                        ),
+                        |header| header.border_b_1().border_color(theme.border),
+                    )
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(self.settings_header(theme))
+                    .children(self.settings_toolbar(theme, this.clone(), cx)),
+            )
+            .child(
+                div()
+                    .id("settings-content")
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .max_w(px(CONTENT_MAX_W))
+                    .mx_auto()
+                    .overflow_y_scroll()
+                    .child(
+                        div()
+                            .w_full()
+                            .px(px(24.))
+                            .pb(px(12.))
+                            .flex()
+                            .flex_col()
+                            .gap(theme.space(12.))
+                            .children(self.error_banner(theme, cx))
+                            .children(self.settings_rows(&this, theme, cx)),
+                    ),
+            )
+            .into_any_element()
     }
 
     pub(super) fn settings_header(&self, theme: Theme) -> impl IntoElement + use<> {
@@ -190,6 +233,14 @@ impl OrbitApp {
             SettingsSection::Agent => (
                 "Agent",
                 "How pi queues your messages, compacts context, and retries errors.",
+            ),
+            SettingsSection::Skills => (
+                "Skills",
+                "SKILL.md files pi can load, from this project and your global agent.",
+            ),
+            SettingsSection::Plugins => (
+                "Plugins",
+                "pi packages for this machine and this project. pi loads them at startup — restart pi to apply changes.",
             ),
             SettingsSection::Appearance => ("Appearance", "Window, layout, and color preferences."),
             SettingsSection::Providers => (
@@ -231,65 +282,45 @@ impl OrbitApp {
         cx: &Context<Self>,
     ) -> Vec<AnyElement> {
         match self.settings_section {
-            SettingsSection::General => vec![
-                self.card(
-                    theme,
-                    "pi agent",
-                    "Spawned as a child process — newline-delimited JSON over stdio.",
-                    Some(self.connection_status(theme)),
-                ),
-                self.card_with_path(
-                    theme,
-                    "Local by default",
-                    "Sessions live in pi's own store on this computer — no daemon, no cloud.",
-                    Some(&sessions::sessions_dir().to_string_lossy()),
-                    None,
-                ),
-                self.card_with_path(
-                    theme,
-                    "Workspace",
-                    "New tasks start in this directory.",
-                    Some(
-                        &self
-                            .current_workspace
-                            .clone()
-                            .or_else(|| std::env::current_dir().ok())
-                            .unwrap_or_default()
-                            .to_string_lossy(),
+            SettingsSection::General => {
+                let mut rows = vec![
+                    self.card(
+                        theme,
+                        "pi agent",
+                        "Spawned as a child process — newline-delimited JSON over stdio.",
+                        Some(self.connection_status(theme)),
                     ),
-                    None,
-                ),
-            ],
+                    self.card_with_path(
+                        theme,
+                        "Local by default",
+                        "Sessions live in pi's own store on this computer — no daemon, no cloud.",
+                        Some(&sessions::sessions_dir().to_string_lossy()),
+                        None,
+                    ),
+                    self.card_with_path(
+                        theme,
+                        "Workspace",
+                        "New tasks start in this directory.",
+                        Some(
+                            &self
+                                .current_workspace
+                                .clone()
+                                .or_else(|| std::env::current_dir().ok())
+                                .unwrap_or_default()
+                                .to_string_lossy(),
+                        ),
+                        None,
+                    ),
+                ];
+                rows.extend(self.updater_rows(theme, this.clone(), cx));
+                rows
+            }
             SettingsSection::Runtime => self.runtime_rows(theme, this.clone(), cx),
             SettingsSection::Agent => self.agent_rows(theme, this.clone(), cx),
-            SettingsSection::Appearance => vec![
-                self.card(
-                    theme,
-                    "Theme",
-                    "Pick a Zed-compatible palette for the workbench.",
-                    Some(self.theme_select(theme, this.clone(), cx)),
-                ),
-                self.background_card(theme, this.clone(), cx),
-                self.card(
-                    theme,
-                    "Language",
-                    "Choose the language used throughout Orbit.",
-                    Some(self.language_select(theme, this.clone(), cx)),
-                ),
-                self.density_type_card(theme, this.clone(), cx),
-                self.card(
-                    theme,
-                    "Show sidebar",
-                    "Show the sessions sidebar. Also toggleable from the top bar.",
-                    Some(self.sidebar_toggle(theme, this.clone())),
-                ),
-                self.card(
-                    theme,
-                    "GPU-rendered streaming",
-                    "Stream commits are coalesced (~8 Hz) and highlighting is paint-only, so long tasks never reflow the transcript.",
-                    None,
-                ),
-            ],
+            // Rendered by `skills_ui::render_skills_page`, not the card body.
+            SettingsSection::Skills => Vec::new(),
+            SettingsSection::Plugins => self.plugin_rows(theme, this.clone(), cx),
+            SettingsSection::Appearance => self.appearance_rows(theme, this.clone(), cx),
             SettingsSection::Providers => self.provider_rows(theme, this.clone(), cx),
             SettingsSection::About => vec![
                 self.card(
@@ -324,6 +355,504 @@ impl OrbitApp {
                 ),
             ],
         }
+    }
+
+    /// The pinned toolbar for the active section (Providers search + add,
+    /// Plugins install + refresh). `None` on sections without one.
+    pub(super) fn settings_toolbar(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        match self.settings_section {
+            SettingsSection::Providers => Some(self.provider_toolbar(theme, this, cx)),
+            SettingsSection::Plugins => Some(self.plugin_toolbar(theme, this, cx)),
+            _ => None,
+        }
+    }
+
+    // ── Settings → Plugins ─────────────────────────────────────────────
+
+    /// Installed pi packages plus the install field. Plugins are managed
+    /// through `pi install/remove/update`, so pi owns the network fetch and
+    /// the settings write.
+    pub(super) fn plugin_rows(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        _cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut rows: Vec<AnyElement> = Vec::new();
+        if let Some(error) = &self.plugins_error {
+            rows.push(self.provider_error_card(theme, "Settings could not be read", error));
+        }
+        if self.plugins.is_empty() {
+            rows.push(self.empty_resource_card(
+                theme,
+                "icons/extensions.svg",
+                "No plugins installed",
+                "Install an npm package, a git repo, or a local path above.",
+            ));
+            return rows;
+        }
+
+        let installed = self
+            .plugins
+            .iter()
+            .filter(|package| package.installed)
+            .count();
+        rows.push(
+            div()
+                .w_full()
+                .text_size(theme.ui_px(12.))
+                .text_color(theme.text_3)
+                .child(format!("{} of {} installed", installed, self.plugins.len()))
+                .into_any_element(),
+        );
+        for package in &self.plugins {
+            rows.push(self.plugin_card(package, theme, this.clone()));
+        }
+        rows
+    }
+
+    fn plugin_card(
+        &self,
+        package: &PluginPackage,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+    ) -> AnyElement {
+        let source = package.source.clone();
+        let project = package.scope == PackageScope::Project;
+        let confirming = self.plugin_remove_confirm.as_deref() == Some(source.as_str());
+
+        let mut badges = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_end()
+            .gap_1p5()
+            .child(self.provider_badge(
+                package.scope.label(),
+                if project { theme.accent } else { theme.text_3 },
+                if project {
+                    theme.accent.opacity(0.12)
+                } else {
+                    theme.overlay_strong
+                },
+                theme,
+            ))
+            .child(self.provider_badge(
+                package.kind.label(),
+                theme.text_3,
+                theme.overlay_strong,
+                theme,
+            ));
+        if let Some(version) = &package.version {
+            badges = badges.child(self.provider_badge(
+                &format!("v{version}"),
+                theme.text_3,
+                theme.overlay_strong,
+                theme,
+            ));
+        }
+        if !package.installed {
+            badges = badges.child(self.provider_badge(
+                "Not installed",
+                theme.crit,
+                theme.crit.opacity(0.12),
+                theme,
+            ));
+        }
+
+        let tile = div()
+            .size(px(38.))
+            .flex_none()
+            .rounded(px(10.))
+            .bg(theme.bg_raised)
+            .border_1()
+            .border_color(theme.border)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(icon("icons/extensions.svg", 18., theme.text_2));
+
+        let header = div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(tile)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(13.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .truncate()
+                            .child(package.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .font_family(theme::code_font_family())
+                            .text_size(theme.code_px(10.5))
+                            .text_color(theme.text_3)
+                            .truncate()
+                            .child(source.clone()),
+                    ),
+            )
+            .child(badges);
+
+        let actions: AnyElement = if confirming {
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(theme.ui_px(11.5))
+                        .text_color(theme.crit)
+                        .child("Remove this plugin?"),
+                )
+                .child(self.plugin_button(
+                    format!("plugin-remove-confirm-{source}"),
+                    "Remove",
+                    false,
+                    Some("icons/trash.svg"),
+                    theme,
+                    this.clone(),
+                    PluginAction::ConfirmRemove {
+                        source: source.clone(),
+                        project,
+                    },
+                ))
+                .child(self.plugin_button(
+                    format!("plugin-remove-cancel-{source}"),
+                    "Cancel",
+                    false,
+                    None,
+                    theme,
+                    this,
+                    PluginAction::CancelRemove,
+                ))
+                .into_any_element()
+        } else {
+            let mut actions = div().flex().items_center().gap_2();
+            if package.installed {
+                actions = actions.child(self.plugin_button(
+                    format!("plugin-update-{source}"),
+                    "Update",
+                    false,
+                    Some("icons/refresh.svg"),
+                    theme,
+                    this.clone(),
+                    PluginAction::Update {
+                        source: source.clone(),
+                    },
+                ));
+            }
+            actions = actions.child(self.plugin_button(
+                format!("plugin-remove-{source}"),
+                "Remove",
+                false,
+                Some("icons/trash.svg"),
+                theme,
+                this,
+                PluginAction::Remove { source },
+            ));
+            actions.into_any_element()
+        };
+
+        div()
+            .w_full()
+            .min_w_0()
+            .bg(theme.bg_composer)
+            .border_1()
+            .border_color(theme.border)
+            .rounded_lg()
+            .p(px(14.))
+            .flex()
+            .flex_col()
+            .gap_2p5()
+            .child(header)
+            .child(
+                div()
+                    .font_family(theme::code_font_family())
+                    .text_size(theme.code_px(10.5))
+                    .text_color(theme.text_3)
+                    .truncate()
+                    .child(package.install_path.to_string_lossy().into_owned()),
+            )
+            .child(div().h(px(1.)).w_full().bg(theme.border))
+            .child(actions)
+            .into_any_element()
+    }
+
+    /// The pinned Plugins toolbar: install field + scope target + Install,
+    /// then the count and Refresh.
+    pub(super) fn plugin_toolbar(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        _cx: &Context<Self>,
+    ) -> AnyElement {
+        let field = div()
+            .flex_1()
+            .min_w_0()
+            .h(px(34.))
+            .px(px(10.))
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_main)
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_size(theme.ui_px(13.))
+            .child(icon("icons/extensions.svg", 14., theme.text_3))
+            .child(self.plugin_source_input.clone());
+
+        let scope = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(self.plugin_scope_chip(
+                "Global",
+                !self.plugin_install_project,
+                false,
+                theme,
+                this.clone(),
+            ))
+            .child(self.plugin_scope_chip(
+                "Project",
+                self.plugin_install_project,
+                true,
+                theme,
+                this.clone(),
+            ));
+
+        let install = self.plugin_button(
+            "plugin-install".to_string(),
+            "Install",
+            true,
+            Some("icons/plus.svg"),
+            theme,
+            this.clone(),
+            PluginAction::Install,
+        );
+
+        let refresh = self.plugin_button(
+            "plugin-refresh".to_string(),
+            "Refresh",
+            false,
+            Some("icons/refresh.svg"),
+            theme,
+            this,
+            PluginAction::Refresh,
+        );
+
+        let status: AnyElement = match &self.plugin_action {
+            Some(action) => div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_size(theme.ui_px(12.))
+                .text_color(theme.text_2)
+                .child(
+                    gpui::svg()
+                        .path("icons/loader.svg")
+                        .flex_none()
+                        .size(px(13.))
+                        .text_color(theme.text_2)
+                        .with_animation(
+                            "plugin-action-spin",
+                            Animation::new(Duration::from_millis(900)).repeat(),
+                            |svg, delta| {
+                                svg.with_transformation(Transformation::rotate(radians(
+                                    delta * std::f32::consts::TAU,
+                                )))
+                            },
+                        ),
+                )
+                .child(action.clone())
+                .into_any_element(),
+            None => div()
+                .flex_1()
+                .min_w_0()
+                .text_size(theme.ui_px(12.))
+                .text_color(theme.text_3)
+                .child(format!(
+                    "{} package{} configured",
+                    self.plugins.len(),
+                    if self.plugins.len() == 1 { "" } else { "s" }
+                ))
+                .into_any_element(),
+        };
+
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(field)
+                    .child(scope)
+                    .child(install),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(status)
+                    .child(refresh),
+            )
+            .into_any_element()
+    }
+
+    fn plugin_scope_chip(
+        &self,
+        label: &str,
+        active: bool,
+        project: bool,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+    ) -> AnyElement {
+        let id = format!(
+            "plugin-scope-{}",
+            if project { "project" } else { "global" }
+        );
+        let mut chip = div()
+            .id(ElementId::Name(id.into()))
+            .h(px(28.))
+            .px(px(9.))
+            .rounded_md()
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .text_size(theme.ui_px(11.5))
+            .font_weight(FontWeight::MEDIUM);
+        chip = if active {
+            chip.bg(theme.active).text_color(theme.active_fg)
+        } else {
+            chip.border_1()
+                .border_color(theme.border)
+                .bg(theme.bg_raised)
+                .text_color(theme.text_3)
+                .hover(|style| style.bg(theme.bg_hover))
+        };
+        chip.on_mouse_up(MouseButton::Left, move |_, _, cx| {
+            this.update(cx, |app, cx| {
+                app.apply_plugin_action(PluginAction::SetScope { project }, cx)
+            });
+        })
+        .child(label.to_string())
+        .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn plugin_button(
+        &self,
+        id: String,
+        label: &str,
+        primary: bool,
+        icon_path: Option<&'static str>,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        action: PluginAction,
+    ) -> AnyElement {
+        let base = div()
+            .id(ElementId::Name(id.into()))
+            .h(px(28.))
+            .px(px(10.))
+            .rounded_md()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap_1p5()
+            .cursor_pointer()
+            .text_size(theme.ui_px(11.5))
+            .font_weight(FontWeight::MEDIUM);
+        let (button, icon_color) = if primary {
+            (
+                base.bg(theme.send_bg)
+                    .text_color(theme.send_fg)
+                    .hover(|style| style.bg(theme.send_bg_hover)),
+                theme.send_fg,
+            )
+        } else {
+            (
+                base.border_1()
+                    .border_color(theme.border)
+                    .bg(theme.bg_raised)
+                    .text_color(theme.text_2)
+                    .hover(|style| style.bg(theme.bg_hover)),
+                theme.text_2,
+            )
+        };
+        button
+            .when_some(icon_path, |button, path| {
+                button.child(icon(path, 12., icon_color))
+            })
+            .child(div().child(label.to_string()))
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                let action = action.clone();
+                this.update(cx, |app, cx| app.apply_plugin_action(action, cx));
+            })
+            .into_any_element()
+    }
+
+    fn empty_resource_card(
+        &self,
+        theme: Theme,
+        icon_path: &'static str,
+        title: &str,
+        body: &str,
+    ) -> AnyElement {
+        div()
+            .w_full()
+            .bg(theme.bg_composer)
+            .border_1()
+            .border_color(theme.border)
+            .rounded_lg()
+            .px(px(14.))
+            .py(px(40.))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_2()
+            .child(icon(icon_path, 26., theme.text_3))
+            .child(
+                div()
+                    .text_size(theme.ui_px(13.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(title.to_string()),
+            )
+            .child(
+                div()
+                    .max_w(px(420.))
+                    .text_size(theme.ui_px(12.))
+                    .text_color(theme.text_2)
+                    .child(body.to_string()),
+            )
+            .into_any_element()
     }
 
     /// The sticky provider header: the search field plus the
@@ -1912,6 +2441,7 @@ impl OrbitApp {
         let card = div()
             .w_full()
             .max_w(px(460.))
+            .max_h(relative(1.))
             .rounded(px(14.))
             .border_1()
             .border_color(theme.border_strong)
@@ -1950,7 +2480,16 @@ impl OrbitApp {
                             .child(editor.provider_id.clone()),
                     ),
             )
-            .child(div().px(px(18.)).py(px(16.)).child(body))
+            .child(
+                div()
+                    .id("provider-key-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(px(18.))
+                    .py(px(16.))
+                    .child(body),
+            )
             .child(
                 div()
                     .flex_none()
@@ -1987,7 +2526,7 @@ impl OrbitApp {
                 .inset_0()
                 .occlude()
                 .bg(scrim)
-                .px(px(24.))
+                .p(px(24.))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -2403,6 +2942,110 @@ impl OrbitApp {
                     })),
             )
             .children(control)
+            .into_any_element()
+    }
+
+    /// A settings section: an 11px uppercase label over one grouped board.
+    /// The label sits closer to its board than to the section above it.
+    pub(super) fn settings_section(
+        &self,
+        theme: Theme,
+        label: &str,
+        rows: Vec<AnyElement>,
+    ) -> AnyElement {
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(theme.space(8.))
+            .child(
+                div()
+                    .px(theme.space(4.))
+                    .text_size(theme.ui_px(10.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_3)
+                    .child(label.to_uppercase()),
+            )
+            .child(self.settings_group(theme, rows))
+            .into_any_element()
+    }
+
+    /// One bordered board whose rows are divided by inset 1px hairlines —
+    /// the grouped-surface pattern from DESIGN.md, never a stack of cards.
+    /// No `overflow_hidden`: select popups anchor inside these rows and
+    /// must escape the board's rounded box.
+    pub(super) fn settings_group(&self, theme: Theme, rows: Vec<AnyElement>) -> AnyElement {
+        let last = rows.len().saturating_sub(1);
+        let mut board = div()
+            .w_full()
+            .bg(theme.bg_composer)
+            .border_1()
+            .border_color(theme.border)
+            .rounded_lg()
+            .flex()
+            .flex_col();
+        for (i, row) in rows.into_iter().enumerate() {
+            board = board.child(row);
+            if i != last {
+                board = board.child(
+                    div()
+                        .h(px(1.))
+                        .flex_none()
+                        .mx(theme.space(16.))
+                        .bg(theme.border),
+                );
+            }
+        }
+        board.into_any_element()
+    }
+
+    /// A row inside a settings board: title (and optional description or
+    /// dimmed path) on the left, an optional control on the right. Every
+    /// control shares one right-aligned axis down the board.
+    pub(super) fn setting_row(
+        &self,
+        theme: Theme,
+        title: &str,
+        desc: Option<&str>,
+        meta: Option<&str>,
+        control: Option<AnyElement>,
+    ) -> AnyElement {
+        div()
+            .w_full()
+            .px(theme.space(16.))
+            .py(theme.space(12.))
+            .flex()
+            .items_center()
+            .gap(theme.space(16.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(theme.space(3.))
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(title.to_string()),
+                    )
+                    .children(desc.map(|d| {
+                        div()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.text_2)
+                            .child(d.to_string())
+                    }))
+                    .children(meta.map(|m| {
+                        div()
+                            .text_size(theme.ui_px(11.5))
+                            .text_color(theme.text_3)
+                            .truncate()
+                            .child(m.to_string())
+                    })),
+            )
+            .children(control.map(|c| div().flex_none().child(c)))
             .into_any_element()
     }
 
@@ -3029,14 +3672,329 @@ impl OrbitApp {
             .into_any_element()
     }
 
-    /// Appearance → "Background image": pick an image for the dithered
-    /// page backdrop, or reset to the dot grid.
-    pub(super) fn background_card(
+    // ── Appearance ─────────────────────────────────────────────────────
+
+    /// The Appearance section: theme, background, type & density, and
+    /// layout. Three grouped boards with hairline-separated rows, each
+    /// section led by a live preview so a change is legible on the page
+    /// before you leave it.
+    pub(super) fn appearance_rows(
         &self,
         theme: Theme,
         this: Entity<OrbitApp>,
-        _cx: &Context<Self>,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let background = crate::dither::configured_label();
+        vec![
+            self.settings_section(
+                theme,
+                "Theme & background",
+                vec![
+                    self.setting_row(
+                        theme,
+                        "Theme",
+                        Some("Pick a Zed-compatible palette for the workbench."),
+                        None,
+                        Some(self.theme_control(theme, this.clone(), cx)),
+                    ),
+                    self.setting_row(
+                        theme,
+                        "Background image",
+                        Some("A dithered image behind the new-task and chat pages."),
+                        background.as_deref(),
+                        Some(self.background_controls(theme, this.clone())),
+                    ),
+                    self.setting_row(
+                        theme,
+                        "Language",
+                        Some("Choose the language used throughout Orbit."),
+                        None,
+                        Some(self.language_select(theme, this.clone(), cx)),
+                    ),
+                ],
+            ),
+            self.settings_section(
+                theme,
+                "Type & density",
+                vec![
+                    self.type_preview(theme),
+                    self.setting_row(
+                        theme,
+                        "Interface font",
+                        None,
+                        None,
+                        Some(self.font_family_select(
+                            SettingsSelect::UiFontFamily,
+                            theme,
+                            this.clone(),
+                            cx,
+                        )),
+                    ),
+                    self.setting_row(
+                        theme,
+                        "Code font",
+                        None,
+                        None,
+                        Some(self.font_family_select(
+                            SettingsSelect::CodeFontFamily,
+                            theme,
+                            this.clone(),
+                            cx,
+                        )),
+                    ),
+                    self.setting_row(
+                        theme,
+                        "UI font size",
+                        None,
+                        None,
+                        Some(self.preset_select(
+                            SettingsSelect::UiFontSize,
+                            theme,
+                            this.clone(),
+                            cx,
+                        )),
+                    ),
+                    self.setting_row(
+                        theme,
+                        "Terminal size",
+                        None,
+                        None,
+                        Some(self.preset_select(
+                            SettingsSelect::TerminalFont,
+                            theme,
+                            this.clone(),
+                            cx,
+                        )),
+                    ),
+                    self.setting_row(
+                        theme,
+                        "Editor size",
+                        None,
+                        None,
+                        Some(self.preset_select(
+                            SettingsSelect::EditorFont,
+                            theme,
+                            this.clone(),
+                            cx,
+                        )),
+                    ),
+                    self.setting_row(
+                        theme,
+                        "Spacing density",
+                        None,
+                        None,
+                        Some(self.preset_select(
+                            SettingsSelect::SpacingDensity,
+                            theme,
+                            this.clone(),
+                            cx,
+                        )),
+                    ),
+                ],
+            ),
+            self.settings_section(
+                theme,
+                "Layout",
+                vec![
+                    self.setting_row(
+                        theme,
+                        "Show sidebar",
+                        Some("Show the sessions sidebar. Also toggleable from the top bar."),
+                        None,
+                        Some(self.sidebar_toggle(theme, this.clone())),
+                    ),
+                    self.setting_row(
+                        theme,
+                        "GPU-rendered streaming",
+                        Some("Stream commits are coalesced (~8 Hz) and highlighting is paint-only, so long tasks never reflow the transcript."),
+                        None,
+                        None,
+                    ),
+                ],
+            ),
+        ]
+    }
+
+    /// The Theme row's control: a live palette strip (canvas, chrome,
+    /// raised, tertiary ink, ink, accent) before the palette dropdown, so
+    /// the active colors are legible without opening the menu.
+    pub(super) fn theme_control(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
     ) -> AnyElement {
+        let swatch = |color: Hsla| {
+            div()
+                .size(px(16.))
+                .rounded(px(4.))
+                .bg(color)
+                .border_1()
+                .border_color(theme.border_strong)
+                .flex_none()
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(theme.space(12.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .child(swatch(theme.bg_main))
+                    .child(swatch(theme.bg_sidebar))
+                    .child(swatch(theme.bg_raised))
+                    .child(swatch(theme.text_3))
+                    .child(swatch(theme.text))
+                    .child(swatch(theme.accent)),
+            )
+            .child(self.theme_select(theme, this, cx))
+            .into_any_element()
+    }
+
+    /// Live previews of the chosen faces at their current sizes: the
+    /// interface sample on the left, a mock terminal (chrome + prompt) on
+    /// the right so the code/terminal font is legible at a glance without
+    /// opening a session. Each is labelled as a preview.
+    pub(super) fn type_preview(&self, theme: Theme) -> AnyElement {
+        let column = |label: &str, body: AnyElement| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(theme.space(6.))
+                .child(
+                    div()
+                        .text_size(theme.ui_px(10.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_3)
+                        .child(label.to_uppercase()),
+                )
+                .child(body)
+                .into_any_element()
+        };
+
+        // ── interface sample ──
+        let interface = div()
+            .w_full()
+            .flex_1()
+            .px(theme.space(14.))
+            .py(theme.space(12.))
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_main)
+            .flex()
+            .flex_col()
+            .justify_center()
+            .gap(theme.space(6.))
+            .child(
+                div()
+                    .font_family(theme::ui_font_family())
+                    .text_size(theme.ui_px(15.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child("New task"),
+            )
+            .child(
+                div()
+                    .font_family(theme::ui_font_family())
+                    .text_size(theme.ui_px(12.5))
+                    .text_color(theme.text_2)
+                    .child("The quick brown fox jumps over the lazy dog."),
+            );
+
+        // ── terminal sample ──
+        let prompt = |command: &str, cursor: bool| {
+            let mut row = div()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .font_family(theme::code_font_family())
+                .text_size(theme.term_px(12.5))
+                .child(div().text_color(theme.ok_green).child("$"))
+                .child(div().text_color(theme.code_text).child(command.to_string()));
+            if cursor {
+                row = row.child(
+                    div()
+                        .w(theme.term_px(7.))
+                        .h(theme.term_px(14.))
+                        .rounded(px(1.))
+                        .bg(theme.text_2),
+                );
+            }
+            row
+        };
+        let terminal = div()
+            .w_full()
+            .flex_1()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.code_bg)
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_none()
+                    .h(px(26.))
+                    .px(theme.space(10.))
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .bg(theme.bg_sidebar)
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .children(
+                        [theme.stop_red, theme.warn, theme.ok_green]
+                            .map(|color| div().size(px(7.)).rounded_full().bg(color)),
+                    )
+                    .child(
+                        div()
+                            .ml_1p5()
+                            .font_family(theme::code_font_family())
+                            .text_size(theme.term_px(10.5))
+                            .text_color(theme.text_3)
+                            .child("orbit — pi"),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex_1()
+                    .px(theme.space(12.))
+                    .py(theme.space(10.))
+                    .flex()
+                    .flex_col()
+                    .gap(theme.space(3.))
+                    .child(prompt("orbit-pi --session", false))
+                    .child(
+                        div()
+                            .font_family(theme::code_font_family())
+                            .text_size(theme.term_px(12.5))
+                            .text_color(theme.text_2)
+                            .child("pi agent ready · anthropic/claude"),
+                    )
+                    .child(prompt("", true)),
+            );
+
+        div()
+            .w_full()
+            .px(theme.space(16.))
+            .py(theme.space(12.))
+            .flex()
+            .gap(theme.space(16.))
+            .child(column("Interface preview", interface.into_any_element()))
+            .child(column("Terminal preview", terminal.into_any_element()))
+            .into_any_element()
+    }
+
+    /// Appearance → "Background image": pick an image for the dithered
+    /// page backdrop, or reset to the dot grid.
+    pub(super) fn background_controls(&self, theme: Theme, this: Entity<OrbitApp>) -> AnyElement {
         let label = crate::dither::configured_label();
         let mut controls = div()
             .flex()
@@ -3064,13 +4022,7 @@ impl OrbitApp {
                 OrbitApp::background_reset,
             ));
         }
-        self.card_with_path(
-            theme,
-            "Background image",
-            "A dithered image behind the new-task and chat pages.",
-            label.as_deref(),
-            Some(controls.into_any_element()),
-        )
+        controls.into_any_element()
     }
 
     /// Pick the background image (native dialog), copy + process it, and
@@ -3177,106 +4129,7 @@ impl OrbitApp {
         )
     }
 
-    // ── Appearance → Density & type ────────────────────────────────────
-
-    /// Waku's grouped "Density & type" card: typefaces on the first row,
-    /// their sizes / densities beneath, laid out two-up so the whole
-    /// surface reads as one instrument cluster rather than six cards.
-    pub(super) fn density_type_card(
-        &self,
-        theme: Theme,
-        this: Entity<OrbitApp>,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let field = |label: &'static str, control: AnyElement| {
-            div()
-                .flex()
-                .flex_col()
-                .gap(theme.space(6.))
-                .min_w_0()
-                .child(
-                    div()
-                        .text_size(theme.ui_px(11.5))
-                        .text_color(theme.text_2)
-                        .child(label),
-                )
-                .child(control)
-                .into_any_element()
-        };
-        let pair = |left: AnyElement, right: AnyElement| {
-            div()
-                .flex()
-                .gap(theme.space(16.))
-                .child(div().flex_1().min_w_0().child(left))
-                .child(div().flex_1().min_w_0().child(right))
-        };
-        div()
-            .bg(theme.bg_composer)
-            .border_1()
-            .border_color(theme.border)
-            .rounded_lg()
-            .p(theme.space(14.))
-            .flex()
-            .flex_col()
-            .gap(theme.space(14.))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(theme.ui_px(13.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child("Density & type"),
-                    )
-                    .child(
-                        div()
-                            .text_size(theme.ui_px(12.))
-                            .text_color(theme.text_2)
-                            .child("Typefaces, sizes, and how much air the workbench keeps."),
-                    ),
-            )
-            .child(pair(
-                field(
-                    "Interface Font",
-                    self.font_family_select(SettingsSelect::UiFontFamily, theme, this.clone(), cx),
-                ),
-                field(
-                    "Code Font",
-                    self.font_family_select(
-                        SettingsSelect::CodeFontFamily,
-                        theme,
-                        this.clone(),
-                        cx,
-                    ),
-                ),
-            ))
-            .child(pair(
-                field(
-                    "Interface Font Size",
-                    self.preset_select(SettingsSelect::InterfaceScale, theme, this.clone(), cx),
-                ),
-                field(
-                    "Terminal Font Size",
-                    self.preset_select(SettingsSelect::TerminalFont, theme, this.clone(), cx),
-                ),
-            ))
-            .child(pair(
-                field(
-                    "Editor Font Size",
-                    self.preset_select(SettingsSelect::EditorFont, theme, this.clone(), cx),
-                ),
-                field(
-                    "Spacing Density",
-                    self.preset_select(SettingsSelect::SpacingDensity, theme, this.clone(), cx),
-                ),
-            ))
-            .into_any_element()
-    }
-
-    /// The percentage / px preset dropdowns in the Density & type card.
+    /// The percentage / px preset dropdowns in the type & density board.
     pub(super) fn preset_select(
         &self,
         kind: SettingsSelect,
@@ -3284,13 +4137,9 @@ impl OrbitApp {
         this: Entity<OrbitApp>,
         cx: &Context<Self>,
     ) -> AnyElement {
-        use crate::theme::{FONT_SIZES, INTERFACE_SCALES, SPACING_DENSITIES};
+        use crate::theme::{FONT_SIZES, SPACING_DENSITIES};
         let (values, current, suffix): (Vec<f32>, f32, &str) = match kind {
-            SettingsSelect::InterfaceScale => (
-                INTERFACE_SCALES.iter().map(|v| *v as f32).collect(),
-                theme.ui.interface_scale as f32,
-                "%",
-            ),
+            SettingsSelect::UiFontSize => (FONT_SIZES.to_vec(), theme.ui.ui_font_size, "px"),
             SettingsSelect::TerminalFont => {
                 (FONT_SIZES.to_vec(), theme.ui.terminal_font_size, "px")
             }
@@ -3311,7 +4160,7 @@ impl OrbitApp {
             .unwrap_or(0);
         self.select_control(
             match kind {
-                SettingsSelect::InterfaceScale => "interface-scale-select",
+                SettingsSelect::UiFontSize => "ui-font-size-select",
                 SettingsSelect::TerminalFont => "terminal-font-select",
                 SettingsSelect::EditorFont => "editor-font-select",
                 SettingsSelect::SpacingDensity => "spacing-density-select",
@@ -3369,7 +4218,7 @@ impl OrbitApp {
         )
     }
 
-    /// A Waku-style select: value chip + caret, dropdown above when open.
+    /// A Waku-style select: value chip + caret, dropdown below when open.
     pub(super) fn select_control(
         &self,
         id: &'static str,
@@ -3387,7 +4236,7 @@ impl OrbitApp {
             .flex()
             .flex_col()
             .items_end()
-            // dropdown anchored above the chip when open
+            // dropdown anchored below the chip when open
             .children(self.settings_select_popup(kind, options, selected, theme, &this, cx))
             .child(
                 div()
@@ -3411,10 +4260,24 @@ impl OrbitApp {
                     .hover(|s| s.bg(theme.overlay))
                     .on_mouse_up(MouseButton::Left, move |_, window, cx| {
                         chip_this.update(cx, |app, cx| {
+                            // A dismissal from this same click's mouse-down
+                            // must not immediately re-open (see
+                            // `toggle_session_menu`).
+                            const GESTURE: Duration = Duration::from_millis(200);
+                            if let Some(dismissed) = app.menu_dismissed_at.take() {
+                                if dismissed.elapsed() < GESTURE {
+                                    return;
+                                }
+                            }
                             if app.settings_select == Some(kind) {
                                 app.settings_select = None;
                             } else {
                                 app.settings_select = Some(kind);
+                                // Open with the cursor on the chosen option,
+                                // scrolled into view in the list below.
+                                app.settings_select_highlight = Some(selected);
+                                app.settings_select_scroll
+                                    .scroll_to_item(selected, ScrollStrategy::Center);
                                 app.settings_filter
                                     .update(cx, |filter, cx| filter.clear(cx));
                                 let handle = app.settings_filter.read(cx).focus_handle(cx);
@@ -3429,7 +4292,7 @@ impl OrbitApp {
             .into_any_element()
     }
 
-    /// The open dropdown's option list, anchored above its chip.
+    /// The open dropdown's option list, anchored below its chip.
     pub(super) fn settings_select_popup(
         &self,
         kind: SettingsSelect,
@@ -3442,15 +4305,16 @@ impl OrbitApp {
         if self.settings_select != Some(kind) {
             return None;
         }
-        let needle = self.settings_filter.read(cx).text().to_lowercase();
         // Filter options, keeping the original index for click dispatch.
-        let rows: Vec<(usize, String)> = options
-            .iter()
-            .enumerate()
-            .filter(|(_, option)| needle.is_empty() || option.to_lowercase().contains(&needle))
-            .map(|(ix, option)| (ix, option.clone()))
+        // The cursor shares `settings_select_visible`, so the painted rows
+        // and the keyboard cursor can never disagree about the query.
+        let rows: Vec<(usize, String)> = self
+            .settings_select_visible(&options, cx)
+            .into_iter()
+            .map(|ix| (ix, options[ix].clone()))
             .collect();
         let empty = rows.is_empty();
+        let highlight = self.settings_select_highlight;
         // Virtualized list — only the visible rows are laid out and painted.
         // The font-family dropdowns can have a thousand+ entries, and the
         // whole app re-renders on every scroll tick, so rendering every row
@@ -3489,6 +4353,7 @@ impl OrbitApp {
                         let (orig_ix, option) = &rows[ix];
                         let orig_ix = *orig_ix;
                         let selected_row = orig_ix == selected;
+                        let highlighted_row = highlight == Some(orig_ix);
                         let this = this.clone();
                         // 30 px stride = 28 px row + the 2 px gap the old
                         // flex list had between rows (uniform_list has no
@@ -3509,11 +4374,20 @@ impl OrbitApp {
                                     .justify_between()
                                     .gap(px(10.))
                                     .cursor_pointer()
-                                    .when(selected_row, |row| row.bg(theme.active))
-                                    .hover(|style| style.bg(theme.overlay))
+                                    // The keyboard cursor is a wash; the
+                                    // chosen option keeps the fill.
+                                    .when(highlighted_row, |row| row.bg(theme.overlay_strong))
+                                    .when(!highlighted_row && selected_row, |row| {
+                                        row.bg(theme.active)
+                                    })
+                                    .when(!highlighted_row && !selected_row, |row| {
+                                        row.hover(|style| style.bg(theme.overlay))
+                                    })
                                     .text_size(theme.ui_px(12.))
                                     .text_color(if selected_row {
                                         theme.active_fg
+                                    } else if highlighted_row {
+                                        theme.text
                                     } else {
                                         theme.text_2
                                     })
@@ -3536,6 +4410,7 @@ impl OrbitApp {
             )
             .w_full()
             .h(px(list_h))
+            .track_scroll(self.settings_select_scroll.clone())
             .px(px(4.))
             .py(px(4.))
             .into_any_element()
@@ -3556,9 +4431,37 @@ impl OrbitApp {
                 move |_: &MouseDownEvent, _, cx: &mut App| {
                     this.update(cx, |app, cx| {
                         if app.settings_select.take().is_some() {
+                            // Arm the click-through guard so this same click's
+                            // mouse-up on the chip cannot immediately re-open
+                            // the dropdown.
+                            app.menu_dismissed_at = Some(Instant::now());
                             cx.notify();
                         }
                     });
+                }
+            })
+            // The filter input carries the `Picker` context, so these ride
+            // the same dispatch node as the model picker's: arrows move the
+            // cursor, Enter chooses it, Escape (global) closes.
+            .on_action({
+                let this = this.clone();
+                let options = options.clone();
+                move |_: &crate::PickerSelectPrev, _, cx: &mut App| {
+                    this.update(cx, |app, cx| app.settings_select_step(&options, -1, cx));
+                }
+            })
+            .on_action({
+                let this = this.clone();
+                let options = options.clone();
+                move |_: &crate::PickerSelectNext, _, cx: &mut App| {
+                    this.update(cx, |app, cx| app.settings_select_step(&options, 1, cx));
+                }
+            })
+            .on_action({
+                let this = this.clone();
+                let options = options.clone();
+                move |_: &crate::PickerConfirm, _, cx: &mut App| {
+                    this.update(cx, |app, cx| app.settings_select_confirm(&options, cx));
                 }
             })
             // Search field — filters the options below.
@@ -3576,8 +4479,13 @@ impl OrbitApp {
                     .child(self.settings_filter.clone()),
             )
             .child(list);
-        // Anchor to the chip's top-right corner (via a zero-size point), so the
-        // popup opens above the chip, right-aligned — like the open-in menu.
+        // Anchor to the chip's top-right corner (via a zero-size point) and
+        // drop the popup 4 px below the 26 px chip, right-aligned. `Window`
+        // position mode (not `Local`) is deliberate: `anchored`'s switch-anchor
+        // fit then flips the popup above the chip when the viewport bottom is
+        // closer than the list is tall, instead of sliding it down over its own
+        // chip (which made a second click land inside the popup). The
+        // post-switch snap still clamps at the window edges as a backstop.
         Some(
             div()
                 .absolute()
@@ -3586,14 +4494,66 @@ impl OrbitApp {
                 .size(px(0.))
                 .child(
                     anchored()
-                        .position_mode(AnchoredPositionMode::Local)
-                        .anchor(Corner::BottomRight)
-                        .offset(point(px(0.), px(-4.)))
-                        .snap_to_window()
+                        .position_mode(AnchoredPositionMode::Window)
+                        .anchor(Corner::TopRight)
+                        .offset(point(px(0.), px(30.)))
                         .child(deferred(popup)),
                 )
                 .into_any_element(),
         )
+    }
+
+    /// Move the settings dropdown's keyboard cursor one visible option,
+    /// clamped at the ends like the model picker. A query owns the list, so
+    /// a cursor the filter dropped lands on the first (or last) match rather
+    /// than doing nothing, and the list keeps it in view.
+    pub(super) fn settings_select_step(
+        &mut self,
+        options: &[String],
+        dir: isize,
+        cx: &mut Context<Self>,
+    ) {
+        let visible = self.settings_select_visible(options, cx);
+        let Some(next) = stepped_visible_position(&visible, self.settings_select_highlight, dir)
+        else {
+            return;
+        };
+        self.settings_select_highlight = Some(visible[next]);
+        self.settings_select_scroll
+            .scroll_to_item(next, ScrollStrategy::Center);
+        cx.notify();
+    }
+
+    /// Choose the option under the settings dropdown's keyboard cursor (or
+    /// the first match when the query filtered the cursor away) and close
+    /// the popup.
+    pub(super) fn settings_select_confirm(&mut self, options: &[String], cx: &mut Context<Self>) {
+        let Some(kind) = self.settings_select else {
+            return;
+        };
+        let visible = self.settings_select_visible(options, cx);
+        let ix = self
+            .settings_select_highlight
+            .filter(|ix| visible.contains(ix))
+            .or_else(|| visible.first().copied());
+        let Some(ix) = ix else {
+            return;
+        };
+        self.apply_settings_select(kind, ix, cx);
+        self.settings_select = None;
+        cx.notify();
+    }
+
+    /// The original indices of `options` that survive the filter — the rows
+    /// the popup actually paints, in display order.
+    fn settings_select_visible(&self, options: &[String], cx: &Context<Self>) -> Vec<usize> {
+        let needle = self.settings_filter.read(cx).text().to_lowercase();
+        options
+            .iter()
+            .enumerate()
+            .filter(|(_, option)| needle.is_empty() || option.to_lowercase().contains(&needle))
+            .map(|(ix, _)| ix)
+            .collect()
     }
 
     /// Apply a dropdown choice to the persisted UI customization.
@@ -3630,7 +4590,7 @@ impl OrbitApp {
             }
             _ => {}
         }
-        use crate::theme::{Language, FONT_SIZES, INTERFACE_SCALES, SPACING_DENSITIES};
+        use crate::theme::{Language, FONT_SIZES, SPACING_DENSITIES};
         let mut ui = theme::get(cx).ui;
         match kind {
             SettingsSelect::Language => {
@@ -3640,8 +4600,8 @@ impl OrbitApp {
                     Language::System
                 };
             }
-            SettingsSelect::InterfaceScale => {
-                ui.interface_scale = INTERFACE_SCALES.get(ix).copied().unwrap_or(100);
+            SettingsSelect::UiFontSize => {
+                ui.ui_font_size = FONT_SIZES.get(ix).copied().unwrap_or(14.);
             }
             SettingsSelect::TerminalFont => {
                 ui.terminal_font_size = FONT_SIZES.get(ix).copied().unwrap_or(13.);
@@ -3663,6 +4623,7 @@ impl OrbitApp {
 // ── controller ────────────────────────────────────────────────────
 impl OrbitApp {
     pub(super) fn open_settings(&mut self, cx: &mut Context<Self>) {
+        self.refresh_updater(cx);
         self.settings_open = true;
         self.set_settings_section(SettingsSection::General, cx);
     }
@@ -3708,7 +4669,7 @@ impl OrbitApp {
         cx.notify();
     }
 
-    /// Switch sections, loading models.json when Providers is shown so CLI
+    /// Switch sections, reloading the on-disk facts each page reads so CLI
     /// edits appear without a restart.
     pub(super) fn set_settings_section(
         &mut self,
@@ -3719,11 +4680,124 @@ impl OrbitApp {
         self.provider_remove_confirm = None;
         self.provider_editor = None;
         self.provider_key_editor = None;
-        if section == SettingsSection::Providers {
-            self.reload_custom_providers(cx);
-            self.refresh_auth();
+        self.plugin_remove_confirm = None;
+        match section {
+            SettingsSection::Providers => {
+                self.reload_custom_providers(cx);
+                self.refresh_auth();
+            }
+            SettingsSection::Skills => self.refresh_skills(cx),
+            SettingsSection::Plugins => self.refresh_plugins(cx),
+            _ => {}
         }
         cx.notify();
+    }
+
+    /// The directory new tasks and discovery use — the workspace when one is
+    /// selected, else the process cwd.
+    pub(super) fn workspace_dir(&self) -> PathBuf {
+        self.current_workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default()
+    }
+
+    /// Re-read the user and project settings `packages` arrays.
+    pub(super) fn refresh_plugins(&mut self, cx: &mut Context<Self>) {
+        let (packages, error) = crate::plugins::discover(&self.workspace_dir());
+        self.plugins = packages;
+        self.plugins_error = error;
+        cx.notify();
+    }
+
+    /// Install the source currently in the toolbar field.
+    pub(super) fn plugin_install(&mut self, cx: &mut Context<Self>) {
+        if self.plugin_action.is_some() {
+            return;
+        }
+        let source = self.plugin_source_input.read(cx).text().trim().to_string();
+        if source.is_empty() {
+            self.set_status("Enter a package source to install");
+            cx.notify();
+            return;
+        }
+        self.plugin_run(PluginOp::Install, source, self.plugin_install_project, cx);
+    }
+
+    /// Run a plugin operation off the UI thread, then reload the list.
+    fn plugin_run(&mut self, op: PluginOp, source: String, project: bool, cx: &mut Context<Self>) {
+        if self.plugin_action.is_some() {
+            return;
+        }
+        let verb = match op {
+            PluginOp::Install => "Installing",
+            PluginOp::Update => "Updating",
+            PluginOp::Remove => "Removing",
+        };
+        self.plugin_action = Some(format!("{verb} {source}…"));
+        let done = format!("{verb} {source}");
+        let workspace = self.workspace_dir();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    match op {
+                        PluginOp::Install => crate::plugins::install(&source, project, &workspace),
+                        PluginOp::Update => crate::plugins::update(&source, &workspace),
+                        PluginOp::Remove => crate::plugins::remove(&source, project, &workspace),
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                app.plugin_action = None;
+                match result {
+                    Ok(output) => {
+                        let last = output
+                            .lines()
+                            .rev()
+                            .find(|line| !line.trim().is_empty())
+                            .map(str::to_string);
+                        app.set_status(last.unwrap_or_else(|| format!("{done} — done")));
+                        app.refresh_plugins(cx);
+                    }
+                    Err(err) => app.set_error(err),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Single dispatch point for every Plugins-page control.
+    pub(super) fn apply_plugin_action(&mut self, action: PluginAction, cx: &mut Context<Self>) {
+        match action {
+            PluginAction::Install => self.plugin_install(cx),
+            PluginAction::Update { source } => {
+                self.plugin_run(PluginOp::Update, source, false, cx);
+            }
+            PluginAction::Remove { source } => {
+                self.plugin_remove_confirm = Some(source);
+                cx.notify();
+            }
+            PluginAction::ConfirmRemove { source, project } => {
+                self.plugin_remove_confirm = None;
+                self.plugin_run(PluginOp::Remove, source, project, cx);
+            }
+            PluginAction::CancelRemove => {
+                self.plugin_remove_confirm = None;
+                cx.notify();
+            }
+            PluginAction::SetScope { project } => {
+                self.plugin_install_project = project;
+                cx.notify();
+            }
+            PluginAction::Refresh => {
+                self.refresh_plugins(cx);
+                self.set_status("Reloaded installed plugins");
+                cx.notify();
+            }
+        }
     }
 
     /// Re-read `~/.pi/agent/models.json` and `~/.pi/agent/auth.json`. Read
@@ -4224,5 +5298,61 @@ impl OrbitApp {
             }
         }
         cx.notify();
+    }
+}
+
+/// The position among `visible` that `dir` moves the settings dropdown's
+/// keyboard cursor to: the current position ± 1, clamped at the ends. A
+/// highlight the query filtered away lands on the first match going down,
+/// the last going up. `None` when nothing is visible.
+fn stepped_visible_position(
+    visible: &[usize],
+    highlight: Option<usize>,
+    dir: isize,
+) -> Option<usize> {
+    if visible.is_empty() {
+        return None;
+    }
+    Some(
+        match highlight.and_then(|ix| visible.iter().position(|visible| *visible == ix)) {
+            Some(pos) => (pos as isize + dir).clamp(0, visible.len() as isize - 1) as usize,
+            None if dir >= 0 => 0,
+            None => visible.len() - 1,
+        },
+    )
+}
+
+#[cfg(test)]
+mod settings_select_tests {
+    use super::stepped_visible_position;
+
+    /// The cursor is an original option index; `visible` holds the indices
+    /// the current query left in the list, in display order.
+    #[test]
+    fn stepping_starts_at_the_first_and_last_match() {
+        let visible = [0, 3, 7];
+        assert_eq!(stepped_visible_position(&visible, None, 1), Some(0));
+        assert_eq!(stepped_visible_position(&visible, None, -1), Some(2));
+    }
+
+    #[test]
+    fn stepping_clamps_at_the_ends() {
+        let visible = [0, 3, 7];
+        assert_eq!(stepped_visible_position(&visible, Some(0), -1), Some(0));
+        assert_eq!(stepped_visible_position(&visible, Some(3), 1), Some(2));
+        assert_eq!(stepped_visible_position(&visible, Some(7), 1), Some(2));
+    }
+
+    #[test]
+    fn stepping_recovers_when_the_query_filtered_the_cursor_away() {
+        let visible = [2, 5];
+        assert_eq!(stepped_visible_position(&visible, Some(4), 1), Some(0));
+        assert_eq!(stepped_visible_position(&visible, Some(4), -1), Some(1));
+    }
+
+    #[test]
+    fn stepping_an_empty_list_stays_put() {
+        assert_eq!(stepped_visible_position(&[], Some(0), 1), None);
+        assert_eq!(stepped_visible_position(&[], None, -1), None);
     }
 }

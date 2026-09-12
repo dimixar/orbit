@@ -18,3 +18,8 @@ serde_json = "1"
 # rendering spike. Drop this when measuring real-world perf.
 [profile.dev]
 opt-level = 1
+# Incremental codegen for this crate has emitted object files whose internal
+# LLVM symbols no longer match its dependencies' rlibs, failing the final link
+# with `ld: symbol(s) not found for architecture arm64`. Build non-incrementally
+# so `cargo build`/`bacon` links reliably; a from-scratch app rebuild is ~25s.
+incremental = false

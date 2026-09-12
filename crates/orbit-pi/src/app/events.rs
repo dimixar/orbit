@@ -12,6 +12,8 @@ impl OrbitApp {
             cx.notify();
         }
         self.tick_background(cx);
+        // Background update checks and the install handoff report here.
+        self.drain_updater_events(cx);
         // Sessions can be written by the CLI or another Orbit window; the
         // watcher has already scanned off-thread, so this only swaps the list.
         if let Some(reloaded) = self
@@ -32,16 +34,18 @@ impl OrbitApp {
         // index moved. Cheap when nothing changed.
         self.usage.update(cx, |page, cx| page.sync(cx));
         // Workspace edits (pi, the user, or git) have no RPC event either;
-        // refresh Review and the Git page when the tree changes.
-        self.sync_workspace_watcher();
-        if self
+        // refresh Review, the Git page, and the branch chip when the tree
+        // changes.
+        self.sync_workspace_watcher(cx);
+        let workspace_dirty = self
             .workspace_watcher
             .as_ref()
-            .is_some_and(watch::WorkspaceWatcher::take_dirty)
-        {
+            .is_some_and(watch::WorkspaceWatcher::take_dirty);
+        if workspace_dirty {
             self.sidepane
                 .update(cx, |pane, cx| pane.mark_review_stale(cx));
             self.git_panel.update(cx, |panel, cx| panel.refresh(cx));
+            self.refresh_branch_status(cx);
             cx.notify();
         }
         // Expire a stalled login and auto-cancel it with pi.
@@ -69,6 +73,9 @@ impl OrbitApp {
             };
             client.drain_events()
         };
+        // The bridge writes snapshots into the session file, not the event
+        // stream; poll for new entries on a slow clock independent of events.
+        self.poll_quota_entries();
         let copy_pending = self.transcript.prune_copy_feedback();
         // The one-time rail hint dismisses itself once its TTL lapses.
         if self.transcript.rail_hint_timed_out() {
@@ -86,18 +93,12 @@ impl OrbitApp {
         for event in &events {
             match event {
                 Event::AgentStart => self.busy = true,
-                // pi blocks interactive extension dialogs on a client
-                // response; Orbit has no dialog surface yet — cancel the
-                // request so the run can settle (Waku parity).
-                Event::ExtensionUiRequest { id, .. } => {
-                    self.send(
-                        CommandBody::Raw(serde_json::json!({
-                            "type": "extension_ui_response",
-                            "id": id,
-                            "cancelled": true
-                        })),
-                        "extension_ui_response",
-                    );
+                // An extension dialog blocks the run until the client answers.
+                // Render it natively (select / confirm / input / editor); the
+                // user's reply on the modal unblocks pi.
+                Event::ExtensionUiRequest { id, method, value } => {
+                    self.handle_extension_ui_request(id.clone(), method, value, cx);
+                    cx.notify();
                 }
                 Event::SessionInfoChanged { name } => {
                     // pi names the session after the first user message;
@@ -179,6 +180,10 @@ impl OrbitApp {
                     self.queue = PendingQueue::default();
                     refresh_sessions = true;
                     self.refresh_context_stats();
+                    // The bridge appends its post-turn snapshot at settle;
+                    // read it now instead of waiting for the slow poll.
+                    self.quota_entries_next_poll = Instant::now();
+                    self.poll_quota_entries();
                     // Capture the turn's end checkpoint, then refresh Review.
                     self.finish_turn(cx);
                 }
@@ -205,6 +210,10 @@ impl OrbitApp {
                     self.retry_detail = None;
                     self.pending_follow_up = None;
                     self.queue = PendingQueue::default();
+                    // The run is gone; its dialog (if any) can never be
+                    // answered, so drop it without a reply.
+                    self.dialog = None;
+                    self.dialog_focus_pending = false;
                     self.runtime.alive = false;
                     self.runtime.exited = true;
                     self.auth.on_disconnect();
@@ -281,9 +290,9 @@ impl OrbitApp {
                     // `agent_settled` is the real settle (queued steering /
                     // follow-up / retry can continue past `agent_end`).
                     Event::AgentSettled | Event::ProcessExited => parked.busy = false,
-                    // pi blocks extension dialogs on a client response;
-                    // cancel so a background run can settle (same as the
-                    // active-session handling in `tick`).
+                    // A parked session has no visible dialog surface; cancel
+                    // so its blocked run can settle (an active session renders
+                    // the dialog in `tick` above).
                     Event::ExtensionUiRequest { id, .. } => {
                         let _ = parked.client.respond_dialog(
                             id,
@@ -342,6 +351,13 @@ impl OrbitApp {
         if command == "quota.list" {
             self.quota.on_response(success, data, error);
             cx.notify();
+            return;
+        }
+        // The bundled bridge appends quota snapshots as session entries; poll
+        // responses merge them and must not surface a stale-cursor error as a
+        // user-facing banner.
+        if command == "get_entries" {
+            self.on_entries_response(success, data, error, cx);
             return;
         }
         // Error handling (docs #error-handling): a failed command carries an
@@ -436,6 +452,9 @@ impl OrbitApp {
                 if let Some(id) = data.get("sessionId").and_then(Value::as_str) {
                     if self.session_id.as_deref() != Some(id) {
                         self.session_id = Some(id.to_string());
+                        // Entry ids are per-session; a different session means
+                        // the bridge cursor must start over.
+                        self.reset_quota_entries();
                         self.recover_latest_turn(cx);
                     }
                 }
@@ -629,6 +648,49 @@ impl OrbitApp {
         cx.notify();
     }
 
+    /// Apply a `get_entries` poll for the quota bridge. A cursor can dangle
+    /// when the session file changed underneath it; that is recovered by
+    /// dropping the cursor and re-reading, never by a user-facing error.
+    pub(super) fn on_entries_response(
+        &mut self,
+        success: bool,
+        data: Option<&serde_json::Value>,
+        error: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        self.quota_entries_inflight = false;
+        if !success {
+            let stale_cursor = self.quota_entries_cursor.is_some()
+                && error.is_some_and(|error| error.contains("Entry not found"));
+            if stale_cursor {
+                self.quota_entries_cursor = None;
+                self.quota_entries_next_poll = Instant::now();
+                self.poll_quota_entries();
+            }
+            return;
+        }
+        let Some(entries) = data
+            .and_then(|data| data.get("entries"))
+            .and_then(serde_json::Value::as_array)
+        else {
+            return;
+        };
+        // The cursor is the last appended entry id: entries arrive in append
+        // order, so the next poll asks for strictly newer ones only.
+        if let Some(id) = entries
+            .last()
+            .and_then(|entry| entry.get("id"))
+            .and_then(serde_json::Value::as_str)
+        {
+            self.quota_entries_cursor = Some(id.to_string());
+        }
+        if self.quota.on_entries(entries) {
+            // A snapshot landed: no need for fast bootstrap polls.
+            self.quota_entries_bootstrap = 0;
+            cx.notify();
+        }
+    }
+
     /// Move images the composer collected (clipboard paste) into the
     /// attachment queue. Called on tick and again at submit so a paste
     /// immediately followed by Enter still attaches.
@@ -655,8 +717,9 @@ impl OrbitApp {
     /// Re-point the workspace watcher when the active workspace moves.
     /// Comparing the last-attempted dir (rather than the live watcher) means
     /// a backend that failed to start is retried on the next workspace
-    /// change, not every heartbeat.
-    pub(super) fn sync_workspace_watcher(&mut self) {
+    /// change, not every heartbeat. The branch chip belongs to the workspace,
+    /// so it refetches here too.
+    pub(super) fn sync_workspace_watcher(&mut self, cx: &mut Context<Self>) {
         if self.workspace_watch_dir == self.current_workspace {
             return;
         }
@@ -665,5 +728,6 @@ impl OrbitApp {
             .current_workspace
             .as_deref()
             .and_then(watch::WorkspaceWatcher::start);
+        self.refresh_branch_status(cx);
     }
 }

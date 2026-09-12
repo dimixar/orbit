@@ -11,6 +11,34 @@ Reference client implementation: `crates/orbit-rpc/src/types.rs` (wire types)
 and `crates/orbit-pi/src/quota.rs` (`QuotaManager` reducer). The pi-side
 handlers are injected by `contrib/pi-quota-rpc/apply.mjs`.
 
+## Bridge path (default, no patch)
+
+Orbit does not require the `quota.*` namespace. It ships a pi extension
+(`contrib/orbit-quota-extension/`, materialized under
+`~/.orbit-pi/quota-extension/` by `crates/orbit-pi/src/quota_bridge.rs`) and
+loads it on every session process with `pi --extension <index.js>`. The
+extension resolves credentials through pi's own `ctx.modelRegistry`, queries
+the same provider endpoints, and appends one normalized snapshot as a custom
+session entry:
+
+```json
+{"type":"custom","customType":"orbit:quota","data":{"providers":[…]}}
+```
+
+Custom entries never enter the model's context. Orbit reads them with pi's
+standard `get_entries` command, passing the previous entry id as `since` so a
+poll returns only entries appended after it; the newest `orbit:quota` entry is
+merged into the same `QuotaManager` as a `quota.list` response (bridge data
+does not change `QuotaSupport`, so a patched pi is still probed). The extension
+appends only when the snapshot changes — `fetchedAt` is ignored for that
+comparison — so a quiet account does not grow the session file. Entry ids are
+per-session: the client resets its cursor when `get_state` reports a different
+`sessionId`, and drops the cursor and re-reads when pi answers `Entry not
+found`.
+
+`quota.list` remains fully supported and is used when the running pi
+implements it; the bridge simply makes the feature work on stock pi.
+
 ## Secret boundary
 
 Only non-sensitive, already-displayable material crosses this protocol:

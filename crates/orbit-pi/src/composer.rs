@@ -7,6 +7,7 @@
 //! approximated as plain replaces — flag for P2 polish.
 
 use std::ops::Range;
+use std::time::Duration;
 use unicode_segmentation::UnicodeSegmentation;
 
 use gpui::{
@@ -14,17 +15,23 @@ use gpui::{
     ContentMask, Context, CursorStyle, Element, ElementInputHandler, Entity, EntityInputHandler,
     FocusHandle, Focusable, GlobalElementId, Image, InspectorElementId, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, ScrollWheelEvent,
-    SharedString, Style, TextAlign, TextRun, UTF16Selection, Window, WrappedLine,
+    SharedString, Style, Task, TextAlign, TextRun, Timer, UTF16Selection, Window, WrappedLine,
 };
 
 use crate::{
-    mentions::{detect_trigger, SharedAutocomplete, Trigger},
+    mentions::{detect_trigger, tokenize_mentions, MentionKind, SharedAutocomplete, Trigger},
     theme, Backspace, Copy, Cut, Delete, Down, End, Home, Left, Newline, Paste, Right, SelectAll,
     SelectLeft, SelectRight, Up,
 };
 
 /// Visual rows the editor grows to before it scrolls internally.
 const MAX_LINES: usize = 8;
+
+/// Idle beat after an edit or caret move before the caret starts blinking —
+/// the caret holds solid while typing, the way a native field behaves.
+const BLINK_RESUME_DELAY: Duration = Duration::from_millis(300);
+/// Caret on/off half-period (a ~1s cycle).
+const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 
 pub struct ComposerInput {
     focus_handle: FocusHandle,
@@ -63,6 +70,17 @@ pub struct ComposerInput {
     /// Images pasted (or attached) since the app last drained them — the
     /// app turns these into message attachments.
     pub pasted_images: Vec<Image>,
+    /// Caret blink: whether the caret paints this frame, the epoch that
+    /// invalidates superseded timers, and the pending timer task (dropped
+    /// when a newer wake replaces it, which cancels it).
+    caret_visible: bool,
+    blink_active: bool,
+    blink_epoch: usize,
+    _blink_task: Option<Task<()>>,
+    /// Content + selection at the last render, so an edit or caret move can
+    /// hold the caret solid for a beat before it resumes blinking.
+    blink_content: String,
+    blink_selection: Range<usize>,
 }
 
 impl ComposerInput {
@@ -86,6 +104,12 @@ impl ComposerInput {
             max_lines: MAX_LINES,
             autocomplete: None,
             pasted_images: Vec::new(),
+            caret_visible: true,
+            blink_active: false,
+            blink_epoch: 0,
+            _blink_task: None,
+            blink_content: String::new(),
+            blink_selection: 0..0,
         }
     }
 
@@ -175,6 +199,64 @@ impl ComposerInput {
 
     pub fn focus(&self, window: &mut Window) {
         window.focus(&self.focus_handle);
+    }
+
+    // ── caret blink ────────────────────────────────────────────────────
+
+    /// Drive the caret blink from focus: start it when the input gains
+    /// focus, stop it when focus leaves, and hold the caret solid for a beat
+    /// after any edit or caret move before it resumes. Called once per render.
+    fn sync_caret_blink(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let edited =
+            self.content != self.blink_content || self.selected_range != self.blink_selection;
+        if edited {
+            self.blink_content = self.content.clone();
+            self.blink_selection = self.selected_range.clone();
+        }
+
+        if !self.focus_handle.is_focused(window) {
+            if self.blink_active {
+                self.blink_active = false;
+                self.blink_epoch += 1; // invalidate the pending timer
+                self.caret_visible = true;
+            }
+            return;
+        }
+
+        if !self.blink_active {
+            self.blink_active = true;
+            self.wake_caret(cx);
+        } else if edited {
+            self.wake_caret(cx);
+        }
+    }
+
+    /// Show the caret now and schedule the first blink after the idle delay.
+    fn wake_caret(&mut self, cx: &mut Context<Self>) {
+        self.caret_visible = true;
+        self.blink_epoch += 1;
+        let epoch = self.blink_epoch;
+        self.schedule_blink(BLINK_RESUME_DELAY, epoch, cx);
+    }
+
+    /// Toggle the caret and schedule the next toggle, unless a newer wake has
+    /// superseded this timer or focus has left.
+    fn blink(&mut self, epoch: usize, cx: &mut Context<Self>) {
+        if epoch != self.blink_epoch || !self.blink_active {
+            return;
+        }
+        self.caret_visible = !self.caret_visible;
+        cx.notify();
+        self.schedule_blink(BLINK_INTERVAL, epoch, cx);
+    }
+
+    fn schedule_blink(&mut self, after: Duration, epoch: usize, cx: &mut Context<Self>) {
+        self._blink_task = Some(cx.spawn(async move |this, cx| {
+            Timer::after(after).await;
+            if let Some(this) = this.upgrade() {
+                this.update(cx, |input, cx| input.blink(epoch, cx)).ok();
+            }
+        }));
     }
 
     // ── movement ───────────────────────────────────────────────────────
@@ -291,11 +373,33 @@ impl ComposerInput {
         cx: &mut Context<Self>,
     ) {
         self.is_selecting = true;
-        if event.modifiers.shift {
-            self.select_to(self.index_for_mouse_position(event.position), cx);
-        } else {
-            self.move_to(self.index_for_mouse_position(event.position), cx)
+        let offset = self.index_for_mouse_position(event.position);
+        match event.click_count {
+            // Double-click selects the run under the pointer; triple-click
+            // selects the whole logical line.
+            2 => self.select_word_at(offset, cx),
+            n if n >= 3 => self.select_line_at(offset, cx),
+            // Shift extends the existing selection, a plain click drops it.
+            _ if event.modifiers.shift => self.select_to(offset, cx),
+            _ => self.move_to(offset, cx),
         }
+    }
+
+    /// Select the character-class run (word, punctuation, or whitespace)
+    /// containing `offset`.
+    fn select_word_at(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.selected_range = word_range_at(&self.content, offset);
+        self.selection_reversed = false;
+        cx.notify();
+    }
+
+    /// Select the logical line containing `offset` (its trailing newline
+    /// included, so deleting the selection merges the lines like a native
+    /// field).
+    fn select_line_at(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.selected_range = line_range_at(&self.content, offset);
+        self.selection_reversed = false;
+        cx.notify();
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _window: &mut Window, _: &mut Context<Self>) {
@@ -640,6 +744,124 @@ fn line_at_offset(
         })
 }
 
+/// The byte before `offset`, or 0 at the start. `offset` must be a char
+/// boundary.
+fn prev_char_boundary(text: &str, offset: usize) -> usize {
+    text[..offset]
+        .char_indices()
+        .next_back()
+        .map(|(i, _)| i)
+        .unwrap_or(0)
+}
+
+/// The byte after the char at `offset`, or the end. `offset` must be a char
+/// boundary.
+fn next_char_boundary(text: &str, offset: usize) -> usize {
+    text[offset..]
+        .chars()
+        .next()
+        .map(|c| offset + c.len_utf8())
+        .unwrap_or(text.len())
+}
+
+/// The double-click selection range: the run of the same character class
+/// (word / punctuation / whitespace) around `offset`. Returning the class run
+/// rather than only a word means double-clicking punctuation selects it too,
+/// matching native text views.
+fn word_range_at(text: &str, offset: usize) -> Range<usize> {
+    if text.is_empty() {
+        return 0..0;
+    }
+    let class = |c: char| -> u8 {
+        if c.is_alphanumeric() || c == '_' {
+            0
+        } else if c.is_whitespace() {
+            2
+        } else {
+            1
+        }
+    };
+    let offset = offset.min(text.len());
+    let probe = if offset < text.len() {
+        offset
+    } else {
+        prev_char_boundary(text, offset)
+    };
+    let target = match text[probe..].chars().next() {
+        Some(c) => class(c),
+        None => return probe..probe,
+    };
+    let mut start = probe;
+    while start > 0 {
+        let prev = prev_char_boundary(text, start);
+        if text[prev..start].chars().next().map(class) != Some(target) {
+            break;
+        }
+        start = prev;
+    }
+    let mut end = probe;
+    while end < text.len() {
+        let next = next_char_boundary(text, end);
+        if text[end..next].chars().next().map(class) != Some(target) {
+            break;
+        }
+        end = next;
+    }
+    start..end
+}
+
+/// The triple-click selection range: the logical line around `offset`,
+/// including its trailing newline so deleting the selection joins lines.
+fn line_range_at(text: &str, offset: usize) -> Range<usize> {
+    let offset = offset.min(text.len());
+    let start = text[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let end = text[offset..]
+        .find('\n')
+        .map(|i| offset + i + 1)
+        .unwrap_or(text.len());
+    start..end
+}
+
+/// Split the composer text into paint runs: the base ink plus the
+/// `/command` and `@file` token colors. Gaps keep `base`'s color. Runs span
+/// the whole text (newlines included) so `shape_text` never runs dry.
+fn mention_runs(text: &str, base: &TextRun, theme: &theme::Theme) -> Vec<TextRun> {
+    let spans = tokenize_mentions(text);
+    if spans.is_empty() {
+        return vec![TextRun {
+            len: text.len(),
+            ..base.clone()
+        }];
+    }
+    let mut runs = Vec::with_capacity(spans.len() * 2 + 1);
+    let mut cursor = 0usize;
+    for span in spans {
+        if span.range.start > cursor {
+            runs.push(TextRun {
+                len: span.range.start - cursor,
+                ..base.clone()
+            });
+        }
+        let color = match span.kind {
+            MentionKind::Command => theme.mention_command(),
+            MentionKind::File => theme.mention_file(),
+        };
+        runs.push(TextRun {
+            len: span.range.end - span.range.start,
+            color,
+            ..base.clone()
+        });
+        cursor = span.range.end;
+    }
+    if cursor < text.len() {
+        runs.push(TextRun {
+            len: text.len() - cursor,
+            ..base.clone()
+        });
+    }
+    runs
+}
+
 /// The painted text element for the input.
 struct TextElement {
     input: Entity<ComposerInput>,
@@ -703,37 +925,54 @@ impl Element for TextElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let line_height = window.line_height();
-        let (content, selected_range, cursor, max_lines) = {
+        let (content, selected_range, cursor, max_lines, caret_visible) = {
             let input = self.input.read(cx);
             (
                 input.content.clone(),
                 input.selected_range.clone(),
                 input.cursor_offset(),
                 input.max_lines,
+                input.caret_visible,
             )
         };
         let style = window.text_style();
         let theme = theme::get(cx);
 
-        let (display_text, text_color) = if content.is_empty() {
-            (self.input.read(cx).placeholder.clone(), theme.text_3)
-        } else {
-            (SharedString::from(content.clone()), style.color)
-        };
-
-        let run = TextRun {
-            len: display_text.len(),
+        // Base ink run; token runs override only the color, so the shaped
+        // layout (and therefore caret/selection geometry) is unchanged.
+        let base = TextRun {
+            len: 0,
             font: style.font(),
-            color: text_color,
+            color: style.color,
             background_color: None,
             underline: None,
             strikethrough: None,
         };
+        let (display_text, runs) = if content.is_empty() {
+            let placeholder = self.input.read(cx).placeholder.clone();
+            let mut run = base.clone();
+            run.len = placeholder.len();
+            run.color = theme.text_3;
+            (placeholder, vec![run])
+        } else {
+            // Token colors belong to mention-capable inputs (the main
+            // composer); plain form fields keep one ink.
+            let runs = if self.input.read(cx).autocomplete.is_some() {
+                mention_runs(&content, &base, theme)
+            } else {
+                vec![TextRun {
+                    len: content.len(),
+                    ..base.clone()
+                }]
+            };
+            (SharedString::from(content.clone()), runs)
+        };
+
         let font_size = style.font_size.to_pixels(window.rem_size());
         let wrap_width = (bounds.size.width > px(0.)).then_some(bounds.size.width);
         let lines: Vec<WrappedLine> = window
             .text_system()
-            .shape_text(display_text, font_size, &[run], wrap_width, None)
+            .shape_text(display_text, font_size, &runs, wrap_width, None)
             .map(|shaped| shaped.to_vec())
             .unwrap_or_default();
 
@@ -840,16 +1079,20 @@ impl Element for TextElement {
                 caret_pos = Some(point(raw.x, line_y[i] + raw.y));
             }
         }
-        let caret = caret_pos.map(|caret| {
-            let origin = map(caret.x, caret.y);
-            fill(
-                Bounds::new(
-                    point(origin.x, origin.y + px(2.)),
-                    size(px(2.), line_height - px(4.)),
-                ),
-                theme.accent,
-            )
-        });
+        let caret = if caret_visible {
+            caret_pos.map(|caret| {
+                let origin = map(caret.x, caret.y);
+                fill(
+                    Bounds::new(
+                        point(origin.x, origin.y + px(2.)),
+                        size(px(2.), line_height - px(4.)),
+                    ),
+                    theme.accent,
+                )
+            })
+        } else {
+            None
+        };
 
         let width_changed = self.input.read(cx).last_wrap_width != wrap_width;
         let rows_changed = self.input.read(cx).last_total_rows != total_rows;
@@ -931,7 +1174,9 @@ impl Element for TextElement {
 }
 
 impl Render for ComposerInput {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Keep the caret blink in step with focus and this frame's edit.
+        self.sync_caret_blink(window, cx);
         // Transparent: the floating composer box in app.rs provides the
         // background/border; this is just the editable (auto-growing) area.
         div()
@@ -967,7 +1212,7 @@ impl Render for ComposerInput {
 
 #[cfg(test)]
 mod tests {
-    use super::line_at_offset;
+    use super::{line_at_offset, line_range_at, word_range_at};
 
     /// A caret on the newline byte (`"abc\n"` at offset 3) must resolve to
     /// the end of the preceding line, not underflow into the next line's
@@ -1003,5 +1248,37 @@ mod tests {
     #[test]
     fn no_lines_yields_none() {
         assert_eq!(line_at_offset(&[], &[], 0), None);
+    }
+
+    #[test]
+    fn double_click_selects_the_run_under_the_caret() {
+        let text = "hello world";
+        // Anywhere in a word selects the whole word.
+        assert_eq!(word_range_at(text, 1), 0..5);
+        assert_eq!(word_range_at(text, 4), 0..5);
+        // On the space, the whitespace run.
+        assert_eq!(word_range_at(text, 5), 5..6);
+        // In the second word.
+        assert_eq!(word_range_at(text, 8), 6..11);
+        // At the very end, the last word.
+        assert_eq!(word_range_at(text, text.len()), 6..11);
+        // Punctuation is its own run, like a native text view.
+        assert_eq!(word_range_at("foo.bar", 3), 3..4);
+        assert_eq!(word_range_at("foo.bar", 1), 0..3);
+        // Empty input is a no-op, not a panic.
+        assert_eq!(word_range_at("", 0), 0..0);
+    }
+
+    #[test]
+    fn triple_click_selects_the_whole_line() {
+        let text = "one\ntwo\nthree";
+        // The middle line, including its trailing newline.
+        assert_eq!(line_range_at(text, 4), 4..8);
+        // The first line ends at the newline.
+        assert_eq!(line_range_at(text, 0), 0..4);
+        // The last line has no trailing newline.
+        assert_eq!(line_range_at(text, 9), 8..13);
+        // An offset at the end still selects the last line.
+        assert_eq!(line_range_at(text, text.len()), 8..13);
     }
 }

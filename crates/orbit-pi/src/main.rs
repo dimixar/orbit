@@ -13,6 +13,7 @@ mod command_palette;
 mod commit_message;
 mod composer;
 mod context_meter;
+mod dialog;
 mod dither;
 mod favorites;
 mod git;
@@ -25,14 +26,18 @@ mod model_selector;
 mod model_selector_match;
 mod onboarding;
 mod platform;
+mod plugins;
 mod providers;
 mod quota;
+mod quota_bridge;
 mod review;
 mod sessions;
 mod sidepane;
+mod skills;
 mod theme;
 mod transcript;
 mod transcript_view;
+mod updater;
 mod usage;
 mod watch;
 mod workspace_picker;
@@ -64,6 +69,7 @@ actions!(
         Paste,
         Cut,
         Copy,
+        AutocompleteAccept,
         Submit,
     ]
 );
@@ -83,7 +89,8 @@ actions!(
         ToggleThinkingMenu,
         CopyLastResponse,
         PrevTurn,
-        NextTurn
+        NextTurn,
+        CheckForUpdates
     ]
 );
 
@@ -106,6 +113,13 @@ actions!(
     [AddMenuNext, AddMenuPrev, AddMenuConfirm, AddMenuClose]
 );
 
+// Extension-dialog actions (bound to the `DialogSelect` context on the option
+// card and `DialogInput` on its text field).
+actions!(
+    dialog_keys,
+    [DialogCancel, DialogConfirm, DialogNext, DialogPrev]
+);
+
 fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
@@ -125,6 +139,9 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-x", Cut, Some("Composer")),
         KeyBinding::new("enter", Submit, Some("Composer")),
         KeyBinding::new("cmd-enter", Submit, Some("Composer")),
+        // Tab accepts the highlighted `/`-command or `@`-file entry while
+        // the autocomplete menu is open (Enter is the second way in).
+        KeyBinding::new("tab", AutocompleteAccept, Some("Composer")),
         KeyBinding::new("shift-enter", Newline, Some("Composer")),
         KeyBinding::new("up", Up, Some("Composer")),
         KeyBinding::new("down", Down, Some("Composer")),
@@ -140,6 +157,8 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-c", CopyLastResponse, None),
         KeyBinding::new("cmd-up", PrevTurn, None),
         KeyBinding::new("cmd-down", NextTurn, None),
+        // Check for Updates (the app menu has no native home in Orbit yet).
+        KeyBinding::new("cmd-shift-u", CheckForUpdates, None),
         // Model picker keys — the `Picker` context rides on the popup's
         // filter input, i.e. the *same* dispatch node as `Composer`, so these
         // bindings sit at the same depth as the composer ones. gpui breaks
@@ -157,10 +176,27 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", AddMenuConfirm, Some("AddMenu")),
         KeyBinding::new("up", AddMenuPrev, Some("AddMenu")),
         KeyBinding::new("down", AddMenuNext, Some("AddMenu")),
+        // Extension-dialog keys. `DialogSelect` rides the option card;
+        // `DialogInput` rides the dialog's text field (which also carries
+        // `Composer`, so caret/clipboard keys stay live). Registered after
+        // the Composer bindings so Enter confirms instead of submitting and
+        // Escape cancels the dialog instead of aborting the run.
+        KeyBinding::new("escape", DialogCancel, Some("DialogSelect")),
+        KeyBinding::new("escape", DialogCancel, Some("DialogInput")),
+        KeyBinding::new("enter", DialogConfirm, Some("DialogSelect")),
+        KeyBinding::new("enter", DialogConfirm, Some("DialogInput")),
+        KeyBinding::new("up", DialogPrev, Some("DialogSelect")),
+        KeyBinding::new("down", DialogNext, Some("DialogSelect")),
     ]);
 }
 
 fn main() {
+    // A hidden re-exec of this binary performs the Unix install swap after
+    // the app quits; it must run before any GPUI setup.
+    if let Some(code) = updater::run_install_helper() {
+        std::process::exit(code);
+    }
+
     let mut application = Application::new().with_assets(assets::Assets);
     // Remote author avatars need an HTTP client; without one GPUI renders
     // nothing for `img("https://…")` and the monogram fallback shows instead.
@@ -170,12 +206,11 @@ fn main() {
     application.run(|cx: &mut App| {
         bind_keys(cx);
         theme::init(cx);
-        // GPUI Kit's component layer (data table + plot), then project Orbit's
-        // palette onto it so its widgets look like this app rather than
-        // another product.
-        usage::kit::init(cx);
-        let theme = *theme::get(cx);
-        usage::kit::sync(cx, &theme);
+        // Arm the background updater before the app reads its global. Debug
+        // builds, a keyless build, and a bare `cargo run` binary all leave it
+        // dormant. The launch check runs on its own thread.
+        let updater = updater::Updater::init();
+        cx.set_global(updater::UpdaterState(updater));
         // Bundle Zed's UI/mono faces plus the curated font catalog so every
         // picker choice resolves to a real face without OS dependencies.
         assets::register_zed_fonts(cx).expect("failed to register Zed fonts");
@@ -241,6 +276,10 @@ fn main() {
                 },
             )
             .unwrap();
+
+        // If this launch replaced an older build, tell the waiting helper the
+        // new window is up so it can commit the swap instead of rolling back.
+        updater::signal_relaunch_ready();
 
         cx.activate(true);
         cx.on_action(|_: &Quit, cx| cx.quit());

@@ -9,25 +9,25 @@
 //!         ↓  aggregate::UsageSnapshot   — one pass per (index, filter)
 //! page::UsagePage                       — cached snapshot + filter/view state
 //!         ↓  view / chart / filters     — GPUI, aggregates only
-//!         ↓  table                      — rows adapted to GPUI Kit's delegate
+//!         ↓  table                      — rows dressed as native GPUI rows
 //! ```
 //!
 //! Accounting rules (what counts as a request, how cache hit rate is defined,
 //! why retries are unavailable) are documented once, in [`model`].
 //!
-//! The data tables and the timeline plot are `gpui-component` widgets rather
-//! than hand-rolled ones, themed through [`kit`] so they render in this app's
-//! palette.
+//! The data tables and the timeline plot are drawn with GPUI's own elements —
+//! `div`, `canvas` and the app's theme — so they read exactly like the rest of
+//! the surface.
 
 pub mod aggregate;
 pub mod chart;
 pub mod collect;
 pub mod filters;
 pub mod format;
-pub mod kit;
 pub mod model;
 pub mod page;
 pub mod table;
+pub mod tooltip;
 pub mod view;
 
 #[cfg(test)]

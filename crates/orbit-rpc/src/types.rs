@@ -107,6 +107,13 @@ pub enum CommandBody {
     GetSessionStats,
     /// Message list (with `entryId`s) used to build a fork point.
     GetForkMessages,
+    /// Session entries in append order, including custom entries written by
+    /// extensions. `since` is an entry id cursor: only entries strictly after
+    /// it are returned, so a client can poll without re-reading the session.
+    GetEntries {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        since: Option<String>,
+    },
     /// Rewind the session to just before `entry_id` (drops later turns).
     Fork {
         #[serde(rename = "entryId")]
@@ -2155,6 +2162,28 @@ mod tests {
         let parsed: Value = serde_json::from_str(&one).unwrap();
         assert_eq!(parsed["type"], "quota.list");
         assert_eq!(parsed["provider"], "anthropic");
+    }
+
+    #[test]
+    fn get_entries_serializes_with_optional_cursor() {
+        let all = Command::new("e1", CommandBody::GetEntries { since: None })
+            .to_wire()
+            .unwrap();
+        let parsed: Value = serde_json::from_str(&all).unwrap();
+        assert_eq!(parsed["type"], "get_entries");
+        assert!(parsed.get("since").is_none());
+
+        let incremental = Command::new(
+            "e2",
+            CommandBody::GetEntries {
+                since: Some("abc123".into()),
+            },
+        )
+        .to_wire()
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&incremental).unwrap();
+        assert_eq!(parsed["type"], "get_entries");
+        assert_eq!(parsed["since"], "abc123");
     }
 
     #[test]

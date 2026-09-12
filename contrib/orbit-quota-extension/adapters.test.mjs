@@ -1,0 +1,251 @@
+#!/usr/bin/env node
+/**
+ * Unit tests for the Orbit quota bridge adapters.
+ *
+ * Run: node --test contrib/orbit-quota-extension/
+ *
+ * These tests are network-free: they only cover the providers whose adapters
+ * return without making a request (the honest `unsupported` set) plus
+ * dispatch, credential resolution, and error sanitization. Authoritative
+ * provider payloads are covered by `crates/orbit-rpc/docs/quota-rpc.md`
+ * fixtures and the Rust round-trip test.
+ */
+
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import test, { beforeEach } from "node:test";
+
+import {
+  OllamaCloudParser,
+  ollamaCloudKey,
+  quotaAdapters,
+  quotaReport,
+  quotaReports,
+  quotaSanitize,
+  resetQuotaRuntime,
+} from "./adapters.js";
+
+beforeEach(() => resetQuotaRuntime());
+
+/** A fetch stub returning one JSON body for any URL. */
+function jsonFetch(body, { status = 200 } = {}) {
+  return async (url) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    redirected: false,
+    url,
+    text: async () => (typeof body === "string" ? body : JSON.stringify(body)),
+  });
+}
+
+/** A fetch stub returning one HTML body for any URL. */
+function htmlFetch(html, { status = 200, finalUrl } = {}) {
+  return async (url) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    url: finalUrl || url,
+    text: async () => html,
+  });
+}
+
+/** Point `$HOME` at a temp dir containing `auth.json`, run `fn`, then restore. */
+async function withAuth(auth, fn) {
+  const dir = fs.mkdtempSync(path.join(process.env.TMPDIR || "/tmp", "orbit-quota-"));
+  fs.mkdirSync(path.join(dir, ".pi", "agent"), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, ".pi", "agent", "auth.json"),
+    JSON.stringify(auth),
+  );
+  const prev = process.env.HOME;
+  process.env.HOME = dir;
+  resetQuotaRuntime();
+  try {
+    return await fn();
+  } finally {
+    process.env.HOME = prev;
+    resetQuotaRuntime();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("google reports unsupported without a network request", async () => {
+  const report = await quotaReport("google");
+  assert.equal(report.provider, "google");
+  assert.equal(report.kind, "unsupported");
+  assert.deepEqual(report.windows, []);
+  assert.deepEqual(report.balances, []);
+  assert.match(report.note, /AI Studio/);
+  assert.equal(report.error, undefined);
+});
+
+test("google-vertex shares the Gemini explanation", async () => {
+  const report = await quotaReport("google-vertex");
+  assert.equal(report.kind, "unsupported");
+  assert.match(report.note, /AI Studio/);
+});
+
+test("ollama without a cloud credential explains how to add one", async () => {
+  await withAuth({}, async () => {
+    const report = await quotaReport("ollama");
+    assert.equal(report.kind, "unsupported");
+    assert.match(report.note, /API key|session cookie/);
+    assert.match(report.note, /Settings → Providers → Ollama/);
+    assert.equal(report.error, undefined);
+  });
+});
+
+test("ollama local placeholder is never treated as a cloud key", () => {
+  assert.equal(ollamaCloudKey({ type: "api_key", key: "ollama" }), undefined);
+  assert.equal(
+    ollamaCloudKey({ type: "api_key", key: "http://127.0.0.1:11434" }),
+    undefined,
+  );
+  assert.equal(ollamaCloudKey({ type: "api_key", key: "  " }), undefined);
+  assert.equal(ollamaCloudKey(null), undefined);
+  assert.equal(
+    ollamaCloudKey({ type: "api_key", key: "abc123realkey" }),
+    "abc123realkey",
+  );
+});
+
+test("OllamaCloudParser reads legacy session and weekly meters", () => {
+  const html = `
+    <h2>Cloud Usage</h2><span>Pro</span>
+    <div class="meter" aria-label="Session usage 42.5% used">
+      <span>Resets in 1h 20m</span>
+      <time data-time="2026-09-12T16:30:00Z"></time>
+    </div>
+    <div class="meter" aria-label="Weekly usage 12% used"></div>
+  `;
+  assert.equal(OllamaCloudParser.plan(html), "Pro");
+  const windows = OllamaCloudParser.windows(html);
+  assert.equal(windows.length, 2);
+  assert.equal(windows[0].id, "session");
+  assert.equal(windows[0].usedPercent, 42.5);
+  assert.equal(windows[0].resetsAt, Date.parse("2026-09-12T16:30:00Z"));
+  assert.equal(windows[1].id, "weekly");
+  assert.equal(windows[1].usedPercent, 12);
+  assert.equal(windows[1].resetsAt, undefined);
+});
+
+test("OllamaCloudParser returns no windows for unrelated markup", () => {
+  const windows = OllamaCloudParser.windows("<html><body>Nothing here</body></html>");
+  assert.deepEqual(windows, []);
+  assert.equal(OllamaCloudParser.plan("<html></html>"), undefined);
+});
+
+test("OllamaCloudParser handles zero usage as a real value, not missing", () => {
+  const html = `<h2>Cloud Usage</h2> (Free)
+    <div aria-label="Session usage 0% used"></div>
+    <div aria-label="Weekly usage 0% used"></div>`;
+  const windows = OllamaCloudParser.windows(html);
+  assert.equal(windows.length, 2);
+  assert.equal(windows[0].usedPercent, 0);
+  assert.equal(windows[1].usedPercent, 0);
+});
+
+test("google/ollama are registered; unknown ids report unsupported", async () => {
+  for (const id of ["google", "google-vertex", "ollama"]) {
+    assert.equal(typeof quotaAdapters[id], "function", `${id} registered`);
+  }
+  const report = await quotaReport("acme-llm");
+  assert.equal(report.kind, "unsupported");
+  assert.match(report.note, /no account usage API/);
+});
+
+test("dispatch returns every requested provider report", async () => {
+  await withAuth({}, async () => {
+    const reports = await quotaReports(["google", "google-vertex", "ollama"]);
+    const providers = reports.map((report) => report.provider).sort();
+    assert.deepEqual(providers, ["google", "google-vertex", "ollama"]);
+  });
+});
+
+test("sanitize redacts credential-shaped substrings", () => {
+  const cleaned = quotaSanitize(
+    new Error("request to https://x failed with Bearer sk-abc123DEFghi and ghp_00aa11bb22cc"),
+  );
+  assert.ok(!cleaned.includes("sk-abc123DEFghi"), "openai-style key redacted");
+  assert.ok(!cleaned.includes("ghp_00aa11bb22cc"), "github token redacted");
+});
+
+test("ollama with a real cloud key maps the monthly credit fraction", async () => {
+  await withAuth({ ollama: { type: "api_key", key: "real-cloud-key" } }, async () => {
+    globalThis.fetch = jsonFetch({
+      plan: "pro",
+      limits: { monthly: { usage: 0.28 } },
+    });
+    const report = await quotaReport("ollama");
+    assert.equal(report.kind, "subscription");
+    assert.equal(report.plan, "pro");
+    const window = report.windows.find((w) => w.id === "monthly");
+    assert.ok(window, "monthly window present");
+    assert.equal(window.usedPercent, 28, "0.28 fraction becomes 28% cleanly");
+    // The anniversary reset is not in the payload: never fabricated.
+    assert.equal(window.resetsAt, undefined);
+  });
+});
+
+test("ollama with a session parses the legacy settings page", async () => {
+  await withAuth(
+    { ollama: { type: "ollama_cloud_session", session: "__Secure-session=abc123" } },
+    async () => {
+      const html = `<h2>Cloud Usage</h2> (Pro)
+        <div aria-label="Session usage 42.5% used">
+          <time data-time="2026-09-12T16:30:00Z"></time>
+        </div>
+        <div aria-label="Weekly usage 12% used"></div>`;
+      globalThis.fetch = htmlFetch(html);
+      const report = await quotaReport("ollama");
+      assert.equal(report.kind, "subscription");
+      assert.equal(report.plan, "Pro");
+      const session = report.windows.find((w) => w.id === "session");
+      const weekly = report.windows.find((w) => w.id === "weekly");
+      assert.equal(session.usedPercent, 42.5);
+      assert.equal(session.resetsAt, Date.parse("2026-09-12T16:30:00Z"));
+      assert.equal(weekly.usedPercent, 12);
+    },
+  );
+});
+
+test("ollama expired session degrades to a sign-in error, not a crash", async () => {
+  await withAuth(
+    { ollama: { type: "ollama_cloud_session", session: "__Secure-session=expired" } },
+    async () => {
+      globalThis.fetch = htmlFetch("", {
+        status: 200,
+        finalUrl: "https://ollama.com/signin",
+      });
+      const report = await quotaReport("ollama");
+      assert.equal(report.kind, "unsupported");
+      assert.match(report.error, /expired/i);
+    },
+  );
+});
+
+test("ollama changed markup reports an error instead of a fake zero", async () => {
+  await withAuth(
+    { ollama: { type: "ollama_cloud_session", session: "__Secure-session=abc123" } },
+    async () => {
+      globalThis.fetch = htmlFetch("<html><body>Redesigned dashboard</body></html>");
+      const report = await quotaReport("ollama");
+      assert.equal(report.kind, "unsupported");
+      assert.match(report.error, /layout changed/i);
+      assert.deepEqual(report.windows, []);
+    },
+  );
+});
+
+test("the local placeholder key is never sent to ollama.com", async () => {
+  // The fetch sentinel throws if a request is attempted, so reaching the
+  // network fails the test.
+  await withAuth({ ollama: { type: "api_key", key: "ollama" } }, async () => {
+    globalThis.fetch = () => {
+      throw new Error("unsupported adapters must not make a network request");
+    };
+    const report = await quotaReport("ollama");
+    assert.equal(report.kind, "unsupported");
+    assert.match(report.note, /API key|session cookie/);
+  });
+});

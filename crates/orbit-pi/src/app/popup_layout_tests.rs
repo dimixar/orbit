@@ -1,5 +1,158 @@
 use super::*;
 
+// ── settings select popup anchoring ───────────────────────────────────
+
+/// A settings select control: a 26 px chip with its popup anchored to a
+/// zero-size point at the chip's top-right, exactly like `select_control`.
+/// `legacy` reproduces the old `Local` + snap anchoring; the fixed code
+/// uses `Window` mode so `anchored` can flip the popup when it would
+/// overflow the viewport.
+struct SettingsSelectAnchorProbe {
+    legacy: bool,
+    /// Place the chip near the viewport bottom instead of the top.
+    near_bottom: bool,
+}
+
+impl Render for SettingsSelectAnchorProbe {
+    fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let vp = window.viewport_size();
+        let gap = if self.near_bottom {
+            vp.height - px(80.)
+        } else {
+            px(120.)
+        };
+        let chip = div()
+            .id("anchor-chip")
+            .debug_selector(|| "anchor-chip".to_string())
+            .h(px(26.))
+            .w(px(120.))
+            .bg(gpui::black());
+        let popup = div()
+            .id("anchor-popup")
+            .debug_selector(|| "anchor-popup".to_string())
+            .w(px(360.))
+            .h(px(240.))
+            .bg(gpui::black());
+        let anchored_popup = if self.legacy {
+            anchored()
+                .position_mode(AnchoredPositionMode::Local)
+                .anchor(Corner::BottomRight)
+                .offset(point(px(0.), px(-4.)))
+                .snap_to_window()
+                .child(deferred(popup))
+                .into_any_element()
+        } else {
+            anchored()
+                .position_mode(AnchoredPositionMode::Window)
+                .anchor(Corner::TopRight)
+                .offset(point(px(0.), px(30.)))
+                .child(deferred(popup))
+                .into_any_element()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .items_end()
+            .w(px(600.))
+            .child(div().h(gap).flex_none())
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_end()
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .size(px(0.))
+                            .child(anchored_popup),
+                    )
+                    .child(chip),
+            )
+    }
+}
+
+/// The old `Local` + `snap_to_window` anchor cannot flip: with no room
+/// above the chip, the snap slides the popup down over the chip itself,
+/// so a second click on the chip lands inside the popup instead of
+/// toggling it closed.
+#[gpui::test]
+fn local_snap_anchor_covers_the_chip_near_the_viewport_top(cx: &mut gpui::TestAppContext) {
+    let cx = cx.add_empty_window();
+    let _ = cx.draw(
+        point(px(0.), px(0.)),
+        gpui::size(px(600.), px(800.)),
+        |_, cx| {
+            cx.new(|_| SettingsSelectAnchorProbe {
+                legacy: true,
+                near_bottom: false,
+            })
+        },
+    );
+    let chip = cx.debug_bounds("anchor-chip").expect("chip laid out");
+    let popup = cx.debug_bounds("anchor-popup").expect("popup laid out");
+    assert!(
+        popup.top() < chip.bottom() && popup.bottom() > chip.top(),
+        "expected the snapped popup to cover the chip: chip {chip:?}, popup {popup:?}"
+    );
+}
+
+/// The fixed anchor drops the popup below the chip, right-aligned, with a
+/// 4 px gap — the platform's combobox direction and the pattern every
+/// other dropdown in the app follows.
+#[gpui::test]
+fn settings_select_popup_opens_below_its_chip(cx: &mut gpui::TestAppContext) {
+    let cx = cx.add_empty_window();
+    let _ = cx.draw(
+        point(px(0.), px(0.)),
+        gpui::size(px(600.), px(800.)),
+        |_, cx| {
+            cx.new(|_| SettingsSelectAnchorProbe {
+                legacy: false,
+                near_bottom: false,
+            })
+        },
+    );
+    let chip = cx.debug_bounds("anchor-chip").expect("chip laid out");
+    let popup = cx.debug_bounds("anchor-popup").expect("popup laid out");
+    assert_eq!(
+        popup.right(),
+        chip.right(),
+        "popup right-aligns to the chip"
+    );
+    assert_eq!(
+        popup.top() - chip.bottom(),
+        px(4.),
+        "4 px gap below the chip"
+    );
+}
+
+/// Near the viewport bottom the popup flips above the chip rather than
+/// snapping over it; it sits flush so the chip stays clickable.
+#[gpui::test]
+fn settings_select_popup_flips_above_near_the_viewport_bottom(cx: &mut gpui::TestAppContext) {
+    let cx = cx.add_empty_window();
+    let _ = cx.draw(
+        point(px(0.), px(0.)),
+        gpui::size(px(600.), px(800.)),
+        |_, cx| {
+            cx.new(|_| SettingsSelectAnchorProbe {
+                legacy: false,
+                near_bottom: true,
+            })
+        },
+    );
+    let chip = cx.debug_bounds("anchor-chip").expect("chip laid out");
+    let popup = cx.debug_bounds("anchor-popup").expect("popup laid out");
+    assert_eq!(
+        popup.bottom(),
+        chip.top(),
+        "popup sits flush above the chip"
+    );
+    assert!(popup.top() >= px(0.), "flipped popup stays on screen");
+}
+
 /// The settings popup's list: a `uniform_list` with an explicit height
 /// (30 px row stride + 8 px vertical padding, capped at 220 px), inside
 /// the popup's flex column under a 34 px search field.

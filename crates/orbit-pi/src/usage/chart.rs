@@ -1,12 +1,10 @@
 //! The usage timeline.
 //!
-//! The plot itself is GPUI Kit's `AreaChart` (`gpui_component::chart`): real
-//! axes, tick labels and a dashed grid, drawn by a maintained implementation
-//! and colored through the [`super::kit`] theme bridge.
-//!
-//! Orbit keeps the parts the framework does not provide: the compact y-axis
-//! figures, the hover marker and the readout card — the page's own interaction,
-//! in the page's own type (§18/§56).
+//! The plot is drawn with GPUI's own `canvas`: a dashed grid, a filled area and
+//! a straight stroke, in the app's palette. Orbit keeps the parts a general
+//! chart library cannot know: the compact y-axis figures, the hover marker and
+//! the readout card — the page's own interaction, in the page's own type
+//! (§18/§56).
 //!
 //! Restraint is the point (§17): one accent, straight segments, no rainbow.
 //! The chart is a measurement, not a poster.
@@ -14,11 +12,9 @@
 use std::rc::Rc;
 
 use gpui::{
-    div, prelude::*, px, relative, AnyElement, App, ElementId, FontWeight, IntoElement,
-    MouseButton, SharedString, Window,
+    canvas, div, fill, point, prelude::*, px, relative, size, AnyElement, App, Bounds, ElementId,
+    FontWeight, Hsla, IntoElement, MouseButton, PathBuilder, SharedString, Window,
 };
-use gpui_component::chart::AreaChart;
-use gpui_component::plot::AXIS_GAP;
 
 use super::aggregate::{ChartMetric, LatencyMetric, TimeSeries};
 use super::format;
@@ -27,8 +23,12 @@ use crate::theme::Theme;
 const PLOT_H: f32 = 168.;
 const Y_AXIS_W: f32 = 56.;
 const TOOLTIP_W: f32 = 208.;
+/// The strip below the plot reserved for the x-axis labels.
+const AXIS_GAP: f32 = 18.;
 /// Most x-axis labels before they start colliding.
 const MAX_X_LABELS: usize = 8;
+/// Approximate width of one x-axis label, used to center it on its bucket.
+const X_LABEL_W: f32 = 64.;
 
 /// The page's hover callback: the bucket under the pointer, or nothing.
 type HoverFn = Rc<dyn Fn(Option<usize>, &mut Window, &mut App)>;
@@ -60,14 +60,6 @@ pub fn format_point(
     point: &super::aggregate::SeriesPoint,
 ) -> String {
     axis_label(point_value(metric, latency_metric, point), metric)
-}
-
-/// One plotted point. The framework's chart takes an owned data set and two
-/// accessor closures, so the row is a plain value type.
-#[derive(Clone)]
-struct Datum {
-    label: SharedString,
-    value: f64,
 }
 
 /// Round a maximum up to a friendly axis top (1/2/2.5/5 × 10ⁿ).
@@ -128,27 +120,15 @@ pub fn timeline(
     let count = values.len();
     let accent = theme.accent;
 
-    let data: Vec<Datum> = series
-        .points
-        .iter()
-        .zip(values.iter())
-        .map(|(bucket, value)| Datum {
-            label: bucket.label.clone().into(),
-            value: *value,
-        })
-        .collect();
-
-    // X labels: the framework draws every `tick_margin`-th one.
+    // X labels: one every `tick_margin` buckets, so names never collide.
     let tick_margin = if count <= MAX_X_LABELS {
         1
     } else {
         count.div_ceil(MAX_X_LABELS)
     };
 
-    // Y axis: five figures, each centered on the grid line it names. The
-    // framework draws those lines at quarters of `height = PLOT_H - AXIS_GAP`,
-    // so the labels are placed at the same fractions rather than distributed
-    // by eye — and in the same 10px register as the framework's x labels.
+    // Y axis: five figures, each centered on the grid line it names, in the
+    // same 10px register as the x labels.
     let plot_h = PLOT_H - AXIS_GAP;
     let line_h = theme.ui_px(10.) * 1.4;
     let axis = div()
@@ -218,25 +198,20 @@ pub fn timeline(
         .flex_1()
         .min_w_0()
         .h(px(PLOT_H))
-        .child(
-            div().absolute().inset_0().child(
-                AreaChart::new(data)
-                    .x(|datum: &Datum| datum.label.clone())
-                    .y(|datum: &Datum| datum.value)
-                    .tick_margin(tick_margin)
-                    .stroke(accent)
-                    .fill(accent.opacity(0.14))
-                    // Buckets are discrete measurements; the framework's
-                    // default smoothing would imply values between them.
-                    .linear(),
-            ),
-        )
+        // The plot itself: grid, area and stroke, painted by the canvas.
+        .child(div().absolute().inset_0().child(plot_canvas(
+            values.clone(),
+            max,
+            accent,
+            theme.border,
+        )))
+        // The x labels, in the axis strip below the plot.
+        .child(x_axis_labels(series, count, tick_margin, theme))
         // A selected bucket keeps a visible band so the active time scope is
         // obvious even after the pointer leaves (§73).
         .children(selected.map(|ix| selection_band(ix, count, theme)))
-        // The framework's plot has no hover state of its own, so the page owns
-        // the pointer: one invisible cell per bucket, plus a guide line and a
-        // marker drawn by the plot's decoration overlay.
+        // The page owns the pointer: one invisible cell per bucket, plus a
+        // guide line and a marker drawn over the plot.
         .children(hover.map(|ix| marker(ix, count, values[ix], max, theme)))
         .child(
             div()
@@ -259,6 +234,118 @@ pub fn timeline(
         .flex()
         .flex_col()
         .child(div().w_full().flex().items_start().child(axis).child(plot))
+}
+
+/// The plot's geometry, painted directly: a dashed grid, the baseline, the
+/// filled area under the series, then the series line on top.
+///
+/// Points sit at their bucket's center, so the marker and the selection band —
+/// both positioned from the same fractions — land on the line (§73).
+fn plot_canvas(values: Vec<f64>, max: f64, accent: Hsla, grid: Hsla) -> AnyElement {
+    canvas(
+        |_, _, _| (),
+        move |bounds: Bounds<gpui::Pixels>, _, window, _| {
+            let width = f32::from(bounds.size.width);
+            let plot_h = f32::from(bounds.size.height) - AXIS_GAP;
+            if width <= 0. || plot_h <= 0. {
+                return;
+            }
+
+            let at = |x: f32, y: f32| point(bounds.origin.x + px(x), bounds.origin.y + px(y));
+
+            // Dashed grid at the quarter lines, solid baseline at the foot.
+            let dash: f32 = 4.;
+            let gap: f32 = 2.;
+            for step in 0..4 {
+                let y = plot_h * step as f32 / 4.0;
+                let mut x = 0.;
+                while x < width {
+                    let w = dash.min(width - x);
+                    window.paint_quad(fill(Bounds::new(at(x, y), size(px(w), px(1.))), grid));
+                    x += dash + gap;
+                }
+            }
+            window.paint_quad(fill(
+                Bounds::new(at(0., plot_h), size(px(width), px(1.))),
+                grid,
+            ));
+
+            if values.is_empty() {
+                return;
+            }
+            let n = values.len();
+            let x_at = |i: usize| (i as f32 + 0.5) / n as f32 * width;
+            let y_at = |v: f64| plot_h * (1.0 - (v / max.max(f64::EPSILON)).clamp(0.0, 1.0) as f32);
+
+            // Area: the line, down to the baseline and closed.
+            let mut area = PathBuilder::fill();
+            area.move_to(at(x_at(0), y_at(values[0])));
+            for (i, v) in values.iter().enumerate().skip(1) {
+                area.line_to(at(x_at(i), y_at(*v)));
+            }
+            area.line_to(at(x_at(n - 1), plot_h));
+            area.line_to(at(x_at(0), plot_h));
+            area.close();
+            if let Ok(path) = area.build() {
+                window.paint_path(path, accent.opacity(0.14));
+            }
+
+            // The line itself.
+            let mut line = PathBuilder::stroke(px(1.));
+            line.move_to(at(x_at(0), y_at(values[0])));
+            for (i, v) in values.iter().enumerate().skip(1) {
+                line.line_to(at(x_at(i), y_at(*v)));
+            }
+            if let Ok(path) = line.build() {
+                window.paint_path(path, accent);
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+    .into_any_element()
+}
+
+/// The x-axis labels, centered under their buckets. The first and last hug the
+/// plot edges so they are never clipped by the column.
+fn x_axis_labels(
+    series: &TimeSeries,
+    count: usize,
+    tick_margin: usize,
+    theme: Theme,
+) -> AnyElement {
+    let mut strip = div()
+        .absolute()
+        .bottom_0()
+        .left_0()
+        .w_full()
+        .h(px(AXIS_GAP))
+        .text_size(theme.ui_px(10.))
+        .text_color(theme.text_3);
+    for (i, point) in series.points.iter().enumerate() {
+        if (i + 1) % tick_margin != 0 {
+            continue;
+        }
+        let fraction = (i as f32 + 0.5) / count.max(1) as f32;
+        let label = div()
+            .absolute()
+            .top(px(4.))
+            .whitespace_nowrap()
+            .child(point.label.clone());
+        let label = if i == 0 {
+            label.left_0()
+        } else if i + 1 == count {
+            label.right_0()
+        } else {
+            label
+                .left(relative(fraction))
+                .w(px(X_LABEL_W))
+                .ml(px(-(X_LABEL_W / 2.)))
+                .text_align(gpui::TextAlign::Center)
+        };
+        strip = strip.child(label);
+    }
+    strip.into_any_element()
 }
 
 /// The hover guide and marker: pure layout, so no canvas is needed.

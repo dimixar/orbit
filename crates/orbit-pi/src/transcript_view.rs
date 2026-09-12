@@ -3045,6 +3045,27 @@ fn render_prose(
     )
 }
 
+/// Render a standalone markdown document — a skill's `SKILL.md` body — with
+/// the transcript's block renderer and no transcript-specific state, so the
+/// two surfaces can never drift.
+pub(crate) fn render_markdown_document(text: &str, theme: Theme) -> impl IntoElement + use<> {
+    let copied: CopiedSections = Rc::new(RefCell::new(HashMap::new()));
+    let expanded: ExpandedBlocks = Rc::new(RefCell::new(HashSet::new()));
+    // Not collapsible: the page has no persistent fold state for a document
+    // preview, and a fold control that could not remember its state would be
+    // a broken affordance.
+    render_prose(
+        text,
+        0,
+        0,
+        theme,
+        copied,
+        expanded,
+        false,
+        MessageScrollerState::new(1),
+    )
+}
+
 /// Vertical space to place *above* `next`, given `prev`. More room above a
 /// heading than below it, tight joins for lists and their introducer, and a
 /// clear break around code and tables (the brief's rhythm table).
@@ -3762,7 +3783,7 @@ fn workspace_relative_path(path: &str, workspace: Option<&Path>) -> String {
 /// Waku `ChangedFilesCard`: raised tile, "Changed N files" with a ±delta
 /// underneath, a Review affordance, and roomy file rows with right-aligned
 /// line counts. Shows 3 rows; expanded shows up to 12 with a clip note.
-fn render_changed_files(
+pub(crate) fn render_changed_files(
     files: &[(String, u64, u64)],
     theme: Theme,
     message_ix: usize,

@@ -162,11 +162,11 @@ impl Render for OrbitApp {
 
         // ── top-bar right controls ──
         let mut top_controls = div().flex().items_center().gap_2();
-        top_controls = top_controls.children(self.render_open_in_control(cx));
         // Provider quota — a compact, provider-independent headroom meter.
         // Hidden entirely on a pi without `quota.*` (or when no provider
         // reports anything), so the bar never shows a fabricated value.
         top_controls = top_controls.children(self.render_quota_pill(cx));
+        top_controls = top_controls.children(self.render_open_in_control(cx));
         top_controls = top_controls
             .child(
                 div()
@@ -246,6 +246,17 @@ impl Render for OrbitApp {
                         },
                     )),
             );
+
+        // A blocking extension dialog owns the keyboard while it is open. Focus
+        // it (or its text field) once, on the first frame it appears — `tick`
+        // has no window to focus with.
+        let dialog_layer = self.dialog.clone();
+        if let Some(dialog) = &dialog_layer {
+            if self.dialog_focus_pending {
+                self.dialog_focus_pending = false;
+                window.focus(&dialog.read(cx).focus_handle(cx));
+            }
+        }
 
         div()
             .size_full()
@@ -390,6 +401,9 @@ impl Render for OrbitApp {
                                     ),
                             )
                             .child(div().flex_1())
+                            .when_some(self.sidebar_updater_button(theme, cx), |footer, button| {
+                                footer.child(button).child(div().w(px(8.)))
+                            })
                             .child(
                                 div()
                                     .flex()
@@ -611,6 +625,10 @@ impl Render for OrbitApp {
                     .clone()
                     .map(|palette| command_palette::layer(palette).into_any_element()),
             )
+            // ── extension dialog (select / confirm / input / editor) — a
+            // blocking modal above every other surface; pi holds the run until
+            // the user answers. It cancels the incoming request otherwise.
+            .children(dialog_layer.map(|dialog| crate::dialog::layer(dialog).into_any_element()))
             .track_focus(&self.focus_handle(cx))
             // Sidebar resize: fires for every mouse move while the handle
             // drag is active, wherever the pointer travels.
@@ -646,6 +664,7 @@ impl Render for OrbitApp {
                 },
             ))
             .on_action(cx.listener(Self::on_submit))
+            .on_action(cx.listener(Self::on_autocomplete_accept))
             .on_action(cx.listener(Self::on_abort))
             .on_action(cx.listener(Self::on_refresh))
             .on_action(cx.listener(Self::on_copy_last_response))
@@ -654,6 +673,7 @@ impl Render for OrbitApp {
             .on_action(cx.listener(Self::on_open_settings))
             .on_action(cx.listener(Self::on_toggle_usage))
             .on_action(cx.listener(Self::on_toggle_command_palette))
+            .on_action(cx.listener(Self::on_check_for_updates))
     }
 }
 
@@ -1237,7 +1257,7 @@ impl OrbitApp {
                         .clone()
                         .or_else(|| std::env::current_dir().ok())
                         .unwrap_or_else(|| PathBuf::from("."));
-                    match PiClient::spawn(&workspace, None) {
+                    match app.quota_bridge.spawn(&workspace) {
                         Ok(client) => {
                             app.client = Some(client);
                             app.send(CommandBody::GetState, "get_state");
@@ -1511,19 +1531,14 @@ impl OrbitApp {
             })
     }
 
-    /// Status bar under the composer: workspace / transport / branch on the
-    /// left, used-context percent + ring on the right.
+    /// Status bar under the composer: workspace / branch on the left,
+    /// used-context percent + ring on the right.
     pub(super) fn status_bar(
         &self,
         workspace_label: &str,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = *theme::get(cx);
-        let cwd = self
-            .current_workspace
-            .clone()
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_default();
         div()
             .pt_1p5()
             .w_full()
@@ -1548,15 +1563,7 @@ impl OrbitApp {
                     .child(icon("icons/folder.svg", 12., theme.text_3))
                     .child(workspace_label.to_string()),
             )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1p5()
-                    .child(icon("icons/monitor.svg", 12., theme.text_3))
-                    .child("Local"),
-            )
-            .children(crate::git::current_branch(&cwd).map(|branch| {
+            .children(self.branch.as_ref().map(|branch| {
                 let open = self.branch_picker.is_some();
                 let pending = self.branch_operation_pending;
                 div()
@@ -1587,7 +1594,15 @@ impl OrbitApp {
                                 }),
                             )
                             .child(icon("icons/branch.svg", 12., theme.text_3))
-                            .child(branch),
+                            .child(branch.name.clone())
+                            .children((branch.ahead > 0 || branch.behind > 0).then(|| {
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(format!("↑{}", branch.ahead))
+                                    .child(format!("↓{}", branch.behind))
+                            })),
                     )
                     .children(self.branch_picker_popup())
                     .into_any_element()

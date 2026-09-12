@@ -1,5 +1,7 @@
 use super::helpers::*;
 use super::*;
+use crate::context_meter::context_ring;
+use crate::quota::{is_five_hour_window, QuotaHeadline};
 
 impl OrbitApp {
     pub(super) fn submit(&mut self, text: String, cx: &mut Context<Self>) {
@@ -200,6 +202,22 @@ impl OrbitApp {
         self.submit(text, cx);
     }
 
+    /// Tab accepts the highlighted autocomplete entry; with the menu closed
+    /// it is a no-op (gpui binds no tab navigation in the Composer context).
+    pub(super) fn on_autocomplete_accept(
+        &mut self,
+        _: &crate::AutocompleteAccept,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Only the main composer owns the completion menu — picker filter
+        // inputs share the `Composer` key context but must never reach it.
+        if !self.input.read(cx).focus_handle(cx).is_focused(window) {
+            return;
+        }
+        self.commit_autocomplete_if_open(cx);
+    }
+
     pub(super) fn on_send_click(
         &mut self,
         _: &MouseUpEvent,
@@ -325,6 +343,9 @@ impl OrbitApp {
             return;
         }
 
+        // Leaving this session: cancel any open blocking dialog first, so a
+        // parked run never waits on a modal tied to the previous session.
+        self.cancel_open_dialog(cx);
         if let Some(old_path) = self.current_session_path.take() {
             let old_busy = self.busy || self.transcript.is_streaming();
             if let Some(client) = self.client.take() {
@@ -355,7 +376,7 @@ impl OrbitApp {
         self.reset_queue();
         self.current_workspace = Some(cwd.clone());
 
-        match PiClient::spawn(&cwd, None) {
+        match self.quota_bridge.spawn(&cwd) {
             Ok(client) => {
                 self.adopt_client(client);
                 self.send(CommandBody::NewSession, "new_session");
@@ -412,6 +433,9 @@ impl OrbitApp {
         if self.current_session_path.as_ref() == Some(&session.path) {
             return;
         }
+        // A blocking dialog belongs to the session being left; cancel it so
+        // the now-parked run can settle instead of waiting on an unseen modal.
+        self.cancel_open_dialog(cx);
         // ── park the outgoing session ──
         if let Some(old_path) = self.current_session_path.take() {
             let old_busy = self.busy || self.transcript.is_streaming();
@@ -459,11 +483,9 @@ impl OrbitApp {
             // Fresh open: spawn a dedicated pi process rooted at the
             // session's workspace and point it at the session file. The
             // `switch_session` response triggers the get_messages snapshot.
-            let spawned = PiClient::spawn(&session.cwd, None).or_else(|_| {
-                PiClient::spawn(
-                    &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-                    None,
-                )
+            let spawned = self.quota_bridge.spawn(&session.cwd).or_else(|_| {
+                self.quota_bridge
+                    .spawn(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
             });
             match spawned {
                 Ok(client) => {
@@ -797,16 +819,14 @@ impl OrbitApp {
         )
     }
 
-    /// The top-bar quota pill: the single most-constraining provider window
-    /// across every connected account, as a tiny meter plus percentage. This is
-    /// deliberately provider-independent — it reads the normalized
-    /// [`QuotaReport`] list and never names a specific provider in code, so a
-    /// new adapter needs no UI change. `None` (hidden) when pi lacks `quota.*`
-    /// or nothing has been reported yet.
+    /// The top-bar quota pill: the rolling 5-hour limit of the provider the
+    /// active model is using — provider mark, window label, percentage, and
+    /// a context-style ring gauge — falling back to that provider's
+    /// most-constrained window or balance, then to the account that will run
+    /// out first. It stays provider-independent: everything comes from the
+    /// normalized [`QuotaReport`] list, so a new adapter needs no UI change.
+    /// `None` (hidden) when pi lacks `quota.*` or nothing has been reported.
     pub(super) fn render_quota_pill(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        // Something to show at all? A balance-only provider (DeepSeek,
-        // OpenRouter) has no percentage window but is still worth surfacing,
-        // so the pill falls back to a compact label instead of hiding.
         if self.quota.reports().is_empty() {
             return None;
         }
@@ -826,37 +846,74 @@ impl OrbitApp {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_quota_click))
             .children(self.render_quota_popup(cx));
 
-        match self.quota.peak_window() {
-            Some((_, peak)) => {
-                if let Some(fraction) = peak.fraction() {
-                    let percent = (fraction * 100.0).round() as i32;
+        // The provider mark and name anchor every headline: the meter is
+        // only truthful if the account it belongs to is named beside it.
+        let provider_head = |report: &QuotaReport| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(icon_dyn(provider_icon(&report.provider), 12., theme.text_3))
+                .child(
+                    div()
+                        .max_w(px(96.))
+                        .truncate()
+                        .text_size(theme.ui_px(11.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_2)
+                        .child(providers::provider_display_name(&report.provider)),
+                )
+        };
+
+        match self.quota.headline(&self.model_provider) {
+            QuotaHeadline::Window { report, window } => {
+                pill = pill.child(provider_head(report)).child(
+                    div()
+                        .max_w(px(72.))
+                        .truncate()
+                        .text_size(theme.ui_px(10.5))
+                        .text_color(theme.text_3)
+                        .child(if is_five_hour_window(window) {
+                            "5h".to_string()
+                        } else {
+                            window.label.clone()
+                        }),
+                );
+                if let Some(fraction) = window.fraction() {
                     pill = pill
                         .child(
                             div()
-                                .w(px(44.))
-                                .h(px(5.))
-                                .rounded_full()
-                                .overflow_hidden()
-                                .bg(theme.overlay_strong)
-                                .child(
-                                    div()
-                                        .h_full()
-                                        .rounded_full()
-                                        .bg(quota_tint(fraction, theme))
-                                        .w(relative(fraction)),
-                                ),
-                        )
-                        .child(
-                            div()
                                 .text_size(theme.ui_px(11.5))
-                                .text_color(theme.text_2)
-                                .child(format!("{percent}%")),
-                        );
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(format!("{}%", (fraction * 100.0).round() as i32)),
+                        )
+                        .child(context_ring(
+                            fraction,
+                            quota_tint(fraction, theme),
+                            theme.ring_track,
+                        ));
                 }
             }
-            // No percentage/used-limit pair anywhere (credits/balance only):
-            // a quiet label keeps the popover reachable.
-            None => {
+            // A balance-only account (DeepSeek, OpenRouter) has no window to
+            // meter; the amount is the whole story.
+            QuotaHeadline::Balance { report, balance } => {
+                let text = if balance.currency.is_empty() {
+                    quota_amount(balance.amount)
+                } else {
+                    format!("{} {}", quota_amount(balance.amount), balance.currency)
+                };
+                pill = pill.child(provider_head(report)).child(
+                    div()
+                        .text_size(theme.ui_px(11.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(text),
+                );
+            }
+            // Nothing metered anywhere (notes, errors): a quiet label keeps
+            // the popover reachable.
+            QuotaHeadline::Quiet => {
                 pill = pill
                     .child(icon("icons/spark.svg", 13., theme.text_2))
                     .child(
@@ -881,7 +938,10 @@ impl OrbitApp {
         let theme = *theme::get(cx);
         let this = cx.entity();
 
+        let reports = self.quota.reports();
+        let count = reports.len();
         let header = div()
+            .flex_none()
             .px(px(12.))
             .py(px(10.))
             .border_b_1()
@@ -898,22 +958,39 @@ impl OrbitApp {
             )
             .child(
                 div()
-                    .text_size(theme.ui_px(10.5))
-                    .text_color(theme.text_3)
-                    .child("subscription quota"),
+                    .text_size(theme.ui_px(11.))
+                    .text_color(theme.text_2)
+                    .child(if count == 1 {
+                        "1 provider".to_string()
+                    } else {
+                        format!("{count} providers")
+                    }),
             );
 
-        let reports = self.quota.reports();
-        let body = div().flex().flex_col().child(header).children(
-            reports
-                .iter()
-                .map(|report| quota_provider_row(report, theme)),
+        // One card per provider, 8 px apart: the boundary between accounts
+        // is what tells a glance which numbers belong together.
+        let body = div().flex().flex_col().child(header).child(
+            div()
+                .id("quota-popup-body")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .p(px(8.))
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .children(
+                    reports
+                        .iter()
+                        .map(|report| quota_provider_card(self, report, theme)),
+                ),
         );
 
         let popup = div()
             .w(px(320.))
+            .max_h(px(460.))
             .font_family(theme::ui_font_family())
-            .rounded(px(8.))
+            .rounded(px(12.))
             .border_1()
             .border_color(theme.border_strong)
             .bg(theme.menu_bg)
@@ -927,6 +1004,10 @@ impl OrbitApp {
                 move |_: &MouseDownEvent, _, cx: &mut App| {
                     this.update(cx, |app, cx| {
                         if app.quota_popup_open {
+                            // Arm the click-through guard so this same
+                            // click's mouse-up on the pill cannot
+                            // immediately re-open the popover.
+                            app.menu_dismissed_at = Some(Instant::now());
                             app.quota_popup_open = false;
                             cx.notify();
                         }
@@ -960,6 +1041,14 @@ impl OrbitApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A dismissal from this same click's mouse-down must not
+        // immediately re-open (see `toggle_session_menu`).
+        const GESTURE: Duration = Duration::from_millis(200);
+        if let Some(dismissed) = self.menu_dismissed_at.take() {
+            if dismissed.elapsed() < GESTURE {
+                return;
+            }
+        }
         self.quota_popup_open = !self.quota_popup_open;
         // The quota popover and the session-details popover share the top
         // bar; only one is meaningful at a time.
@@ -1153,52 +1242,102 @@ fn quota_tint(fraction: f32, theme: Theme) -> Hsla {
     }
 }
 
-/// One provider block in the top-bar quota popover. Provider-independent: it
-/// renders whatever the normalized report carries (windows, balances, note,
-/// error) and names the provider by id only, never a bespoke label.
-fn quota_provider_row(report: &QuotaReport, theme: Theme) -> AnyElement {
-    let name = providers::provider_display_name(&report.provider);
-    let amount = |value: f64| -> String {
-        if value.fract() == 0.0 {
-            format!("{value:.0}")
+/// Amount text for the quota surfaces: whole amounts drop the decimals so a
+/// balance reads `110 CNY`, not `110.00 CNY`.
+fn quota_amount(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.2}")
+    }
+}
+
+/// Countdown copy for a window reset in the top-bar popover: `resets in
+/// 3h 12m` is read at a glance where an absolute timestamp needs arithmetic.
+/// Past a week the countdown stops helping, and a timestamp in the past is
+/// stale, so both fall back to the absolute local time the Settings card
+/// shows. `now_ms` is injected to keep the label a pure function.
+fn quota_reset_hint(resets_at: i64, now_ms: i64) -> String {
+    const MINUTE: i64 = 60_000;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+    let remaining = resets_at.saturating_sub(now_ms);
+    let hint = if remaining <= 0 {
+        return format!("resets {}", format_epoch_ms(resets_at));
+    } else if remaining < MINUTE {
+        "in <1m".to_string()
+    } else if remaining < HOUR {
+        format!("in {}m", remaining / MINUTE)
+    } else if remaining < DAY {
+        let hours = remaining / HOUR;
+        let minutes = (remaining % HOUR) / MINUTE;
+        if minutes == 0 {
+            format!("in {hours}h")
         } else {
-            format!("{value:.2}")
+            format!("in {hours}h {minutes}m")
         }
+    } else if remaining < 7 * DAY {
+        let days = remaining / DAY;
+        let hours = (remaining % DAY) / HOUR;
+        if hours == 0 {
+            format!("in {days}d")
+        } else {
+            format!("in {days}d {hours}h")
+        }
+    } else {
+        return format!("resets {}", format_epoch_ms(resets_at));
     };
+    format!("resets {hint}")
+}
+
+/// One provider card in the top-bar quota popover: a raised block carrying
+/// the provider's mark, plan, windows, and balances, with the meter and its
+/// countdown beside every window. Provider-independent: it renders whatever
+/// the normalized report carries (windows, balances, note, error) and names
+/// the provider by id only, never a bespoke label.
+fn quota_provider_card(app: &OrbitApp, report: &QuotaReport, theme: Theme) -> AnyElement {
+    let name = providers::provider_display_name(&report.provider);
+    let amount = quota_amount;
 
     let mut header = div()
-        .px(px(12.))
-        .pt(px(10.))
-        .pb(px(4.))
         .flex()
         .items_center()
-        .gap(px(6.))
+        .gap(px(7.))
+        .child(icon_dyn(provider_icon(&report.provider), 13., theme.text_3))
         .child(
             div()
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_size(theme.ui_px(11.5))
+                .text_size(theme.ui_px(12.))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.text)
                 .child(name),
         );
     if let Some(plan) = &report.plan {
-        header = header.child(
-            div()
-                .px(px(6.))
-                .h(px(16.))
-                .rounded_sm()
-                .bg(theme.accent.opacity(0.12))
-                .text_size(theme.ui_px(10.))
-                .text_color(theme.accent)
-                .flex()
-                .items_center()
-                .child(plan.clone()),
-        );
+        header = header.child(app.provider_badge(
+            plan,
+            theme.accent,
+            theme.accent.opacity(0.12),
+            theme,
+        ));
     }
 
-    let mut block = div().pb(px(6.)).flex().flex_col().child(header);
+    // The card fill is the ink wash rather than `bg_raised`: most palettes
+    // set `menu_bg == bg_raised`, where a raised fill would vanish inside
+    // the popup. The wash steps off any surface in every palette.
+    let mut block = div()
+        .w_full()
+        .rounded(px(8.))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.overlay)
+        .px(px(12.))
+        .py(px(10.))
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .child(header);
 
     for window in &report.windows {
         let value = if let Some(percent) = window.used_percent {
@@ -1215,11 +1354,10 @@ fn quota_provider_row(report: &QuotaReport, theme: Theme) -> AnyElement {
         };
 
         let mut row = div()
-            .px(px(12.))
-            .py(px(3.))
+            .w_full()
             .flex()
             .flex_col()
-            .gap(px(4.))
+            .gap(px(5.))
             .child(
                 div()
                     .flex()
@@ -1237,7 +1375,8 @@ fn quota_provider_row(report: &QuotaReport, theme: Theme) -> AnyElement {
                     .child(
                         div()
                             .flex_none()
-                            .text_size(theme.ui_px(11.))
+                            .text_size(theme.ui_px(11.5))
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
                             .child(value),
                     ),
@@ -1247,10 +1386,10 @@ fn quota_provider_row(report: &QuotaReport, theme: Theme) -> AnyElement {
             row = row.child(
                 div()
                     .w_full()
-                    .h(px(4.))
+                    .h(px(5.))
                     .rounded_full()
                     .overflow_hidden()
-                    .bg(theme.overlay_strong)
+                    .bg(theme.trough)
                     .child(
                         div()
                             .h_full()
@@ -1263,9 +1402,12 @@ fn quota_provider_row(report: &QuotaReport, theme: Theme) -> AnyElement {
         if let Some(resets_at) = window.resets_at {
             row = row.child(
                 div()
-                    .text_size(theme.ui_px(10.))
-                    .text_color(theme.text_3)
-                    .child(format!("resets {}", format_epoch_ms(resets_at))),
+                    .text_size(theme.ui_px(10.5))
+                    .text_color(theme.text_2)
+                    .child(quota_reset_hint(
+                        resets_at,
+                        chrono::Local::now().timestamp_millis(),
+                    )),
             );
         }
         block = block.child(row);
@@ -1279,8 +1421,7 @@ fn quota_provider_row(report: &QuotaReport, theme: Theme) -> AnyElement {
         };
         block = block.child(
             div()
-                .px(px(12.))
-                .py(px(3.))
+                .w_full()
                 .flex()
                 .items_center()
                 .gap(px(8.))
@@ -1296,7 +1437,8 @@ fn quota_provider_row(report: &QuotaReport, theme: Theme) -> AnyElement {
                 .child(
                     div()
                         .flex_none()
-                        .text_size(theme.ui_px(11.))
+                        .text_size(theme.ui_px(11.5))
+                        .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text)
                         .child(text),
                 ),
@@ -1306,8 +1448,6 @@ fn quota_provider_row(report: &QuotaReport, theme: Theme) -> AnyElement {
     if let Some(error) = &report.error {
         block = block.child(
             div()
-                .px(px(12.))
-                .pt(px(2.))
                 .text_size(theme.ui_px(10.5))
                 .text_color(theme.crit)
                 .child(error.clone()),
@@ -1316,8 +1456,6 @@ fn quota_provider_row(report: &QuotaReport, theme: Theme) -> AnyElement {
         if let Some(note) = &report.note {
             block = block.child(
                 div()
-                    .px(px(12.))
-                    .pt(px(2.))
                     .text_size(theme.ui_px(10.5))
                     .text_color(theme.text_3)
                     .child(note.clone()),
@@ -1326,4 +1464,47 @@ fn quota_provider_row(report: &QuotaReport, theme: Theme) -> AnyElement {
     }
 
     block.into_any_element()
+}
+
+#[cfg(test)]
+mod quota_reset_tests {
+    use super::*;
+
+    const MINUTE: i64 = 60_000;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+
+    #[test]
+    fn reset_hint_reads_as_a_short_countdown() {
+        let now = 1_000_000_000_000;
+        assert_eq!(quota_reset_hint(now + 30_000, now), "resets in <1m");
+        assert_eq!(quota_reset_hint(now + 42 * MINUTE, now), "resets in 42m");
+        assert_eq!(quota_reset_hint(now + 2 * HOUR, now), "resets in 2h");
+        assert_eq!(
+            quota_reset_hint(now + 3 * HOUR + 12 * MINUTE, now),
+            "resets in 3h 12m"
+        );
+        assert_eq!(quota_reset_hint(now + 3 * DAY, now), "resets in 3d");
+        assert_eq!(
+            quota_reset_hint(now + 2 * DAY + 4 * HOUR + 5 * MINUTE, now),
+            "resets in 2d 4h"
+        );
+    }
+
+    #[test]
+    fn reset_hint_falls_back_to_the_absolute_time() {
+        let now = 1_000_000_000_000;
+        // More than a week out: a countdown stops being useful.
+        let far = now + 8 * DAY;
+        assert_eq!(
+            quota_reset_hint(far, now),
+            format!("resets {}", format_epoch_ms(far))
+        );
+        // A stale report (reset time already passed) also stays absolute.
+        let past = now - DAY;
+        assert_eq!(
+            quota_reset_hint(past, now),
+            format!("resets {}", format_epoch_ms(past))
+        );
+    }
 }

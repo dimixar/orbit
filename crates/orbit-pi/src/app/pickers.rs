@@ -129,7 +129,10 @@ impl OrbitApp {
         self.session_usage = None;
         self.reset_turns();
         self.reset_queue();
-        match PiClient::spawn(self.current_workspace.as_ref().unwrap(), None) {
+        match self
+            .quota_bridge
+            .spawn(self.current_workspace.as_ref().unwrap())
+        {
             Ok(client) => {
                 self.adopt_client(client);
                 self.send(CommandBody::GetState, "get_state");
@@ -488,6 +491,7 @@ impl OrbitApp {
                     Ok(()) => app.set_status(format!("Switched to {label}")),
                     Err(err) => app.set_status(format!("Branch switch failed: {err}")),
                 }
+                app.refresh_branch_status(cx);
                 cx.notify();
             });
         })
@@ -518,6 +522,7 @@ impl OrbitApp {
                     Ok(()) => app.set_status(format!("Created and switched to {label}")),
                     Err(err) => app.set_status(format!("Branch create failed: {err}")),
                 }
+                app.refresh_branch_status(cx);
                 cx.notify();
             });
         })

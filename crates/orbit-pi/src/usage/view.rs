@@ -8,19 +8,17 @@
 //! (insights), trend (timeline), breakdowns (models, composition, workspaces,
 //! providers), health (cache, tools, errors), then the record tables.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, relative, AnyElement, App, Context, Corner, Entity, Font, FontFeatures,
-    FontWeight, Hsla, IntoElement, MouseButton, Render, SharedString, Window,
+    anchored, deferred, div, prelude::*, px, relative, AnyElement, App, Context, Corner, Entity,
+    Font, FontFeatures, FontWeight, Hsla, IntoElement, MouseButton, Render, SharedString, Window,
 };
-use gpui_component::table::Table;
-use gpui_component::tooltip::Tooltip;
-use gpui_component::{Sizable as _, Size as KitSize};
 
 use super::aggregate::{
-    Breakdown, ChartMetric, Direction, GroupRow, Insight, LatencyMetric, LatencyStats, Tone,
-    Totals, UsageSnapshot,
+    Breakdown, ChartMetric, Direction, GroupRow, Insight, LatencyMetric, LatencyStats, SessionRow,
+    Tone, Totals, UsageSnapshot,
 };
 use super::chart;
 use super::filters::{self, FilterOption};
@@ -29,7 +27,12 @@ use super::model::{
     next_bucket, Granularity, RangePreset, TimeFocus, TokenCounts, ToolClass, UsageFilter,
     UsageIndex,
 };
-use super::page::{MenuKind, SessionQueryResult, UsagePage};
+use super::page::{BucketSort, MenuKind, SessionQueryResult, SessionSort, UsagePage};
+use super::table::{
+    cell_shell, data_table, empty_cell, text_cell, Column, FailureSort, SortState, TableHandlers,
+    TableKind, ROW_H,
+};
+use super::tooltip::Tooltip;
 use crate::app::icon;
 use crate::theme::{self, Theme};
 
@@ -42,10 +45,9 @@ pub(super) const PAGE_PAD: f32 = 40.;
 const TWO_COLUMN_MIN: f32 = 820.;
 const FOUR_KPI_MIN: f32 = 880.;
 
-/// Heights for the framework tables. Each is a whole number of 26px rows plus
-/// the header, so a table never ends by cutting a row in half. All three scroll
+/// Heights for the tables. Each is a whole number of 26px rows plus the
+/// header, so a table never ends by cutting a row in half. All three scroll
 /// internally rather than growing without bound.
-const ROW_H: f32 = 26.;
 const BUCKET_TABLE_H: f32 = ROW_H * 11.;
 const FAILURE_TABLE_H: f32 = ROW_H * 10.;
 /// Ranked rows per breakdown panel before the tail is pooled into "more".
@@ -1662,7 +1664,7 @@ impl UsagePage {
                 "usage-breakdown-{kind}-{}",
                 row.label
             )))
-            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            .tooltip(move |_, cx| cx.new(|_| Tooltip::new(tooltip.clone())).into())
             .px(px(8.))
             .py(px(5.))
             .rounded(px(6.))
@@ -1821,7 +1823,7 @@ impl UsagePage {
             content = content.child(
                 div()
                     .id(SharedString::from(format!("usage-composition-{label}")))
-                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                    .tooltip(move |_, cx| cx.new(|_| Tooltip::new(tooltip.clone())).into())
                     .px(px(8.))
                     .py(px(4.))
                     .rounded(px(6.))
@@ -2227,11 +2229,9 @@ impl UsagePage {
         &mut self,
         snapshot: &UsageSnapshot,
         theme: Theme,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let state = self.failure_table(window, cx);
-        self.sync_tables(cx);
         let errors = &snapshot.errors;
         // Two different measures, both real: "failed requests" (a request whose
         // stop reason was an error) and recorded failure events (provider
@@ -2249,12 +2249,8 @@ impl UsagePage {
         if errors.rows.is_empty() {
             content = content.child(empty_line("No failed requests in this range.", theme));
         } else {
-            content = content.child(
-                div()
-                    .h(px(FAILURE_TABLE_H))
-                    .w_full()
-                    .child(table_element(&state)),
-            );
+            let table = self.failure_table_element(theme, cx);
+            content = content.child(div().h(px(FAILURE_TABLE_H)).w_full().child(table));
         }
         content = content.child(retry_note(theme));
 
@@ -2286,17 +2282,12 @@ impl UsagePage {
 
     /// Day/week/month table. The granularity adapts with the range, so the
     /// same panel is the weekly and monthly trend view for long windows (§42).
-    ///
-    /// Rendered by GPUI Kit's `Table`: sorting, column resizing and keyboard
-    /// navigation come from the framework, the rows come from the snapshot.
     fn buckets_panel(
         &mut self,
         theme: Theme,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (_, bucket_table) = self.tables(window, cx);
-        self.sync_tables(cx);
         let granularity = self
             .snapshot()
             .map(|snapshot| snapshot.buckets.granularity)
@@ -2313,7 +2304,26 @@ impl UsagePage {
             format::count(rows.len() as u64),
             granularity.label()
         );
-        let _ = theme;
+
+        let (columns, keys) = self.bucket_columns();
+        let rows = self.bucket_row_elements(&columns, &keys, granularity, theme);
+        let table = self.table_element(
+            TableKind::Buckets,
+            "usage-buckets-table",
+            columns,
+            rows,
+            BUCKET_TABLE_H,
+            empty_cell("No buckets in this range.", theme),
+            theme,
+            Rc::new(
+                move |page, ix, sort, cx| match (keys.get(ix).copied(), sort) {
+                    (Some(key), SortState::Ascending) => page.set_bucket_sort(key, false, cx),
+                    (Some(key), SortState::Descending) => page.set_bucket_sort(key, true, cx),
+                    _ => page.set_bucket_sort(BucketSort::Date, true, cx),
+                },
+            ),
+            cx,
+        );
 
         section(
             "usage-buckets",
@@ -2323,25 +2333,22 @@ impl UsagePage {
             div()
                 .h(px(BUCKET_TABLE_H))
                 .w_full()
-                .child(table_element(&bucket_table))
+                .child(table)
                 .into_any_element(),
             theme,
         )
     }
 
-    /// The session table: searchable, sortable, virtualized (§48/§49/§50).
+    /// The session table: searchable, sortable, pageable (§48/§49/§50).
     ///
-    /// The framework owns the mechanics (virtual rows over thousands of
-    /// sessions, resizable columns, keyboard navigation); the page owns the
-    /// ordering, so a header click comes back here before anything re-sorts.
+    /// The page owns the ordering, so a header click comes back here before
+    /// anything re-sorts; the table just draws the page it is handed.
     fn sessions_panel(
         &mut self,
         theme: Theme,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let (session_table, _) = self.tables(window, cx);
-        self.sync_tables(cx);
         let result = self.session_page(cx);
         let search = self.search().clone();
         let all = self
@@ -2391,6 +2398,26 @@ impl UsagePage {
         let table_h = ROW_H * visible_rows + 28.;
         let footer = self.pagination_footer(&result, theme, cx);
 
+        let (columns, keys) = self.session_columns();
+        let rows = self.session_row_elements(&result.rows, &columns, &keys, theme, cx);
+        let table = self.table_element(
+            TableKind::Sessions,
+            "usage-sessions-table",
+            columns,
+            rows,
+            table_h,
+            empty_cell("No sessions match this search.", theme),
+            theme,
+            Rc::new(
+                move |page, ix, sort, cx| match (keys.get(ix).copied().flatten(), sort) {
+                    (Some(key), SortState::Ascending) => page.set_session_sort(key, false, cx),
+                    (Some(key), SortState::Descending) => page.set_session_sort(key, true, cx),
+                    _ => page.set_session_sort(SessionSort::Tokens, true, cx),
+                },
+            ),
+            cx,
+        );
+
         section(
             "usage-sessions",
             "Sessions",
@@ -2400,17 +2427,375 @@ impl UsagePage {
                 .w_full()
                 .flex()
                 .flex_col()
-                .child(
-                    div()
-                        .h(px(table_h))
-                        .w_full()
-                        .child(table_element(&session_table)),
-                )
+                .child(div().h(px(table_h)).w_full().child(table))
                 .children(self.totals_line(&result, theme))
                 .child(footer)
                 .into_any_element(),
             theme,
         )
+    }
+
+    // ── column plans ───────────────────────────────────────────────────────
+
+    /// Session columns plus their sort keys (the trailing affordance is not
+    /// sortable). Widths come from the plan, overridden by any divider drag.
+    fn session_columns(&self) -> (Vec<Column>, Vec<Option<SessionSort>>) {
+        // Room the table steals for its scrollbar, hairlines and cell padding.
+        const CHROME: f32 = 48.;
+        const GAPS: f32 = 12.;
+        const TITLE_MIN: f32 = 180.;
+        const OPEN_W: f32 = 38.;
+        let budget = (self.table_width() - CHROME).max(360.);
+        let hidden = self.hidden_columns();
+        let (sort, desc) = self.session_sort_state();
+
+        // `true` marks a column dropped when the window is too narrow (and
+        // hidden by the user on request).
+        let plan: [(SessionSort, f32, bool); 12] = [
+            (SessionSort::Title, 0., false),
+            (SessionSort::Workspace, 110., false),
+            (SessionSort::Provider, 110., false),
+            (SessionSort::Model, 156., false),
+            (SessionSort::Started, 88., true),
+            (SessionSort::Duration, 92., false),
+            (SessionSort::Requests, 92., false),
+            (SessionSort::Input, 70., true),
+            (SessionSort::Output, 76., true),
+            (SessionSort::Cache, 72., true),
+            (SessionSort::Tokens, 82., false),
+            (SessionSort::Errors, 82., false),
+        ];
+        let keep: Vec<(SessionSort, f32, bool)> = plan
+            .into_iter()
+            .filter(|(key, _, _)| *key == SessionSort::Title || !hidden.contains(key))
+            .collect();
+
+        // Optional columns are added in priority order while the title still
+        // breathes: the per-bucket token columns are the first to go.
+        let mut running: f32 = keep
+            .iter()
+            .filter(|(key, _, optional)| !*optional && *key != SessionSort::Title)
+            .map(|(key, default, _)| self.col_width(TableKind::Sessions, key.as_str(), *default))
+            .sum();
+        let mut keep_optional: Vec<SessionSort> = Vec::new();
+        for (key, default, optional) in &keep {
+            if !*optional {
+                continue;
+            }
+            let width = self.col_width(TableKind::Sessions, key.as_str(), *default);
+            if running + width + OPEN_W + GAPS + TITLE_MIN <= budget {
+                running += width;
+                keep_optional.push(*key);
+            }
+        }
+        let title_default = (budget - running - OPEN_W - GAPS).clamp(TITLE_MIN, 460.);
+
+        let mut columns = Vec::with_capacity(keep.len() + 1);
+        let mut keys = Vec::with_capacity(keep.len() + 1);
+        for (key, default, optional) in keep {
+            if optional && !keep_optional.contains(&key) {
+                continue;
+            }
+            let default = if key == SessionSort::Title {
+                title_default
+            } else {
+                default
+            };
+            let width = self.col_width(TableKind::Sessions, key.as_str(), default);
+            let numeric = !matches!(
+                key,
+                SessionSort::Title
+                    | SessionSort::Workspace
+                    | SessionSort::Provider
+                    | SessionSort::Model
+            );
+            let mut column = Column::new(key.as_str(), key.label())
+                .width(width)
+                .sortable()
+                .sort(sort_state(key == sort, desc));
+            if numeric {
+                column = column.numeric();
+            }
+            columns.push(column);
+            keys.push(Some(key));
+        }
+        // The trailing affordance: no header label, no sorting, fixed width.
+        columns.push(Column::new("open", "").width(OPEN_W));
+        keys.push(None);
+        (columns, keys)
+    }
+
+    /// Breakdown columns plus their sort keys.
+    fn bucket_columns(&self) -> (Vec<Column>, Vec<BucketSort>) {
+        let plan: [(BucketSort, f32, bool); 5] = [
+            (BucketSort::Date, 220., false),
+            (BucketSort::Requests, 104., true),
+            (BucketSort::Tokens, 96., true),
+            (BucketSort::Cache, 104., true),
+            (BucketSort::Errors, 84., true),
+        ];
+        let mut columns = Vec::with_capacity(plan.len());
+        let mut keys = Vec::with_capacity(plan.len());
+        let (sort, desc) = self.bucket_sort_state();
+        for (key, default, numeric) in plan {
+            let width = self.col_width(TableKind::Buckets, key.label(), default);
+            let mut column = Column::new(key.label(), key.label())
+                .width(width)
+                .sortable()
+                .sort(sort_state(key == sort, desc));
+            if numeric {
+                column = column.numeric();
+            }
+            columns.push(column);
+            keys.push(key);
+        }
+        (columns, keys)
+    }
+
+    /// Failure columns plus their sort keys. The message takes the remainder.
+    fn failure_columns(&self) -> (Vec<Column>, Vec<FailureSort>) {
+        let fixed = 108. + 96. + 150. + 200. + 60.;
+        let message_w = (self.table_width() - fixed).clamp(180., 560.);
+        let plan: [(FailureSort, f32); 5] = [
+            (FailureSort::When, 108.),
+            (FailureSort::Kind, 96.),
+            (FailureSort::Model, 150.),
+            (FailureSort::Session, 200.),
+            (FailureSort::Model, message_w),
+        ];
+        let mut columns = Vec::with_capacity(plan.len());
+        let mut keys = Vec::with_capacity(plan.len());
+        let (sort, desc) = self.failure_sort_state();
+        for (ix, (key, default)) in plan.into_iter().enumerate() {
+            let is_message = ix == 4;
+            let id: &'static str = if is_message { "message" } else { key.label() };
+            let width = self.col_width(TableKind::Failures, id, default);
+            let mut column = Column::new(id, if is_message { "Message" } else { key.label() })
+                .width(width)
+                .resizable();
+            if !is_message {
+                column = column.sortable().sort(sort_state(key == sort, desc));
+            }
+            columns.push(column);
+            keys.push(key);
+        }
+        (columns, keys)
+    }
+
+    // ── row plans ──────────────────────────────────────────────────────────
+
+    /// One session per row, cell content in the register its column deserves
+    /// (§54). The selected row is the page's scoped session.
+    fn session_row_elements(
+        &self,
+        rows: &[SessionRow],
+        columns: &[Column],
+        keys: &[Option<SessionSort>],
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let selected = self.filter().session;
+        let entity = cx.entity();
+        let context_row = self.context_row();
+        let mut out = Vec::with_capacity(rows.len());
+        for (ix, row) in rows.iter().enumerate() {
+            let mut line = div()
+                .id(("usage-session-row", ix))
+                .group("usage-row")
+                .h(px(ROW_H))
+                .w_full()
+                .min_w(px(columns.iter().map(|column| column.width).sum::<f32>()))
+                .flex()
+                .items_center()
+                .border_b_1()
+                .border_color(theme.border)
+                .hover(|style| style.bg(theme.bg_hover))
+                .when(selected == Some(row.session), |line| line.bg(theme.active))
+                .on_mouse_down(MouseButton::Left, {
+                    let entity = entity.clone();
+                    let session = row.session;
+                    move |event, window, cx| {
+                        if event.click_count >= 2 {
+                            entity.update(cx, |page, cx| page.open_session(window, cx, session));
+                        } else {
+                            entity.update(cx, |page, cx| page.set_session_scope(Some(session), cx));
+                        }
+                    }
+                })
+                .on_mouse_down(MouseButton::Right, {
+                    let entity = entity.clone();
+                    move |_, _, cx| {
+                        entity.update(cx, |page, cx| page.open_context_menu(ix, cx));
+                    }
+                });
+            for (col_ix, column) in columns.iter().enumerate() {
+                let cell = match keys.get(col_ix).copied().flatten() {
+                    Some(key) => session_cell(row, key, theme, column),
+                    None => open_session_cell(row.session, entity.clone(), theme, column),
+                };
+                line = line.child(cell);
+            }
+            if context_row == Some(ix) {
+                line = line.child(session_context_menu(row, theme, entity.clone()));
+            }
+            out.push(line.into_any_element());
+        }
+        out
+    }
+
+    /// One bucket per row. The date column carries the granularity as a quieter
+    /// suffix, so an all-time monthly table still says what each row is.
+    fn bucket_row_elements(
+        &self,
+        columns: &[Column],
+        keys: &[BucketSort],
+        granularity: Granularity,
+        theme: Theme,
+    ) -> Vec<AnyElement> {
+        let rows = self.bucket_rows();
+        let total_w: f32 = columns.iter().map(|column| column.width).sum();
+        let mut out = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let mut line = div()
+                .h(px(ROW_H))
+                .w_full()
+                .min_w(px(total_w))
+                .flex()
+                .items_center()
+                .border_b_1()
+                .border_color(theme.border)
+                .hover(|style| style.bg(theme.bg_hover));
+            for (ix, column) in columns.iter().enumerate() {
+                let key = keys.get(ix).copied().unwrap_or(BucketSort::Date);
+                if key == BucketSort::Date {
+                    line = line.child(
+                        cell_shell(column)
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_size(theme.ui_px(12.))
+                                    .text_color(theme.text)
+                                    .child(row.label.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(theme.ui_px(10.5))
+                                    .text_color(theme.text_3)
+                                    .child(granularity.label()),
+                            ),
+                    );
+                } else {
+                    let (text, color) = match key {
+                        BucketSort::Requests => (format::count(row.totals.requests), theme.text_2),
+                        BucketSort::Tokens => {
+                            (format::compact(row.totals.tokens.total), theme.text)
+                        }
+                        BucketSort::Cache => (
+                            match row.totals.cache_hit_rate() {
+                                Some(rate) => format::percent(rate),
+                                None => "—".to_string(),
+                            },
+                            theme.text_3,
+                        ),
+                        BucketSort::Errors => (
+                            format::count(row.totals.errors),
+                            if row.totals.errors > 0 {
+                                theme.crit
+                            } else {
+                                theme.text_3
+                            },
+                        ),
+                        BucketSort::Date => unreachable!("handled above"),
+                    };
+                    line = line.child(text_cell(column, text, color, theme));
+                }
+            }
+            out.push(line.into_any_element());
+        }
+        out
+    }
+
+    /// One failure per row, newest first.
+    fn failure_table_element(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let (columns, keys) = self.failure_columns();
+        let rows = self.failure_rows();
+        let total_w: f32 = columns.iter().map(|column| column.width).sum();
+        let mut elements = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let mut line = div()
+                .h(px(ROW_H))
+                .w_full()
+                .min_w(px(total_w))
+                .flex()
+                .items_center()
+                .border_b_1()
+                .border_color(theme.border)
+                .hover(|style| style.bg(theme.bg_hover));
+            for (ix, column) in columns.iter().enumerate() {
+                let is_message = column.id == "message";
+                let (text, color) = if is_message {
+                    (row.message.clone(), theme.text_3)
+                } else {
+                    match keys.get(ix).copied().unwrap_or(FailureSort::When) {
+                        FailureSort::When => (super::table::failure_when(row.ts_ms), theme.text_3),
+                        FailureSort::Kind => {
+                            let (label, color) =
+                                super::table::failure_kind_register(row.kind, theme);
+                            (label.to_string(), color)
+                        }
+                        FailureSort::Model => (row.model.clone(), theme.text_2),
+                        FailureSort::Session => (row.session_title.clone(), theme.text_2),
+                    }
+                };
+                line = line.child(text_cell(column, text, color, theme));
+            }
+            elements.push(line.into_any_element());
+        }
+        self.table_element(
+            TableKind::Failures,
+            "usage-failures-table",
+            columns,
+            elements,
+            FAILURE_TABLE_H,
+            empty_cell("No failed requests in this range.", theme),
+            theme,
+            Rc::new(move |page, ix, sort, cx| {
+                let key = keys.get(ix).copied().unwrap_or(FailureSort::When);
+                match sort {
+                    SortState::Ascending => page.set_failure_sort(key, false, cx),
+                    SortState::Descending => page.set_failure_sort(key, true, cx),
+                    SortState::Default => page.set_failure_sort(FailureSort::When, true, cx),
+                }
+            }),
+            cx,
+        )
+    }
+
+    /// A table with its handlers wired to this page. The column ids and widths
+    /// are captured so a divider drag knows what it grabbed; `on_sort` maps the
+    /// clicked column to a key.
+    #[allow(clippy::too_many_arguments)]
+    fn table_element(
+        &self,
+        table: TableKind,
+        id: &'static str,
+        columns: Vec<Column>,
+        rows: Vec<AnyElement>,
+        height: f32,
+        empty: AnyElement,
+        theme: Theme,
+        on_sort: Rc<SetSort>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let ids = Rc::new(columns.iter().map(|column| column.id).collect::<Vec<_>>());
+        let widths = Rc::new(
+            columns
+                .iter()
+                .map(|column| column.width)
+                .collect::<Vec<_>>(),
+        );
+        let handlers = table_handlers(cx.entity(), table, ids, widths, on_sort);
+        data_table(id, &columns, rows, px(height), empty, theme, handlers)
     }
 
     /// The column-visibility control for the sessions table (§41).
@@ -2579,21 +2964,254 @@ impl UsagePage {
     }
 }
 
-/// One framework table, configured to look like the rest of the page: no
-/// outer border, no stripes (hairline rows instead), compact density, and a
-/// vertical scrollbar only — the column plan always fits the width it is given.
-fn table_element<D>(state: &Entity<gpui_component::table::TableState<D>>) -> impl IntoElement
-where
-    D: gpui_component::table::TableDelegate,
-{
-    Table::new(state)
-        .bordered(false)
-        .stripe(false)
-        .with_size(KitSize::XSmall)
-        // Both axes: columns are resizable, so a widened column has to stay
-        // reachable.
-        .scrollbar_visible(true, true)
+/// The sort state for a column: only the active key shows a direction.
+fn sort_state(active: bool, desc: bool) -> SortState {
+    if !active {
+        SortState::Default
+    } else if desc {
+        SortState::Descending
+    } else {
+        SortState::Ascending
+    }
+}
+
+/// A header click routed to the page: which column and the state to move to.
+type SetSort = dyn Fn(&mut UsagePage, usize, SortState, &mut Context<UsagePage>);
+
+/// Wire a table's handlers to the page: header clicks sort, divider drags
+/// resize the column they grabbed.
+fn table_handlers(
+    entity: Entity<UsagePage>,
+    table: TableKind,
+    ids: Rc<Vec<&'static str>>,
+    widths: Rc<Vec<f32>>,
+    on_sort: Rc<SetSort>,
+) -> TableHandlers {
+    let sort_entity = entity.clone();
+    let start_entity = entity.clone();
+    let move_entity = entity.clone();
+    let end_entity = entity;
+    TableHandlers::new(
+        move |ix, sort, _window, cx| {
+            sort_entity.update(cx, |page, cx| on_sort(page, ix, sort, cx));
+        },
+        move |ix, x, _window, cx| {
+            if let (Some(id), Some(width)) = (ids.get(ix).copied(), widths.get(ix).copied()) {
+                start_entity.update(cx, |page, _| page.begin_resize(table, id, x, width));
+            }
+        },
+        move |_ix, x, _window, cx| {
+            move_entity.update(cx, |page, cx| page.drag_resize(x, cx));
+        },
+        move |_window, cx| {
+            end_entity.update(cx, |page, _| page.end_resize());
+        },
+    )
+}
+
+/// One session cell, in the register its column deserves (§54).
+fn session_cell(row: &SessionRow, key: SessionSort, theme: Theme, column: &Column) -> AnyElement {
+    let totals = row.totals;
+    let (text, color) = match key {
+        SessionSort::Title => (row.title.clone(), theme.text),
+        SessionSort::Workspace => (row.workspace.clone(), theme.text_2),
+        SessionSort::Provider => (row.provider.clone(), theme.text_2),
+        SessionSort::Model => (row.top_model.clone(), theme.text_2),
+        SessionSort::Started => (
+            super::model::bucket_label(row.ended_ms, Granularity::Day),
+            theme.text_3,
+        ),
+        SessionSort::Duration => (format::span_ms(row.duration_ms()), theme.text_3),
+        SessionSort::Requests => (format::count(totals.requests), theme.text_2),
+        SessionSort::Input => (format::compact(totals.tokens.input), theme.text_3),
+        SessionSort::Output => (format::compact(totals.tokens.output), theme.text_3),
+        SessionSort::Cache => (
+            // "0" would claim the provider reported no cache reuse; "—" says
+            // nothing was reported at all.
+            if totals.tokens.cache_read == 0 && !row.cache_capable {
+                "—".to_string()
+            } else {
+                format::compact(totals.tokens.cache_read)
+            },
+            theme.text_3,
+        ),
+        SessionSort::Tokens => (format::compact(totals.tokens.total), theme.text),
+        SessionSort::Errors => {
+            let errors = totals.errors + row.tool_errors;
+            (
+                format::count(errors),
+                if errors > 0 { theme.crit } else { theme.text_3 },
+            )
+        }
+        // Tool calls are shown in the tool activity panel, which ranks them
+        // properly; the table's column plan does not include one.
+        SessionSort::Tools => (format::count(row.tool_runs), theme.text_3),
+    };
+    text_cell(column, text, color, theme)
+}
+
+/// The trailing affordance: open this session in the chat surface. Hidden
+/// until its row is hovered, so thirteen rows do not ship thirteen arrows.
+fn open_session_cell(
+    session: u16,
+    page: Entity<UsagePage>,
+    theme: Theme,
+    column: &Column,
+) -> AnyElement {
+    div()
+        .w(px(column.width))
+        .h_full()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(
+            div()
+                .id(SharedString::from(format!("usage-open-{session}")))
+                .size(px(22.))
+                .rounded(px(5.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .opacity(0.)
+                .group_hover("usage-row", |style| style.opacity(1.))
+                .hover(|style| style.bg(theme.overlay_strong))
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    // Do not let the row's own click handler also fire: this
+                    // is a jump to another surface, not a scope change.
+                    cx.stop_propagation();
+                    page.update(cx, |page, cx| page.open_session(window, cx, session));
+                })
+                .child(icon("icons/arrow-up-right.svg", 12., theme.text_3)),
+        )
         .into_any_element()
+}
+
+/// The session row's right-click menu (§43): only actions that are wired.
+fn session_context_menu(row: &SessionRow, theme: Theme, page: Entity<UsagePage>) -> AnyElement {
+    let session = row.session;
+    let session_id = row.id.clone();
+    let provider_id = row.provider_id;
+    let model_id = row.top_model_id;
+    let provider_label = row.provider.clone();
+    let model_label = row.top_model.clone();
+
+    let mut items: Vec<AnyElement> = Vec::new();
+    items.push(context_item("Open session".into(), theme, {
+        let page = page.clone();
+        move |window, cx| {
+            page.update(cx, |page, cx| page.open_session(window, cx, session));
+        }
+    }));
+    items.push(context_item("Scope to this session".into(), theme, {
+        let page = page.clone();
+        move |_, cx| {
+            page.update(cx, |page, cx| page.set_session_scope(Some(session), cx));
+        }
+    }));
+    items.push(context_separator(theme));
+    items.push(context_item(
+        "Copy session ID".into(),
+        theme,
+        move |_, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(session_id.clone()));
+        },
+    ));
+    items.push(context_separator(theme));
+    items.push(context_item(
+        format!("Filter by provider: {provider_label}"),
+        theme,
+        {
+            let page = page.clone();
+            move |_, cx| {
+                page.update(cx, |page, cx| {
+                    page.toggle_filter_value(MenuKind::Provider, provider_id, cx)
+                });
+            }
+        },
+    ));
+    if let Some(model_id) = model_id {
+        items.push(context_item(
+            format!("Filter by model: {model_label}"),
+            theme,
+            {
+                let page = page.clone();
+                move |_, cx| {
+                    page.update(cx, |page, cx| {
+                        page.toggle_filter_value(MenuKind::Model, model_id, cx)
+                    });
+                }
+            },
+        ));
+    }
+    items.push(context_item("Filter by workspace".into(), theme, {
+        let page = page.clone();
+        move |_, cx| {
+            page.update(cx, |page, cx| {
+                let workspace = page
+                    .index()
+                    .and_then(|index| index.try_session(session).map(|entry| entry.workspace));
+                if let Some(workspace) = workspace {
+                    page.toggle_filter_value(MenuKind::Workspace, workspace, cx);
+                }
+            });
+        }
+    }));
+
+    anchored()
+        .position_mode(gpui::AnchoredPositionMode::Local)
+        .anchor(Corner::TopLeft)
+        .snap_to_window()
+        .child(deferred(context_menu_shell(theme, page, items)))
+        .into_any_element()
+}
+
+/// The menu shell: the app's popover register, dismissed by an outside click.
+fn context_menu_shell(theme: Theme, page: Entity<UsagePage>, items: Vec<AnyElement>) -> AnyElement {
+    div()
+        .id("usage-row-menu")
+        .min_w(px(220.))
+        .rounded(px(9.))
+        .border_1()
+        .border_color(theme.border_strong)
+        .bg(theme.menu_bg)
+        .shadow(theme.popover_shadow())
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .occlude()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_mouse_down_out(move |_, _, cx| {
+            page.update(cx, |page, cx| page.close_context_menu(cx));
+        })
+        .children(items)
+        .into_any_element()
+}
+
+/// One row of a context menu.
+fn context_item(
+    label: String,
+    theme: Theme,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .px(px(10.))
+        .py(px(6.))
+        .text_size(theme.ui_px(12.))
+        .text_color(theme.text)
+        .cursor_pointer()
+        .hover(|style| style.bg(theme.bg_hover))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            on_click(window, cx);
+        })
+        .child(label)
+        .into_any_element()
+}
+
+fn context_separator(theme: Theme) -> AnyElement {
+    div().h(px(1.)).w_full().bg(theme.border).into_any_element()
 }
 
 // ── shared pieces ─────────────────────────────────────────────────────────

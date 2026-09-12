@@ -436,6 +436,18 @@ impl CommandPalette {
                 "settings preferences agent steer follow-up compaction retry rename",
             ),
             (
+                SettingsSection::Skills,
+                "icons/magic-wand.svg",
+                "Skills",
+                "settings preferences skills skill.md instructions agent",
+            ),
+            (
+                SettingsSection::Plugins,
+                "icons/extensions.svg",
+                "Plugins",
+                "settings preferences plugins extensions packages install npm git",
+            ),
+            (
                 SettingsSection::Appearance,
                 "icons/contrast.svg",
                 "Appearance",

@@ -134,6 +134,37 @@ fn termy_open_url(path: &Path) -> String {
 #[cfg(not(target_os = "macos"))]
 pub fn open_path_in_app(_: &Path, _: &str) {}
 
+/// Reveal `path` in the OS file manager, selecting it. Used by the skills
+/// page to open a skill's directory.
+#[cfg(target_os = "macos")]
+pub fn reveal_in_file_manager(path: &Path) {
+    let _ = std::process::Command::new("/usr/bin/open")
+        .arg("-R")
+        .arg(path)
+        .spawn();
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn reveal_in_file_manager(path: &Path) {
+    // Most Linux desktops have no "select" verb; open the containing folder.
+    let target = path.parent().unwrap_or(path);
+    let _ = std::process::Command::new("xdg-open").arg(target).spawn();
+}
+
+/// Open `path` in the OS default application (the user's editor for a
+/// `SKILL.md`). Used by the skills page's **Open SKILL.md** action.
+#[cfg(target_os = "macos")]
+pub fn open_path_default(path: &Path) {
+    let _ = std::process::Command::new("/usr/bin/open")
+        .arg(path)
+        .spawn();
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn open_path_default(path: &Path) {
+    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+}
+
 fn open_in_prefs_path() -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)

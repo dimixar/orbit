@@ -277,6 +277,110 @@ fn settings_cards_stay_inside_the_content_column(cx: &mut gpui::TestAppContext) 
     );
 }
 
+/// Regression: the Providers page's 3-column grid blew past the content
+/// column and clipped its third column off the window. `grid_cols(3)` is
+/// `repeat(3, minmax(0, 1fr))`, but `1fr` resolves against max-content when
+/// the grid's parent is given only `w_full().max_w()` *inside* a vertical
+/// scroll container — the tracks size to the widest card instead of the
+/// column. The max-width belongs on the scroll container itself, so the
+/// grid is laid out against a definite width and the columns stay equal.
+#[gpui::test]
+fn provider_grid_columns_fit_inside_the_content_column(cx: &mut gpui::TestAppContext) {
+    use gpui::{point, size};
+
+    const NAMES: [&str; 3] = ["grid-card-0", "grid-card-1", "grid-card-2"];
+
+    struct ProviderGridTestView;
+    impl Render for ProviderGridTestView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let theme = Theme::for_id(ThemeId::Orbit);
+            let card = |i: usize| {
+                let name = NAMES[i];
+                div()
+                    .id(ElementId::Name(name.to_string().into()))
+                    .debug_selector(move || name.to_string())
+                    .w_full()
+                    .min_w_0()
+                    .bg(theme.bg_composer)
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded_lg()
+                    .p(px(14.))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(14.))
+                            .child(format!("Provider {i}")),
+                    )
+                    .child(
+                        div()
+                            .font_family(theme::code_font_family())
+                            .text_size(theme.code_px(10.5))
+                            .truncate()
+                            .child("https://api.example.com/v1 · openai-completions plus a long trailing note"),
+                    )
+            };
+
+            div()
+                .size_full()
+                .flex()
+                .child(div().flex_none().w(px(240.)).h_full())
+                .child(
+                    div().flex_1().min_w_0().min_h_0().flex().flex_col().child(
+                        div()
+                            .id("grid-scroll")
+                            .debug_selector(|| "grid-scroll".to_string())
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .max_w(px(CONTENT_MAX_W))
+                            .mx_auto()
+                            .overflow_y_scroll()
+                            .child(
+                                div().w_full().px(px(24.)).flex().flex_col().gap_3().child(
+                                    div()
+                                        .w_full()
+                                        .grid()
+                                        .grid_cols(3)
+                                        .gap_3()
+                                        .children((0..3).map(card)),
+                                ),
+                            ),
+                    ),
+                )
+        }
+    }
+
+    let cx = cx.add_empty_window();
+    let _ = cx.draw(point(px(0.), px(0.)), size(px(1240.), px(700.)), |_, cx| {
+        cx.new(|_| ProviderGridTestView)
+    });
+    let scroll = cx.debug_bounds("grid-scroll").expect("scroll container");
+    assert_eq!(scroll.size.width, px(CONTENT_MAX_W));
+    for i in 0..3 {
+        let card = cx
+            .debug_bounds(NAMES[i])
+            .unwrap_or_else(|| panic!("card {i} laid out"));
+        assert!(
+            card.size.width > px(250.),
+            "grid column {i} collapsed: {:?}",
+            card.size
+        );
+        assert!(
+            card.size.width < px(400.),
+            "grid column {i} blew past its share — `fr` resolved to max-content: {:?}",
+            card.size
+        );
+        assert!(
+            card.origin.x + card.size.width <= scroll.origin.x + scroll.size.width,
+            "card {i} overflows the content column: {:?}",
+            card
+        );
+    }
+}
+
 /// Regression: an SVG defaults to `flex-shrink: 1`, so beside wide text
 /// (e.g. the transcript's activity label + copy button) it collapses to
 /// zero width — the "icons render tiny" bug. `icon`/`icon_dyn`/`glyph`

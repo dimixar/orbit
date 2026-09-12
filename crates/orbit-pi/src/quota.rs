@@ -15,7 +15,12 @@
 
 use std::collections::HashMap;
 
-use orbit_rpc::{parse_quota_reports, QuotaReport};
+use orbit_rpc::{parse_quota_reports, QuotaBalance, QuotaReport, QuotaWindow};
+use serde_json::Value;
+
+/// Custom session-entry type the Orbit quota bridge appends. The payload is
+/// the `quota.list` response body: `{"providers": [QuotaReport, …]}`.
+pub const BRIDGE_ENTRY_TYPE: &str = "orbit:quota";
 
 /// Whether pi exposes the quota RPC namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +31,23 @@ pub enum QuotaSupport {
     Supported,
     /// pi rejected `quota.list`; the Providers page hides quota meters.
     Unsupported,
+}
+
+/// What the top-bar quota pill should show, resolved from the cached reports
+/// by [`QuotaManager::headline`].
+pub enum QuotaHeadline<'a> {
+    /// A metered window: draw the rounded bar and its percentage.
+    Window {
+        report: &'a QuotaReport,
+        window: &'a QuotaWindow,
+    },
+    /// A provider with balances but no metered window.
+    Balance {
+        report: &'a QuotaReport,
+        balance: &'a QuotaBalance,
+    },
+    /// Reports exist but none carries a number to meter (notes, errors).
+    Quiet,
 }
 
 /// The non-secret quota cache, keyed by provider id.
@@ -64,23 +86,66 @@ impl QuotaManager {
         let mut reports: Vec<&QuotaReport> = self
             .reports
             .values()
-            .filter(|report| report.has_data() || report.error.is_some() || report.note.is_some())
+            .filter(|report| has_something(report))
             .collect();
         reports.sort_by(|a, b| a.provider.cmp(&b.provider));
         reports
     }
 
+    /// What the top-bar pill should meter for the provider the active model
+    /// is using, in priority order:
+    ///
+    /// 1. the active provider's rolling 5-hour window;
+    /// 2. the active provider's most-constrained window;
+    /// 3. the active provider's first balance;
+    /// 4. the 5-hour window closest to its limit on any other provider;
+    /// 5. the most-constrained window on any other provider.
+    ///
+    /// Steps 4–5 keep the pill useful while the active model runs on a
+    /// provider with no usage surface (a local model, say) and a metered
+    /// account is connected. Errored reports never meter — their windows may
+    /// be stale, and the popover carries the error.
+    pub fn headline(&self, active_provider: &str) -> QuotaHeadline<'_> {
+        let active = self
+            .reports
+            .get(active_provider)
+            .filter(|report| report.error.is_none() && has_something(report));
+        if let Some(report) = active {
+            if let Some(window) = best_window(&report.windows) {
+                return QuotaHeadline::Window { report, window };
+            }
+            if let Some(balance) = report.balances.first() {
+                return QuotaHeadline::Balance { report, balance };
+            }
+        }
+        if let Some((report, window)) = self
+            .peak_window_matching(is_five_hour_window)
+            .or_else(|| self.peak_window())
+        {
+            return QuotaHeadline::Window { report, window };
+        }
+        QuotaHeadline::Quiet
+    }
+
     /// The single most-constraining window across every provider: the highest
     /// fraction used, preferring a window without an error. `None` when no
-    /// provider reports a percentage or a used/limit pair. Used for the
-    /// top-bar headroom accent, never to fabricate a value.
-    pub fn peak_window(&self) -> Option<(&QuotaReport, &orbit_rpc::QuotaWindow)> {
-        let mut peak: Option<(&QuotaReport, &orbit_rpc::QuotaWindow)> = None;
+    /// provider reports a percentage or a used/limit pair. The pill's
+    /// fallback when the active provider has nothing to meter.
+    pub fn peak_window(&self) -> Option<(&QuotaReport, &QuotaWindow)> {
+        self.peak_window_matching(|_| true)
+    }
+
+    /// [`Self::peak_window`] restricted to windows matching `accept`.
+    fn peak_window_matching(
+        &self,
+        accept: impl Fn(&QuotaWindow) -> bool,
+    ) -> Option<(&QuotaReport, &QuotaWindow)> {
+        let mut peak: Option<(&QuotaReport, &QuotaWindow)> = None;
         for report in self.reports() {
             if report.error.is_some() {
                 continue;
             }
-            for window in &report.windows {
+            for window in report.windows.iter().filter(|window| accept(window)) {
                 let Some(fraction) = window.fraction() else {
                     continue;
                 };
@@ -115,9 +180,36 @@ impl QuotaManager {
         let Some(data) = data else {
             return;
         };
-        for report in parse_quota_reports(data) {
+        self.merge(data);
+    }
+
+    /// Merge the newest bridge snapshot from a `get_entries` response. The
+    /// bridge appends one `orbit:quota` custom entry per changed snapshot, so
+    /// only the last matching entry in the slice matters. Returns `true` when
+    /// a snapshot was applied — the caller repaints. Bridge data never
+    /// touches [`QuotaSupport`]: it arrives regardless of whether pi exposes
+    /// the `quota.*` RPC namespace.
+    pub fn on_entries(&mut self, entries: &[Value]) -> bool {
+        let snapshot = entries.iter().rev().find(|entry| {
+            entry.get("type").and_then(Value::as_str) == Some("custom")
+                && entry.get("customType").and_then(Value::as_str) == Some(BRIDGE_ENTRY_TYPE)
+        });
+        let Some(data) = snapshot.and_then(|entry| entry.get("data")) else {
+            return false;
+        };
+        self.merge(data)
+    }
+
+    /// Insert every report carried by `data`, keyed by provider id.
+    fn merge(&mut self, data: &Value) -> bool {
+        let reports = parse_quota_reports(data);
+        if reports.is_empty() {
+            return false;
+        }
+        for report in reports {
             self.reports.insert(report.provider.clone(), report);
         }
+        true
     }
 
     /// The pi process went away: forget the capability probe so the next
@@ -131,6 +223,45 @@ impl QuotaManager {
 fn is_unsupported_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("unknown command") || lower.contains("unsupported")
+}
+
+/// Whether a report carries anything the UI can render.
+fn has_something(report: &QuotaReport) -> bool {
+    report.has_data() || report.error.is_some() || report.note.is_some()
+}
+
+/// Whether a window is a provider's rolling 5-hour limit, whatever the
+/// adapter names it: id `five_hour` / `5h` / `primary` / `rolling`, label
+/// `5-hour`, `Rolling 5h`, `5-hour session`. Separators and the spelled-out
+/// `five` are normalized, so a new adapter's wording needs no UI change.
+pub fn is_five_hour_window(window: &QuotaWindow) -> bool {
+    let matches = |text: &str| {
+        let normalized = text
+            .to_ascii_lowercase()
+            .replace("five", "5")
+            .replace(['-', '_'], " ");
+        let tokens: Vec<&str> = normalized.split_whitespace().collect();
+        tokens.contains(&"5h") || tokens.windows(2).any(|pair| pair == ["5", "hour"])
+    };
+    matches(&window.id) || matches(&window.label)
+}
+
+/// The window a provider's meter should headline: its 5-hour limit when one
+/// is metered, otherwise the window closest to its limit.
+fn best_window(windows: &[QuotaWindow]) -> Option<&QuotaWindow> {
+    windows
+        .iter()
+        .find(|window| is_five_hour_window(window) && window.fraction().is_some())
+        .or_else(|| {
+            windows
+                .iter()
+                .filter(|window| window.fraction().is_some())
+                .max_by(|a, b| {
+                    a.fraction()
+                        .unwrap_or(0.0)
+                        .total_cmp(&b.fraction().unwrap_or(0.0))
+                })
+        })
 }
 
 #[cfg(test)]
@@ -276,5 +407,205 @@ mod tests {
         );
         assert!(balances.peak_window().is_none());
         assert_eq!(balances.reports().len(), 1);
+    }
+
+    #[test]
+    fn headline_prefers_the_active_providers_five_hour_window() {
+        let mut quota = QuotaManager::new();
+        quota.on_response(
+            true,
+            Some(&json!({"providers":[
+                {"provider":"anthropic","kind":"subscription",
+                 "windows":[
+                    {"id":"five_hour","label":"5-hour","usedPercent":6.0,"resetsAt":1},
+                    {"id":"weekly","label":"Weekly","usedPercent":82.0,"resetsAt":2}]},
+                {"provider":"openai-codex","kind":"subscription",
+                 "windows":[{"id":"primary","label":"5-hour","usedPercent":99.0,"resetsAt":3}]}
+            ]})),
+            None,
+        );
+        // The active provider's 5-hour window, not its higher weekly window
+        // and not the other account's busier one.
+        match quota.headline("anthropic") {
+            QuotaHeadline::Window { report, window } => {
+                assert_eq!(report.provider, "anthropic");
+                assert_eq!(window.id, "five_hour");
+            }
+            _ => panic!("expected a window headline"),
+        }
+    }
+
+    #[test]
+    fn headline_falls_back_within_the_active_provider() {
+        // No 5-hour window: the window closest to its limit headlines.
+        let mut quota = QuotaManager::new();
+        quota.on_response(
+            true,
+            Some(&json!({"providers":[
+                {"provider":"zai","kind":"subscription",
+                 "windows":[
+                    {"id":"monthly","label":"Monthly tools","usedPercent":12.0,"resetsAt":1},
+                    {"id":"credits","label":"Credits","usedPercent":41.0,"resetsAt":2}]}
+            ]})),
+            None,
+        );
+        match quota.headline("zai") {
+            QuotaHeadline::Window { window, .. } => assert_eq!(window.id, "credits"),
+            _ => panic!("expected a window headline"),
+        }
+
+        // No window at all: the balance headlines.
+        let mut balances = QuotaManager::new();
+        balances.on_response(
+            true,
+            Some(
+                &json!({"providers":[{"provider":"deepseek","kind":"balance",
+                "balances":[{"label":"Available","amount":110.0,"currency":"CNY"}]}]}),
+            ),
+            None,
+        );
+        match balances.headline("deepseek") {
+            QuotaHeadline::Balance { report, balance } => {
+                assert_eq!(report.provider, "deepseek");
+                assert_eq!(balance.amount, 110.0);
+            }
+            _ => panic!("expected a balance headline"),
+        }
+    }
+
+    #[test]
+    fn headline_falls_back_to_the_accounts_five_hour_window() {
+        let mut quota = QuotaManager::new();
+        quota.on_response(
+            true,
+            Some(&json!({"providers":[
+                {"provider":"anthropic","kind":"subscription",
+                 "windows":[
+                    {"id":"five_hour","label":"5-hour","usedPercent":6.0,"resetsAt":1},
+                    {"id":"weekly","label":"Weekly","usedPercent":82.0,"resetsAt":2}]}
+            ]})),
+            None,
+        );
+        // The active provider (`ollama`) reports nothing, so the account's
+        // 5-hour window wins over the more-used weekly window.
+        match quota.headline("ollama") {
+            QuotaHeadline::Window { report, window } => {
+                assert_eq!(report.provider, "anthropic");
+                assert_eq!(window.id, "five_hour");
+            }
+            _ => panic!("expected a window headline"),
+        }
+    }
+
+    #[test]
+    fn headline_skips_errored_reports_and_notes_only_providers() {
+        let mut quota = QuotaManager::new();
+        quota.on_response(
+            true,
+            Some(&json!({"providers":[
+                {"provider":"anthropic","kind":"subscription","error":"429",
+                 "windows":[{"id":"5h","label":"5-hour","usedPercent":99.0,"resetsAt":1}]},
+                {"provider":"zai","kind":"subscription",
+                 "windows":[{"id":"weekly","label":"Weekly","usedPercent":40.0,"resetsAt":2}]}
+            ]})),
+            None,
+        );
+        match quota.headline("anthropic") {
+            QuotaHeadline::Window { report, .. } => assert_eq!(report.provider, "zai"),
+            _ => panic!("expected the healthy account's window"),
+        }
+
+        // Reports exist but none meters: the quiet label keeps the popover
+        // reachable.
+        let mut notes = QuotaManager::new();
+        notes.on_response(
+            true,
+            Some(
+                &json!({"providers":[{"provider":"groq","kind":"unsupported",
+                "windows":[],"balances":[],"note":"Groq exposes no usage API."}]}),
+            ),
+            None,
+        );
+        assert!(matches!(notes.headline("groq"), QuotaHeadline::Quiet));
+    }
+
+    #[test]
+    fn five_hour_matcher_covers_adapter_wording() {
+        let window = |id: &str, label: &str| QuotaWindow {
+            id: id.into(),
+            label: label.into(),
+            used_percent: None,
+            used: None,
+            limit: None,
+            unit: None,
+            resets_at: None,
+        };
+        // The ids and labels the bundled adapters emit.
+        for (id, label) in [
+            ("five_hour", "5-hour"),
+            ("5h", "5-hour"),
+            ("primary", "5-hour"),
+            ("rolling", "Rolling 5h"),
+            ("session", "5-hour session"),
+            ("time_limit", "5-hour"),
+        ] {
+            assert!(is_five_hour_window(&window(id, label)), "{id}/{label}");
+        }
+        // Weekly, monthly, and a hypothetical 15-hour window stay out.
+        for (id, label) in [
+            ("weekly", "Weekly"),
+            ("monthly", "Monthly tools"),
+            ("credits", "Credits"),
+            ("15h", "15-hour"),
+        ] {
+            assert!(!is_five_hour_window(&window(id, label)), "{id}/{label}");
+        }
+    }
+
+    #[test]
+    fn bridge_entries_merge_without_flipping_support() {
+        let mut quota = QuotaManager::new();
+        let entries = vec![
+            json!({"type":"message","id":"m1"}),
+            json!({"type":"custom","customType":"other","data":{}}),
+            json!({"type":"custom","customType":BRIDGE_ENTRY_TYPE,"data":payload()}),
+        ];
+        assert!(quota.on_entries(&entries));
+        // Bridge data is not the `quota.*` namespace: support stays unknown
+        // so a patched pi is still probed, and the report renders either way.
+        assert_eq!(quota.support(), QuotaSupport::Unknown);
+        assert_eq!(
+            quota.report("anthropic").unwrap().plan.as_deref(),
+            Some("Max")
+        );
+        assert!(quota.report("deepseek").is_some());
+    }
+
+    #[test]
+    fn bridge_entries_use_the_newest_snapshot() {
+        let mut quota = QuotaManager::new();
+        let entries = vec![
+            json!({"type":"custom","customType":BRIDGE_ENTRY_TYPE,"data":payload()}),
+            json!({"type":"custom","customType":BRIDGE_ENTRY_TYPE,"data":{
+                "providers":[{"provider":"anthropic","kind":"subscription",
+                "windows":[{"id":"weekly","label":"Weekly","usedPercent":50.0}]}]
+            }}),
+        ];
+        assert!(quota.on_entries(&entries));
+        assert_eq!(quota.report("anthropic").unwrap().windows[0].id, "weekly");
+        // The older snapshot is ignored entirely: its deepseek report is not
+        // merged alongside the newer payload.
+        assert!(quota.report("deepseek").is_none());
+    }
+
+    #[test]
+    fn bridge_entries_absent_or_empty_are_a_noop() {
+        let mut quota = QuotaManager::new();
+        assert!(!quota.on_entries(&[]));
+        assert!(!quota.on_entries(&[json!({"type":"message"})]));
+        assert!(!quota.on_entries(&[
+            json!({"type":"custom","customType":BRIDGE_ENTRY_TYPE,"data":{"providers":[]}})
+        ]));
+        assert!(quota.reports().is_empty());
     }
 }

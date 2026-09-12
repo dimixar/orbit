@@ -88,6 +88,36 @@ impl PiClient {
         Self::spawn_with_bin(&resolve_pi_bin(), workspace_dir, session_dir)
     }
 
+    /// Spawn with extra extension files loaded via pi's `--extension` flag.
+    ///
+    /// Orbit uses this to load its bundled quota bridge without installing a
+    /// package or writing settings: pi discovers the file at startup and the
+    /// path travels with the app, so an update can never leave a stale entry
+    /// behind in `~/.pi/agent/settings.json`.
+    pub fn spawn_with_extensions(
+        workspace_dir: &Path,
+        session_dir: Option<&Path>,
+        extensions: &[PathBuf],
+    ) -> Result<Self> {
+        Self::spawn_with_bin_and_extensions(
+            &resolve_pi_bin(),
+            workspace_dir,
+            session_dir,
+            extensions,
+        )
+    }
+
+    /// [`spawn_with_extensions`](Self::spawn_with_extensions) against a
+    /// specific executable — the seam the transport tests drive.
+    pub fn spawn_with_bin_and_extensions(
+        bin: &str,
+        workspace_dir: &Path,
+        session_dir: Option<&Path>,
+        extensions: &[PathBuf],
+    ) -> Result<Self> {
+        Self::spawn_inner(bin, workspace_dir, session_dir, extensions)
+    }
+
     /// Spawn a specific executable as the RPC server. [`spawn`](Self::spawn)
     /// resolves the real `pi`; this seam lets tests drive the transport with a
     /// scripted server and lets callers target an alternate pi build.
@@ -95,6 +125,15 @@ impl PiClient {
         bin: &str,
         workspace_dir: &Path,
         session_dir: Option<&Path>,
+    ) -> Result<Self> {
+        Self::spawn_inner(bin, workspace_dir, session_dir, &[])
+    }
+
+    fn spawn_inner(
+        bin: &str,
+        workspace_dir: &Path,
+        session_dir: Option<&Path>,
+        extensions: &[PathBuf],
     ) -> Result<Self> {
         let mut command = std::process::Command::new(bin);
         // Waku parity: `--approve` auto-approves tool calls so the RPC
@@ -114,6 +153,9 @@ impl PiClient {
             .stderr(Stdio::piped());
         if let Some(dir) = session_dir {
             command.arg("--session-dir").arg(dir);
+        }
+        for extension in extensions {
+            command.arg("--extension").arg(extension);
         }
         let mut child = command
             .spawn()

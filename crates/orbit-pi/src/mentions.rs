@@ -12,6 +12,7 @@
 //! ↑/↓ to highlight movement, while Enter/Escape are intercepted by the app
 //! (they already dispatch there as `Submit`/`AbortRun`).
 
+use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -71,6 +72,71 @@ pub fn detect_trigger(content: &str, cursor: usize) -> Option<Trigger> {
         end: cursor,
         query: query.to_string(),
     })
+}
+
+/// Which composer token a span paints as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MentionKind {
+    /// `/command` — the leading token of a message.
+    Command,
+    /// `@file` — a workspace reference.
+    File,
+}
+
+/// A paint-colored span of the composer text. Byte offsets into the raw
+/// content, so the caller can slice runs without disturbing the caret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MentionSpan {
+    pub range: Range<usize>,
+    pub kind: MentionKind,
+}
+
+/// Locate the tokens the composer paints in their own color: a leading
+/// `/command` and every `@file` mention. Pure, sorted and non-overlapping,
+/// so the editor's caret/selection model is untouched — this is paint only.
+///
+/// The rules mirror [`detect_trigger`]: a slash token only opens at the very
+/// start of the message and must look like a command name (a path like
+/// `/usr/local` stays plain); an `@` must sit at a token boundary and runs
+/// unbroken to the next whitespace.
+pub fn tokenize_mentions(content: &str) -> Vec<MentionSpan> {
+    let mut spans = Vec::new();
+
+    // Leading `/command`: the whole first word, only when every character
+    // after the sigil reads as a command name.
+    if content.starts_with('/') {
+        let word_end = content.find(char::is_whitespace).unwrap_or(content.len());
+        let name = &content[1..word_end];
+        if !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':'))
+        {
+            spans.push(MentionSpan {
+                range: 0..word_end,
+                kind: MentionKind::Command,
+            });
+        }
+    }
+
+    // `@file` mentions: each `@` at a token boundary, running to whitespace.
+    for (at, _) in content.match_indices('@') {
+        if at != 0 && !content[..at].ends_with(char::is_whitespace) {
+            continue;
+        }
+        let end = content[at..]
+            .find(char::is_whitespace)
+            .map(|off| at + off)
+            .unwrap_or(content.len());
+        if end > at + 1 {
+            spans.push(MentionSpan {
+                range: at..end,
+                kind: MentionKind::File,
+            });
+        }
+    }
+
+    spans
 }
 
 /// One slash command from pi's `get_commands` (extensions + skills).
@@ -354,6 +420,49 @@ mod tests {
         // Newline also starts a token (multi-line composer).
         let t = detect_trigger("done\n@re", 8).unwrap();
         assert_eq!(t.query, "re");
+    }
+
+    #[test]
+    fn tokenize_colors_leading_command_and_files() {
+        let spans = tokenize_mentions("/review fix @src/main.rs and @lib.rs");
+        assert_eq!(
+            spans,
+            vec![
+                MentionSpan {
+                    range: 0..7,
+                    kind: MentionKind::Command,
+                },
+                MentionSpan {
+                    range: 12..24,
+                    kind: MentionKind::File,
+                },
+                MentionSpan {
+                    range: 29..36,
+                    kind: MentionKind::File,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenize_leaves_paths_and_emails_plain() {
+        // A leading path is not a command; a mid-word `@` is not a mention.
+        assert!(tokenize_mentions("/usr/local/bin").is_empty());
+        assert!(tokenize_mentions("mail me at a@b.com").is_empty());
+        // A lone sigil has no payload yet.
+        assert!(tokenize_mentions("/").is_empty());
+        assert!(tokenize_mentions("@").is_empty());
+    }
+
+    #[test]
+    fn tokenize_handles_multiline_and_repeats() {
+        let spans = tokenize_mentions("done\n@re @two/three");
+        assert_eq!(
+            spans.iter().map(|s| s.range.clone()).collect::<Vec<_>>(),
+            vec![5..8, 9..19]
+        );
+        // A `@` inside an existing mention does not open a second span.
+        assert_eq!(tokenize_mentions("@a@b").len(), 1);
     }
 
     #[test]

@@ -115,8 +115,8 @@ genuinely float above the page (composer, popovers, modals).
 - Hairlines over boxes: `border_1` at `theme.border` separates; cards are the exception.
 - Three ink weights: `text` (primary), `text_2` (secondary), `text_3` (tertiary/labels).
 - Density with air: 28–34px controls, 6–10px padding, 44px page headers. The
-  Appearance panel exposes this as Interface Font Size, Terminal/Editor Font
-  Size, and Spacing Density (a global multiplier through `theme.space`).
+  Appearance panel exposes this as UI, Terminal/Editor font sizes (px), and
+  Spacing Density (a global multiplier through `theme.space`).
 - Thirty-one palettes, one grammar: every color is read from `theme::get(cx)`, never hardcoded.
 
 ## Colors
@@ -143,6 +143,17 @@ one of them is wrong.
 
 **The Ink Weight Rule.** Emphasis comes from ink weight and size, never from hue.
 A number that must shout gets `text` + a larger size, not a color.
+
+### Composer tokens
+The composer paints two inline token roles. They are read as content — siblings of the
+`syn_*` editor colors — not as chrome accents, so they sit outside the accent economy:
+- **`/command`** takes the accent (`mention_command`): commands are actions, the same role
+  terminal command words and syntax keywords already carry.
+- **`@file`** takes the accent's complement (`mention_file`), so a reference never reads as
+  a command. Chroma-less palettes (Ashwood, Mono) stay monochrome and split the two by
+  ink instead of hue.
+
+Both are derived in `Theme`, so all thirty-one palettes stay legible without per-palette tuning.
 
 ## Typography
 
@@ -253,11 +264,20 @@ fade on the new-task page.
   composer, 8px on inline fields.
 - **Focus:** the border steps to `border_strong`; the accent is not used for focus fills.
 - **Placeholder:** `text_3` — always a real prompt ("Search sessions…"), never a label.
+- **Tokens:** a leading `/command` and any `@file` mention paint inline in their token
+  colors while typing; the caret, selection, and wrapping are unaffected (paint only).
+- **Caret & selection:** a 2px accent caret that holds solid while the field is being
+  edited and blinks at the platform cadence (~1s) once idle. The selection wash is the
+  accent at 25%; double-click selects the character run, triple-click the line, and
+  shift-click extends — matching native text fields.
 
 ### Navigation
 - Sidebar rows: 28px tall, 8px radius, 13px icon in a fixed 20px slot, label in
   `text_2`/`text_3`; hover fills `bg_hover`; the active destination is marked by
   `active` fill with `active_fg`, never by accent color alone.
+- A running session row leads with an 11px spinner in the accent and its title carries a
+  shimmer — an ember highlight band swept left-to-right across the ink on a 2s loop. This is
+  the only per-row motion in the sidebar; a settled row is still.
 - Page headers: 44px, back affordance first, title in 15px/500, actions right-aligned
   as 28px ghost controls.
 
@@ -270,15 +290,15 @@ fade on the new-task page.
 - Row-level actions are revealed on row hover, never as a permanent icon rail.
 - Sort indicators are small chevrons in `text_3`; the sorted column's label steps to
   `text_2`.
-- **Data tables and plots are borrowed, not hand-built.** They come from
-  `gpui-component` 0.5.1 (the GPUI Kit component layer on this app's `gpui 0.2.2`) and
-  are themed through `usage::kit`, which maps every Orbit token onto the framework's
-  palette. Nothing renders in framework colors, and no second table or chart
-  implementation should be written by hand.
+- **Data tables and plots are drawn with GPUI's own elements.** The usage tables
+  are built from `div` in `usage::table` and the timeline from `canvas` in
+  `usage::chart`, each reading colors only from `theme::get(cx)` — the same
+  surface as the rest of the page. There is no component layer and no second
+  palette to synchronise.
 
-**The Bridge Rule.** A framework widget is only ever configured from
-`usage::kit`. If it renders in a color this file does not list, the bridge is
-incomplete — fix the bridge, not the call site.
+**The Bridge Rule.** A table or chart reads every color from `theme::get(cx)`. If
+it renders in a color this file does not list, the element is wrong — fix the
+element, not the palette.
 
 ## Do's and Don'ts
 

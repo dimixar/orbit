@@ -11,7 +11,8 @@
 //! - [`pickers`] — model, command-palette, branch, and workspace pickers
 //! - [`composer_ops`] — autocomplete, attachments, add-menu, model chips
 //! - [`sidebar`] — session/workspace sidebar rendering + row menus
-//! - [`settings`] — Settings surface (General/Runtime/Agent/Providers)
+//! - [`settings`] — Settings surface (General/Runtime/Agent/Skills/Plugins/Providers)
+//! - [`skills_ui`] — Settings → Skills master-detail page + controllers
 //! - [`view`] — top-level chrome: sidebar, transcript, composer, status bar
 //! - [`open_in`] — "open workspace in" app detection and menu
 //! - [`helpers`] — icons, file glyphs, and small formatting helpers
@@ -32,8 +33,8 @@ use gpui::{
     AnyElement, App, ClipboardItem, Context, Corner, CursorStyle, DragMoveEvent, ElementId, Entity,
     ExternalPaths, FocusHandle, Focusable, FontWeight, Hsla, ImageSource, IntoElement,
     ListAlignment, ListState, MouseButton, MouseDownEvent, MouseUpEvent, ObjectFit, Pixels, Render,
-    SharedString, StatefulInteractiveElement, Subscription, TextAlign, Transformation, Window,
-    WindowControlArea,
+    ScrollStrategy, SharedString, StatefulInteractiveElement, Subscription, TextAlign,
+    Transformation, UniformListScrollHandle, Window, WindowControlArea,
 };
 use orbit_rpc::{
     CommandBody, ContextUsage, Event, PendingQueue, PiClient, QuotaReport, SessionState,
@@ -47,6 +48,7 @@ use crate::checkpoint;
 use crate::command_palette::{self, CommandPalette, PaletteCommand, PaletteSnapshot};
 use crate::composer::ComposerInput;
 use crate::context_meter::{self, ContextMeterData, ContextPopup};
+use crate::dialog::{Dialog, DialogRequest, DialogResponse};
 use crate::git_panel::GitPanel;
 use crate::mentions::{self, AcEntry, SharedAutocomplete, SlashCommand, Trigger, TriggerKind};
 use crate::model_selector::{
@@ -54,10 +56,13 @@ use crate::model_selector::{
 };
 use crate::onboarding::{self, Dependency};
 use crate::platform::{self, ExternalApp};
+use crate::plugins::{PackageScope, PluginPackage};
 use crate::providers::{self, CustomProvider};
 use crate::quota::{QuotaManager, QuotaSupport};
+use crate::quota_bridge::QuotaBridge;
 use crate::sessions::{self, SessionInfo};
 use crate::sidepane::{SidePane, SidePaneResize};
+use crate::skills::Skill;
 use crate::theme::{self, Theme, ThemeId, ThemeMode};
 use crate::transcript::{self, Transcript};
 use crate::usage::page::UsagePage;
@@ -92,6 +97,16 @@ const MAX_ATTACHMENTS: usize = 8;
 /// How long a status message stays visible in the status bar.
 const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(6);
 
+/// How often the app polls pi for new quota-bridge session entries. The
+/// bridge appends only on change, so this is a cheap idempotent read.
+const QUOTA_ENTRY_POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Session start races the bridge's first fetch (it runs on `session_start`
+/// too), so the first few polls use a short interval until a snapshot lands
+/// — or the bootstrap budget runs out for an account with no providers.
+const QUOTA_ENTRY_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(3);
+const QUOTA_ENTRY_BOOTSTRAP_POLLS: u8 = 10;
+
 /// Rows in the composer's "+" add menu (icon, label, trailing hint).
 const ADD_MENU_ITEMS: [(&str, &str, &str); 3] = [
     ("icons/image.svg", "Attach image…", ""),
@@ -123,6 +138,16 @@ struct RetryDetail {
     attempt: u64,
     max: Option<u64>,
     error: String,
+}
+
+/// The status bar's branch chip: the checked-out branch plus how far it has
+/// diverged from its upstream (`ahead_behind`; zero when in sync or with no
+/// upstream).
+#[derive(PartialEq)]
+struct BranchStatus {
+    name: String,
+    ahead: usize,
+    behind: usize,
 }
 
 pub struct OrbitApp {
@@ -196,6 +221,12 @@ pub struct OrbitApp {
     status_at: Option<Instant>,
     current_title: Option<String>,
     current_workspace: Option<PathBuf>,
+    /// Status-bar branch chip: the checked-out branch and its divergence from
+    /// upstream, fetched off-thread so render never shells out to git.
+    branch: Option<BranchStatus>,
+    /// Generation of the newest branch fetch; a late result from an older
+    /// fetch is discarded.
+    branch_fetch: u64,
     /// Real line counts from edit/write tool calls this session.
     added: u64,
     removed: u64,
@@ -210,6 +241,12 @@ pub struct OrbitApp {
     model_selector: Option<(PickerKind, Entity<ModelSelector>)>,
     /// The window-wide command palette (⌘P / sidebar Search row), if open.
     command_palette: Option<Entity<CommandPalette>>,
+    /// A blocking extension dialog (`extension_ui_request`), if one is open.
+    /// pi holds the run until the answer is sent, so this is a modal surface.
+    dialog: Option<Entity<Dialog>>,
+    /// Focus the dialog (or its text field) on the next paint — `tick` has no
+    /// window to focus with.
+    dialog_focus_pending: bool,
     /// Open row-actions menu in the sessions sidebar (which session's path
     /// plus whether the popup is showing the delete confirmation).
     session_menu: Option<SessionMenu>,
@@ -221,6 +258,12 @@ pub struct OrbitApp {
     settings_select: Option<SettingsSelect>,
     /// Filter text for the open settings dropdown.
     settings_filter: Entity<ComposerInput>,
+    /// Keyboard cursor in the open settings dropdown: an original option
+    /// index, so it survives filtering. `<Enter>` picks it; the list keeps
+    /// it in view.
+    settings_select_highlight: Option<usize>,
+    /// Scroll handle for the settings dropdown's option list.
+    settings_select_scroll: UniformListScrollHandle,
     /// Visited sessions, oldest first — drives the top-bar back/forward
     /// navigation. `history_index` points at the active entry.
     session_history: Vec<SessionInfo>,
@@ -341,8 +384,21 @@ pub struct OrbitApp {
     /// unsupported and the page keeps the Terminal login fallback.
     auth: AuthManager,
     /// Non-secret account quota/balance/spend per connected provider, from the
-    /// `quota.*` RPC namespace. Empty when pi does not support it.
+    /// `quota.*` RPC namespace and the bundled bridge extension's session
+    /// entries. Empty when nothing has been reported yet.
     quota: QuotaManager,
+    /// The bundled pi extension that fetches quota and appends snapshots to
+    /// each session; spawned with `--extension` on every session process.
+    quota_bridge: QuotaBridge,
+    /// `get_entries` cursor for the bridge's quota snapshots. Entry ids are
+    /// per-session, so this resets when the active session changes.
+    quota_entries_cursor: Option<String>,
+    /// One bridge poll in flight at a time.
+    quota_entries_inflight: bool,
+    /// Remaining fast (bootstrap) polls for a fresh session; 0 = steady state.
+    quota_entries_bootstrap: u8,
+    /// When the next bridge poll is due; throttles the 90 ms heartbeat.
+    quota_entries_next_poll: Instant,
     /// True once a credential changed and pi needs a restart to load it
     /// (pi reads auth.json only at startup). Only used on the file-based
     /// fallback path; RPC logins take effect live.
@@ -368,6 +424,39 @@ pub struct OrbitApp {
     provider_filter: Entity<ComposerInput>,
     /// Re-render the grid as the filter is typed.
     _provider_filter_sub: Subscription,
+    /// Skills discovered for the current workspace (project + user scope).
+    skills: Vec<Skill>,
+    /// Installed pi packages (plugins) from user + project settings.
+    plugins: Vec<PluginPackage>,
+    /// A malformed settings file surfaced on the Plugins page.
+    plugins_error: Option<String>,
+    /// Source field for installing a new plugin.
+    plugin_source_input: Entity<ComposerInput>,
+    /// Install the next plugin into project scope instead of user scope.
+    plugin_install_project: bool,
+    /// Description of the plugin operation in flight, if any.
+    plugin_action: Option<String>,
+    /// Plugin source awaiting inline remove confirmation.
+    plugin_remove_confirm: Option<String>,
+    /// Re-render the toolbar as the install field is typed.
+    _plugin_source_sub: Subscription,
+    /// Settings → Skills: filter field for the skill list.
+    skills_filter: Entity<ComposerInput>,
+    /// The skill selected in the master-detail page (its `SKILL.md` path).
+    selected_skill: Option<PathBuf>,
+    /// Cached `SKILL.md` body for the selected skill.
+    skill_content: Option<String>,
+    /// A skill directory awaiting delete confirmation.
+    skill_delete_confirm: Option<PathBuf>,
+    /// Re-render the skill list as the filter is typed.
+    _skills_filter_sub: Subscription,
+    /// Background updater status mirrored from the global: `Idle` (nothing to
+    /// show), `Available` (the footer offers the update), `Updating` (spinning
+    /// until the app quits to install). The details stay on the worker.
+    updater_status: crate::updater::UpdateStatus,
+    /// Mirror of the persisted automatic-check preference, refreshed when the
+    /// updater reports and on toggle, so frames never read the file.
+    automatic_updates_enabled: bool,
 }
 
 /// An image queued to ride along with the next prompt.
@@ -472,6 +561,29 @@ impl OrbitApp {
         });
         let provider_filter_sub = cx.observe(&provider_filter, |_, _, cx| cx.notify());
 
+        // Settings → Plugins: the install-source field. `Composer Picker`
+        // keeps editing keys live; Enter is unhandled, so the Install button
+        // is the only commit path.
+        let plugin_source_input = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("plugin-source-input")
+                .with_placeholder("npm:@scope/pkg, git:github.com/owner/repo, or ./path")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+        });
+        let plugin_source_sub = cx.observe(&plugin_source_input, |_, _, cx| cx.notify());
+
+        // Settings → Skills: the list filter. `Composer Picker` keeps editing
+        // keys live so typing filters the master list.
+        let skills_filter = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("skills-filter")
+                .with_placeholder("Search skills…")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+        });
+        let skills_filter_sub = cx.observe(&skills_filter, |_, _, cx| cx.notify());
+
         // Settings → Agent: rename field. Default `Composer` key context keeps
         // real text editing (selection, clipboard, arrows); Enter routes to the
         // app's Submit, which no-ops on the empty main composer.
@@ -485,7 +597,8 @@ impl OrbitApp {
         // Spawn pi rooted at the repo; sessions live in the real
         // ~/.pi/agent/sessions so they are shared with the CLI.
         let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let (client, connect_error) = match PiClient::spawn(&workspace, None) {
+        let quota_bridge = QuotaBridge::install();
+        let (client, connect_error) = match quota_bridge.spawn(&workspace) {
             Ok(client) => (Some(client), String::new()),
             Err(err) => (None, format!("pi spawn failed: {err}")),
         };
@@ -497,10 +610,6 @@ impl OrbitApp {
         };
 
         let theme_sub = cx.observe_global::<Theme>(|this, cx| {
-            // Keep the borrowed component layer (table, plot) on the same
-            // palette as the rest of the app.
-            let theme = *theme::get(cx);
-            crate::usage::kit::sync(cx, &theme);
             this.input.update(cx, |_, cx| cx.notify());
             if let Some((_, selector)) = &this.model_selector {
                 selector.update(cx, |_, cx| cx.notify());
@@ -557,6 +666,8 @@ impl OrbitApp {
             status_at: (!connect_error.is_empty()).then(Instant::now),
             current_title: None,
             current_workspace: None,
+            branch: None,
+            branch_fetch: 0,
             added: 0,
             removed: 0,
             focus: cx.focus_handle(),
@@ -564,11 +675,15 @@ impl OrbitApp {
             available_thinking_levels: Vec::new(),
             model_selector: None,
             command_palette: None,
+            dialog: None,
+            dialog_focus_pending: false,
             session_menu: None,
             settings_open: false,
             settings_section: SettingsSection::General,
             settings_select: None,
             settings_filter: settings_filter,
+            settings_select_highlight: None,
+            settings_select_scroll: UniformListScrollHandle::new(),
             session_history: Vec::new(),
             history_index: 0,
             collapsed_workspaces: HashSet::new(),
@@ -621,6 +736,11 @@ impl OrbitApp {
             provider_auth_error: None,
             auth: AuthManager::new(),
             quota: QuotaManager::new(),
+            quota_bridge,
+            quota_entries_cursor: None,
+            quota_entries_inflight: false,
+            quota_entries_bootstrap: QUOTA_ENTRY_BOOTSTRAP_POLLS,
+            quota_entries_next_poll: Instant::now(),
             provider_auth_dirty: false,
             provider_catalog_counts: HashMap::new(),
             provider_metadata: Vec::new(),
@@ -631,6 +751,29 @@ impl OrbitApp {
             providers_refreshing: false,
             provider_filter: provider_filter.clone(),
             _provider_filter_sub: provider_filter_sub,
+            skills: Vec::new(),
+            plugins: Vec::new(),
+            plugins_error: None,
+            plugin_source_input: plugin_source_input.clone(),
+            plugin_install_project: false,
+            plugin_action: None,
+            plugin_remove_confirm: None,
+            _plugin_source_sub: plugin_source_sub,
+            skills_filter: skills_filter.clone(),
+            selected_skill: None,
+            skill_content: None,
+            skill_delete_confirm: None,
+            _skills_filter_sub: skills_filter_sub,
+            updater_status: cx
+                .try_global::<crate::updater::UpdaterState>()
+                .and_then(|state| state.0.as_ref())
+                .map(|updater| updater.status())
+                .unwrap_or_default(),
+            automatic_updates_enabled: cx
+                .try_global::<crate::updater::UpdaterState>()
+                .and_then(|state| state.0.as_ref())
+                .map(|updater| updater.automatically_checks_for_updates())
+                .unwrap_or(false),
         };
 
         // A changed-file row on the Git page opens its diff in Review.
@@ -687,6 +830,9 @@ impl OrbitApp {
             app.send(CommandBody::GetCommands, "get_commands");
             app.probe_auth();
         }
+        // The branch chip tracks the launch workspace even before a session
+        // is open.
+        app.refresh_branch_status(cx);
         app
     }
 
@@ -719,6 +865,52 @@ impl OrbitApp {
                     .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
                     .unwrap_or_else(|| "workspace".into())
             })
+    }
+
+    /// Refetch the status bar's branch chip off-thread: branch name plus
+    /// ahead/behind against its upstream. Called at launch, when the workspace
+    /// moves, when the workspace watcher reports git state changed (commit,
+    /// checkout, fetch), and after an in-app branch switch — render must never
+    /// spawn `git`.
+    pub(super) fn refresh_branch_status(&mut self, cx: &mut Context<Self>) {
+        self.branch_fetch = self.branch_fetch.wrapping_add(1);
+        let fetch = self.branch_fetch;
+        let cwd = self
+            .current_workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok());
+        let Some(cwd) = cwd else {
+            self.branch = None;
+            cx.notify();
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let branch = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::git::current_branch(&cwd).map(|name| {
+                        let (ahead, behind) = crate::git::ahead_behind(&cwd).unwrap_or((0, 0));
+                        BranchStatus {
+                            name,
+                            ahead,
+                            behind,
+                        }
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                // A newer fetch (workspace move or fresh git state) superseded
+                // this one; drop the stale result.
+                if app.branch_fetch != fetch {
+                    return;
+                }
+                if app.branch != branch {
+                    app.branch = branch;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 }
 
@@ -822,6 +1014,8 @@ pub(crate) enum SettingsSection {
     General,
     Runtime,
     Agent,
+    Skills,
+    Plugins,
     Appearance,
     Providers,
     About,
@@ -1063,7 +1257,7 @@ enum RuntimeState {
 enum SettingsSelect {
     Theme,
     Language,
-    InterfaceScale,
+    UiFontSize,
     TerminalFont,
     EditorFont,
     SpacingDensity,
@@ -1076,6 +1270,7 @@ enum SettingsSelect {
 // wiring. Rendering and feature-specific logic live in child modules; they
 // are descendants of `app`, so they reach private fields/methods directly.
 mod composer_ops;
+mod dialogs;
 mod events;
 mod helpers;
 mod open_in;
@@ -1084,6 +1279,8 @@ mod runtime;
 mod session;
 mod settings;
 mod sidebar;
+mod skills_ui;
+mod updater_ui;
 mod view;
 
 #[cfg(test)]
