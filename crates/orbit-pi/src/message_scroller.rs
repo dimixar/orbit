@@ -141,6 +141,60 @@ impl MessageScrollerState {
         true
     }
 
+    /// Remeasure one row whose height changed from an expand/collapse, keeping
+    /// the transcript exactly where the reader left it.
+    ///
+    /// While tail-following, a plain remeasure re-pins the list to the bottom
+    /// and yanks the growing row out of view. Freeze the live edge into an
+    /// explicit item anchor first (which also leaves tail-following, so the
+    /// view stops chasing the bottom).
+    ///
+    /// Either way the anchor is re-applied after the splice: gpui's `splice`
+    /// zeroes the offset when the changed row *is* the anchor, which otherwise
+    /// snaps that row's top to the viewport top (the "it jumps when I open a
+    /// card in the message I'm reading" case). Restoring the captured pair
+    /// leaves the row under the reader fixed and lets the card open in place.
+    pub fn remeasure_toggle(&self, ix: usize) -> bool {
+        if ix >= self.item_count() {
+            return false;
+        }
+        // Only freeze an anchor when there is content to scroll. A transcript
+        // shorter than the viewport is bottom-pinned; materializing an anchor
+        // there would snap the whole run to the top.
+        let anchor = if self.is_following_tail() {
+            if self.is_scrollable() {
+                // `logical_scroll_top` reads as past-the-end while following;
+                // move back one viewport to turn the visible top item into the
+                // anchor.
+                let viewport = self.list.viewport_bounds().size.height;
+                self.list.scroll_by(-viewport);
+                let anchor = self.list.logical_scroll_top();
+                if anchor.item_ix < self.item_count() {
+                    self.following_tail.set(false);
+                    // Programmatic scrolls skip the scroll handler; keep the
+                    // rail's "reader is here" hint on the frozen top row.
+                    self.visible_start.set(anchor.item_ix);
+                    Some(anchor)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            // Already anchored by the reader's own scroll.
+            Some(self.list.logical_scroll_top())
+        };
+
+        self.list.splice(ix..ix + 1, 1);
+        if let Some(anchor) = anchor {
+            self.list.scroll_to(anchor);
+        } else {
+            self.stick_if_following();
+        }
+        true
+    }
+
     /// Scroll to the row at `index`, if it exists. Leaves tail following.
     pub fn scroll_to_item(&self, index: usize) -> bool {
         if index >= self.item_count() {
@@ -279,6 +333,158 @@ fn render_jump_button(state: MessageScrollerState, theme: Theme) -> impl IntoEle
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type RowHeights = Rc<std::cell::RefCell<std::collections::HashMap<usize, f32>>>;
+
+    /// A bottom-aligned transcript standing in for real message rows: each row
+    /// is 40 px unless `heights` gives it a taller one, which is how an opened
+    /// thinking/tool card changes a row's size.
+    struct TranscriptProbe {
+        state: MessageScrollerState,
+        heights: RowHeights,
+    }
+
+    impl gpui::Render for TranscriptProbe {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            let heights = self.heights.clone();
+            gpui::list(self.state.list_state(), move |ix, _, _| {
+                let height = heights.borrow().get(&ix).copied().unwrap_or(40.);
+                gpui::div()
+                    .id(gpui::ElementId::NamedInteger("probe-row".into(), ix as u64))
+                    .debug_selector(move || format!("probe-row-{ix}"))
+                    .w_full()
+                    .h(px(height))
+                    .child(format!("row {ix}"))
+                    .into_any_element()
+            })
+            .size_full()
+        }
+    }
+
+    /// Open a probe at a 600×400 window and return its first painted frame.
+    fn draw_probe(
+        cx: &mut gpui::VisualTestContext,
+        probe: &gpui::Entity<TranscriptProbe>,
+    ) -> gpui::Size<gpui::Pixels> {
+        let space = gpui::size(px(600.), px(400.));
+        let origin = gpui::point(px(0.), px(0.));
+        let _ = cx.draw(origin, space, |_, _| {
+            gpui::div().size_full().child(probe.clone())
+        });
+        space
+    }
+
+    /// Expanding a card while tail-following must not re-pin the list to the
+    /// bottom: the row under the reader stays put and the card grows below it.
+    #[gpui::test]
+    fn remeasure_toggle_keeps_the_reader_anchored(cx: &mut gpui::TestAppContext) {
+        let state = MessageScrollerState::new(40);
+        let heights: RowHeights =
+            Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
+        let cx = cx.add_empty_window();
+        let probe = cx.update(|_, cx| {
+            cx.new(|_| TranscriptProbe {
+                state: state.clone(),
+                heights: heights.clone(),
+            })
+        });
+        draw_probe(cx, &probe);
+        let before = cx.debug_bounds("probe-row-30").expect("row 30 visible");
+        assert!(state.is_following_tail(), "starts at the live edge");
+
+        heights.borrow_mut().insert(38, 500.);
+        state.remeasure_toggle(38);
+        draw_probe(cx, &probe);
+
+        assert!(
+            !state.is_following_tail(),
+            "toggling leaves tail-following so the view holds still"
+        );
+        let after = cx
+            .debug_bounds("probe-row-30")
+            .expect("row 30 still visible");
+        assert_eq!(
+            after.top(),
+            before.top(),
+            "the row under the reader did not move"
+        );
+    }
+
+    /// The failing shape: the changed row is itself the row pinned to the top
+    /// of the viewport. gpui's splice zeroes that row's scroll offset, so the
+    /// anchor has to be re-applied or the row's top snaps to the viewport top.
+    #[gpui::test]
+    fn remeasure_toggle_holds_a_pinned_row_that_is_itself_toggled(cx: &mut gpui::TestAppContext) {
+        let state = MessageScrollerState::new(40);
+        let heights: RowHeights =
+            Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
+        // A tall row 29 sits under the viewport top (offset 420), with rows
+        // 30..39 (30 px each) beneath it so the anchor holds while it grows.
+        heights.borrow_mut().insert(29, 520.);
+        for ix in 30..40 {
+            heights.borrow_mut().insert(ix, 30.);
+        }
+        let cx = cx.add_empty_window();
+        let probe = cx.update(|_, cx| {
+            cx.new(|_| TranscriptProbe {
+                state: state.clone(),
+                heights: heights.clone(),
+            })
+        });
+        draw_probe(cx, &probe);
+        let before = cx
+            .debug_bounds("probe-row-29")
+            .expect("row 29 is the pinned row");
+        assert!(before.top() < px(0.), "row 29 is scrolled under the top");
+
+        heights.borrow_mut().insert(29, 700.);
+        state.remeasure_toggle(29);
+        draw_probe(cx, &probe);
+
+        let after = cx.debug_bounds("probe-row-29").expect("row 29 visible");
+        assert_eq!(
+            after.top(),
+            before.top(),
+            "toggling the pinned row keeps its offset instead of snapping to the top"
+        );
+    }
+
+    /// A run shorter than the viewport stays bottom-pinned through a toggle —
+    /// freezing an anchor would snap it to the top of the panel.
+    #[gpui::test]
+    fn remeasure_toggle_keeps_a_short_run_bottom_pinned(cx: &mut gpui::TestAppContext) {
+        let state = MessageScrollerState::new(5);
+        let heights: RowHeights =
+            Rc::new(std::cell::RefCell::new(std::collections::HashMap::new()));
+        let cx = cx.add_empty_window();
+        let probe = cx.update(|_, cx| {
+            cx.new(|_| TranscriptProbe {
+                state: state.clone(),
+                heights: heights.clone(),
+            })
+        });
+        draw_probe(cx, &probe);
+        let before = cx.debug_bounds("probe-row-4").expect("row 4 visible");
+
+        heights.borrow_mut().insert(4, 200.);
+        state.remeasure_toggle(4);
+        draw_probe(cx, &probe);
+
+        assert!(
+            state.is_following_tail(),
+            "a run that still fits stays at the live edge"
+        );
+        let after = cx.debug_bounds("probe-row-4").expect("row 4 visible");
+        assert_eq!(
+            after.bottom(),
+            before.bottom(),
+            "the run stays pinned to the bottom of the panel"
+        );
+    }
 
     #[test]
     fn state_starts_following_tail() {

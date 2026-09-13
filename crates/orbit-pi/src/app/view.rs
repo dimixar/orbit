@@ -313,6 +313,28 @@ impl Render for OrbitApp {
                             .hover(|style| style.bg(theme.accent.opacity(0.4)))
                             .on_drag(SidebarResize, |_, _, _, cx| cx.new(|_| DragGhost)),
                     )
+                    // brand — the Orbit wordmark, set over the nav column
+                    .child(
+                        div()
+                            .px_3()
+                            .pt(px(2.))
+                            .pb(px(6.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            // White mark on dark sidebars; the dark-ink mark
+                            // on light ones, where the white wordmark vanishes.
+                            // A compact fixed width keeps the brand quiet above
+                            // the nav rows.
+                            .child(embedded_image_w(
+                                if theme.mode == ThemeMode::Light {
+                                    crate::app_icon::LOGO_DARK_ASSET
+                                } else {
+                                    crate::app_icon::LOGO_ASSET
+                                },
+                                px(90.),
+                            )),
+                    )
                     // nav — one primary action (New Task), one quiet row
                     // (Search); the switcher palette anchors under Search
                     .child(
@@ -654,7 +676,11 @@ impl Render for OrbitApp {
             .children(dialog_layer.map(|dialog| crate::dialog::layer(dialog).into_any_element()))
             // ── image lightbox — full-window, above everything; opened from a
             // transcript image tile, dismissed by click or Escape.
-            .children(self.lightbox.clone().map(|image| self.lightbox_layer(image, cx)))
+            .children(
+                self.lightbox
+                    .clone()
+                    .map(|image| self.lightbox_layer(image, cx)),
+            )
             .track_focus(&self.focus_handle(cx))
             // Sidebar resize: fires for every mouse move while the handle
             // drag is active, wherever the pointer travels.
@@ -2238,7 +2264,11 @@ impl OrbitApp {
     /// Full-window image lightbox: the clicked attachment at `Contain` scale
     /// over a dimmed scrim. Any click (or Escape) closes it. No new surface
     /// for the app — it reads `OrbitApp::lightbox`, set by `image_opener`.
-    pub(super) fn lightbox_layer(&self, image: std::sync::Arc<Image>, cx: &Context<Self>) -> AnyElement {
+    pub(super) fn lightbox_layer(
+        &self,
+        image: std::sync::Arc<Image>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let theme = *theme::get(cx);
         let scrim = match theme.mode {
             theme::ThemeMode::Dark => gpui::hsla(0., 0., 0., 0.72),

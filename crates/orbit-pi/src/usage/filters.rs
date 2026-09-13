@@ -59,11 +59,20 @@ pub fn chip_with_menu(
 
 /// A filter chip: 28px, hairline, and unmistakably "on" when it narrows the
 /// view (active fill, `active_fg` text — never accent alone).
+///
+/// `inset` picks the resting fill for the surface the chip sits on: a chip on
+/// the canvas takes `bg_raised`, while a chip inside a raised card takes
+/// `bg_main` so it reads as a recessed well instead of vanishing into the card.
+///
+/// `icon_path` is the optional leading icon. A plain picker (rows-per-page)
+/// passes `None`: the trailing chevron already marks it as a dropdown, and a
+/// leading chevron there would read as a second one.
 pub fn chip(
     id: &'static str,
     label: String,
-    icon_path: &'static str,
+    icon_path: Option<&'static str>,
     active: bool,
+    inset: bool,
     theme: Theme,
     on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
@@ -71,6 +80,16 @@ pub fn chip(
         theme.active_fg
     } else {
         theme.text_2
+    };
+    let resting = if inset {
+        theme.bg_main
+    } else {
+        theme.bg_raised
+    };
+    let leading_color = if active {
+        theme.active_fg
+    } else {
+        theme.text_3
     };
     div()
         .id(ElementId::Name(SharedString::from(id)))
@@ -83,26 +102,14 @@ pub fn chip(
         } else {
             theme.border
         })
-        .bg(if active {
-            theme.active
-        } else {
-            theme.bg_raised
-        })
+        .bg(if active { theme.active } else { resting })
         .flex()
         .items_center()
         .gap(px(6.))
         .cursor_pointer()
         .hover(|style| style.bg(if active { theme.active } else { theme.bg_hover }))
         .on_mouse_down(MouseButton::Left, on_click)
-        .child(icon(
-            icon_path,
-            12.,
-            if active {
-                theme.active_fg
-            } else {
-                theme.text_3
-            },
-        ))
+        .children(icon_path.map(|path| icon(path, 12., leading_color)))
         .child(
             div()
                 .max_w(px(180.))
@@ -521,6 +528,78 @@ pub fn columns_menu(
     children.push(menu_footer(theme, show_all, div().into_any_element()));
     let page = cx.entity();
     panel("usage-columns-menu", 220., theme, children, page)
+}
+
+/// The breakdown table's column-visibility picker. The name column is fixed;
+/// every other column of the open dimension can be turned off.
+pub fn breakdown_columns_menu(
+    page: &UsagePage,
+    cx: &mut gpui::Context<UsagePage>,
+    theme: Theme,
+) -> AnyElement {
+    let mut children: Vec<AnyElement> = vec![menu_title("Columns", theme)];
+    for (id, label) in page.breakdown_column_options() {
+        let selected = page.breakdown_column_visible(id);
+        let entity = cx.entity();
+        children.push(row(
+            ElementId::Name(SharedString::from(format!("usage-breakdown-col-{id}"))),
+            label,
+            None,
+            selected,
+            false,
+            theme,
+            move |_, _, cx| {
+                entity.update(cx, |page, cx| page.toggle_breakdown_column(id, cx));
+            },
+            |_, _, _| {},
+        ));
+    }
+    let entity = cx.entity();
+    let show_all = footer_row(
+        "usage-breakdown-columns-all",
+        "Show all",
+        theme,
+        move |_, _, cx| {
+            entity.update(cx, |page, cx| page.show_all_breakdown_columns(cx));
+        },
+    );
+    children.push(menu_footer(theme, show_all, div().into_any_element()));
+    let page = cx.entity();
+    panel("usage-breakdown-columns-menu", 220., theme, children, page)
+}
+
+/// The breakdown table's rows-per-page picker.
+pub fn breakdown_page_size_menu(
+    page: &UsagePage,
+    cx: &mut gpui::Context<UsagePage>,
+    theme: Theme,
+) -> AnyElement {
+    let current = page.breakdown_view(page.breakdown_tab()).page_size;
+    let mut children: Vec<AnyElement> = vec![menu_title("Rows per page", theme)];
+    for size in PAGE_SIZES {
+        let selected = size == current;
+        let entity = cx.entity();
+        children.push(row(
+            ElementId::NamedInteger("usage-breakdown-page-size".into(), size as u64),
+            &size.to_string(),
+            None,
+            selected,
+            false,
+            theme,
+            move |_, _, cx| {
+                entity.update(cx, |page, cx| page.set_breakdown_page_size(size, cx));
+            },
+            |_, _, _| {},
+        ));
+    }
+    let page = cx.entity();
+    panel(
+        "usage-breakdown-page-size-menu",
+        180.,
+        theme,
+        children,
+        page,
+    )
 }
 
 /// A small heading at the top of a menu.

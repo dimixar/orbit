@@ -1,0 +1,209 @@
+@import "tailwindcss";
+
+/*
+ * Palette and layout scale mirror the warm.run reference landing:
+ * dark slate page, recessed "well" bands, cards, and a single blue micro-accent.
+ */
+@theme {
+  --color-page: #141518;
+  --color-well: #0f1012;
+  --color-missions: #0b0c0f;
+  --color-card: #1c1d21;
+  --color-slab: #242529;
+  --color-ink: #f4f4f5;
+  --color-ink-2: #a2a5ab;
+  --color-ink-3: #6f7278;
+  --color-hair: #ffffff14;
+  --color-dash: #ffffff1c;
+  --color-accent: #5b9dff;
+  --color-window: #17181b;
+  --color-winbar: #1d1e22;
+  --color-side: #131417;
+
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, Menlo, monospace;
+
+  --shadow-window: 0 0 0 1px #ffffff17, 0 24px 60px #0000008c;
+  --shadow-pop: 0 0 0 1px #ffffff14, 0 12px 30px #00000073;
+}
+
+html {
+  color-scheme: dark;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
+}
+
+body {
+  background: var(--color-page);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--color-ink);
+  color: var(--color-page);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* The 1280px center column with a hairline rule down each edge. */
+.shell {
+  position: relative;
+  max-width: 1280px;
+  margin-inline: auto;
+}
+
+.shell::before,
+.shell::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--color-hair);
+  z-index: 2;
+}
+
+.shell::before {
+  left: 0;
+}
+
+.shell::after {
+  right: 0;
+}
+
+/* A band is a full-width row inside the shell with a dashed baseline. */
+.band {
+  position: relative;
+  padding-inline: 20px;
+}
+
+@media (min-width: 640px) {
+  .band {
+    padding-inline: 48px;
+  }
+}
+
+.band-dashed::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: repeating-linear-gradient(
+    90deg,
+    var(--color-dash) 0 8px,
+    transparent 8px 16px
+  );
+  z-index: 2;
+}
+
+/* Watermark band used behind mocks (reference uses a faint geometric mark). */
+.watermark {
+  pointer-events: none;
+  position: absolute;
+  color: #ffffff0a;
+  z-index: 0;
+}
+
+/* Entry animations, matching the reference's gentle blur-rise. */
+@keyframes rise-in {
+  0% {
+    opacity: 0;
+    filter: blur(7px);
+    transform: translateY(14px);
+  }
+  100% {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(0);
+  }
+}
+
+@keyframes rise-in-window {
+  0% {
+    opacity: 0;
+    filter: blur(10px);
+    transform: translateY(20px) scale(0.988);
+  }
+  100% {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(0) scale(1);
+  }
+}
+
+.rise {
+  animation: rise-in 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.rise-window {
+  animation: rise-in-window 0.95s cubic-bezier(0.16, 1, 0.3, 1) 0.18s both;
+}
+
+@keyframes caret-blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.caret {
+  display: inline-block;
+  width: 1px;
+  height: 11px;
+  margin-left: 3px;
+  vertical-align: -2px;
+  background: var(--color-ink-2);
+  animation: caret-blink 1.1s step-end infinite;
+}
+
+@keyframes pulse-dot {
+  0% {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.pulse-dot {
+  animation: pulse-dot 0.72s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rise,
+  .rise-window,
+  .caret,
+  .pulse-dot {
+    animation: none;
+  }
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

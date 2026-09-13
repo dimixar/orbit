@@ -4,9 +4,31 @@
 //! computed elsewhere and formats it; the only logic allowed here is layout,
 //! interaction, and choosing which register a number is shown in.
 //!
-//! Structure follows §99/§100: current usage (metric board), what changed
-//! (insights), trend (timeline), breakdowns (models, composition, workspaces,
-//! providers), health (cache, tools, errors), then the record tables.
+//! # Direction contract — Usage, card-stack redesign
+//!
+//! **THESIS.** The page is an instrument cluster, not a scroll of lists: each
+//! measure owns a bordered card so a metric's domain is spatial, refusing the
+//! undifferentiated hairline stack the category defaults to.
+//!
+//! **OWN-WORLD.** Orbit's instrument panel, inherited whole: canvas ground,
+//! `bg_raised` cards at 12px radius, one ember accent on the active series,
+//! hairlines only *inside* a card, tabular mono figures for every number.
+//!
+//! **STORY.** The operator scans the summary, reads the trend, ranks one
+//! dimension at a time, checks token health, then drills the record tables.
+//! Every figure is pi's own session measurement; nothing is invented.
+//!
+//! **FIRST VIEWPORT.** 44px header + filter bar, then the Summary card: the
+//! metric grid first, the quieter secondary figures one click away. The Trend
+//! area chart follows as the first chart, so data starts above the fold.
+//!
+//! **FORM.** Established world, brief-pinned structure — no concept tournament
+//! was run. Composition is a card stack on the canvas; the trend is an area
+//! chart, and both the Breakdown dimensions and the Details records are the
+//! same shared data table (search, columns, sorting, totals, pagination).
+//!
+//! Sections: Summary (metric grid) · Signals · Trend (area) · Breakdown (four
+//! dimensions, each a data table) · Token composition · Cache · Details.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -18,22 +40,25 @@ use gpui::{
 
 use super::aggregate::{
     Breakdown, ChartMetric, Direction, GroupRow, Insight, LatencyMetric, LatencyStats, SessionRow,
-    Tone, Totals, UsageSnapshot,
+    TimeSeries, Tone, ToolRow, Totals, UsageSnapshot,
 };
 use super::chart;
 use super::filters::{self, FilterOption};
 use super::format;
 use super::model::{
-    next_bucket, Granularity, RangePreset, TimeFocus, TokenCounts, ToolClass, UsageFilter,
-    UsageIndex,
+    next_bucket, Granularity, RangePreset, TimeFocus, TokenCounts, UsageFilter, UsageIndex,
 };
-use super::page::{BucketSort, MenuKind, SessionQueryResult, SessionSort, UsagePage};
+use super::page::{
+    BreakdownQueryResult, BreakdownSort, BreakdownTab, BucketSort, DetailTab, MenuKind,
+    SessionQueryResult, SessionSort, ToolQueryResult, UsagePage,
+};
 use super::table::{
     cell_shell, data_table, empty_cell, text_cell, Column, FailureSort, SortState, TableHandlers,
     TableKind, ROW_H,
 };
 use super::tooltip::Tooltip;
 use crate::app::icon;
+use crate::composer::ComposerInput;
 use crate::theme::{self, Theme};
 
 /// Inner column width for a data surface (§58): wide enough for a full table,
@@ -50,8 +75,8 @@ const FOUR_KPI_MIN: f32 = 880.;
 /// internally rather than growing without bound.
 const BUCKET_TABLE_H: f32 = ROW_H * 11.;
 const FAILURE_TABLE_H: f32 = ROW_H * 10.;
-/// Ranked rows per breakdown panel before the tail is pooled into "more".
-const RANKED_ROWS: usize = 6;
+/// Ranked bars the Breakdown chart shows; the table below carries the rest.
+const CHART_ROWS: usize = 8;
 
 impl Render for UsagePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -100,8 +125,10 @@ impl Render for UsagePage {
                                 div()
                                     .w_full()
                                     .px(px(20.))
+                                    .pt(px(18.))
                                     .flex()
                                     .flex_col()
+                                    .gap(px(16.))
                                     .child(self.body(theme, wide, kpi_cols, window, cx)),
                             ),
                     ),
@@ -253,8 +280,9 @@ impl UsagePage {
         let range_chip = filters::chip(
             "usage-range-chip",
             range.label(),
-            "icons/clock.svg",
+            Some("icons/clock.svg"),
             range.preset != RangePreset::Last7,
+            false,
             theme,
             move |_, window, cx| {
                 entity.update(cx, |page, cx| page.toggle_menu(MenuKind::Range, window, cx));
@@ -366,8 +394,9 @@ impl UsagePage {
         let chip = filters::chip(
             id,
             label,
-            "icons/filter.svg",
+            Some("icons/filter.svg"),
             !selected.is_empty(),
+            false,
             theme,
             move |_, window, cx| {
                 entity.update(cx, |page, cx| page.toggle_menu(kind, window, cx));
@@ -378,9 +407,7 @@ impl UsagePage {
                 div().into_any_element()
             });
         }
-        let entity = cx.entity();
         let panel = filters::multi_menu(self, kind, ranked, all, selected, cx, theme);
-        let _ = entity;
         filters::chip_with_menu(id, chip, true, Corner::TopLeft, move || panel)
     }
 
@@ -507,6 +534,7 @@ impl UsagePage {
             div()
                 .id("usage-active-filters")
                 .w_full()
+                .px(px(20.))
                 .pt(px(14.))
                 .flex()
                 .flex_wrap()
@@ -609,76 +637,20 @@ impl UsagePage {
             return self.empty_store_state(theme, index.unreadable_files);
         }
 
-        let mut sections: Vec<AnyElement> = vec![
-            self.kpi_board(snapshot, theme, kpi_cols, cx),
-            self.secondary_strip(snapshot, theme),
-        ];
+        let mut sections: Vec<AnyElement> = vec![self.summary_card(snapshot, theme, kpi_cols, cx)];
         if !snapshot.insights.is_empty() {
-            sections.push(self.insights_panel(&snapshot.insights, theme));
+            sections.push(self.signals_card(&snapshot.insights, theme));
         }
-        sections.push(self.timeline_section(snapshot, theme, cx));
-
-        let model_panel = self.breakdown_panel(
-            "model-usage",
-            "Model usage",
-            model_meta(&snapshot.models),
-            &snapshot.models,
-            "models",
-            theme,
-            cx,
-        );
-        let composition = self.composition_panel(snapshot, theme, cx);
-        let workspace_panel = self.breakdown_panel(
-            "workspace-usage",
-            "Workspace usage",
-            workspace_meta(&snapshot.workspaces),
-            &snapshot.workspaces,
-            "workspaces",
-            theme,
-            cx,
-        );
-        let provider_panel = self.breakdown_panel(
-            "provider-usage",
-            "Provider usage",
-            provider_meta(&snapshot.providers),
-            &snapshot.providers,
-            "providers",
-            theme,
-            cx,
-        );
-        let cache_panel = self.cache_panel(snapshot, theme, cx);
-        let tools_panel = self.tools_panel(snapshot, theme);
-
-        if wide {
-            sections.push(paired(
-                divide_left(model_panel, theme),
-                divide_right(composition),
-            ));
-            sections.push(paired(
-                divide_left(workspace_panel, theme),
-                divide_right(provider_panel),
-            ));
-            sections.push(paired(
-                divide_left(cache_panel, theme),
-                divide_right(tools_panel),
-            ));
-        } else {
-            sections.push(model_panel);
-            sections.push(composition);
-            sections.push(workspace_panel);
-            sections.push(provider_panel);
-            sections.push(cache_panel);
-            sections.push(tools_panel);
-        }
-
-        sections.push(self.errors_panel(snapshot, theme, window, cx));
-        sections.push(self.buckets_panel(theme, window, cx));
-        sections.push(self.sessions_panel(theme, window, cx));
+        sections.push(self.trend_card(snapshot, theme, cx));
+        sections.push(self.breakdown_card(snapshot, theme, cx));
+        sections.push(self.health_section(snapshot, theme, wide, cx));
+        sections.push(self.details_section(snapshot, theme, window, cx));
 
         div()
             .w_full()
             .flex()
             .flex_col()
+            .gap(px(16.))
             .children(sections)
             .into_any_element()
     }
@@ -713,58 +685,102 @@ impl UsagePage {
 
     /// Lightweight skeleton: the page's shape, without a spinner (§45).
     fn skeleton(&self, theme: Theme) -> AnyElement {
+        // A placeholder bar, drawn in the trough so it reads against a card.
         let bar = |width: f32, height: f32| {
             div()
                 .w(px(width))
                 .h(px(height))
                 .rounded(px(4.))
-                .bg(theme.bg_raised)
+                .bg(theme.trough)
                 .into_any_element()
         };
-        let mut board = div()
+        // One card shell, so the load→loaded swap keeps the same shape: a
+        // header strip over a body.
+        let shell = |body: AnyElement| {
+            div()
+                .w_full()
+                .flex_none()
+                .rounded(px(12.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.bg_raised)
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .flex_none()
+                        .h(px(42.))
+                        .px(px(14.))
+                        .flex()
+                        .items_center()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .child(bar(96., 10.)),
+                )
+                .child(body)
+                .into_any_element()
+        };
+
+        // Summary: a metric grid divided by hairlines.
+        let mut grid = div()
+            .w_full()
             .flex()
             .flex_wrap()
             .gap(px(1.))
-            .bg(theme.border)
-            .rounded(px(12.))
-            .overflow_hidden();
+            .bg(theme.border);
         for _ in 0..8 {
-            board = board.child(
+            grid = grid.child(
                 div()
                     .flex_1()
-                    .min_w(px(180.))
-                    .h(px(84.))
-                    .bg(theme.bg_raised)
+                    .min_w(px(150.))
                     .p(px(14.))
+                    .bg(theme.bg_raised)
                     .flex()
                     .flex_col()
-                    .gap(px(10.))
-                    .child(bar(64., 10.))
-                    .child(bar(96., 20.))
-                    .child(bar(120., 10.)),
+                    .gap(px(8.))
+                    .child(bar(56., 10.))
+                    .child(bar(88., 18.))
+                    .child(bar(112., 10.)),
             );
         }
+
+        // Trend: the switcher row, then the plot block.
+        let trend = div()
+            .p(px(14.))
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(bar(320., 26.))
+            .child(div().h(px(168.)).w_full().rounded(px(8.)).bg(theme.trough));
+
+        // Records: a header rule and a handful of rows.
+        let mut records = div().w_full().pt(px(12.)).flex().flex_col();
+        for ix in 0..6 {
+            records = records.child(
+                div()
+                    .h(px(26.))
+                    .w_full()
+                    .px(px(14.))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .when(ix > 0, |row| row.border_t_1().border_color(theme.border))
+                    .child(bar(140., 10.))
+                    .child(div().flex_1())
+                    .child(bar(72., 10.)),
+            );
+        }
+
         div()
             .w_full()
             .flex()
             .flex_col()
-            .pt(px(18.))
-            .child(board)
-            .child(
-                div()
-                    .mt(px(28.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(12.))
-                    .child(bar(140., 12.))
-                    .child(
-                        div()
-                            .h(px(168.))
-                            .w_full()
-                            .rounded(px(8.))
-                            .bg(theme.bg_raised),
-                    ),
-            )
+            .gap(px(16.))
+            .child(shell(grid.into_any_element()))
+            .child(shell(trend.into_any_element()))
+            .child(shell(records.into_any_element()))
             .into_any_element()
     }
 
@@ -857,16 +873,17 @@ impl UsagePage {
             .into_any_element()
     }
 
-    // ── metric board ───────────────────────────────────────────────────────
+    // ── summary card ───────────────────────────────────────────────────────
 
-    /// The KPI board: one bordered readout divided by hairlines — a
-    /// measurement panel, not a grid of cards (§13).
+    /// The Summary card: the metric grid first, as full-bleed cells divided by
+    /// hairlines (a measurement board, not a grid of floating cards), then the
+    /// quieter secondary figures behind a disclosure.
     ///
-    /// Built as explicit rows of `flex_1` cells rather than one wrapping
-    /// container of percentage-width cells: percentage widths inside a
+    /// The grid is built as explicit rows of `flex_1` cells rather than one
+    /// wrapping container of percentage-width cells: percentage widths inside a
     /// wrapping flex row are resolved against the row's own (content-derived)
     /// width, which let the board grow past the window.
-    fn kpi_board(
+    fn summary_card(
         &self,
         snapshot: &UsageSnapshot,
         theme: Theme,
@@ -874,17 +891,7 @@ impl UsagePage {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let cells = self.kpi_cells(snapshot);
-        let mut board = div()
-            .flex_none()
-            .w_full()
-            .pt(px(18.))
-            .flex()
-            .flex_col()
-            .rounded(px(12.))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.bg_raised)
-            .overflow_hidden();
+        let mut grid = div().w_full().flex().flex_col();
 
         for (row_ix, chunk) in cells.chunks(cols).enumerate() {
             let mut row = div().w_full().flex();
@@ -899,10 +906,11 @@ impl UsagePage {
                     .id(SharedString::from(format!("usage-kpi-{row_ix}-{col_ix}")))
                     .flex_1()
                     .min_w(px(150.))
-                    .p(px(14.))
+                    .px(px(14.))
+                    .py(px(13.))
                     .flex()
                     .flex_col()
-                    .gap(px(7.))
+                    .gap(px(6.))
                     .when(row_ix > 0, |cell| {
                         cell.border_t_1().border_color(theme.border)
                     })
@@ -952,9 +960,28 @@ impl UsagePage {
                     cell.border_t_1().border_color(theme.border)
                 }));
             }
-            board = board.child(row);
+            grid = grid.child(row);
         }
-        board.into_any_element()
+
+        let body = div().w_full().flex().flex_col().child(grid).child(
+            div()
+                .w_full()
+                .px(px(14.))
+                .py(px(10.))
+                .border_t_1()
+                .border_color(theme.border)
+                .child(self.summary_strip(snapshot, theme, cx)),
+        );
+
+        card(
+            "usage-summary",
+            "Summary",
+            Some(summary_meta(snapshot)),
+            None,
+            body.into_any_element(),
+            theme,
+            true,
+        )
     }
 
     /// One cell per headline metric. A metric whose data does not exist says
@@ -1090,32 +1117,47 @@ impl UsagePage {
 
     /// Secondary readout under the board: the metrics that inform the headline
     /// numbers but should not compete with them (§88/§101).
-    fn secondary_strip(&self, snapshot: &UsageSnapshot, theme: Theme) -> AnyElement {
+    ///
+    /// The headline items stay visible; the long tail is behind a disclosure so
+    /// the default view stays quiet. Nothing is dropped — it is one click away.
+    fn summary_strip(
+        &self,
+        snapshot: &UsageSnapshot,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let totals = &snapshot.summary.totals;
-        let mut items: Vec<(String, String)> = vec![
-            ("Agent turns".into(), format::count(snapshot.summary.turns)),
+        let headline: Vec<(String, String)> = vec![
+            ("Turns".into(), format::count(snapshot.summary.turns)),
             ("Sessions".into(), format::count(snapshot.summary.sessions)),
             (
                 "Tool calls".into(),
                 format::count(snapshot.summary.tool_runs),
             ),
+            ("Models".into(), format::count(snapshot.summary.models)),
             (
-                "Bash commands".into(),
-                format::count(snapshot.summary.bash_runs),
-            ),
-            (
-                "Tool failures".into(),
-                format::count(snapshot.summary.tool_errors),
+                "Workspaces".into(),
+                format::count(snapshot.summary.workspaces),
             ),
         ];
+        let mut extra: Vec<(String, String)> = vec![(
+            "Bash commands".into(),
+            format::count(snapshot.summary.bash_runs),
+        )];
+        if snapshot.summary.tool_errors > 0 {
+            extra.push((
+                "Tool failures".into(),
+                format::count(snapshot.summary.tool_errors),
+            ));
+        }
         if totals.duration_samples > 0 {
-            items.push((
+            extra.push((
                 "Generation time".into(),
                 format::span_ms(totals.duration_ms as i64),
             ));
         }
         if let Some(avg) = totals.avg_prompt() {
-            items.push(("Avg prompt".into(), format::compact(avg as u64)));
+            extra.push(("Avg prompt".into(), format::compact(avg as u64)));
         }
         if let Some(ratio) = totals.output_input_ratio() {
             // Three decimals: output is routinely a fraction of a percent of
@@ -1125,57 +1167,86 @@ impl UsagePage {
             } else {
                 format!("{ratio:.3}×")
             };
-            items.push(("Output / input".into(), text));
+            extra.push(("Output / input".into(), text));
         }
         if let Some(per_mtok) = totals.cost_per_mtok() {
-            items.push(("Cost / M tokens".into(), format::cost(per_mtok)));
+            extra.push(("Cost / M tokens".into(), format::cost(per_mtok)));
         }
         if totals.peak_prompt > 0 {
-            items.push(("Peak prompt".into(), format::compact(totals.peak_prompt)));
+            extra.push(("Peak prompt".into(), format::compact(totals.peak_prompt)));
         }
         if totals.reasoning_reported > 0 {
-            items.push((
+            extra.push((
                 "Reasoning".into(),
                 format!("{} of output", format::compact(totals.reasoning)),
             ));
         }
-        items.push(("Models".into(), format::count(snapshot.summary.models)));
-        items.push((
-            "Workspaces".into(),
-            format::count(snapshot.summary.workspaces),
-        ));
+
+        let open = self.is_summary_open();
+        let entity = cx.entity();
+        let toggle = filters::text_button(
+            "usage-summary-toggle",
+            if open {
+                "Fewer metrics"
+            } else {
+                "More metrics"
+            },
+            if open {
+                Some("icons/chevron-up.svg")
+            } else {
+                Some("icons/chevron-down.svg")
+            },
+            true,
+            theme,
+            move |_, _, cx| {
+                entity.update(cx, |page, cx| page.toggle_summary(cx));
+            },
+        );
+
+        let mut values: Vec<AnyElement> = headline
+            .into_iter()
+            .map(|(label, value)| summary_stat(label, value, theme))
+            .collect();
+        if open {
+            values.extend(
+                extra
+                    .into_iter()
+                    .map(|(label, value)| summary_stat(label, value, theme)),
+            );
+        }
 
         div()
-            .flex_none()
             .w_full()
-            .pt(px(10.))
             .flex()
-            .flex_wrap()
-            .gap_x(px(20.))
-            .gap_y(px(6.))
-            .children(items.into_iter().map(|(label, value)| {
+            .items_start()
+            .gap(px(12.))
+            .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
                     .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .text_size(theme.ui_px(11.5))
-                    .child(div().text_color(theme.text_3).child(label))
-                    .child(div().font(num_font()).text_color(theme.text_2).child(value))
-                    .into_any_element()
-            }))
+                    .flex_wrap()
+                    .gap_x(px(20.))
+                    .gap_y(px(6.))
+                    .children(values),
+            )
+            .child(toggle)
             .into_any_element()
     }
 
-    fn insights_panel(&self, insights: &[Insight], theme: Theme) -> AnyElement {
-        section(
-            "usage-insights",
-            "Usage insights",
+    /// Derived findings, one line each. Their own card so a warning cannot be
+    /// mistaken for a metric.
+    fn signals_card(&self, insights: &[Insight], theme: Theme) -> AnyElement {
+        card(
+            "usage-signals",
+            "Signals",
             Some("derived from this range".into()),
             None,
             div()
+                .p(px(14.))
                 .flex()
                 .flex_col()
-                .gap(px(6.))
+                .gap(px(7.))
                 .children(insights.iter().map(|insight| {
                     let (path, color) = match insight.tone {
                         Tone::Positive => ("icons/check.svg", theme.ok_green),
@@ -1199,12 +1270,16 @@ impl UsagePage {
                 }))
                 .into_any_element(),
             theme,
+            false,
         )
     }
 
-    // ── timeline ───────────────────────────────────────────────────────────
+    // ── trend ──────────────────────────────────────────────────────────────
 
-    fn timeline_section(
+    /// The Trend card: one area chart across several measures. The metric
+    /// switcher lives in the card header; the chart is the card's whole body,
+    /// because the trend is this page's primary read.
+    fn trend_card(
         &self,
         snapshot: &UsageSnapshot,
         theme: Theme,
@@ -1239,7 +1314,7 @@ impl UsagePage {
             .rounded(px(8.))
             .border_1()
             .border_color(theme.border)
-            .bg(theme.bg_raised);
+            .bg(theme.bg_main);
         let mut unavailable: Vec<&str> = Vec::new();
         for option in ChartMetric::ALL {
             let available = option.available(&snapshot.summary);
@@ -1261,7 +1336,7 @@ impl UsagePage {
                     .items_center()
                     .text_size(theme.ui_px(11.5))
                     .when(active, |tab| {
-                        tab.bg(theme.bg_main)
+                        tab.bg(theme.bg_raised)
                             .text_color(theme.text)
                             .font_weight(FontWeight::MEDIUM)
                     })
@@ -1294,7 +1369,7 @@ impl UsagePage {
                 .rounded(px(8.))
                 .border_1()
                 .border_color(theme.border)
-                .bg(theme.bg_raised);
+                .bg(theme.bg_main);
             for choice in LatencyMetric::ALL {
                 let available = choice.available(&snapshot.latency);
                 let active = choice == latency_metric;
@@ -1312,7 +1387,7 @@ impl UsagePage {
                         .items_center()
                         .text_size(theme.ui_px(11.5))
                         .when(active, |tab| {
-                            tab.bg(theme.bg_main)
+                            tab.bg(theme.bg_raised)
                                 .text_color(theme.text)
                                 .font_weight(FontWeight::MEDIUM)
                         })
@@ -1348,13 +1423,16 @@ impl UsagePage {
             },
         );
 
-        let controls = div()
+        // The metric switcher sits in the body, above the plot: a row of
+        // selectors under a heading reads as controls, and no eight-way
+        // switcher can overflow a 42px header on a narrow column.
+        let selectors = div()
             .flex()
             .items_center()
             .gap(px(8.))
+            .flex_wrap()
             .child(tabs)
-            .children(latency_selector)
-            .child(view_data);
+            .children(latency_selector);
 
         let hover = self.hover_bucket();
         let entity = cx.entity();
@@ -1398,40 +1476,48 @@ impl UsagePage {
             });
         };
 
-        let mut content = div().w_full().flex().flex_col().child(chart::timeline(
-            "usage-timeline",
-            &snapshot.series,
-            metric,
-            latency_metric,
-            hover,
-            selected,
-            theme,
-            on_hover,
-            on_select,
-        ));
+        let mut content = div()
+            .p(px(14.))
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(selectors)
+            .child(chart::timeline(
+                "usage-timeline",
+                &snapshot.series,
+                metric,
+                latency_metric,
+                hover,
+                selected,
+                theme,
+                on_hover,
+                on_select,
+            ));
         if data_open {
             content = content.child(self.chart_data_table(snapshot, metric, latency_metric, theme));
         }
         if snapshot.latency.samples > 0 {
             content = content.child(self.latency_line(snapshot, theme));
         }
-        if !unavailable.is_empty() {
+        let reason = unavailable_reason(&unavailable);
+        if !reason.is_empty() {
             content = content.child(
                 div()
-                    .pt(px(8.))
                     .text_size(theme.ui_px(11.))
                     .text_color(theme.text_3)
-                    .child(unavailable_reason(&unavailable)),
+                    .child(reason),
             );
         }
 
-        section(
-            "usage-timeline-section",
+        card(
+            "usage-trend",
             "Usage over time",
             Some(meta),
-            Some(controls.into_any_element()),
+            Some(view_data),
             content.into_any_element(),
             theme,
+            false,
         )
     }
 
@@ -1527,14 +1613,13 @@ impl UsagePage {
                     )),
             );
         }
+        // A hairline-separated readout under the plot, not a card inside a
+        // card: the chart's values are the card's own detail.
         div()
             .w_full()
             .pt(px(8.))
-            .rounded(px(8.))
-            .border_1()
+            .border_t_1()
             .border_color(theme.border)
-            .bg(theme.bg_raised)
-            .overflow_hidden()
             .child(body)
             .into_any_element()
     }
@@ -1593,163 +1678,643 @@ impl UsagePage {
 
     // ── breakdown panels ───────────────────────────────────────────────────
 
-    /// A ranked distribution: bars, values, shares, and click-to-scope rows.
-    #[allow(clippy::too_many_arguments)]
-    fn breakdown_panel(
+    /// The Breakdown card: one dimension at a time, each shown as a ranked bar
+    /// chart over a sortable data table. The chart reads the aggregate's own
+    /// token ranking; the table sorts independently, so an operator can rank by
+    /// requests or cache without disturbing the overview.
+    fn breakdown_card(
         &self,
-        id: &'static str,
-        title: &str,
-        meta: String,
-        breakdown: &Breakdown,
-        kind: &'static str,
+        snapshot: &UsageSnapshot,
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let expanded = self.is_breakdown_expanded(id);
-        let limit = if expanded { usize::MAX } else { RANKED_ROWS };
-        let rows = ranked_rows(breakdown, limit);
-        let mut content = div().flex().flex_col().gap(px(2.));
-        if rows.is_empty() {
-            content = content.child(empty_line("No usage in this range.", theme));
-        }
-        for row in rows {
-            content = content.child(self.breakdown_row(&row, kind, theme, cx));
-        }
-        // Expand/collapse when the breakdown has more rows than the ranked top
-        // (§13/§15); the tail is never hidden without a way to see it.
-        let toggle = (breakdown.rows.len() > RANKED_ROWS).then(|| {
-            let entity = cx.entity();
-            filters::text_button(
-                match id {
-                    "model-usage" => "usage-model-expand",
-                    "workspace-usage" => "usage-workspace-expand",
-                    _ => "usage-provider-expand",
-                },
-                if expanded { "Show less" } else { "Show all" },
-                if expanded {
-                    Some("icons/chevron-up.svg")
-                } else {
-                    Some("icons/chevron-down.svg")
-                },
-                true,
-                theme,
-                move |_, _, cx| {
-                    entity.update(cx, |page, cx| page.toggle_breakdown(id, cx));
-                },
-            )
-        });
-        section(
-            id,
-            title,
-            Some(meta),
-            toggle,
-            content.into_any_element(),
+        let tab = self.breakdown_tab();
+        let tabs = segmented(
+            "usage-breakdown-tab",
+            &BreakdownTab::ALL,
+            tab,
+            |choice| choice.label(),
+            |choice| choice.as_str(),
             theme,
+            {
+                let entity = cx.entity();
+                move |choice, _, cx| {
+                    entity.update(cx, |page, cx| page.set_breakdown_tab(choice, cx));
+                }
+            },
+        );
+
+        // The shape first (a ranked bar chart), then the same treatment as the
+        // Sessions table: search, a column picker, the table, totals, pagination.
+        let (meta, chart, table, totals, footer) = match tab {
+            BreakdownTab::Models => {
+                let chart_rows = self.breakdown_top(&snapshot.models, CHART_ROWS, cx);
+                let result = self.breakdown_result(&snapshot.models, cx);
+                (
+                    model_meta(&snapshot.models),
+                    self.breakdown_chart(
+                        &chart_rows,
+                        result.totals.tokens.total,
+                        "models",
+                        theme,
+                        cx,
+                    ),
+                    self.breakdown_table(&result, "models", theme, cx),
+                    self.breakdown_totals(&result, theme),
+                    self.breakdown_footer(result.page, result.page_size, result.total, theme, cx),
+                )
+            }
+            BreakdownTab::Workspaces => {
+                let chart_rows = self.breakdown_top(&snapshot.workspaces, CHART_ROWS, cx);
+                let result = self.breakdown_result(&snapshot.workspaces, cx);
+                (
+                    workspace_meta(&snapshot.workspaces),
+                    self.breakdown_chart(
+                        &chart_rows,
+                        result.totals.tokens.total,
+                        "workspaces",
+                        theme,
+                        cx,
+                    ),
+                    self.breakdown_table(&result, "workspaces", theme, cx),
+                    self.breakdown_totals(&result, theme),
+                    self.breakdown_footer(result.page, result.page_size, result.total, theme, cx),
+                )
+            }
+            BreakdownTab::Providers => {
+                let chart_rows = self.breakdown_top(&snapshot.providers, CHART_ROWS, cx);
+                let result = self.breakdown_result(&snapshot.providers, cx);
+                (
+                    provider_meta(&snapshot.providers),
+                    self.breakdown_chart(
+                        &chart_rows,
+                        result.totals.tokens.total,
+                        "providers",
+                        theme,
+                        cx,
+                    ),
+                    self.breakdown_table(&result, "providers", theme, cx),
+                    self.breakdown_totals(&result, theme),
+                    self.breakdown_footer(result.page, result.page_size, result.total, theme, cx),
+                )
+            }
+            BreakdownTab::Tools => {
+                let chart_rows = self.tools_top(snapshot, CHART_ROWS, cx);
+                let result = self.tools_result(snapshot, cx);
+                (
+                    tools_meta(snapshot),
+                    self.tools_chart(&chart_rows, result.calls, theme),
+                    self.tools_table(&result, theme, cx),
+                    self.tools_totals(&result, theme),
+                    self.breakdown_footer(result.page, result.page_size, result.total, theme, cx),
+                )
+            }
+        };
+
+        let search = search_box(self.breakdown_search(), theme);
+        let toolbar = div()
+            .w_full()
+            .px(px(14.))
+            .pb(px(10.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(search)
+            .child(div().flex_1())
+            .child(self.breakdown_columns_control(theme, cx));
+
+        let body = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(div().px(px(14.)).pt(px(14.)).pb(px(10.)).child(tabs))
+            .child(chart)
+            .child(toolbar)
+            .child(table)
+            .child(totals)
+            .child(footer);
+
+        card(
+            "usage-breakdowns",
+            "Breakdown",
+            Some(meta),
+            None,
+            body.into_any_element(),
+            theme,
+            false,
         )
     }
 
-    fn breakdown_row(
+    /// The Breakdown column-visibility control, mirroring the Sessions one.
+    fn breakdown_columns_control(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.menu() == Some(MenuKind::BreakdownColumns);
+        let entity = cx.entity();
+        let chip = filters::chip(
+            "usage-breakdown-columns-chip",
+            "Columns".to_string(),
+            Some("icons/panel-right.svg"),
+            !self.breakdown_hidden_columns().is_empty(),
+            true,
+            theme,
+            move |_, window, cx| {
+                entity.update(cx, |page, cx| {
+                    page.toggle_menu(MenuKind::BreakdownColumns, window, cx)
+                });
+            },
+        );
+        if !open {
+            return filters::chip_with_menu(
+                "usage-breakdown-columns-anchor",
+                chip,
+                false,
+                Corner::TopRight,
+                || div().into_any_element(),
+            );
+        }
+        let panel = filters::breakdown_columns_menu(self, cx, theme);
+        filters::chip_with_menu(
+            "usage-breakdown-columns-anchor",
+            chip,
+            true,
+            Corner::TopRight,
+            move || panel,
+        )
+    }
+
+    /// The totals line under a token-dimension table.
+    fn breakdown_totals(&self, result: &BreakdownQueryResult, theme: Theme) -> AnyElement {
+        let page_requests: u64 = result.rows.iter().map(|row| row.totals.requests).sum();
+        let page_tokens: u64 = result.rows.iter().map(|row| row.totals.tokens.total).sum();
+        let mut filtered = format!(
+            "Filtered totals: {} requests · {} tokens",
+            format::count(result.totals.requests),
+            format::compact(result.totals.tokens.total)
+        );
+        if result.totals.cost_coverage() > 0.0 {
+            filtered.push_str(&format!(" · {}", format::cost(result.totals.cost_usd)));
+        }
+        let page = format!(
+            "this page: {} requests · {} tokens",
+            format::count(page_requests),
+            format::compact(page_tokens)
+        );
+        totals_row(&filtered, &page, theme)
+    }
+
+    /// The totals line under the Tools table.
+    fn tools_totals(&self, result: &ToolQueryResult, theme: Theme) -> AnyElement {
+        let page_calls: u64 = result.rows.iter().map(|row| row.calls).sum();
+        let page_errors: u64 = result.rows.iter().map(|row| row.errors).sum();
+        let filtered = format!(
+            "Filtered totals: {} calls · {} failed",
+            format::count(result.calls),
+            format::count(result.errors)
+        );
+        let page = format!(
+            "this page: {} calls · {} failed",
+            format::count(page_calls),
+            format::count(page_errors)
+        );
+        totals_row(&filtered, &page, theme)
+    }
+
+    /// The breakdown footer: range, rows-per-page, and page stepping — the same
+    /// shape as the Sessions footer, driven by the open dimension's state.
+    fn breakdown_footer(
         &self,
-        row: &BreakdownRow,
+        page: usize,
+        page_size: usize,
+        total: usize,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let pages = total.div_ceil(page_size.max(1)).max(1);
+        let current = page.clamp(1, pages);
+        let start = (current - 1) * page_size;
+        let shown = page_size.min(total.saturating_sub(start));
+        let summary = if total == 0 {
+            "No rows".to_string()
+        } else {
+            format!(
+                "Showing {}–{} of {}",
+                format::count((start + 1) as u64),
+                format::count((start + shown) as u64),
+                format::count(total as u64)
+            )
+        };
+
+        let size_open = self.menu() == Some(MenuKind::BreakdownPageSize);
+        let entity = cx.entity();
+        let size_chip = filters::chip(
+            "usage-breakdown-page-size-chip",
+            page_size.to_string(),
+            None,
+            false,
+            true,
+            theme,
+            move |_, window, cx| {
+                entity.update(cx, |page, cx| {
+                    page.toggle_menu(MenuKind::BreakdownPageSize, window, cx)
+                });
+            },
+        );
+        let size_panel = size_open.then(|| filters::breakdown_page_size_menu(self, cx, theme));
+        let size_control = filters::chip_with_menu(
+            "usage-breakdown-page-size-anchor",
+            size_chip,
+            size_open,
+            Corner::TopRight,
+            move || size_panel.unwrap_or_else(|| div().into_any_element()),
+        );
+
+        let prev = filters::text_button(
+            "usage-breakdown-page-prev",
+            "Previous",
+            Some("icons/chevron-left.svg"),
+            current > 1,
+            theme,
+            {
+                let entity = cx.entity();
+                move |_, _, cx| {
+                    entity.update(cx, |page, cx| {
+                        page.set_breakdown_page(current.saturating_sub(1), cx)
+                    });
+                }
+            },
+        );
+        let next = filters::text_button(
+            "usage-breakdown-page-next",
+            "Next",
+            Some("icons/chevron-right.svg"),
+            current < pages,
+            theme,
+            {
+                let entity = cx.entity();
+                move |_, _, cx| {
+                    entity.update(cx, |page, cx| page.set_breakdown_page(current + 1, cx));
+                }
+            },
+        );
+
+        div()
+            .w_full()
+            .px(px(14.))
+            .pt(px(10.))
+            .pb(px(14.))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .text_size(theme.ui_px(11.5))
+            .child(div().text_color(theme.text_3).child(summary))
+            .child(div().flex_1())
+            .child(div().text_color(theme.text_3).child("Rows per page"))
+            .child(size_control)
+            .child(prev)
+            .child(
+                div()
+                    .px(px(4.))
+                    .font(num_font())
+                    .text_color(theme.text_2)
+                    .child(format!("{current} / {pages}")),
+            )
+            .child(next)
+            .into_any_element()
+    }
+
+    /// One page of a token dimension as a standard data table — the same
+    /// component and column shape as the Sessions table. Rows are clickable to
+    /// scope the page to that model / workspace / provider.
+    fn breakdown_table(
+        &self,
+        result: &BreakdownQueryResult,
         kind: &'static str,
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let rows = &result.rows;
+        let (columns, keys) = self.breakdown_columns();
+        let total_w: f32 = columns.iter().map(|column| column.width).sum();
+        let total_tokens = result.totals.tokens.total;
         let entity = cx.entity();
-        let target = row.id;
-        let clickable = target.is_some();
-        let tooltip = row.tooltip_text();
-        div()
-            .id(SharedString::from(format!(
-                "usage-breakdown-{kind}-{}",
-                row.label
-            )))
-            .tooltip(move |_, cx| cx.new(|_| Tooltip::new(tooltip.clone())).into())
-            .px(px(8.))
-            .py(px(5.))
-            .rounded(px(6.))
-            .flex()
-            .items_center()
-            .gap(px(10.))
-            .when(clickable, |line| {
-                line.cursor_pointer()
-                    .hover(|style| style.bg(theme.bg_hover))
-            })
-            .child(
-                div()
-                    .w(px(150.))
-                    .flex_none()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(theme.ui_px(12.))
-                            .text_color(theme.text)
-                            .child(row.label.clone()),
-                    )
-                    .children(row.sub.clone().map(|sub| {
-                        div()
-                            .truncate()
-                            .text_size(theme.ui_px(10.5))
-                            .text_color(theme.text_3)
-                            .child(sub)
-                    })),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(48.))
-                    .h(px(6.))
-                    .rounded(px(3.))
-                    .bg(theme.trough)
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .h_full()
-                            .w(relative(row.fraction.clamp(0.0, 1.0) as f32))
-                            .rounded(px(3.))
-                            .bg(row.color(&theme)),
+        let mut elements = Vec::with_capacity(rows.len());
+        for row in rows {
+            let target = row.id;
+            let mut line = div()
+                .id(SharedString::from(format!(
+                    "usage-breakdown-{kind}-{}",
+                    row.label
+                )))
+                .h(px(ROW_H))
+                .w_full()
+                .min_w(px(total_w))
+                .flex()
+                .items_center()
+                .border_b_1()
+                .border_color(theme.border)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg_hover));
+            for column in &columns {
+                let cell = match column.id {
+                    "name" => breakdown_name_cell(column, row, theme),
+                    "requests" => text_cell(
+                        column,
+                        format::count(row.totals.requests),
+                        theme.text_2,
+                        theme,
                     ),
-            )
-            .child(
+                    "input" => text_cell(
+                        column,
+                        format::compact(row.totals.tokens.input),
+                        theme.text_3,
+                        theme,
+                    ),
+                    "output" => text_cell(
+                        column,
+                        format::compact(row.totals.tokens.output),
+                        theme.text_3,
+                        theme,
+                    ),
+                    "cache" => text_cell(
+                        column,
+                        format::compact(row.totals.tokens.cache_read),
+                        theme.text_3,
+                        theme,
+                    ),
+                    "share" => {
+                        let share = if total_tokens > 0 {
+                            row.totals.tokens.total as f64 / total_tokens as f64
+                        } else {
+                            row.share
+                        };
+                        text_cell(column, format::share(share), theme.text_3, theme)
+                    }
+                    _ => text_cell(
+                        column,
+                        format::compact(row.totals.tokens.total),
+                        theme.text,
+                        theme,
+                    ),
+                };
+                line = line.child(cell);
+            }
+            let click_entity = entity.clone();
+            line = line.on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                click_entity.update(cx, |page, cx| {
+                    let mut filter = page.filter().clone();
+                    match kind {
+                        "workspaces" => toggle(&mut filter.workspaces, target),
+                        "providers" => toggle(&mut filter.providers, target),
+                        _ => toggle(&mut filter.models, target),
+                    }
+                    page.set_filter(filter, cx);
+                });
+            });
+            elements.push(line.into_any_element());
+        }
+        // The table grows with its page: choosing 100 rows shows 100, not a
+        // ten-row viewport. The page scrolls; the table never does.
+        let visible = if result.rows.is_empty() {
+            3
+        } else {
+            result.rows.len()
+        } as f32;
+        let height = (ROW_H * visible) + 28.;
+        self.table_element(
+            TableKind::Breakdown,
+            "usage-breakdown-table",
+            columns,
+            elements,
+            height,
+            empty_cell("No rows match this search.", theme),
+            theme,
+            Rc::new(move |page, ix, sort, cx| {
+                let Some(Some(key)) = keys.get(ix).copied() else {
+                    return;
+                };
+                match sort {
+                    SortState::Ascending => page.set_breakdown_sort(key, false, cx),
+                    SortState::Descending => page.set_breakdown_sort(key, true, cx),
+                    SortState::Default => page.set_breakdown_sort(BreakdownSort::Tokens, true, cx),
+                }
+            }),
+            cx,
+        )
+    }
+
+    /// The ranked bar chart above a token dimension's table: the top rows as
+    /// magnitude bars, so the shape reads before the figures. Rows are clickable
+    /// to scope the page exactly like the table's rows.
+    fn breakdown_chart(
+        &self,
+        rows: &[GroupRow],
+        total: u64,
+        kind: &'static str,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut chart = div()
+            .w_full()
+            .px(px(14.))
+            .pb(px(12.))
+            .flex()
+            .flex_col()
+            .gap(px(2.));
+        if rows.is_empty() {
+            chart = chart.child(empty_line("No usage in this range.", theme));
+        }
+        for row in rows {
+            let fraction = if total > 0 {
+                row.totals.tokens.total as f64 / total as f64
+            } else {
+                row.share
+            };
+            let target = row.id;
+            let entity = cx.entity();
+            chart = chart.child(
                 div()
-                    .w(px(64.))
-                    .flex_none()
-                    .font(num_font())
-                    .text_size(theme.ui_px(11.5))
-                    .text_color(theme.text_2)
-                    .text_align(gpui::TextAlign::Right)
-                    .child(row.value.clone()),
-            )
-            .child(
+                    .id(SharedString::from(format!(
+                        "usage-breakdown-chart-{kind}-{}",
+                        row.label
+                    )))
+                    .px(px(8.))
+                    .py(px(5.))
+                    .rounded(px(6.))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.bg_hover))
+                    .child(chart_label(&row.label, row.sub.as_deref(), theme))
+                    .child(bar_track(fraction, theme))
+                    .child(chart_value(
+                        &format::compact(row.totals.tokens.total),
+                        theme,
+                    ))
+                    .child(chart_share(&format::share(fraction), theme))
+                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        entity.update(cx, |page, cx| {
+                            let mut filter = page.filter().clone();
+                            match kind {
+                                "workspaces" => toggle(&mut filter.workspaces, target),
+                                "providers" => toggle(&mut filter.providers, target),
+                                _ => toggle(&mut filter.models, target),
+                            }
+                            page.set_filter(filter, cx);
+                        });
+                    }),
+            );
+        }
+        chart.into_any_element()
+    }
+
+    /// The ranked bar chart above the Tools table: the busiest tools as bars.
+    fn tools_chart(&self, rows: &[ToolRow], total: u64, theme: Theme) -> AnyElement {
+        let mut chart = div()
+            .w_full()
+            .px(px(14.))
+            .pb(px(12.))
+            .flex()
+            .flex_col()
+            .gap(px(2.));
+        if rows.is_empty() {
+            chart = chart.child(empty_line("No tool calls in this range.", theme));
+        }
+        for row in rows {
+            let fraction = if total > 0 {
+                row.calls as f64 / total as f64
+            } else {
+                0.0
+            };
+            let tooltip = format!(
+                "{} · {} calls · {} errors · avg {}",
+                row.label,
+                format::count(row.calls),
+                format::count(row.errors),
+                row.avg_duration_ms()
+                    .map(format::duration_ms)
+                    .unwrap_or_else(|| "—".into())
+            );
+            chart = chart.child(
                 div()
-                    .w(px(52.))
-                    .flex_none()
-                    .whitespace_nowrap()
-                    .font(num_font())
-                    .text_size(theme.ui_px(11.5))
-                    .text_color(theme.text_3)
-                    .text_align(gpui::TextAlign::Right)
-                    .child(format::share(row.fraction)),
-            )
-            .when(clickable, |line| {
-                line.on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                    let Some(value) = target else {
-                        return;
-                    };
-                    entity.update(cx, |page, cx| {
-                        let mut filter = page.filter().clone();
-                        match kind {
-                            "workspaces" => toggle(&mut filter.workspaces, value),
-                            "providers" => toggle(&mut filter.providers, value),
-                            _ => toggle(&mut filter.models, value),
-                        }
-                        page.set_filter(filter, cx);
-                    });
-                })
-            })
-            .into_any_element()
+                    .id(SharedString::from(format!(
+                        "usage-tools-chart-{}",
+                        row.label
+                    )))
+                    .tooltip(move |_, cx| cx.new(|_| Tooltip::new(tooltip.clone())).into())
+                    .px(px(8.))
+                    .py(px(5.))
+                    .rounded(px(6.))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(chart_label(&row.label, Some(row.class.label()), theme))
+                    .child(bar_track(fraction, theme))
+                    .child(chart_value(&format::count(row.calls), theme))
+                    .child(chart_share(&format::share(fraction), theme)),
+            );
+        }
+        chart.into_any_element()
+    }
+
+    /// The tools data table: every tool with its family, calls, failures, and
+    /// duration. Ordered busiest first, the aggregate's own ranking.
+    fn tools_table(
+        &self,
+        result: &ToolQueryResult,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let columns = self.tool_columns();
+        let total_w: f32 = columns.iter().map(|column| column.width).sum();
+        let mut elements = Vec::with_capacity(result.rows.len());
+        for row in &result.rows {
+            let mut line = div()
+                .h(px(ROW_H))
+                .w_full()
+                .min_w(px(total_w))
+                .flex()
+                .items_center()
+                .border_b_1()
+                .border_color(theme.border)
+                .hover(|style| style.bg(theme.bg_hover));
+            for column in &columns {
+                let cell = match column.id {
+                    "tool" => cell_shell(column)
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .flex_none()
+                                .max_w(px(column.width - 96.))
+                                .truncate()
+                                .text_size(theme.ui_px(12.))
+                                .text_color(theme.text)
+                                .child(row.label.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(theme.ui_px(10.5))
+                                .text_color(theme.text_3)
+                                .child(row.class.label()),
+                        )
+                        .into_any_element(),
+                    "calls" => text_cell(column, format::count(row.calls), theme.text_2, theme),
+                    "errors" => text_cell(
+                        column,
+                        if row.errors > 0 {
+                            format::count(row.errors)
+                        } else {
+                            "—".into()
+                        },
+                        if row.errors > 0 {
+                            theme.crit
+                        } else {
+                            theme.text_3
+                        },
+                        theme,
+                    ),
+                    "avg" => text_cell(
+                        column,
+                        row.avg_duration_ms()
+                            .map(format::duration_ms)
+                            .unwrap_or_else(|| "—".into()),
+                        theme.text_3,
+                        theme,
+                    ),
+                    _ => text_cell(
+                        column,
+                        if row.max_ms > 0 {
+                            format::duration_ms(row.max_ms as f64)
+                        } else {
+                            "—".into()
+                        },
+                        theme.text_3,
+                        theme,
+                    ),
+                };
+                line = line.child(cell);
+            }
+            elements.push(line.into_any_element());
+        }
+        let visible = if result.rows.is_empty() {
+            3
+        } else {
+            result.rows.len()
+        } as f32;
+        let height = (ROW_H * visible) + 28.;
+        self.table_element(
+            TableKind::Breakdown,
+            "usage-tools-table",
+            columns,
+            elements,
+            height,
+            empty_cell("No tools match this search.", theme),
+            theme,
+            Rc::new(|_: &mut UsagePage, _: usize, _: SortState, _: &mut Context<UsagePage>| {}),
+            cx,
+        )
     }
 
     /// Token composition: input / output / cache read / cache write, as one
@@ -1880,13 +2445,14 @@ impl UsagePage {
                 }),
         );
 
-        section(
+        card(
             "usage-composition",
             "Token composition",
             Some(meta),
             None,
-            content.into_any_element(),
+            div().p(px(14.)).child(content).into_any_element(),
             theme,
+            false,
         )
     }
 
@@ -1912,13 +2478,14 @@ impl UsagePage {
                 "Cache data unavailable — no cache tokens were reported in this range.",
                 theme,
             ));
-            return section(
+            return card(
                 "usage-cache",
                 "Cache performance",
                 Some(meta),
                 None,
-                content.into_any_element(),
+                div().p(px(14.)).child(content).into_any_element(),
                 theme,
+                false,
             );
         }
 
@@ -1986,23 +2553,15 @@ impl UsagePage {
         );
 
         // Hit rate across the window: one bar per bucket, so a drop is visible.
-        let rates: Vec<Option<f64>> = snapshot
+        // Each bar carries its own hover readout — the strip is a measurement,
+        // not decoration — and a bucket with no cache traffic draws as a stub.
+        let readable = snapshot
             .series
             .points
             .iter()
-            .map(|point| {
-                Totals {
-                    tokens: TokenCounts {
-                        input: point.totals.tokens.input,
-                        cache_read: point.totals.tokens.cache_read,
-                        ..Default::default()
-                    },
-                    ..Totals::default()
-                }
-                .cache_hit_rate()
-            })
-            .collect();
-        if rates.iter().filter(|rate| rate.is_some()).count() >= 2 {
+            .filter(|point| point.totals.tokens.input + point.totals.tokens.cache_read > 0)
+            .count();
+        if readable >= 2 {
             content = content.child(
                 div()
                     .flex()
@@ -2014,7 +2573,7 @@ impl UsagePage {
                             .text_color(theme.text_3)
                             .child("Hit rate over time"),
                     )
-                    .child(spark_bars(&rates, theme)),
+                    .child(hit_rate_bars(&snapshot.series, theme)),
             );
         }
 
@@ -2049,354 +2608,190 @@ impl UsagePage {
                 ),
         );
 
-        section(
+        card(
             "usage-cache",
             "Cache performance",
             Some(meta),
             None,
-            content.into_any_element(),
+            div().p(px(14.)).child(content).into_any_element(),
             theme,
+            false,
         )
     }
 
-    /// Tool activity: families, the busiest tools, durations, failures (§32/§33).
-    fn tools_panel(&self, snapshot: &UsageSnapshot, theme: Theme) -> AnyElement {
-        let tools = &snapshot.tools;
-        let meta = match snapshot.summary.tool_error_rate() {
-            Some(rate) if tools.errors > 0 => format!(
-                "{} calls · {} failed ({})",
-                format::count(tools.calls),
-                format::count(tools.errors),
-                format::percent(rate)
-            ),
-            Some(_) => format!("{} calls · none failed", format::count(tools.calls)),
-            None => "no tool calls".to_string(),
-        };
-        let mut content = div().flex().flex_col().gap(px(10.));
-        if tools.calls == 0 {
-            content = content.child(empty_line("No tool calls in this range.", theme));
-            return section(
-                "usage-tools",
-                "Tool activity",
-                Some(meta),
-                None,
-                content.into_any_element(),
-                theme,
-            );
-        }
+    // ── health ─────────────────────────────────────────────────────────────
 
-        let families: Vec<(String, u64, Hsla)> = tools
-            .by_class
-            .iter()
-            .filter(|(_, count)| *count > 0)
-            .map(|(class, count)| {
-                (
-                    class.label().to_string(),
-                    *count,
-                    class_color(*class, theme),
-                )
-            })
-            .collect();
-        let total: u64 = families.iter().map(|(_, count, _)| count).sum();
-        let mut stack = div()
-            .w_full()
-            .h(px(8.))
-            .rounded(px(4.))
-            .overflow_hidden()
-            .flex()
-            .bg(theme.trough);
-        for (_, count, color) in &families {
-            stack = stack.child(
-                div()
-                    .h_full()
-                    .w(relative(*count as f32 / total as f32))
-                    .bg(*color),
-            );
-        }
-        content = content.child(stack).child(
+    /// Two token-health cards share one row on wide layouts: composition (what
+    /// the tokens were) beside cache performance (how much was reused). They
+    /// stay separate cards so neither reads as a subordinate of the other.
+    fn health_section(
+        &self,
+        snapshot: &UsageSnapshot,
+        theme: Theme,
+        wide: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let composition = self.composition_panel(snapshot, theme, cx);
+        let cache = self.cache_panel(snapshot, theme, cx);
+        if wide {
             div()
+                .w_full()
                 .flex()
-                .flex_wrap()
-                .gap_x(px(14.))
-                .gap_y(px(4.))
-                .children(families.into_iter().map(|(label, count, color)| {
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .text_size(theme.ui_px(10.5))
-                        .child(div().size(px(7.)).rounded(px(2.)).bg(color))
-                        .child(div().text_color(theme.text_2).child(label))
-                        .child(
-                            div()
-                                .font(num_font())
-                                .text_color(theme.text_3)
-                                .child(format::count(count)),
-                        )
-                        .into_any_element()
-                })),
-        );
-
-        content = content.children(tools.rows.iter().take(RANKED_ROWS).map(|row| {
-            div()
-                .px(px(8.))
-                .py(px(4.))
-                .rounded(px(6.))
-                .flex()
-                .items_center()
-                .gap(px(10.))
-                .child(
-                    div()
-                        .w(px(112.))
-                        .flex_none()
-                        .truncate()
-                        .text_size(theme.ui_px(12.))
-                        .text_color(theme.text)
-                        .child(row.label.clone()),
-                )
-                .child(
-                    div()
-                        .w(px(64.))
-                        .flex_none()
-                        .font(num_font())
-                        .text_size(theme.ui_px(11.5))
-                        .text_color(theme.text_2)
-                        .text_align(gpui::TextAlign::Right)
-                        .child(format::count(row.calls)),
-                )
-                .child(
-                    div()
-                        .w(px(58.))
-                        .flex_none()
-                        .font(num_font())
-                        .text_size(theme.ui_px(11.5))
-                        .text_align(gpui::TextAlign::Right)
-                        .text_color(if row.errors > 0 {
-                            theme.crit
-                        } else {
-                            theme.text_3
-                        })
-                        .child(match row.error_rate() {
-                            Some(rate) if row.errors > 0 => format::percent(rate),
-                            _ => "—".to_string(),
-                        }),
-                )
-                .child(
-                    div()
-                        .w(px(62.))
-                        .flex_none()
-                        .font(num_font())
-                        .text_size(theme.ui_px(11.5))
-                        .text_color(theme.text_3)
-                        .text_align(gpui::TextAlign::Right)
-                        .child(match row.avg_duration_ms() {
-                            Some(avg) => format::duration_ms(avg),
-                            None => "—".to_string(),
-                        }),
-                )
+                .gap(px(16.))
+                .child(div().flex_1().min_w_0().child(composition))
+                .child(div().flex_1().min_w_0().child(cache))
                 .into_any_element()
-        }));
-
-        if let Some(bash) = tools.rows.iter().find(|row| row.label == "bash") {
-            content = content.child(
-                div()
-                    .px(px(8.))
-                    .text_size(theme.ui_px(10.5))
-                    .text_color(theme.text_3)
-                    .child(format!(
-                        "Bash: {} commands, {} failed, {} of command time, slowest {}",
-                        format::count(bash.calls),
-                        format::count(bash.errors),
-                        format::span_ms(bash.duration_ms as i64),
-                        format::duration_ms(bash.max_ms as f64)
-                    )),
-            );
+        } else {
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap(px(16.))
+                .child(composition)
+                .child(cache)
+                .into_any_element()
         }
-        section(
-            "usage-tools",
-            "Tool activity",
-            Some(meta),
-            None,
-            content.into_any_element(),
-            theme,
-        )
     }
 
-    /// Failures (§34): every provider error and tool failure in the range, in
-    /// the same table as the rest of the page, each row a jump to the session
-    /// it happened in.
-    fn errors_panel(
+    // ── records ────────────────────────────────────────────────────────────
+
+    /// One records section, three tables behind a selector: the searchable
+    /// session list, the day/week/month rollup, and the failure log. Keeps the
+    /// page from ending in three stacked, mostly-empty table sections.
+    fn details_section(
         &mut self,
         snapshot: &UsageSnapshot,
         theme: Theme,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let errors = &snapshot.errors;
-        // Two different measures, both real: "failed requests" (a request whose
-        // stop reason was an error) and recorded failure events (provider
-        // errors pi logged, including ones a retry later recovered from).
-        let meta = format!(
-            "{} provider errors recorded · {} tool failures · {} stopped",
-            format::count(errors.provider),
-            format::count(errors.tool),
-            format::count(errors.aborted)
-        );
-        let shown = errors.rows.len();
-        let total_events = errors.provider + errors.tool;
-
-        let mut content = div().flex().flex_col().gap(px(8.));
-        if errors.rows.is_empty() {
-            content = content.child(empty_line("No failed requests in this range.", theme));
-        } else {
-            let table = self.failure_table_element(theme, cx);
-            content = content.child(div().h(px(FAILURE_TABLE_H)).w_full().child(table));
-        }
-        content = content.child(retry_note(theme));
-
-        section(
-            "usage-errors",
-            "Failures",
-            Some(meta),
-            Some(
-                div()
-                    .text_size(theme.ui_px(10.5))
-                    .text_color(theme.text_3)
-                    .child(if total_events as usize > shown {
-                        format!(
-                            "showing the {} most recent of {} events",
-                            format::count(shown as u64),
-                            format::count(total_events)
-                        )
-                    } else {
-                        format!("{} events", format::count(total_events))
-                    })
-                    .into_any_element(),
-            ),
-            content.into_any_element(),
+        let tab = self.detail_tab();
+        let tabs = segmented(
+            "usage-detail-tab",
+            &DetailTab::ALL,
+            tab,
+            |choice| choice.label(),
+            |choice| choice.as_str(),
             theme,
+            {
+                let entity = cx.entity();
+                move |choice, _, cx| {
+                    entity.update(cx, |page, cx| page.set_detail_tab(choice, cx));
+                }
+            },
+        );
+        let tabs_row = div().px(px(14.)).pt(px(14.)).pb(px(10.)).child(tabs);
+
+        let (meta, content) = match tab {
+            DetailTab::Sessions => {
+                let result = self.session_page(cx);
+                let all = snapshot.sessions.len();
+                let meta = if result.total == all {
+                    format!("{} sessions", format::count(all as u64))
+                } else {
+                    format!(
+                        "{} of {} sessions",
+                        format::count(result.total as u64),
+                        format::count(all as u64)
+                    )
+                };
+                let table = self.sessions_content(&result, theme, cx);
+                let toolbar = div()
+                    .w_full()
+                    .px(px(14.))
+                    .pb(px(10.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(self.session_search_box(theme))
+                    .child(div().flex_1())
+                    .child(self.columns_control(theme, cx));
+                (
+                    meta,
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .child(tabs_row)
+                        .child(toolbar)
+                        .child(table)
+                        .into_any_element(),
+                )
+            }
+            DetailTab::Daily => {
+                let granularity = snapshot.buckets.granularity;
+                let rows = self.bucket_rows();
+                let meta = format!(
+                    "{} buckets · by {}",
+                    format::count(rows.len() as u64),
+                    granularity.label()
+                );
+                (
+                    meta,
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .child(tabs_row)
+                        .child(self.buckets_content(snapshot, theme, cx))
+                        .into_any_element(),
+                )
+            }
+            DetailTab::Failures => {
+                let errors = &snapshot.errors;
+                // Two different measures, both real: recorded failure events
+                // (provider errors pi logged, including ones a retry later
+                // recovered from) and requests whose stop reason was an error.
+                let meta = format!(
+                    "{} provider errors recorded · {} tool failures · {} stopped",
+                    format::count(errors.provider),
+                    format::count(errors.tool),
+                    format::count(errors.aborted)
+                );
+                (
+                    meta,
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .child(tabs_row)
+                        .child(self.failures_content(snapshot, theme, cx))
+                        .into_any_element(),
+                )
+            }
+        };
+
+        card(
+            "usage-details",
+            "Details",
+            Some(meta),
+            None,
+            content,
+            theme,
+            false,
         )
     }
 
-    // ── record tables ──────────────────────────────────────────────────────
-
-    /// Day/week/month table. The granularity adapts with the range, so the
-    /// same panel is the weekly and monthly trend view for long windows (§42).
-    fn buckets_panel(
-        &mut self,
-        theme: Theme,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let granularity = self
-            .snapshot()
-            .map(|snapshot| snapshot.buckets.granularity)
-            .unwrap_or(Granularity::Day);
-        let title = match granularity {
-            Granularity::Day => "Daily breakdown",
-            Granularity::Week => "Weekly breakdown",
-            Granularity::Month => "Monthly breakdown",
-            Granularity::Hour => "Hourly breakdown",
-        };
-        let rows = self.bucket_rows();
-        let meta = format!(
-            "{} buckets · by {}",
-            format::count(rows.len() as u64),
-            granularity.label()
-        );
-
-        let (columns, keys) = self.bucket_columns();
-        let rows = self.bucket_row_elements(&columns, &keys, granularity, theme);
-        let table = self.table_element(
-            TableKind::Buckets,
-            "usage-buckets-table",
-            columns,
-            rows,
-            BUCKET_TABLE_H,
-            empty_cell("No buckets in this range.", theme),
-            theme,
-            Rc::new(
-                move |page, ix, sort, cx| match (keys.get(ix).copied(), sort) {
-                    (Some(key), SortState::Ascending) => page.set_bucket_sort(key, false, cx),
-                    (Some(key), SortState::Descending) => page.set_bucket_sort(key, true, cx),
-                    _ => page.set_bucket_sort(BucketSort::Date, true, cx),
-                },
-            ),
-            cx,
-        );
-
-        section(
-            "usage-buckets",
-            title,
-            Some(meta),
-            None,
-            div()
-                .h(px(BUCKET_TABLE_H))
-                .w_full()
-                .child(table)
-                .into_any_element(),
-            theme,
-        )
+    /// The sessions search field, as it appears in the details header.
+    fn session_search_box(&self, theme: Theme) -> AnyElement {
+        search_box(self.search(), theme)
     }
 
     /// The session table: searchable, sortable, pageable (§48/§49/§50).
     ///
     /// The page owns the ordering, so a header click comes back here before
     /// anything re-sorts; the table just draws the page it is handed.
-    fn sessions_panel(
-        &mut self,
+    fn sessions_content(
+        &self,
+        result: &SessionQueryResult,
         theme: Theme,
-        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let result = self.session_page(cx);
-        let search = self.search().clone();
-        let all = self
-            .snapshot()
-            .map(|snapshot| snapshot.sessions.len())
-            .unwrap_or(0);
-        let meta = if result.total == all {
-            format!("{} sessions", format::count(all as u64))
-        } else {
-            format!(
-                "{} of {} sessions",
-                format::count(result.total as u64),
-                format::count(all as u64)
-            )
-        };
-
-        let search_box = div()
-            .w(px(232.))
-            .h(px(26.))
-            .px(px(8.))
-            .rounded(px(6.))
-            .bg(theme.bg_main)
-            .border_1()
-            .border_color(theme.border)
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .child(icon("icons/search.svg", 12., theme.text_3))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(theme.ui_px(12.))
-                    .child(search),
-            )
-            .into_any_element();
-        let header_right = div()
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .child(search_box)
-            .child(self.columns_control(theme, cx));
-
         // The viewport shows at most 20 rows; a page of 25+ scrolls within it,
         // exactly like a desktop data grid (§38).
         let visible_rows = result.page_size.min(20) as f32;
         let table_h = ROW_H * visible_rows + 28.;
-        let footer = self.pagination_footer(&result, theme, cx);
+        let footer = self.pagination_footer(result, theme, cx);
 
         let (columns, keys) = self.session_columns();
         let rows = self.session_row_elements(&result.rows, &columns, &keys, theme, cx);
@@ -2418,21 +2813,92 @@ impl UsagePage {
             cx,
         );
 
-        section(
-            "usage-sessions",
-            "Sessions",
-            Some(meta),
-            Some(header_right.into_any_element()),
-            div()
-                .w_full()
-                .flex()
-                .flex_col()
-                .child(div().h(px(table_h)).w_full().child(table))
-                .children(self.totals_line(&result, theme))
-                .child(footer)
-                .into_any_element(),
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(div().h(px(table_h)).w_full().child(table))
+            .children(self.totals_line(result, theme))
+            .child(footer)
+            .into_any_element()
+    }
+
+    /// Day/week/month table. The granularity adapts with the range, so the
+    /// same table is the weekly and monthly trend view for long windows (§42).
+    fn buckets_content(
+        &self,
+        snapshot: &UsageSnapshot,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let granularity = snapshot.buckets.granularity;
+        let (columns, keys) = self.bucket_columns();
+        let rows = self.bucket_row_elements(&columns, &keys, granularity, theme);
+        let table = self.table_element(
+            TableKind::Buckets,
+            "usage-buckets-table",
+            columns,
+            rows,
+            BUCKET_TABLE_H,
+            empty_cell("No buckets in this range.", theme),
             theme,
-        )
+            Rc::new(
+                move |page, ix, sort, cx| match (keys.get(ix).copied(), sort) {
+                    (Some(key), SortState::Ascending) => page.set_bucket_sort(key, false, cx),
+                    (Some(key), SortState::Descending) => page.set_bucket_sort(key, true, cx),
+                    _ => page.set_bucket_sort(BucketSort::Date, true, cx),
+                },
+            ),
+            cx,
+        );
+        // Bottom breathing room, matching the card's gutter, so the last row's
+        // hover fill stays clear of the rounded corners.
+        div().w_full().pb(px(14.)).child(table).into_any_element()
+    }
+
+    /// Failures (§34): every provider error and tool failure in the range, in
+    /// the same table as the rest of the page.
+    fn failures_content(
+        &self,
+        snapshot: &UsageSnapshot,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let errors = &snapshot.errors;
+        let shown = errors.rows.len();
+        let total_events = errors.provider + errors.tool;
+
+        let mut content = div().w_full().flex().flex_col().gap(px(8.));
+        if errors.rows.is_empty() {
+            content = content.child(
+                div()
+                    .px(px(14.))
+                    .py(px(8.))
+                    .text_size(theme.ui_px(11.5))
+                    .text_color(theme.text_3)
+                    .child("No failed requests in this range."),
+            );
+        } else {
+            let table = self.failure_table_element(theme, cx);
+            content = content.child(div().h(px(FAILURE_TABLE_H)).w_full().child(table));
+        }
+        content = content.child(retry_note(theme)).child(
+            div()
+                .px(px(14.))
+                .pb(px(14.))
+                .text_size(theme.ui_px(10.5))
+                .text_color(theme.text_3)
+                .child(if total_events as usize > shown {
+                    format!(
+                        "showing the {} most recent of {} events",
+                        format::count(shown as u64),
+                        format::count(total_events)
+                    )
+                } else {
+                    format!("{} events", format::count(total_events))
+                }),
+        );
+        content.into_any_element()
     }
 
     // ── column plans ───────────────────────────────────────────────────────
@@ -2523,6 +2989,92 @@ impl UsagePage {
         columns.push(Column::new("open", "").width(OPEN_W));
         keys.push(None);
         (columns, keys)
+    }
+
+    /// The token breakdown table's columns plus their sort keys — the same
+    /// shape as the Sessions table: a name column that takes the remainder,
+    /// then fixed numeric columns, with Share as the trailing display column.
+    fn breakdown_columns(&self) -> (Vec<Column>, Vec<Option<BreakdownSort>>) {
+        let hidden = self.breakdown_hidden_columns();
+        let is_hidden = |id: &'static str| hidden.contains(&id);
+        let measures: [(BreakdownSort, f32); 5] = [
+            (BreakdownSort::Requests, 92.),
+            (BreakdownSort::Input, 80.),
+            (BreakdownSort::Output, 80.),
+            (BreakdownSort::Cache, 80.),
+            (BreakdownSort::Tokens, 88.),
+        ];
+        let mut fixed = 0.;
+        for (key, default) in measures {
+            if !is_hidden(key.as_str()) {
+                fixed += default;
+            }
+        }
+        if !is_hidden("share") {
+            fixed += 72.;
+        }
+        let budget = self.table_width();
+        let name_w = (budget - fixed).clamp(160., 460.);
+        let (sort, desc) = self.breakdown_sort_state();
+        let mut columns = Vec::with_capacity(7);
+        let mut keys = Vec::with_capacity(7);
+        columns.push(
+            Column::new(BreakdownSort::Name.as_str(), BreakdownSort::Name.label())
+                .width(self.col_width(TableKind::Breakdown, "name", name_w))
+                .sortable()
+                .sort(sort_state(sort == BreakdownSort::Name, desc)),
+        );
+        keys.push(Some(BreakdownSort::Name));
+        for (key, default) in measures {
+            if is_hidden(key.as_str()) {
+                continue;
+            }
+            columns.push(
+                Column::new(key.as_str(), key.label())
+                    .width(self.col_width(TableKind::Breakdown, key.as_str(), default))
+                    .numeric()
+                    .sortable()
+                    .sort(sort_state(key == sort, desc)),
+            );
+            keys.push(Some(key));
+        }
+        if !is_hidden("share") {
+            columns.push(
+                Column::new("share", "Share")
+                    .width(self.col_width(TableKind::Breakdown, "share", 72.))
+                    .numeric(),
+            );
+            keys.push(None);
+        }
+        (columns, keys)
+    }
+
+    /// The tools table's columns, with any hidden ones dropped. The tool name
+    /// takes the room left over; every measure is its own narrow column.
+    fn tool_columns(&self) -> Vec<Column> {
+        let hidden = self.breakdown_hidden_columns();
+        let is_hidden = |id: &'static str| hidden.contains(&id);
+        let measures: [(&'static str, &'static str, f32); 4] = [
+            ("calls", "Calls", 76.),
+            ("errors", "Errors", 80.),
+            ("avg", "Avg", 76.),
+            ("max", "Max", 76.),
+        ];
+        let mut fixed = 0.;
+        for (id, _, default) in measures {
+            if !is_hidden(id) {
+                fixed += default;
+            }
+        }
+        let budget = self.table_width();
+        let name_w = (budget - fixed).clamp(160., 460.);
+        let mut columns = vec![Column::new("tool", "Tool").width(name_w)];
+        for (id, label, default) in measures {
+            if !is_hidden(id) {
+                columns.push(Column::new(id, label).width(default).numeric());
+            }
+        }
+        columns
     }
 
     /// Breakdown columns plus their sort keys.
@@ -2805,8 +3357,9 @@ impl UsagePage {
         let chip = filters::chip(
             "usage-columns-chip",
             "Columns".to_string(),
-            "icons/panel-right.svg",
+            Some("icons/panel-right.svg"),
             !self.hidden_columns().is_empty(),
+            true,
             theme,
             move |_, window, cx| {
                 entity.update(cx, |page, cx| {
@@ -2858,7 +3411,8 @@ impl UsagePage {
         Some(
             div()
                 .w_full()
-                .pt(px(8.))
+                .px(px(14.))
+                .pt(px(10.))
                 .flex()
                 .items_center()
                 .gap(px(12.))
@@ -2895,8 +3449,9 @@ impl UsagePage {
         let size_chip = filters::chip(
             "usage-page-size-chip",
             result.page_size.to_string(),
-            "icons/chevron-down.svg",
+            None,
             false,
+            true,
             theme,
             move |_, window, cx| {
                 entity.update(cx, |page, cx| {
@@ -2942,7 +3497,9 @@ impl UsagePage {
 
         div()
             .w_full()
+            .px(px(14.))
             .pt(px(10.))
+            .pb(px(14.))
             .flex()
             .items_center()
             .gap(px(10.))
@@ -3216,29 +3773,39 @@ fn context_separator(theme: Theme) -> AnyElement {
 
 // ── shared pieces ─────────────────────────────────────────────────────────
 
-/// A page section: an uppercase label with its meta line, optional controls on
-/// the right, then content. Sections are separated by hairlines, never cards.
-fn section(
+/// A page section as its own card: a header strip (title, meta, controls) over
+/// a body, on a raised surface with a single hairline border. `clip` rounds the
+/// corners for cards whose content runs edge to edge; it stays off for a card
+/// that hosts a popover, which must escape the card to be usable.
+fn card(
     id: &'static str,
     title: &str,
     meta: Option<String>,
     right: Option<AnyElement>,
     content: AnyElement,
     theme: Theme,
+    clip: bool,
 ) -> AnyElement {
-    div()
+    let mut root = div()
         .id(SharedString::from(id))
         .flex_none()
         .w_full()
-        .pt(px(22.))
+        .rounded(px(12.))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.bg_raised)
         .flex()
         .flex_col()
         .child(
             div()
-                .pb(px(12.))
+                .flex_none()
+                .h(px(42.))
+                .px(px(14.))
                 .flex()
                 .items_center()
                 .gap(px(10.))
+                .border_b_1()
+                .border_color(theme.border)
                 .child(
                     div()
                         .text_size(theme.ui_px(11.))
@@ -3255,39 +3822,180 @@ fn section(
                 .child(div().flex_1())
                 .children(right),
         )
-        .child(content)
-        .into_any_element()
+        .child(content);
+    if clip {
+        root = root.overflow_hidden();
+    }
+    root.into_any_element()
 }
 
-/// A paired row: left panel with a hairline down its right edge, right panel
-/// with matching padding — one surface with a rule, not two cards.
-fn paired(left: AnyElement, right: AnyElement) -> AnyElement {
-    div()
-        .flex_none()
-        .w_full()
+/// A segmented control's selection callback, boxed so one segment's handler
+/// can be cloned into every option.
+type SegmentPick<T> = Rc<dyn Fn(T, &mut Window, &mut App)>;
+
+/// A compact segmented control: one active segment, the rest quiet. Reuses the
+/// metric switcher's register so every tab row on the page reads the same.
+fn segmented<T>(
+    prefix: &'static str,
+    options: &[T],
+    active: T,
+    label: impl Fn(T) -> &'static str,
+    key: impl Fn(T) -> &'static str,
+    theme: Theme,
+    on_pick: impl Fn(T, &mut Window, &mut App) + 'static,
+) -> AnyElement
+where
+    T: Copy + PartialEq + 'static,
+{
+    let on_pick: SegmentPick<T> = Rc::new(on_pick);
+    let mut row = div()
         .flex()
-        .child(left)
-        .child(right)
-        .into_any_element()
-}
-
-fn divide_left(content: AnyElement, theme: Theme) -> AnyElement {
-    div()
-        .flex_1()
-        .min_w_0()
-        .pr(px(28.))
-        .border_r_1()
+        .items_center()
+        .gap(px(2.))
+        .p(px(2.))
+        .rounded(px(8.))
+        .border_1()
         .border_color(theme.border)
-        .child(content)
+        .bg(theme.bg_main);
+    for option in options.iter().copied() {
+        let is_active = option == active;
+        let handler = on_pick.clone();
+        row = row.child(
+            div()
+                .id(SharedString::from(format!("{prefix}-{}", key(option))))
+                .h(px(24.))
+                .px(px(9.))
+                .rounded(px(6.))
+                .flex()
+                .items_center()
+                .text_size(theme.ui_px(11.5))
+                .when(is_active, |tab| {
+                    tab.bg(theme.bg_raised)
+                        .text_color(theme.text)
+                        .font_weight(FontWeight::MEDIUM)
+                })
+                .when(!is_active, |tab| {
+                    tab.text_color(theme.text_3)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.bg_hover).text_color(theme.text_2))
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            handler(option, window, cx)
+                        })
+                })
+                .child(label(option)),
+        );
+    }
+    row.into_any_element()
+}
+
+/// A search field, shared by the Sessions table and the Breakdown table so both
+/// read the same.
+fn search_box(input: &Entity<ComposerInput>, theme: Theme) -> AnyElement {
+    div()
+        .w(px(232.))
+        .h(px(28.))
+        .px(px(8.))
+        .rounded(px(7.))
+        .bg(theme.bg_main)
+        .border_1()
+        .border_color(theme.border)
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .child(icon("icons/search.svg", 12., theme.text_3))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(theme.ui_px(12.))
+                .child(input.clone()),
+        )
         .into_any_element()
 }
 
-fn divide_right(content: AnyElement) -> AnyElement {
+/// A chart row's label column (name plus its secondary line).
+fn chart_label(label: &str, sub: Option<&str>, theme: Theme) -> AnyElement {
+    div()
+        .w(px(180.))
+        .flex_none()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .truncate()
+                .text_size(theme.ui_px(12.))
+                .text_color(theme.text)
+                .child(label.to_string()),
+        )
+        .children(sub.map(|sub| {
+            div()
+                .truncate()
+                .text_size(theme.ui_px(10.5))
+                .text_color(theme.text_3)
+                .child(sub.to_string())
+        }))
+        .into_any_element()
+}
+
+/// A chart row's magnitude track and its accent fill.
+fn bar_track(fraction: f64, theme: Theme) -> AnyElement {
     div()
         .flex_1()
-        .min_w_0()
-        .pl(px(28.))
-        .child(content)
+        .min_w(px(48.))
+        .h(px(8.))
+        .rounded(px(4.))
+        .bg(theme.trough)
+        .overflow_hidden()
+        .child(
+            div()
+                .h_full()
+                .w(relative(fraction.clamp(0.0, 1.0) as f32))
+                .rounded(px(4.))
+                .bg(theme.accent),
+        )
+        .into_any_element()
+}
+
+/// A chart row's value column.
+fn chart_value(value: &str, theme: Theme) -> AnyElement {
+    div()
+        .w(px(72.))
+        .flex_none()
+        .font(num_font())
+        .text_size(theme.ui_px(11.5))
+        .text_color(theme.text)
+        .text_align(gpui::TextAlign::Right)
+        .child(value.to_string())
+        .into_any_element()
+}
+
+/// A chart row's share column.
+fn chart_share(share: &str, theme: Theme) -> AnyElement {
+    div()
+        .w(px(56.))
+        .flex_none()
+        .whitespace_nowrap()
+        .font(num_font())
+        .text_size(theme.ui_px(11.5))
+        .text_color(theme.text_3)
+        .text_align(gpui::TextAlign::Right)
+        .child(share.to_string())
+        .into_any_element()
+}
+
+/// The totals line under a data table: filtered totals left, this page right.
+fn totals_row(filtered: &str, page: &str, theme: Theme) -> AnyElement {
+    div()
+        .w_full()
+        .px(px(14.))
+        .pt(px(10.))
+        .flex()
+        .items_center()
+        .gap(px(12.))
+        .text_size(theme.ui_px(10.5))
+        .child(div().text_color(theme.text_3).child(filtered.to_string()))
+        .child(div().flex_1())
+        .child(div().text_color(theme.text_3).child(page.to_string()))
         .into_any_element()
 }
 
@@ -3303,7 +4011,7 @@ fn empty_line(text: &str, theme: Theme) -> AnyElement {
 
 fn retry_note(theme: Theme) -> AnyElement {
     div()
-        .px(px(8.))
+        .px(px(14.))
         .text_size(theme.ui_px(10.5))
         .text_color(theme.text_3)
         .child("Retries are unavailable: pi records automatic retries as live events, not in session files.")
@@ -3333,18 +4041,45 @@ fn stat_row(label: &str, value: &str, theme: Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// A compact bar strip: one bar per bucket, drawn bottom-up (§24).
-fn spark_bars(rates: &[Option<f64>], theme: Theme) -> AnyElement {
+/// The cache hit rate across the window: one bar per bucket, drawn bottom-up,
+/// each a real measurement with its own hover readout (§24). A bucket that
+/// reported no cache traffic draws as a faint stub rather than a 0% bar —
+/// "no data" and "a 0% hit rate" are different facts.
+fn hit_rate_bars(series: &TimeSeries, theme: Theme) -> AnyElement {
     div()
         .w_full()
-        .h(px(34.))
+        .h(px(40.))
         .flex()
         .items_end()
         .gap(px(2.))
-        .children(rates.iter().map(|rate| {
+        .children(series.points.iter().enumerate().map(|(ix, point)| {
+            let rate = Totals {
+                tokens: TokenCounts {
+                    input: point.totals.tokens.input,
+                    cache_read: point.totals.tokens.cache_read,
+                    ..Default::default()
+                },
+                ..Totals::default()
+            }
+            .cache_hit_rate();
+            let (height, color, tooltip) = match rate {
+                Some(rate) => (
+                    (rate / 100.0).clamp(0.03, 1.0) as f32,
+                    theme.accent.opacity(0.55),
+                    format!("{} · {} hit rate", point.stamp, format::percent(rate)),
+                ),
+                None => (
+                    0.03,
+                    theme.trough,
+                    format!("{} · no cache traffic", point.stamp),
+                ),
+            };
             div()
+                .id(SharedString::from(format!("usage-cache-bar-{ix}")))
+                .group("usage-cache-bar")
+                .tooltip(move |_, cx| cx.new(|_| Tooltip::new(tooltip.clone())).into())
                 .flex_1()
-                .min_w(px(1.))
+                .min_w(px(2.))
                 .h_full()
                 .flex()
                 .items_end()
@@ -3352,14 +4087,9 @@ fn spark_bars(rates: &[Option<f64>], theme: Theme) -> AnyElement {
                     div()
                         .w_full()
                         .rounded_t(px(2.))
-                        .bg(match rate {
-                            Some(_) => theme.accent.opacity(0.5),
-                            None => theme.trough,
-                        })
-                        .h(relative(match rate {
-                            Some(rate) => (rate / 100.0).clamp(0.02, 1.0) as f32,
-                            None => 0.02,
-                        })),
+                        .bg(color)
+                        .h(relative(height))
+                        .group_hover("usage-cache-bar", |style| style.bg(theme.accent)),
                 )
                 .into_any_element()
         }))
@@ -3377,115 +4107,40 @@ pub(super) fn num_font() -> Font {
     font
 }
 
-/// A ranked breakdown row, already reduced to what the view draws.
-struct BreakdownRow {
-    id: Option<u16>,
-    label: String,
-    sub: Option<String>,
-    value: String,
-    fraction: f64,
-    color: fn(&Theme) -> Hsla,
-    /// Exact figures for the hover detail (§15/§16/§17).
-    requests: u64,
-    tokens: u64,
-    avg_tokens: Option<f64>,
+/// The name cell of a breakdown table: the row's label, with its secondary
+/// line (provider, parent folder) trailing in the quiet register.
+fn breakdown_name_cell(column: &Column, row: &GroupRow, theme: Theme) -> AnyElement {
+    cell_shell(column)
+        .gap(px(8.))
+        .child(
+            div()
+                .flex_none()
+                .max_w(px(column.width - 24.))
+                .truncate()
+                .text_size(theme.ui_px(12.))
+                .text_color(theme.text)
+                .child(row.label.clone()),
+        )
+        .children(row.sub.clone().map(|sub| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(theme.ui_px(10.5))
+                .text_color(theme.text_3)
+                .child(sub)
+        }))
+        .into_any_element()
 }
 
-impl BreakdownRow {
-    fn color(&self, theme: &Theme) -> Hsla {
-        (self.color)(theme)
-    }
-
-    /// A compact, exact hover readout.
-    fn tooltip_text(&self) -> String {
-        let mut text = format!(
-            "{} · {} requests · {} tokens",
-            self.label,
-            format::exact(self.requests),
-            format::exact(self.tokens)
-        );
-        if let Some(avg) = self.avg_tokens {
-            text.push_str(&format!(" · {} avg/request", format::compact(avg as u64)));
-        }
-        text.push_str(&format!(" · {}", format::share(self.fraction)));
-        text
-    }
-}
-
-/// Rank the top rows and pool the tail into one labelled remainder — the shape
-/// the distribution panels describe, without hiding what is left.
-fn ranked_rows(breakdown: &Breakdown, limit: usize) -> Vec<BreakdownRow> {
-    let total_tokens = breakdown.totals.tokens.total;
-    let total_requests = breakdown.totals.requests;
-    let mut rows: Vec<BreakdownRow> = Vec::new();
-    for (ix, row) in breakdown.rows.iter().take(limit).enumerate() {
-        rows.push(BreakdownRow {
-            id: Some(row.id),
-            label: row.label.clone(),
-            sub: row.sub.clone(),
-            value: format::compact(row.totals.tokens.total),
-            fraction: if total_tokens > 0 {
-                row.totals.tokens.total as f64 / total_tokens as f64
-            } else {
-                row.share
-            },
-            color: series_color(ix),
-            requests: row.totals.requests,
-            tokens: row.totals.tokens.total,
-            avg_tokens: row.totals.tokens_per_request(),
-        });
-    }
-    let tail: Vec<&GroupRow> = breakdown.rows.iter().skip(limit).collect();
-    if !tail.is_empty() {
-        let tokens: u64 = tail.iter().map(|row| row.totals.tokens.total).sum();
-        let requests: u64 = tail.iter().map(|row| row.totals.requests).sum();
-        rows.push(BreakdownRow {
-            id: None,
-            label: format!("{} more", tail.len()),
-            // Say what the remainder covers, so the row is not just a label.
-            sub: Some(format!(
-                "{} requests",
-                format::count(requests.max(total_requests.min(requests)))
-            )),
-            value: format::compact(tokens),
-            fraction: if total_tokens > 0 {
-                tokens as f64 / total_tokens as f64
-            } else {
-                0.0
-            },
-            color: |theme: &Theme| theme.text_3.opacity(0.5),
-            requests,
-            tokens,
-            avg_tokens: (requests > 0).then(|| tokens as f64 / requests as f64),
-        });
-    }
-    rows
-}
-
-/// The accent ramp for ranked rows: one hue at four weights, then neutrals.
-/// No rainbow (§17/§63).
-fn series_color(ix: usize) -> fn(&Theme) -> Hsla {
-    match ix {
-        0 => |theme: &Theme| theme.accent,
-        1 => |theme: &Theme| theme.accent.opacity(0.7),
-        2 => |theme: &Theme| theme.accent.opacity(0.5),
-        3 => |theme: &Theme| theme.accent.opacity(0.34),
-        4 => |theme: &Theme| theme.text_2,
-        _ => |theme: &Theme| theme.text_3,
-    }
-}
-
-fn class_color(class: ToolClass, theme: Theme) -> Hsla {
-    match class {
-        ToolClass::Terminal => theme.accent,
-        ToolClass::Read => theme.accent.opacity(0.7),
-        ToolClass::Edit => theme.accent.opacity(0.5),
-        ToolClass::Search => theme.accent.opacity(0.34),
-        ToolClass::Web => theme.text_2,
-        ToolClass::Plan => theme.text_2.opacity(0.6),
-        ToolClass::Ask => theme.text_3,
-        ToolClass::Other => theme.text_3.opacity(0.6),
-    }
+/// The Summary card's meta line: the range's headline counts.
+fn summary_meta(snapshot: &UsageSnapshot) -> String {
+    format!(
+        "{} requests · {} tokens · {} sessions",
+        format::count(snapshot.summary.totals.requests),
+        format::compact(snapshot.summary.totals.tokens.total),
+        format::count(snapshot.summary.sessions)
+    )
 }
 
 fn toggle(list: &mut Vec<u16>, value: u16) {
@@ -3527,6 +4182,32 @@ fn provider_meta(breakdown: &Breakdown) -> String {
         format::count(breakdown.rows.len() as u64),
         format::count(breakdown.totals.requests)
     )
+}
+
+fn tools_meta(snapshot: &UsageSnapshot) -> String {
+    let tools = &snapshot.tools;
+    match snapshot.summary.tool_error_rate() {
+        Some(rate) if tools.errors > 0 => format!(
+            "{} calls · {} failed ({})",
+            format::count(tools.calls),
+            format::count(tools.errors),
+            format::percent(rate)
+        ),
+        Some(_) => format!("{} calls · none failed", format::count(tools.calls)),
+        None => "no tool calls".to_string(),
+    }
+}
+
+/// One label/value pair in the secondary readout under the board.
+fn summary_stat(label: String, value: String, theme: Theme) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .text_size(theme.ui_px(11.5))
+        .child(div().text_color(theme.text_3).child(label))
+        .child(div().font(num_font()).text_color(theme.text_2).child(value))
+        .into_any_element()
 }
 
 /// Secondary line for a KPI cell: the comparison when one exists, otherwise a

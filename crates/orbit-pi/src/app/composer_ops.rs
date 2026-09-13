@@ -417,47 +417,67 @@ impl OrbitApp {
             cx.notify();
             return;
         }
-        let Some(path) = rfd::FileDialog::new()
+        // Opened asynchronously: a blocking `rfd::FileDialog` pumps a nested
+        // main-thread modal loop while GPUI still holds this entity's mutable
+        // borrow, so a queued task that updates the app aborts with
+        // `already borrowed`. The async panel shows as a sheet and resolves
+        // once the user answers, by which point the borrow is released.
+        let dialog = rfd::AsyncFileDialog::new()
             .set_title("Attach an image")
-            .add_filter("Image", &["png", "jpg", "jpeg", "webp", "gif", "bmp"])
-            .pick_file()
-        else {
-            return;
-        };
-        match Attachment::from_path(&path) {
-            Some(attachment) => {
-                self.attachments.push(attachment);
-            }
-            None => {
-                self.set_status("unsupported image format");
-            }
-        }
-        cx.notify();
+            .add_filter("Image", &["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
+        cx.spawn(async move |this, cx| {
+            let Some(handle) = dialog.pick_file().await else {
+                return;
+            };
+            let path = handle.path().to_path_buf();
+            let _ = this.update(cx, |app, cx| {
+                match Attachment::from_path(&path) {
+                    Some(attachment) => {
+                        if app.attachments.len() >= MAX_ATTACHMENTS {
+                            app.set_status(format!("at most {MAX_ATTACHMENTS} images per message"));
+                        } else {
+                            app.attachments.push(attachment);
+                        }
+                    }
+                    None => {
+                        app.set_status("unsupported image format");
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Add menu → "Attach file…": any file. Images become attachments;
     /// anything else is referenced by path at the caret (same rule as a
     /// file dropped on the window).
     pub(super) fn attach_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = rfd::FileDialog::new()
-            .set_title("Attach a file")
-            .pick_file()
-        else {
-            return;
-        };
-        if let Some(attachment) = Attachment::from_path(&path) {
-            if self.attachments.len() >= MAX_ATTACHMENTS {
-                self.set_status(format!("at most {MAX_ATTACHMENTS} images per message"));
-            } else {
-                self.attachments.push(attachment);
-            }
-        } else {
-            self.input.update(cx, |input, cx| {
-                input.insert_at_caret(&format!("{} ", path.display()), cx);
+        // See `attach_image` — never block the main thread on the native panel
+        // while this entity is borrowed.
+        let dialog = rfd::AsyncFileDialog::new().set_title("Attach a file");
+        cx.spawn_in(window, async move |this, cx| {
+            let Some(handle) = dialog.pick_file().await else {
+                return;
+            };
+            let path = handle.path().to_path_buf();
+            let _ = this.update_in(cx, |app, window, cx| {
+                if let Some(attachment) = Attachment::from_path(&path) {
+                    if app.attachments.len() >= MAX_ATTACHMENTS {
+                        app.set_status(format!("at most {MAX_ATTACHMENTS} images per message"));
+                    } else {
+                        app.attachments.push(attachment);
+                    }
+                } else {
+                    app.input.update(cx, |input, cx| {
+                        input.insert_at_caret(&format!("{} ", path.display()), cx);
+                    });
+                    app.input.read(cx).focus(window);
+                }
+                cx.notify();
             });
-            self.input.read(cx).focus(window);
-        }
-        cx.notify();
+        })
+        .detach();
     }
 
     /// Mouse-up on the composer's "+" button: toggle the add menu, with the

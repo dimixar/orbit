@@ -1,0 +1,35 @@
+import Image from "next/image";
+
+export function Shot({
+  src,
+  alt,
+  width = 2400,
+  height = 1499,
+  priority = false,
+  sizes = "(max-width: 768px) 100vw, (max-width: 1280px) 92vw, 1180px",
+  className = "",
+}: {
+  src: string;
+  alt: string;
+  width?: number;
+  height?: number;
+  priority?: boolean;
+  sizes?: string;
+  className?: string;
+}) {
+  return (
+    <div
+      className={`overflow-hidden rounded-[12px] bg-window shadow-pop ${className}`}
+    >
+      <Image
+        src={src}
+        alt={alt}
+        width={width}
+        height={height}
+        priority={priority}
+        sizes={sizes}
+        className="h-auto w-full"
+      />
+    </div>
+  );
+}

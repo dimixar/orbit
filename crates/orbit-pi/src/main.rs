@@ -33,6 +33,7 @@ mod quota;
 mod quota_bridge;
 mod review;
 mod sessions;
+mod shimmer;
 mod sidepane;
 mod skills;
 mod theme;

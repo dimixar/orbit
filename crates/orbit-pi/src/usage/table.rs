@@ -17,7 +17,7 @@ use std::rc::Rc;
 
 use gpui::{
     div, prelude::*, px, AnyElement, App, CursorStyle, DragMoveEvent, ElementId, Empty, FontWeight,
-    Hsla, IntoElement, MouseButton, Pixels, Render, SharedString, Window,
+    Hsla, IntoElement, MouseButton, Pixels, Render, SharedString, TextAlign, Window,
 };
 
 use crate::theme::Theme;
@@ -28,8 +28,10 @@ pub(super) const ROW_H: f32 = 26.;
 /// The header row's height.
 pub(super) const HEADER_H: f32 = 28.;
 
-/// The framework-free cell padding (each side).
-pub(super) const CELL_PADDING: f32 = 12.;
+/// The framework-free cell padding (each side). Matches the 14px gutter a card
+/// uses for its header, tabs and toolbars, so a table's first column lines up
+/// with everything above it.
+pub(super) const CELL_PADDING: f32 = 14.;
 
 /// Width the resize divider's hit area gets.
 const HANDLE_W: f32 = 5.;
@@ -42,6 +44,7 @@ pub enum TableKind {
     Sessions,
     Buckets,
     Failures,
+    Breakdown,
 }
 
 /// The sort state drawn on a column header. Three states, like a desktop grid:
@@ -235,12 +238,23 @@ pub fn data_table(
 }
 
 /// One header cell: label, sort caret, and (for a resizable column) the divider.
+///
+/// The caret lives in the cell's right padding rather than in the flow, so a
+/// numeric column's label still right-aligns with the numbers beneath it, and
+/// the label can use the full content width before it truncates.
 fn header_cell(ix: usize, column: &Column, theme: Theme, handlers: TableHandlers) -> AnyElement {
     let sort_next = column.sort.next();
     let sort = handlers.sort.clone();
     let resize_start = handlers.resize_start.clone();
     let resize_move = handlers.resize_move.clone();
     let resize_end = handlers.resize_end.clone();
+    // A sorted column's label steps up a register, so the active sort reads
+    // even before the caret is noticed.
+    let label_color = if column.sort == SortState::Default {
+        theme.text_3
+    } else {
+        theme.text_2
+    };
 
     let mut content = div()
         .h_full()
@@ -249,26 +263,37 @@ fn header_cell(ix: usize, column: &Column, theme: Theme, handlers: TableHandlers
         .relative()
         .flex()
         .items_center()
-        .gap(px(4.))
         .px(px(CELL_PADDING))
-        .when(column.numeric, |cell| cell.justify_end())
         .when(column.sortable, |cell| {
             cell.cursor_pointer()
+                .hover(|style| style.bg(theme.bg_hover))
                 .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                     sort(ix, sort_next, window, cx);
                 })
         })
         .child(
             div()
+                .flex_1()
+                .min_w_0()
                 .truncate()
                 .text_size(theme.ui_px(11.))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(theme.text_3)
+                .text_color(label_color)
+                .when(column.numeric, |label| label.text_align(TextAlign::Right))
                 .child(column.label.to_uppercase()),
         );
 
     if column.sortable {
-        content = content.child(sort_caret(column.sort, theme));
+        content = content.child(
+            div()
+                .absolute()
+                .top_0()
+                .right(px(2.))
+                .h_full()
+                .flex()
+                .items_center()
+                .child(sort_caret(column.sort, theme)),
+        );
     }
 
     if column.resizable {

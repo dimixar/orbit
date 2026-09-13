@@ -384,7 +384,8 @@ impl OrbitApp {
             return;
         }
         let now = Instant::now();
-        self.lives
-            .retain(|_, parked| parked.busy || now.duration_since(parked.parked_at) < PARKED_IDLE_TTL);
+        self.lives.retain(|_, parked| {
+            parked.busy || now.duration_since(parked.parked_at) < PARKED_IDLE_TTL
+        });
     }
 }

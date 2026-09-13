@@ -9,11 +9,13 @@
 //! Timestamps render on the footer when pi provides one (snapshot
 //! `timestamp` fields, or a wall-clock stamp taken at `message_end`).
 //! Not painted (pi does not provide them): git Review, conversation fork,
-//! per-tool checkpoint diffs.
+//! per-tool checkpoint diffs — an edit/write tool instead shows an inline
+//! diff built from its own `oldText`/`newText` arguments.
 
 use std::{
     cell::{Cell, RefCell},
-    collections::{HashMap, HashSet},
+    collections::{hash_map::DefaultHasher, HashMap, HashSet},
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
@@ -22,9 +24,10 @@ use std::{
 
 use gpui::{
     deferred, div, img, linear_color_stop, linear_gradient, list, point, prelude::*, px, svg,
-    AnyElement, App, ClipboardItem, ElementId, Font, FontFeatures, FontStyle, FontWeight, Hsla,
-    Image, ImageSource, InteractiveText, ObjectFit, Pixels, ScrollHandle, SharedString,
-    StrikethroughStyle, StyledText, TextAlign, TextRun, UnderlineStyle, Window,
+    Animation, AnimationExt, AnyElement, App, ClipboardItem, ElementId, Font, FontFeatures,
+    FontStyle, FontWeight, Hsla, Image, ImageSource, InteractiveText, ObjectFit, Pixels,
+    ScrollHandle, SharedString, StrikethroughStyle, StyledText, TextAlign, TextRun, UnderlineStyle,
+    Window,
 };
 
 use std::ops::Range;
@@ -38,7 +41,8 @@ use orbit_rpc::MessageUsage;
 use crate::context_meter::format_tokens;
 use crate::highlight::{self, Token};
 use crate::message_scroller::{self, MessageScrollerState};
-use crate::theme::{self, Theme};
+use crate::shimmer::ShimmerText;
+use crate::theme::{self, Theme, ThemeMode};
 use crate::transcript::{ChatMessage, Step, ToolCall};
 
 /// Opens the changed-files Review in the side pane (see `sidepane.rs`) —
@@ -101,6 +105,18 @@ const CODE_PREVIEW_LINES: usize = 24;
 /// `2` never collides with Arguments (`0`) / Output (`1`).
 const CODE_COPY_SECTION: u8 = 2;
 const CODE_COPY_BUTTON: f32 = 28.0;
+/// Inline edit diff — an edit/write tool's `oldText`/`newText` shown as a
+/// compact diff. Row height and text size track the Review pane's diff.
+const EDIT_DIFF_TEXT_SIZE: f32 = 12.5;
+const EDIT_DIFF_ROW_HEIGHT: f32 = 19.0;
+/// Copy feedback for an inline edit diff; section `3` never collides with
+/// Arguments (`0`) / Output (`1`) / code block (`2`).
+const EDIT_DIFF_COPY_SECTION: u8 = 3;
+/// A diff taller than this collapses to a preview so one virtualized row
+/// stays bounded; expanding paints at most [`EDIT_DIFF_PAINT_LINES`].
+const EDIT_DIFF_COLLAPSE_LINES: usize = 40;
+const EDIT_DIFF_PREVIEW_LINES: usize = 24;
+const EDIT_DIFF_PAINT_LINES: usize = 400;
 
 type ExpandedActivities = Rc<RefCell<HashMap<(usize, usize), bool>>>;
 type ExpandedTools = Rc<RefCell<HashSet<(usize, usize)>>>;
@@ -1224,7 +1240,7 @@ fn render_step_group(
                         let mut map = expanded_activities.borrow_mut();
                         let next = !map.get(&key).copied().unwrap_or(false);
                         map.insert(key, next);
-                        scroller.remeasure_items(ix..ix + 1);
+                        scroller.remeasure_toggle(ix);
                         cx.refresh_windows();
                     }
                 }),
@@ -1336,6 +1352,9 @@ fn render_activity_card(
     // live, the tool result.
     let has_detail =
         tool.args.as_ref().is_some_and(|args| !args.is_null()) || tool.output.is_some();
+    // An edit/write tool carries its own change; the header copy button and
+    // the expanded body both read from it.
+    let diff = edit_diff(tool);
 
     let mut card = div()
         .id(ElementId::NamedInteger(
@@ -1420,6 +1439,46 @@ fn render_activity_card(
                 .when(complete && !tool.failed, |row| {
                     row.child(glyph("icons/check.svg", 11., theme.text_3))
                 })
+                .when_some(diff.clone(), |row, rows| {
+                    let copied = copied_sections
+                        .borrow()
+                        .get(&(key.0, key.1, EDIT_DIFF_COPY_SECTION))
+                        .is_some_and(|at| at.elapsed() < COPY_FEEDBACK);
+                    let patch = edit_patch_text(&rows);
+                    let copied_sections = copied_sections.clone();
+                    row.child(
+                        div()
+                            .id(ElementId::NamedInteger(
+                                "copy-edit-diff".into(),
+                                (key.0 as u64) << 16 | key.1 as u64,
+                            ))
+                            .flex_none()
+                            .size(px(20.))
+                            .rounded(px(5.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.overlay_strong))
+                            .child(glyph(
+                                if copied {
+                                    "icons/check.svg"
+                                } else {
+                                    "icons/copy.svg"
+                                },
+                                12.,
+                                if copied { theme.ok_green } else { theme.text_3 },
+                            ))
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(patch.clone()));
+                                copied_sections
+                                    .borrow_mut()
+                                    .insert((key.0, key.1, EDIT_DIFF_COPY_SECTION), Instant::now());
+                                cx.stop_propagation();
+                                cx.refresh_windows();
+                            }),
+                    )
+                })
                 .child(glyph(
                     if has_detail && tool_open {
                         "icons/chevron-down.svg"
@@ -1450,7 +1509,7 @@ fn render_activity_card(
                 open.insert(key);
             }
             drop(open);
-            scroller.remeasure_items(key.0..key.0 + 1);
+            scroller.remeasure_toggle(key.0);
             cx.refresh_windows();
         })
     });
@@ -1527,11 +1586,15 @@ fn render_tool_detail(
     scroller: MessageScrollerState,
     theme: Theme,
 ) -> impl IntoElement {
-    // A command tool shows its shell command as terminal input; everything
-    // else shows the JSON arguments. The result is JSON-highlighted when the
-    // tool returned structured data, plain otherwise.
+    // An edit/write tool shows its change as an inline diff — the arguments
+    // JSON would just be the same text, unread. Everything else: a command
+    // tool shows its shell command as terminal input, and the rest show the
+    // JSON arguments. The result is JSON-highlighted when the tool returned
+    // structured data, plain otherwise.
+    let diff = edit_diff(tool);
     let first = match tool_command(tool) {
         Some(command) => Some(("Command", command, Some(highlight::Lang::Shell), true)),
+        None if diff.is_some() => None,
         None => tool.args.as_ref().map(|args| {
             (
                 "Arguments",
@@ -1549,41 +1612,61 @@ fn render_tool_detail(
             false,
         )
     });
-    let sections = [
+    let sections: Vec<_> = [
         first.map(|(label, content, lang, prompt)| (0u8, label, content, lang, prompt)),
         second.map(|(label, content, lang, prompt)| (1u8, label, content, lang, prompt)),
-    ];
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|(_, _, content, _, _)| !content.trim().is_empty())
+    .collect();
+    let has_sections = !sections.is_empty();
 
-    div()
+    let mut container = div()
         .w_full()
         .min_w_0()
         .border_t_1()
         .border_color(theme.border_strong)
-        .px(px(10.))
-        .py(px(8.))
         .flex()
-        .flex_col()
-        .gap(px(10.))
-        .children(
-            sections
-                .into_iter()
-                .flatten()
-                .filter(|(_, _, content, _, _)| !content.trim().is_empty())
-                .map(move |(section, label, content, lang, prompt)| {
-                    render_detail_section(
-                        key,
-                        section,
-                        label,
-                        content,
-                        lang,
-                        prompt,
-                        copied_sections.clone(),
-                        expanded_sections.clone(),
-                        scroller.clone(),
-                        theme,
-                    )
-                }),
-        )
+        .flex_col();
+    if let Some(rows) = diff.as_ref() {
+        container = container.child(render_edit_diff(
+            rows,
+            key,
+            expanded_sections.clone(),
+            scroller.clone(),
+            theme,
+        ));
+    }
+    if has_sections {
+        container = container.child(
+            div()
+                .w_full()
+                .min_w_0()
+                .px(px(10.))
+                .py(px(8.))
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .children(sections.into_iter().map(
+                    move |(section, label, content, lang, prompt)| {
+                        render_detail_section(
+                            key,
+                            section,
+                            label,
+                            content,
+                            lang,
+                            prompt,
+                            copied_sections.clone(),
+                            expanded_sections.clone(),
+                            scroller.clone(),
+                            theme,
+                        )
+                    },
+                )),
+        );
+    }
+    container
 }
 
 /// A structured (non-string) value highlights as JSON; strings and scalars
@@ -1755,7 +1838,7 @@ fn render_detail_section(
                         open.insert(fold_key);
                     }
                     drop(open);
-                    scroller.remeasure_items(key.0..key.0 + 1);
+                    scroller.remeasure_toggle(key.0);
                     cx.refresh_windows();
                 }),
         )
@@ -1795,6 +1878,434 @@ fn render_detail_body(
             ))
         }))
         .into_any_element()
+}
+
+// ── inline edit diff ───────────────────────────────────────────────────────
+
+/// Kind of one row in an inline edit diff. `Break` separates two edits that
+/// arrived in the same tool call so their hunks don't run together.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiffRowKind {
+    Context,
+    Addition,
+    Deletion,
+    Break,
+}
+
+/// One painted row: the text plus the syntax tokens resolved for its line.
+#[derive(Clone)]
+struct DiffRow {
+    kind: DiffRowKind,
+    text: String,
+    tokens: Option<Vec<Token>>,
+}
+
+type EditDiffCache = HashMap<u64, Rc<Vec<DiffRow>>>;
+
+thread_local! {
+    /// Bounded per-tool edit-diff memo. A card repaints every frame (and on
+    /// every streaming tick); the line diff and token pass run only when the
+    /// tool's text actually changes.
+    static EDIT_DIFF_CACHE: RefCell<EditDiffCache> = RefCell::new(HashMap::new());
+}
+
+/// The inline diff for an `edit` / `write` tool, or `None` when its arguments
+/// carry no text to diff. Content comes only from the tool itself.
+fn edit_diff(tool: &ToolCall) -> Option<Rc<Vec<DiffRow>>> {
+    let key = {
+        let mut hasher = DefaultHasher::new();
+        tool.name.hash(&mut hasher);
+        tool.path.hash(&mut hasher);
+        if let Some(args) = tool.args.as_ref() {
+            if let Some(edits) = args.get("edits").and_then(Value::as_array) {
+                for edit in edits {
+                    edit.get("oldText")
+                        .and_then(Value::as_str)
+                        .hash(&mut hasher);
+                    edit.get("newText")
+                        .and_then(Value::as_str)
+                        .hash(&mut hasher);
+                }
+            }
+            if let Some(content) = args.get("content").and_then(Value::as_str) {
+                content.hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    };
+    EDIT_DIFF_CACHE.with(|cache| {
+        if let Some(hit) = cache.borrow().get(&key) {
+            return Some(hit.clone());
+        }
+        let rows = Rc::new(build_edit_diff(tool)?);
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= 128 {
+            cache.clear();
+        }
+        cache.insert(key, rows.clone());
+        Some(rows)
+    })
+}
+
+fn build_edit_diff(tool: &ToolCall) -> Option<Vec<DiffRow>> {
+    let lang = tool.path.as_deref().and_then(path_language);
+    match tool.name.as_str() {
+        "edit" => {
+            let edits = tool.args.as_ref()?.get("edits")?.as_array()?;
+            let mut rows: Vec<DiffRow> = Vec::new();
+            for edit in edits {
+                let (Some(old), Some(new)) = (
+                    edit.get("oldText").and_then(Value::as_str),
+                    edit.get("newText").and_then(Value::as_str),
+                ) else {
+                    continue;
+                };
+                if !rows.is_empty() {
+                    rows.push(DiffRow {
+                        kind: DiffRowKind::Break,
+                        text: String::new(),
+                        tokens: None,
+                    });
+                }
+                rows.extend(line_diff(old, new, lang));
+            }
+            (!rows.is_empty()).then_some(rows)
+        }
+        "write" => {
+            let content = tool.args.as_ref()?.get("content")?.as_str()?;
+            let lines = split_diff_lines(content);
+            let tokens = lang.map(|lang| highlight::tokenize(lang, content));
+            Some(
+                lines
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, text)| DiffRow {
+                        kind: DiffRowKind::Addition,
+                        text: (*text).to_string(),
+                        tokens: tokens.as_ref().and_then(|t| t.get(ix)).cloned(),
+                    })
+                    .collect(),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// Language for a file path's extension, when the lexer knows it.
+fn path_language(path: &str) -> Option<highlight::Lang> {
+    let ext = Path::new(path).extension()?.to_str()?;
+    highlight::lang_for_tag(ext)
+}
+
+/// Split a code block into lines, dropping a single trailing newline so a
+/// file that ends `\n` doesn't paint a phantom empty row.
+fn split_diff_lines(text: &str) -> Vec<&str> {
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        text.split('\n').collect()
+    }
+}
+
+/// Longest-common-subsequence line diff: unchanged lines become context, the
+/// rest are deletions (old only) and additions (new only). Oversized edits
+/// fall back to a whole-block replacement so the paint stays bounded.
+fn line_diff(old: &str, new: &str, lang: Option<highlight::Lang>) -> Vec<DiffRow> {
+    let old_lines = split_diff_lines(old);
+    let new_lines = split_diff_lines(new);
+    let old_tokens = lang.map(|lang| highlight::tokenize(lang, old));
+    let new_tokens = lang.map(|lang| highlight::tokenize(lang, new));
+    let (n, m) = (old_lines.len(), new_lines.len());
+    let mut ops: Vec<(DiffRowKind, Option<usize>, Option<usize>)> = Vec::new();
+    if n.saturating_mul(m) > 250_000 {
+        ops.extend((0..n).map(|i| (DiffRowKind::Deletion, Some(i), None)));
+        ops.extend((0..m).map(|j| (DiffRowKind::Addition, None, Some(j))));
+    } else {
+        let mut lcs = vec![vec![0u32; m + 1]; n + 1];
+        for i in (0..n).rev() {
+            for j in (0..m).rev() {
+                lcs[i][j] = if old_lines[i] == new_lines[j] {
+                    lcs[i + 1][j + 1] + 1
+                } else {
+                    lcs[i + 1][j].max(lcs[i][j + 1])
+                };
+            }
+        }
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < n && j < m {
+            if old_lines[i] == new_lines[j] {
+                ops.push((DiffRowKind::Context, Some(i), Some(j)));
+                i += 1;
+                j += 1;
+            } else if lcs[i + 1][j] >= lcs[i][j + 1] {
+                ops.push((DiffRowKind::Deletion, Some(i), None));
+                i += 1;
+            } else {
+                ops.push((DiffRowKind::Addition, None, Some(j)));
+                j += 1;
+            }
+        }
+        while i < n {
+            ops.push((DiffRowKind::Deletion, Some(i), None));
+            i += 1;
+        }
+        while j < m {
+            ops.push((DiffRowKind::Addition, None, Some(j)));
+            j += 1;
+        }
+    }
+    ops.into_iter()
+        .map(|(kind, old_ix, new_ix)| {
+            let (text, tokens) = match kind {
+                DiffRowKind::Deletion => (
+                    old_ix.and_then(|ix| old_lines.get(ix)).copied(),
+                    old_tokens
+                        .as_ref()
+                        .and_then(|t| old_ix.and_then(|ix| t.get(ix))),
+                ),
+                _ => (
+                    new_ix.and_then(|ix| new_lines.get(ix)).copied(),
+                    new_tokens
+                        .as_ref()
+                        .and_then(|t| new_ix.and_then(|ix| t.get(ix))),
+                ),
+            };
+            DiffRow {
+                kind,
+                text: text.unwrap_or("").to_string(),
+                tokens: tokens.cloned(),
+            }
+        })
+        .collect()
+}
+
+/// Unified-patch text for the copy button — `+`/`-`/space prefixes, minus the
+/// cosmetic break rows.
+fn edit_patch_text(rows: &[DiffRow]) -> String {
+    let mut out = String::new();
+    for row in rows {
+        let marker = match row.kind {
+            DiffRowKind::Addition => Some('+'),
+            DiffRowKind::Deletion => Some('-'),
+            DiffRowKind::Context => Some(' '),
+            DiffRowKind::Break => None,
+        };
+        if let Some(marker) = marker {
+            out.push(marker);
+            out.push_str(&row.text);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// The diff body inside an expanded edit card, full-bleed like the Review
+/// pane's rows. Long diffs fold to a preview; copy always carries the whole
+/// patch.
+fn render_edit_diff(
+    rows: &[DiffRow],
+    key: (usize, usize),
+    expanded_sections: ExpandedSections,
+    scroller: MessageScrollerState,
+    theme: Theme,
+) -> AnyElement {
+    let total = rows.len();
+    let foldable = total > EDIT_DIFF_COLLAPSE_LINES;
+    let expanded = foldable
+        && expanded_sections
+            .borrow()
+            .contains(&(key.0, key.1, EDIT_DIFF_COPY_SECTION));
+    let visible = if foldable && !expanded {
+        EDIT_DIFF_PREVIEW_LINES.min(total)
+    } else {
+        EDIT_DIFF_PAINT_LINES.min(total)
+    };
+    let clipped = expanded && total > EDIT_DIFF_PAINT_LINES;
+    let mut body = div()
+        .w_full()
+        .min_w_0()
+        .py(px(4.))
+        .flex()
+        .flex_col()
+        .children(
+            rows.iter()
+                .take(visible)
+                .map(|row| render_edit_diff_row(row, theme)),
+        );
+    if foldable {
+        let label = if expanded {
+            "Show less".to_string()
+        } else {
+            format!("Show all {total} lines")
+        };
+        body = body.child(
+            div()
+                .id(ElementId::NamedInteger(
+                    "edit-diff-fold".into(),
+                    ((key.0 as u64) << 16 | key.1 as u64) << 8 | EDIT_DIFF_COPY_SECTION as u64,
+                ))
+                .w_full()
+                .h(px(24.))
+                .px(px(14.))
+                .flex()
+                .items_center()
+                .gap(px(5.))
+                .cursor_pointer()
+                .text_size(theme.ui_px(11.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text_3)
+                .hover(|style| style.text_color(theme.text))
+                .child(glyph(
+                    if expanded {
+                        "icons/chevron-down.svg"
+                    } else {
+                        "icons/chevron-right.svg"
+                    },
+                    10.,
+                    theme.text_3,
+                ))
+                .child(label)
+                .when(clipped, |toggle| {
+                    toggle.child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(theme.text_3)
+                            .child(format!(
+                                "Showing first {EDIT_DIFF_PAINT_LINES} — copy for the whole diff"
+                            )),
+                    )
+                })
+                .on_click(move |_, _, cx| {
+                    let fold_key = (key.0, key.1, EDIT_DIFF_COPY_SECTION);
+                    let mut open = expanded_sections.borrow_mut();
+                    if !open.remove(&fold_key) {
+                        open.insert(fold_key);
+                    }
+                    drop(open);
+                    scroller.remeasure_toggle(key.0);
+                    // The fold is not a card toggle — don't collapse the card
+                    // out from under the click.
+                    cx.stop_propagation();
+                    cx.refresh_windows();
+                }),
+        );
+    }
+    body.into_any_element()
+}
+
+fn render_edit_diff_row(row: &DiffRow, theme: Theme) -> AnyElement {
+    if row.kind == DiffRowKind::Break {
+        return div()
+            .w_full()
+            .flex_none()
+            .h(px(9.))
+            .border_t_1()
+            .border_color(theme.border)
+            .into_any_element();
+    }
+    let (body_bg, gutter_bg, edge, marker_color, marker) = match row.kind {
+        DiffRowKind::Addition => (
+            Some(theme.add_green.opacity(diff_body_wash(theme))),
+            Some(theme.add_green.opacity(diff_gutter_wash(theme))),
+            Some(theme.add_green),
+            theme.add_green,
+            "+",
+        ),
+        DiffRowKind::Deletion => (
+            Some(theme.del_red.opacity(diff_body_wash(theme))),
+            Some(theme.del_red.opacity(diff_gutter_wash(theme))),
+            Some(theme.del_red),
+            theme.del_red,
+            "-",
+        ),
+        _ => (None, None, None, theme.text_3, ""),
+    };
+    div()
+        .w_full()
+        .min_w_0()
+        .min_h(px(EDIT_DIFF_ROW_HEIGHT))
+        .flex()
+        .font_family(theme::code_font_family())
+        .text_size(theme.code_px(EDIT_DIFF_TEXT_SIZE))
+        .line_height(theme.code_px(18.))
+        .when_some(edge, |row, edge| row.border_l_2().border_color(edge))
+        .child(
+            div()
+                .w(px(24.))
+                .flex_none()
+                .flex()
+                .items_start()
+                .justify_center()
+                .text_color(marker_color)
+                .when_some(gutter_bg, |gutter, bg| gutter.bg(bg))
+                .child(marker),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .pr(px(12.))
+                .overflow_hidden()
+                // A long line wraps to the next row instead of being clipped —
+                // the diff must stay readable at any pane width.
+                .whitespace_normal()
+                .when_some(body_bg, |body, bg| body.bg(bg))
+                .text_color(theme.code_text)
+                .child(diff_row_text(row, theme)),
+        )
+        .into_any_element()
+}
+
+fn diff_body_wash(theme: Theme) -> f32 {
+    if theme.mode == ThemeMode::Dark {
+        0.18
+    } else {
+        0.12
+    }
+}
+
+fn diff_gutter_wash(theme: Theme) -> f32 {
+    if theme.mode == ThemeMode::Dark {
+        0.24
+    } else {
+        0.15
+    }
+}
+
+/// Syntax-colored text for one diff row (tokens are already per-line).
+fn diff_row_text(row: &DiffRow, theme: Theme) -> StyledText {
+    let font = mono_font();
+    let display = if row.text.is_empty() {
+        " "
+    } else {
+        row.text.as_str()
+    };
+    let mut runs: Vec<TextRun> = Vec::new();
+    if let Some(tokens) = row.tokens.as_ref() {
+        let mut offset = 0usize;
+        for token in tokens {
+            let start = token.range.start.min(row.text.len());
+            let end = token.range.end.min(row.text.len());
+            if start > offset {
+                runs.push(code_run(start - offset, theme.code_text, &font));
+            }
+            if end > start {
+                runs.push(code_run(end - start, theme.token_color(token.class), &font));
+            }
+            offset = offset.max(end);
+        }
+        if offset < row.text.len() {
+            runs.push(code_run(row.text.len() - offset, theme.code_text, &font));
+        }
+    }
+    if runs.is_empty() {
+        runs.push(code_run(display.len(), theme.code_text, &font));
+    }
+    StyledText::new(display.to_string()).with_runs(runs)
 }
 
 /// Arguments / result text: strings as-is, everything else pretty-printed.
@@ -2184,7 +2695,7 @@ fn render_turn_fold(
                 ))
                 .on_click(move |_, _, cx| {
                     toggle_index(&expanded_turns, ix);
-                    scroller.remeasure_items(ix..ix + 1);
+                    scroller.remeasure_toggle(ix);
                     cx.refresh_windows();
                 }),
         )
@@ -2268,7 +2779,38 @@ fn render_working_indicator(
         Some(activity) => format!("{} · {}", activity, format_working_elapsed(elapsed)),
         None => format!("Working for {}", format_working_elapsed(elapsed)),
     };
+    let label_size = theme.ui_px(13.5);
+    let label_line = theme.ui_px(18.);
+    // The live label carries the sidebar's running-session shimmer — the same
+    // ember band sweeping across the ink. Reduce-motion keeps the accent
+    // signal without the perpetual sweep.
+    let label_el: AnyElement = if theme.ui.reduce_motion {
+        div()
+            .min_w_0()
+            .truncate()
+            .text_size(label_size)
+            .line_height(label_line)
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(theme.accent)
+            .child(label)
+            .into_any_element()
+    } else {
+        ShimmerText::new(label, theme.text_3, theme.accent)
+            .with_animation(
+                ElementId::NamedInteger("working-shimmer".into(), 0),
+                Animation::new(Duration::from_millis(2000)).repeat(),
+                |mut text, delta| {
+                    text.phase = delta;
+                    text
+                },
+            )
+            .into_any_element()
+    };
     div()
+        // The row needs a definite width: the shimmer paints at `width: 100%`
+        // of its wrapper, so an indefinite (shrink-to-fit) row would collapse
+        // the label — timer and all — to nothing.
+        .w_full()
         .h(px(22.))
         .flex()
         .items_center()
@@ -2276,13 +2818,12 @@ fn render_working_indicator(
         .child(working_wave_dots(theme, elapsed.as_millis()))
         .child(
             div()
+                .flex_1()
                 .min_w_0()
-                .truncate()
-                .text_size(theme.ui_px(13.5))
-                .line_height(theme.ui_px(18.))
+                .text_size(label_size)
+                .line_height(label_line)
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(theme.text_3)
-                .child(label),
+                .child(label_el),
         )
 }
 
@@ -3565,7 +4106,7 @@ fn render_code_block(
                         open.insert(key);
                     }
                     drop(open);
-                    scroller.remeasure_items(ix..ix + 1);
+                    scroller.remeasure_toggle(ix);
                     cx.refresh_windows();
                 }),
         );
@@ -4055,7 +4596,7 @@ pub(crate) fn render_changed_files(
                 ))
                 .on_click(move |_, _, cx| {
                     toggle_index(&expanded_files, message_ix);
-                    scroller.remeasure_items(message_ix..message_ix + 1);
+                    scroller.remeasure_toggle(message_ix);
                     cx.refresh_windows();
                 }),
         );
@@ -4280,6 +4821,78 @@ mod tests {
     }
 
     #[test]
+    fn line_diff_keeps_context_around_an_insertion() {
+        let old =
+            "let columns = self.tool_columns();\nlet mut elements = Vec::new();\nfor row in rows {";
+        let new = "let columns = self.tool_columns();\nlet total_calls = snapshot.tools.calls.max(1);\nlet mut elements = Vec::new();\nfor row in rows {";
+        let rows = line_diff(old, new, Some(highlight::Lang::Rust));
+        let kinds: Vec<DiffRowKind> = rows.iter().map(|row| row.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                DiffRowKind::Context,
+                DiffRowKind::Addition,
+                DiffRowKind::Context,
+                DiffRowKind::Context,
+            ]
+        );
+        assert_eq!(
+            rows[1].text,
+            "let total_calls = snapshot.tools.calls.max(1);"
+        );
+        // The line is lexed, so the keyword carries a token.
+        assert!(rows[1].tokens.as_ref().is_some_and(|t| !t.is_empty()));
+    }
+
+    #[test]
+    fn build_edit_diff_walks_pi_edit_arguments() {
+        let tool = ToolCall {
+            name: "edit".into(),
+            summary: String::new(),
+            path: Some("src/view.rs".into()),
+            added: 1,
+            removed: 1,
+            id: None,
+            args: Some(serde_json::json!({
+                "path": "src/view.rs",
+                "edits": [{ "oldText": "let a = 1;", "newText": "let a = 2;" }]
+            })),
+            output: None,
+            failed: false,
+        };
+        let rows = build_edit_diff(&tool).expect("diff");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].kind, DiffRowKind::Deletion);
+        assert_eq!(rows[1].kind, DiffRowKind::Addition);
+        assert_eq!(edit_patch_text(&rows), "-let a = 1;\n+let a = 2;\n");
+        // A read tool has no edit text to show.
+        let read = ToolCall {
+            name: "read".into(),
+            ..tool
+        };
+        assert!(build_edit_diff(&read).is_none());
+    }
+
+    #[test]
+    fn write_diff_marks_every_line_added() {
+        let tool = ToolCall {
+            name: "write".into(),
+            summary: String::new(),
+            path: Some("src/new.rs".into()),
+            added: 2,
+            removed: 0,
+            id: None,
+            args: Some(serde_json::json!({ "path": "src/new.rs", "content": "a\nb\n" })),
+            output: None,
+            failed: false,
+        };
+        let rows = build_edit_diff(&tool).expect("diff");
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| row.kind == DiffRowKind::Addition));
+        assert_eq!(rows[1].text, "b");
+    }
+
+    #[test]
     fn section_lang_only_highlights_structured_values() {
         assert_eq!(section_lang(None), None);
         assert_eq!(
@@ -4479,10 +5092,8 @@ mod tests {
         // code block (so it is copyable) and its label is honest about the
         // missing preview.
         let blocks = parse_blocks("```mermaid\ngraph TD; A-->B;\n```");
-        assert!(
-            matches!(&blocks[0], Block::Code(Some(lang), lines)
-                if lang == "mermaid" && lines == &["graph TD; A-->B;".to_string()])
-        );
+        assert!(matches!(&blocks[0], Block::Code(Some(lang), lines)
+                if lang == "mermaid" && lines == &["graph TD; A-->B;".to_string()]));
         assert_eq!(
             code_block_label(Some("Mermaid")),
             "Mermaid · source (preview unavailable)"

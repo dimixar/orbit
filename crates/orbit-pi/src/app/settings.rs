@@ -260,7 +260,7 @@ impl OrbitApp {
             .gap_1()
             .pb_1()
             .when(self.settings_section == SettingsSection::About, |header| {
-                header.child(img(crate::app_icon::ASSET).size(px(72.)).flex_none())
+                header.child(embedded_image(crate::app_icon::ASSET, 72.))
             })
             .child(
                 div()
@@ -414,23 +414,18 @@ impl OrbitApp {
             .filter(|model| favorites.contains(&model.provider, &model.id))
             .count();
 
-        let toolbar = div()
-            .w_full()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(theme.ui_px(12.))
-                    .text_color(theme.text_3)
-                    .child(if count == 0 {
-                        "No models reported by the runtime".to_string()
-                    } else {
-                        format!("{count} models · {favorite_count} favorites")
-                    }),
-            );
+        let toolbar = div().w_full().flex().items_center().gap_2().child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(theme.ui_px(12.))
+                .text_color(theme.text_3)
+                .child(if count == 0 {
+                    "No models reported by the runtime".to_string()
+                } else {
+                    format!("{count} models · {favorite_count} favorites")
+                }),
+        );
 
         div()
             .w_full()
@@ -528,11 +523,7 @@ impl OrbitApp {
                     .py(px(7.))
                     .rounded_lg()
                     .border_1()
-                    .border_color(if active {
-                        theme.accent
-                    } else {
-                        theme.border
-                    })
+                    .border_color(if active { theme.accent } else { theme.border })
                     .bg(if active {
                         theme.active
                     } else {
@@ -548,7 +539,9 @@ impl OrbitApp {
                         let provider = model_provider.clone();
                         let id = id.clone();
                         move |_, _, cx| {
-                            this.update(cx, |app, cx| app.set_model(id.clone(), provider.clone(), cx));
+                            this.update(cx, |app, cx| {
+                                app.set_model(id.clone(), provider.clone(), cx)
+                            });
                         }
                     })
                     .child(
@@ -695,7 +688,12 @@ impl OrbitApp {
                 .child(if visible.len() == self.plugins.len() {
                     format!("{} of {} installed", installed, self.plugins.len())
                 } else {
-                    format!("{} of {} shown · {} installed", visible.len(), self.plugins.len(), installed)
+                    format!(
+                        "{} of {} shown · {} installed",
+                        visible.len(),
+                        self.plugins.len(),
+                        installed
+                    )
                 })
                 .into_any_element(),
         );
@@ -4493,24 +4491,31 @@ impl OrbitApp {
     /// warm the dither cache so the first paint of the new-task page is
     /// costless.
     pub(super) fn background_choose(&mut self, cx: &mut Context<Self>) {
-        let picked = rfd::FileDialog::new()
+        // Async panel only: see `OrbitApp::browse_for_folder` for why a
+        // blocking native dialog on the main thread aborts the app.
+        let dialog = rfd::AsyncFileDialog::new()
             .set_title("Choose a background image")
             .add_filter(
                 "Images",
                 &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff"],
-            )
-            .pick_file();
-        let Some(path) = picked else {
-            return;
-        };
-        match crate::dither::choose_file(&path) {
-            Ok(label) => {
-                crate::dither::background();
-                self.set_status(format!("Background set to {label}"));
-            }
-            Err(err) => self.set_status(err),
-        }
-        cx.notify();
+            );
+        cx.spawn(async move |this, cx| {
+            let Some(handle) = dialog.pick_file().await else {
+                return;
+            };
+            let path = handle.path().to_path_buf();
+            let _ = this.update(cx, |app, cx| {
+                match crate::dither::choose_file(&path) {
+                    Ok(label) => {
+                        crate::dither::background();
+                        app.set_status(format!("Background set to {label}"));
+                    }
+                    Err(err) => app.set_status(err),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Drop the background (the dot grid returns) and forget the cache.

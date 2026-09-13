@@ -463,10 +463,6 @@ impl ToolRow {
     pub fn avg_duration_ms(&self) -> Option<f64> {
         (self.duration_samples > 0).then(|| self.duration_ms as f64 / self.duration_samples as f64)
     }
-
-    pub fn error_rate(&self) -> Option<f64> {
-        (self.calls > 0).then(|| self.errors as f64 / self.calls as f64 * 100.0)
-    }
 }
 
 #[derive(Clone, Default, PartialEq, Debug)]

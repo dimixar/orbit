@@ -66,6 +66,29 @@ pub(crate) fn icon_dyn(path: SharedString, size: f32, color: Hsla) -> impl IntoE
         .text_color(color)
 }
 
+/// Render a compile-time-embedded raster image (PNG) at a fixed height, with
+/// the width derived from the source's aspect ratio.
+///
+/// `img("name.png")` is a trap for embedded assets: gpui's `From<&str>` runs
+/// the string through its URI heuristic, and a slashless filename parses as a
+/// valid URI authority, so it is fetched over the network instead of loaded
+/// from [`crate::assets::Assets`]. Passing [`Resource::Embedded`] explicitly
+/// keeps it on the asset-source path.
+pub(crate) fn embedded_image(path: &'static str, height: f32) -> impl IntoElement + use<> {
+    img(ImageSource::Resource(Resource::Embedded(path.into())))
+        .h(px(height))
+        .flex_none()
+}
+
+/// Same as [`embedded_image`], but sized by width; the height follows the
+/// source's aspect ratio. Use for the wordmark, which is laid out to span the
+/// sidebar's content width.
+pub(crate) fn embedded_image_w(path: &'static str, width: Pixels) -> impl IntoElement + use<> {
+    img(ImageSource::Resource(Resource::Embedded(path.into())))
+        .w(width)
+        .flex_none()
+}
+
 // ── devicons (Nerd Font file glyphs) ───────────────────────────────
 
 /// The Nerd Font family that covers devicons glyphs, detected once per

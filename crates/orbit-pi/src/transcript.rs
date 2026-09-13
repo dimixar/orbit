@@ -1951,10 +1951,7 @@ mod tests {
             appended,
             search
         );
-        eprintln!(
-            "10k messages: append {:?}, search {:?}",
-            appended, search
-        );
+        eprintln!("10k messages: append {:?}, search {:?}", appended, search);
     }
 
     #[test]

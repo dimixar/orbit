@@ -32,9 +32,10 @@ use gpui::{
     radians, relative, svg, uniform_list, AnchoredPositionMode, Animation, AnimationExt,
     AnyElement, App, ClipboardItem, Context, Corner, CursorStyle, DragMoveEvent, ElementId, Entity,
     ExternalPaths, FocusHandle, Focusable, FontWeight, Hsla, Image, ImageSource, IntoElement,
-    ListAlignment, ListState, MouseButton, MouseDownEvent, MouseUpEvent, ObjectFit, Pixels, Render,
-    ScrollStrategy, SharedString, StatefulInteractiveElement, Subscription, TextAlign,
-    Transformation, UniformListScrollHandle, Window, WindowControlArea,
+    ListAlignment, ListState, MouseButton, MouseDownEvent, MouseUpEvent, ObjectFit,
+    PathPromptOptions, Pixels, Render, Resource, ScrollStrategy, SharedString,
+    StatefulInteractiveElement, Subscription, TextAlign, Transformation, UniformListScrollHandle,
+    Window, WindowControlArea,
 };
 use orbit_rpc::{
     CommandBody, ContextUsage, Event, PendingQueue, PiClient, QuotaReport, SessionState,

@@ -119,6 +119,7 @@ impl GitPanel {
             crate::composer::ComposerInput::new(cx)
                 .with_placeholder("Commit message — leave blank to generate")
                 .with_key_context("Composer Picker")
+                .with_max_lines(6)
         });
         Self {
             open: false,
@@ -873,78 +874,22 @@ impl GitPanel {
             .flex_col()
             .gap(px(10.))
             .child(
+                // The message field: wraps and grows to a few rows, then
+                // scrolls internally. A fixed min height keeps the bar stable,
+                // and the actions sit on their own row below so a long
+                // generated body can never overlap them.
                 div()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h(px(52.))
+                    .px(px(10.))
+                    .py(px(8.))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.bg_raised)
                     .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .id("git-branch-bar")
-                            .h(px(30.))
-                            .px(px(9.))
-                            .rounded_md()
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.bg_raised)
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme.bg_hover))
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.branch_menu_open = !this.branch_menu_open;
-                                cx.notify();
-                            }))
-                            .child(icon("icons/branch.svg", 12., theme.text_2))
-                            .child(
-                                div()
-                                    .max_w(px(160.))
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_size(theme.ui_px(12.))
-                                    .text_color(theme.text)
-                                    .child(
-                                        self.branch.clone().unwrap_or_else(|| "detached".into()),
-                                    ),
-                            )
-                            .child(icon("icons/chevron-down.svg", 10., theme.text_3)),
-                    )
-                    .child(div().flex_1().min_w_0().child(self.message.clone()))
-                    .child(
-                        div()
-                            .id("git-generate")
-                            .h(px(30.))
-                            .px(px(10.))
-                            .rounded_md()
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(theme.bg_raised)
-                            .flex()
-                            .items_center()
-                            .gap(px(5.))
-                            .cursor_pointer()
-                            .text_size(theme.ui_px(12.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(if self.generating {
-                                theme.text_3
-                            } else {
-                                theme.text
-                            })
-                            .when(!self.generating, |button| {
-                                button.hover(|s| s.bg(theme.bg_hover))
-                            })
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.generate(cx)))
-                            .child(if self.generating {
-                                spinner("git-generate-spinner", 12., theme)
-                            } else {
-                                icon("icons/magic-wand.svg", 12., theme.accent).into_any_element()
-                            })
-                            .child(if self.generating {
-                                "Generating…"
-                            } else {
-                                "Generate"
-                            }),
-                    ),
+                    .child(div().flex_1().min_w_0().child(self.message.clone())),
             )
             .child(
                 div()
@@ -991,6 +936,45 @@ impl GitPanel {
                             }))
                     }))
                     .child(div().flex_1())
+                    .child(
+                        // Generate sits left of the commit actions on the
+                        // footer row, where it no longer competes with the
+                        // message field for horizontal space.
+                        div()
+                            .id("git-generate")
+                            .h(px(30.))
+                            .px(px(10.))
+                            .rounded_md()
+                            .border_1()
+                            .border_color(theme.border)
+                            .bg(theme.bg_raised)
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(5.))
+                            .cursor_pointer()
+                            .text_size(theme.ui_px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(if self.generating {
+                                theme.text_3
+                            } else {
+                                theme.text
+                            })
+                            .when(!self.generating, |button| {
+                                button.hover(|s| s.bg(theme.bg_hover))
+                            })
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.generate(cx)))
+                            .child(if self.generating {
+                                spinner("git-generate-spinner", 12., theme)
+                            } else {
+                                icon("icons/magic-wand.svg", 12., theme.accent).into_any_element()
+                            })
+                            .child(if self.generating {
+                                "Generating…"
+                            } else {
+                                "Generate"
+                            }),
+                    )
                     .child(match actions {
                         BarActions::Commit => div()
                             .flex()

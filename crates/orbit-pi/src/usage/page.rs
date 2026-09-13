@@ -17,7 +17,10 @@ use serde_json::Value;
 
 use crate::composer::ComposerInput;
 
-use super::aggregate::{BucketRow, ChartMetric, LatencyMetric, SessionRow, UsageSnapshot};
+use super::aggregate::{
+    Breakdown, BucketRow, ChartMetric, GroupRow, LatencyMetric, SessionRow, ToolRow, Totals,
+    UsageSnapshot,
+};
 use super::collect::{now_ms, UsageScanner};
 use super::model::*;
 use super::table::{FailureRow, FailureSort, TableKind};
@@ -26,6 +29,9 @@ use super::table::{FailureRow, FailureSort, TableKind};
 pub const PAGE_SIZES: [usize; 4] = [10, 25, 50, 100];
 /// Default rows per page.
 pub const DEFAULT_PAGE_SIZE: usize = 25;
+/// Default rows per page for a breakdown tab. Shorter than the sessions table:
+/// a dimension rarely has as many rows, so ten is a full screen already.
+pub const DEFAULT_BREAKDOWN_PAGE_SIZE: usize = 10;
 
 /// Everything one request to the sessions table needs, independent of GPUI
 /// (§100/§101): filter/search narrow, sort orders, then pagination slices.
@@ -316,6 +322,10 @@ pub enum MenuKind {
     PageSize,
     /// The sessions table's column-visibility picker.
     Columns,
+    /// The breakdown table's column-visibility picker.
+    BreakdownColumns,
+    /// The breakdown table's rows-per-page picker.
+    BreakdownPageSize,
     /// The header's export popover.
     Export,
 }
@@ -325,6 +335,203 @@ pub enum MenuKind {
 pub enum ExportFormat {
     Csv,
     Json,
+}
+
+/// Which dimension the one breakdown section ranks. The four distributions the
+/// page used to stack as separate panels are the four faces of this selector.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum BreakdownTab {
+    Models,
+    Workspaces,
+    Providers,
+    Tools,
+}
+
+impl BreakdownTab {
+    pub const ALL: [Self; 4] = [Self::Models, Self::Workspaces, Self::Providers, Self::Tools];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Models => "Models",
+            Self::Workspaces => "Workspaces",
+            Self::Providers => "Providers",
+            Self::Tools => "Tools",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Models => "models",
+            Self::Workspaces => "workspaces",
+            Self::Providers => "providers",
+            Self::Tools => "tools",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|tab| tab.as_str() == raw.trim())
+    }
+}
+
+/// Which column the breakdown data table orders on. Shared across the three
+/// token dimensions, whose rows carry the same measures.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BreakdownSort {
+    Name,
+    Requests,
+    Input,
+    Output,
+    Cache,
+    Tokens,
+}
+
+impl BreakdownSort {
+    /// Every sortable column, in the order the table offers them.
+    pub const ALL: [Self; 6] = [
+        Self::Name,
+        Self::Requests,
+        Self::Input,
+        Self::Output,
+        Self::Cache,
+        Self::Tokens,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Name => "Name",
+            Self::Requests => "Requests",
+            Self::Input => "Input",
+            Self::Output => "Output",
+            Self::Cache => "Cache",
+            Self::Tokens => "Tokens",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Requests => "requests",
+            Self::Input => "input",
+            Self::Output => "output",
+            Self::Cache => "cache",
+            Self::Tokens => "tokens",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|column| column.as_str() == raw.trim())
+    }
+
+    /// Numeric value for sorting; the name column sorts on its own text.
+    pub fn key(self, row: &super::aggregate::GroupRow) -> f64 {
+        match self {
+            Self::Requests => row.totals.requests as f64,
+            Self::Input => row.totals.tokens.input as f64,
+            Self::Output => row.totals.tokens.output as f64,
+            Self::Cache => row.totals.tokens.cache_read as f64,
+            Self::Tokens => row.totals.tokens.total as f64,
+            Self::Name => 0.0,
+        }
+    }
+
+    pub fn is_text(self) -> bool {
+        self == Self::Name
+    }
+}
+
+/// Which table the one records section shows. Keeps every detail table without
+/// stacking three scroll-length sections on top of each other.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DetailTab {
+    Sessions,
+    Daily,
+    Failures,
+}
+
+impl DetailTab {
+    pub const ALL: [Self; 3] = [Self::Sessions, Self::Daily, Self::Failures];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Sessions => "Sessions",
+            Self::Daily => "Daily",
+            Self::Failures => "Failures",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sessions => "sessions",
+            Self::Daily => "daily",
+            Self::Failures => "failures",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|tab| tab.as_str() == raw.trim())
+    }
+}
+
+/// Per-tab view state for the breakdown table: each dimension remembers its
+/// own search, hidden columns, and page — parity with the sessions table,
+/// scoped per dimension because the columns and row sets differ.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BreakdownView {
+    pub search: String,
+    pub hidden_columns: Vec<&'static str>,
+    /// 1-based.
+    pub page: usize,
+    pub page_size: usize,
+}
+
+impl Default for BreakdownView {
+    fn default() -> Self {
+        Self {
+            search: String::new(),
+            hidden_columns: Vec::new(),
+            page: 1,
+            page_size: DEFAULT_BREAKDOWN_PAGE_SIZE,
+        }
+    }
+}
+
+/// One page of breakdown rows plus the metadata its footer reports (§75). The
+/// totals cover the whole filtered set, not just the visible page.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BreakdownQueryResult {
+    pub rows: Vec<GroupRow>,
+    pub total: usize,
+    pub page: usize,
+    pub page_size: usize,
+    pub totals: Totals,
+}
+
+/// One page of tool rows plus the metadata its footer reports.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolQueryResult {
+    pub rows: Vec<ToolRow>,
+    pub total: usize,
+    pub page: usize,
+    pub page_size: usize,
+    pub calls: u64,
+    pub errors: u64,
+}
+
+/// Slice one page out of a filtered row set, clamping the page into range.
+fn paginate<T: Clone>(rows: &[T], page: usize, page_size: usize) -> (Vec<T>, usize, usize) {
+    let total = rows.len();
+    let page_size = page_size.max(1);
+    let page_count = total.div_ceil(page_size).max(1);
+    let page = page.clamp(1, page_count);
+    let start = (page - 1) * page_size;
+    let page_rows = if start < total {
+        rows[start..(start + page_size).min(total)].to_vec()
+    } else {
+        Vec::new()
+    };
+    (page_rows, page, total)
 }
 
 /// Opens a session in the app's chat surface (installed by `OrbitApp`).
@@ -357,8 +564,18 @@ pub struct UsagePage {
     latency_metric: LatencyMetric,
     /// The timeline's "View data" table is open (§52).
     chart_data_open: bool,
-    /// Breakdown panels expanded past their ranked top rows (§13/§15).
-    expanded_breakdowns: Vec<&'static str>,
+    /// Which column the breakdown data table orders on, and its direction.
+    breakdown_sort: BreakdownSort,
+    breakdown_sort_desc: bool,
+    /// Which dimension the merged breakdown section ranks.
+    breakdown_tab: BreakdownTab,
+    /// Per-tab breakdown table state: search, hidden columns, and page.
+    breakdown_views: HashMap<BreakdownTab, BreakdownView>,
+    breakdown_search: Entity<ComposerInput>,
+    /// Which table the merged records section shows.
+    detail_tab: DetailTab,
+    /// The secondary metrics under the KPI board are expanded.
+    summary_open: bool,
 
     // ── controls ──
     /// The page's own scroll position. Opening the page always starts at the
@@ -400,6 +617,7 @@ pub struct UsagePage {
     /// inputs live in their own entities, so the page has to watch them.
     _search_sub: Subscription,
     _menu_query_sub: Subscription,
+    _breakdown_search_sub: Subscription,
     /// Width of the main area, refreshed by the shell each render.
     main_width: f32,
 
@@ -449,6 +667,14 @@ impl UsagePage {
             cx.notify();
         });
         let menu_query_sub = cx.observe(&menu_query, |_, _, cx| cx.notify());
+        let breakdown_search = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("usage-breakdown-search")
+                .with_placeholder("Search breakdown…")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+        });
+        let breakdown_search_sub = cx.observe(&breakdown_search, |_, _, cx| cx.notify());
         Self {
             scanner: UsageScanner::start(),
             index: None,
@@ -468,7 +694,15 @@ impl UsagePage {
             latency_metric: LatencyMetric::parse(&prefs.latency_metric)
                 .unwrap_or(LatencyMetric::Average),
             chart_data_open: false,
-            expanded_breakdowns: Vec::new(),
+            breakdown_sort: BreakdownSort::parse(&prefs.breakdown_sort)
+                .unwrap_or(BreakdownSort::Tokens),
+            breakdown_sort_desc: prefs.breakdown_sort_desc,
+            breakdown_tab: BreakdownTab::parse(&prefs.breakdown_tab)
+                .unwrap_or(BreakdownTab::Models),
+            breakdown_views: HashMap::new(),
+            breakdown_search,
+            detail_tab: DetailTab::parse(&prefs.detail_tab).unwrap_or(DetailTab::Sessions),
+            summary_open: prefs.summary_open,
             scroll: ScrollHandle::new(),
             search,
             menu: None,
@@ -491,6 +725,7 @@ impl UsagePage {
             context_row: None,
             _search_sub: search_sub,
             _menu_query_sub: menu_query_sub,
+            _breakdown_search_sub: breakdown_search_sub,
             main_width: 1000.,
             on_open_session: None,
             on_close: None,
@@ -643,11 +878,15 @@ impl UsagePage {
     }
 
     /// The width a table actually gets: the page column is capped at
-    /// [`super::view::CONTENT_MAX_W`] and padded, so budgeting against the raw
-    /// main-area width would over-commit by the difference and squeeze the last
-    /// column.
+    /// [`super::view::CONTENT_MAX_W`] and padded, and every table now sits
+    /// inside a card that spends a hairline on each side — budgeting against the
+    /// raw main-area width would over-commit by the difference and squeeze the
+    /// last column into a horizontal scrollbar.
     pub(super) fn table_width(&self) -> f32 {
-        (self.main_width.min(super::view::CONTENT_MAX_W) - super::view::PAGE_PAD).max(360.)
+        /// The card's own left and right borders.
+        const CARD_EDGE: f32 = 2.;
+        (self.main_width.min(super::view::CONTENT_MAX_W) - super::view::PAGE_PAD - CARD_EDGE)
+            .max(360.)
     }
 
     /// Set by `OrbitApp` on every render: the main area's width in points.
@@ -869,8 +1108,29 @@ impl UsagePage {
         self.latency_metric
     }
 
-    pub fn is_breakdown_expanded(&self, id: &str) -> bool {
-        self.expanded_breakdowns.contains(&id)
+    /// The breakdown data table's current sort key and direction.
+    pub fn breakdown_sort_state(&self) -> (BreakdownSort, bool) {
+        (self.breakdown_sort, self.breakdown_sort_desc)
+    }
+
+    /// The rows of one breakdown, ordered by the data table's sort. The chart
+    /// keeps the aggregate's own token ranking, so the table and the bars never
+    /// fight over the same ordering.
+    pub fn sorted_breakdown_rows(&self, breakdown: &Breakdown) -> Vec<GroupRow> {
+        let mut rows = breakdown.rows.clone();
+        let (sort, desc) = (self.breakdown_sort, self.breakdown_sort_desc);
+        rows.sort_by(|a, b| {
+            let ordering = if sort.is_text() {
+                a.label.to_lowercase().cmp(&b.label.to_lowercase())
+            } else {
+                sort.key(a)
+                    .partial_cmp(&sort.key(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            };
+            let ordering = if desc { ordering.reverse() } else { ordering };
+            ordering.then_with(|| a.label.cmp(&b.label))
+        });
+        rows
     }
 
     pub fn bucket_rows(&self) -> Vec<BucketRow> {
@@ -1072,7 +1332,12 @@ impl UsagePage {
             MenuKind::Workspace => &mut filter.workspaces,
             MenuKind::Provider => &mut filter.providers,
             MenuKind::Model => &mut filter.models,
-            MenuKind::Range | MenuKind::Export | MenuKind::PageSize | MenuKind::Columns => return,
+            MenuKind::Range
+            | MenuKind::Export
+            | MenuKind::PageSize
+            | MenuKind::Columns
+            | MenuKind::BreakdownColumns
+            | MenuKind::BreakdownPageSize => return,
         };
         if let Some(ix) = list.iter().position(|value| *value == id) {
             list.remove(ix);
@@ -1088,7 +1353,12 @@ impl UsagePage {
             MenuKind::Workspace => filter.workspaces = ids.to_vec(),
             MenuKind::Provider => filter.providers = ids.to_vec(),
             MenuKind::Model => filter.models = ids.to_vec(),
-            MenuKind::Range | MenuKind::Export | MenuKind::PageSize | MenuKind::Columns => return,
+            MenuKind::Range
+            | MenuKind::Export
+            | MenuKind::PageSize
+            | MenuKind::Columns
+            | MenuKind::BreakdownColumns
+            | MenuKind::BreakdownPageSize => return,
         }
         self.set_filter(filter, cx);
     }
@@ -1099,7 +1369,12 @@ impl UsagePage {
             MenuKind::Workspace => filter.workspaces.clear(),
             MenuKind::Provider => filter.providers.clear(),
             MenuKind::Model => filter.models.clear(),
-            MenuKind::Range | MenuKind::Export | MenuKind::PageSize | MenuKind::Columns => return,
+            MenuKind::Range
+            | MenuKind::Export
+            | MenuKind::PageSize
+            | MenuKind::Columns
+            | MenuKind::BreakdownColumns
+            | MenuKind::BreakdownPageSize => return,
         }
         self.set_filter(filter, cx);
     }
@@ -1249,18 +1524,226 @@ impl UsagePage {
         cx.notify();
     }
 
-    /// Expand a breakdown panel past its ranked top rows (§13/§15).
-    pub fn toggle_breakdown(&mut self, id: &'static str, cx: &mut Context<Self>) {
-        match self
-            .expanded_breakdowns
-            .iter()
-            .position(|entry| *entry == id)
-        {
-            Some(ix) => {
-                self.expanded_breakdowns.remove(ix);
-            }
-            None => self.expanded_breakdowns.push(id),
+    /// A header click on the breakdown data table.
+    pub fn set_breakdown_sort(&mut self, sort: BreakdownSort, desc: bool, cx: &mut Context<Self>) {
+        if self.breakdown_sort == sort && self.breakdown_sort_desc == desc {
+            return;
         }
+        self.breakdown_sort = sort;
+        self.breakdown_sort_desc = desc;
+        self.persist();
+        cx.notify();
+    }
+
+    // ── merged section selectors ───────────────────────────────────────────
+
+    pub fn breakdown_tab(&self) -> BreakdownTab {
+        self.breakdown_tab
+    }
+
+    pub fn set_breakdown_tab(&mut self, tab: BreakdownTab, cx: &mut Context<Self>) {
+        if self.breakdown_tab == tab {
+            return;
+        }
+        // Each dimension keeps its own search text; stash the outgoing tab's and
+        // restore the incoming one, so switching back feels like returning.
+        let text = self.breakdown_search.read(cx).text();
+        self.breakdown_views
+            .entry(self.breakdown_tab)
+            .or_default()
+            .search = text;
+        self.breakdown_tab = tab;
+        let next = self.breakdown_view(tab).search;
+        self.breakdown_search
+            .update(cx, |input, cx| input.set_text(next, cx));
+        self.persist();
+        cx.notify();
+    }
+
+    /// The per-tab breakdown view state (a clone; callers read it, the page owns it).
+    pub fn breakdown_view(&self, tab: BreakdownTab) -> BreakdownView {
+        self.breakdown_views.get(&tab).cloned().unwrap_or_default()
+    }
+
+    pub fn breakdown_search(&self) -> &Entity<ComposerInput> {
+        &self.breakdown_search
+    }
+
+    /// One dimension's rows narrowed by the open tab's search, in the table's
+    /// current sort order. Not paged — the chart and the table both build on it.
+    fn filtered_breakdown_rows(&self, breakdown: &Breakdown, cx: &App) -> Vec<GroupRow> {
+        let needle = self.breakdown_search.read(cx).text().trim().to_lowercase();
+        let mut rows = self.sorted_breakdown_rows(breakdown);
+        if !needle.is_empty() {
+            rows.retain(|row| {
+                row.label.to_lowercase().contains(&needle)
+                    || row
+                        .sub
+                        .as_deref()
+                        .is_some_and(|sub| sub.to_lowercase().contains(&needle))
+            });
+        }
+        rows
+    }
+
+    /// The ranked top rows of one token dimension for its chart: the filtered
+    /// set, still in rank order, trimmed to `limit`.
+    pub fn breakdown_top(&self, breakdown: &Breakdown, limit: usize, cx: &App) -> Vec<GroupRow> {
+        let mut rows = self.filtered_breakdown_rows(breakdown, cx);
+        rows.truncate(limit);
+        rows
+    }
+
+    /// The filtered, paged rows of one token dimension, with totals over the
+    /// whole filtered set.
+    pub fn breakdown_result(&self, breakdown: &Breakdown, cx: &App) -> BreakdownQueryResult {
+        let view = self.breakdown_view(self.breakdown_tab);
+        let rows = self.filtered_breakdown_rows(breakdown, cx);
+        let mut totals = Totals::default();
+        for row in &rows {
+            totals.add(&row.totals);
+        }
+        let (rows, page, total) = paginate(&rows, view.page, view.page_size);
+        BreakdownQueryResult {
+            rows,
+            total,
+            page,
+            page_size: view.page_size.max(1),
+            totals,
+        }
+    }
+
+    /// One dimension's tool rows narrowed by the open tab's search.
+    fn filtered_tool_rows(&self, snapshot: &UsageSnapshot, cx: &App) -> Vec<ToolRow> {
+        let needle = self.breakdown_search.read(cx).text().trim().to_lowercase();
+        snapshot
+            .tools
+            .rows
+            .iter()
+            .filter(|row| {
+                needle.is_empty()
+                    || row.label.to_lowercase().contains(&needle)
+                    || row.class.label().to_lowercase().contains(&needle)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The ranked top tools for the chart.
+    pub fn tools_top(&self, snapshot: &UsageSnapshot, limit: usize, cx: &App) -> Vec<ToolRow> {
+        let mut rows = self.filtered_tool_rows(snapshot, cx);
+        rows.truncate(limit);
+        rows
+    }
+
+    /// The filtered, paged rows of the Tools dimension.
+    pub fn tools_result(&self, snapshot: &UsageSnapshot, cx: &App) -> ToolQueryResult {
+        let view = self.breakdown_view(self.breakdown_tab);
+        let filtered = self.filtered_tool_rows(snapshot, cx);
+        let calls = filtered.iter().map(|row| row.calls).sum();
+        let errors = filtered.iter().map(|row| row.errors).sum();
+        let (rows, page, total) = paginate(&filtered, view.page, view.page_size);
+        ToolQueryResult {
+            rows,
+            total,
+            page,
+            page_size: view.page_size.max(1),
+            calls,
+            errors,
+        }
+    }
+
+    pub fn set_breakdown_page(&mut self, page: usize, cx: &mut Context<Self>) {
+        let tab = self.breakdown_tab;
+        self.breakdown_views.entry(tab).or_default().page = page.max(1);
+        cx.notify();
+    }
+
+    pub fn set_breakdown_page_size(&mut self, size: usize, cx: &mut Context<Self>) {
+        if !PAGE_SIZES.contains(&size) {
+            return;
+        }
+        let tab = self.breakdown_tab;
+        let view = self.breakdown_views.entry(tab).or_default();
+        view.page_size = size;
+        view.page = 1;
+        self.menu = None;
+        cx.notify();
+    }
+
+    /// The hideable columns of the open breakdown dimension, as `(id, label)`.
+    pub fn breakdown_column_options(&self) -> Vec<(&'static str, &'static str)> {
+        match self.breakdown_tab {
+            BreakdownTab::Tools => vec![
+                ("calls", "Calls"),
+                ("errors", "Errors"),
+                ("avg", "Avg"),
+                ("max", "Max"),
+            ],
+            _ => vec![
+                ("requests", "Requests"),
+                ("input", "Input"),
+                ("output", "Output"),
+                ("cache", "Cache"),
+                ("tokens", "Tokens"),
+                ("share", "Share"),
+            ],
+        }
+    }
+
+    pub fn breakdown_column_visible(&self, id: &'static str) -> bool {
+        !self
+            .breakdown_view(self.breakdown_tab)
+            .hidden_columns
+            .contains(&id)
+    }
+
+    /// The hidden column ids of the open breakdown dimension.
+    pub fn breakdown_hidden_columns(&self) -> Vec<&'static str> {
+        self.breakdown_view(self.breakdown_tab).hidden_columns
+    }
+
+    pub fn toggle_breakdown_column(&mut self, id: &'static str, cx: &mut Context<Self>) {
+        let tab = self.breakdown_tab;
+        let view = self.breakdown_views.entry(tab).or_default();
+        match view.hidden_columns.iter().position(|hidden| *hidden == id) {
+            Some(ix) => {
+                view.hidden_columns.remove(ix);
+            }
+            None => view.hidden_columns.push(id),
+        }
+        cx.notify();
+    }
+
+    pub fn show_all_breakdown_columns(&mut self, cx: &mut Context<Self>) {
+        let tab = self.breakdown_tab;
+        if let Some(view) = self.breakdown_views.get_mut(&tab) {
+            view.hidden_columns.clear();
+        }
+        cx.notify();
+    }
+
+    pub fn detail_tab(&self) -> DetailTab {
+        self.detail_tab
+    }
+
+    pub fn set_detail_tab(&mut self, tab: DetailTab, cx: &mut Context<Self>) {
+        if self.detail_tab == tab {
+            return;
+        }
+        self.detail_tab = tab;
+        self.persist();
+        cx.notify();
+    }
+
+    /// Whether the secondary metrics under the board are showing.
+    pub fn is_summary_open(&self) -> bool {
+        self.summary_open
+    }
+
+    pub fn toggle_summary(&mut self, cx: &mut Context<Self>) {
+        self.summary_open = !self.summary_open;
+        self.persist();
         cx.notify();
     }
 
@@ -1281,41 +1764,55 @@ impl UsagePage {
         }
     }
 
-    /// Write the filtered data to disk. Returns the chosen path, if any.
-    pub fn export(&mut self, format: ExportFormat, cx: &mut Context<Self>) -> Option<PathBuf> {
-        let (index, snapshot) = (self.index.clone()?, self.snapshot.clone()?);
+    /// Write the filtered data to disk. The save panel is opened
+    /// asynchronously — a blocking native dialog would pump a nested
+    /// main-thread modal loop while GPUI holds this entity's mutable borrow
+    /// and abort on the next task that updates the page.
+    pub fn export(&mut self, format: ExportFormat, cx: &mut Context<Self>) {
+        let (Some(index), Some(snapshot)) = (self.index.clone(), self.snapshot.clone()) else {
+            return;
+        };
+        let filter = self.filter.clone();
+        let search = self.search.read(cx).text();
         let default_name = match format {
             ExportFormat::Csv => "orbit-usage.csv",
             ExportFormat::Json => "orbit-usage.json",
         };
-        let path = rfd::FileDialog::new()
-            .set_file_name(default_name)
-            .save_file()?;
-        let body = match format {
-            ExportFormat::Csv => super::view::export_csv(&index, &self.filter),
-            ExportFormat::Json => {
-                super::view::export_json(&index, &snapshot, &self.search.read(cx).text())
-            }
-        };
-        let result = std::fs::write(&path, body);
-        self.status = Some(match result {
-            Ok(()) => (
-                format!(
-                    "Exported {} to {}",
-                    match format {
-                        ExportFormat::Csv => "filtered requests",
-                        ExportFormat::Json => "the current view",
-                    },
-                    path.file_name()
-                        .map(|name| name.to_string_lossy().to_string())
-                        .unwrap_or_else(|| path.to_string_lossy().to_string())
-                ),
-                Instant::now(),
-            ),
-            Err(err) => (format!("Export failed: {err}"), Instant::now()),
-        });
-        cx.notify();
-        Some(path)
+        cx.spawn(async move |this, cx| {
+            let Some(handle) = rfd::AsyncFileDialog::new()
+                .set_file_name(default_name)
+                .save_file()
+                .await
+            else {
+                return;
+            };
+            let path = handle.path().to_path_buf();
+            let body = match format {
+                ExportFormat::Csv => super::view::export_csv(&index, &filter),
+                ExportFormat::Json => super::view::export_json(&index, &snapshot, &search),
+            };
+            let result = std::fs::write(&path, body);
+            let _ = this.update(cx, |page, cx| {
+                page.status = Some(match result {
+                    Ok(()) => (
+                        format!(
+                            "Exported {} to {}",
+                            match format {
+                                ExportFormat::Csv => "filtered requests",
+                                ExportFormat::Json => "the current view",
+                            },
+                            path.file_name()
+                                .map(|name| name.to_string_lossy().to_string())
+                                .unwrap_or_else(|| path.to_string_lossy().to_string())
+                        ),
+                        Instant::now(),
+                    ),
+                    Err(err) => (format!("Export failed: {err}"), Instant::now()),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn persist(&self) {
@@ -1329,6 +1826,11 @@ impl UsagePage {
             page_size: self.page_size,
             latency_metric: self.latency_metric.as_str().to_string(),
             hidden_columns: self.hidden_columns.clone(),
+            breakdown_tab: self.breakdown_tab.as_str().to_string(),
+            breakdown_sort: self.breakdown_sort.as_str().to_string(),
+            breakdown_sort_desc: self.breakdown_sort_desc,
+            detail_tab: self.detail_tab.as_str().to_string(),
+            summary_open: self.summary_open,
         }
         .persist();
     }
@@ -1346,6 +1848,11 @@ struct Prefs {
     page_size: usize,
     latency_metric: String,
     hidden_columns: Vec<SessionSort>,
+    breakdown_tab: String,
+    breakdown_sort: String,
+    breakdown_sort_desc: bool,
+    detail_tab: String,
+    summary_open: bool,
 }
 
 impl Default for Prefs {
@@ -1360,6 +1867,11 @@ impl Default for Prefs {
             page_size: DEFAULT_PAGE_SIZE,
             latency_metric: String::new(),
             hidden_columns: Vec::new(),
+            breakdown_tab: String::new(),
+            breakdown_sort: String::new(),
+            breakdown_sort_desc: true,
+            detail_tab: String::new(),
+            summary_open: false,
         }
     }
 }
@@ -1419,6 +1931,17 @@ impl Prefs {
             latency_metric: text("latency_metric")
                 .unwrap_or_else(|| LatencyMetric::Average.as_str().to_string()),
             hidden_columns,
+            breakdown_tab: text("breakdown_tab").unwrap_or_default(),
+            breakdown_sort: text("breakdown_sort").unwrap_or_default(),
+            breakdown_sort_desc: value
+                .get("breakdown_sort_desc")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+            detail_tab: text("detail_tab").unwrap_or_default(),
+            summary_open: value
+                .get("summary_open")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         }
     }
 
@@ -1441,6 +1964,11 @@ impl Prefs {
                 .iter()
                 .map(|column| column.as_str())
                 .collect::<Vec<_>>(),
+            "breakdown_tab": self.breakdown_tab,
+            "breakdown_sort": self.breakdown_sort,
+            "breakdown_sort_desc": self.breakdown_sort_desc,
+            "detail_tab": self.detail_tab,
+            "summary_open": self.summary_open,
         });
         let _ = std::fs::write(path, payload.to_string());
     }

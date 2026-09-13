@@ -26,12 +26,7 @@ impl OrbitApp {
 
     /// Keyboard path for steering: inject the composer text into the running
     /// turn. With no run in flight this is just a normal submit.
-    pub(super) fn on_steer(
-        &mut self,
-        _: &crate::SteerRun,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn on_steer(&mut self, _: &crate::SteerRun, _: &mut Window, cx: &mut Context<Self>) {
         if self.commit_autocomplete_if_open(cx) {
             return;
         }
@@ -502,13 +497,39 @@ impl OrbitApp {
 
     /// The native folder dialog — the workspace picker's "Choose folder…" row
     /// and the status-bar chip both land here.
+    ///
+    /// The panel is opened *asynchronously*: GPUI holds a mutable borrow of this
+    /// entity for the duration of the event handler, and the blocking
+    /// `rfd::FileDialog::pick_folder` runs a nested main-thread modal loop that
+    /// re-enters the app. A task queued on that loop that touches this same
+    /// entity then panics with `already borrowed`. The async prompt returns
+    /// immediately (a sheet, not a nested `runModal`) and resolves once the
+    /// user answers, so the borrow is long gone.
     pub(super) fn browse_for_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let picked = rfd::FileDialog::new()
-            .set_title("Choose a folder for this task")
-            .pick_folder();
-        if let Some(folder) = picked {
-            self.start_task_in_folder(folder, window, cx);
-        }
+        cx.spawn_in(window, async move |this, cx| {
+            let receiver = cx.update(|_window, app| {
+                app.prompt_for_paths(PathPromptOptions {
+                    files: false,
+                    directories: true,
+                    multiple: false,
+                    prompt: Some("Choose a folder for this task".into()),
+                })
+            });
+            let Ok(receiver) = receiver else {
+                return;
+            };
+            let folder = match receiver.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                _ => None,
+            };
+            let Some(folder) = folder else {
+                return;
+            };
+            let _ = this.update_in(cx, |app, window, cx| {
+                app.start_task_in_folder(folder, window, cx);
+            });
+        })
+        .detach();
     }
 
     /// Switch the live session. With `push`, the visit is recorded in the
@@ -1472,12 +1493,8 @@ fn quota_provider_card(app: &OrbitApp, report: &QuotaReport, theme: Theme) -> An
                 .child(name),
         );
     if let Some(plan) = &report.plan {
-        header = header.child(app.provider_badge(
-            plan,
-            theme.accent,
-            theme.accent.opacity(0.12),
-            theme,
-        ));
+        header =
+            header.child(app.provider_badge(plan, theme.accent, theme.accent.opacity(0.12), theme));
     }
 
     // The card fill is the ink wash rather than `bg_raised`: most palettes
@@ -1510,34 +1527,29 @@ fn quota_provider_card(app: &OrbitApp, report: &QuotaReport, theme: Theme) -> An
             continue;
         };
 
-        let mut row = div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap(px(5.))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(theme.ui_px(11.))
-                            .text_color(theme.text_2)
-                            .child(window.label.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(theme.ui_px(11.5))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(value),
-                    ),
-            );
+        let mut row = div().w_full().flex().flex_col().gap(px(5.)).child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(theme.ui_px(11.))
+                        .text_color(theme.text_2)
+                        .child(window.label.clone()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(theme.ui_px(11.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(value),
+                ),
+        );
 
         if let Some(fraction) = window.fraction() {
             row = row.child(
