@@ -26,7 +26,7 @@ pub const FIELD_MAX_W: f32 = 400.;
 pub const PAGE_PAD: f32 = 24.;
 /// Smallest the popover ever gets (very narrow windows).
 const POPOVER_MIN_W: f32 = 240.;
-const ROW_H: f32 = 34.;
+const ROW_H: f32 = 38.;
 /// Tallest the recents list grows before scrolling (≈ 4 rows). Sized so the
 /// whole popover still fits below the centered field at the 960×640 minimum
 /// window, instead of `snap_to_window` shoving it up over the card.
@@ -246,13 +246,19 @@ impl Render for WorkspacePicker {
                     .id(ElementId::NamedInteger("workspace-row".into(), ix as u64))
                     .h(px(ROW_H))
                     .px(px(8.))
-                    .rounded(px(6.))
+                    .rounded(px(8.))
                     .flex()
                     .items_center()
                     .gap(px(8.))
                     .cursor_pointer()
                     .when(highlighted, |row| row.bg(theme.overlay_strong))
-                    .when(!highlighted, |row| row.hover(|s| s.bg(theme.overlay)))
+                    // The current folder keeps the `active` fill at rest (the
+                    // same "chosen" register the model picker uses); the accent
+                    // check alone is never the only signal.
+                    .when(!highlighted && is_current, |row| row.bg(theme.active))
+                    .when(!highlighted && !is_current, |row| {
+                        row.hover(|s| s.bg(theme.overlay))
+                    })
                     .on_hover({
                         let this = this.clone();
                         move |hovering, _, cx| {
@@ -275,7 +281,7 @@ impl Render for WorkspacePicker {
                     )
                     // The check carries "current" — the icon stays quiet, one
                     // accent signal per fact.
-                    .child(icon("icons/folder.svg", 13., theme.text_3))
+                    .child(icon("icons/folder.svg", 16., theme.text_3))
                     .child(
                         div()
                             .flex_1()
@@ -286,16 +292,18 @@ impl Render for WorkspacePicker {
                             .child(
                                 div()
                                     .flex_none()
-                                    .max_w(px(140.))
+                                    .max_w(px(170.))
                                     .truncate()
-                                    .text_size(theme.ui_px(12.5))
-                                    .font_weight(if highlighted {
+                                    .text_size(theme.ui_px(14.))
+                                    .font_weight(if highlighted || is_current {
                                         FontWeight::MEDIUM
                                     } else {
                                         FontWeight::NORMAL
                                     })
                                     .text_color(if highlighted {
                                         theme.text
+                                    } else if is_current {
+                                        theme.active_fg
                                     } else {
                                         theme.text_2
                                     })
@@ -306,7 +314,10 @@ impl Render for WorkspacePicker {
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
-                                    .text_size(theme.ui_px(11.5))
+                                    // Paths are machine text — mono, like the
+                                    // model picker's id line.
+                                    .font_family(theme::code_font_family())
+                                    .text_size(theme.ui_px(12.))
                                     .text_color(theme.text_3)
                                     .child(entry.path.to_string_lossy().into_owned()),
                             ),
@@ -315,13 +326,13 @@ impl Render for WorkspacePicker {
                         row.child(
                             div()
                                 .flex_none()
-                                .text_size(theme.ui_px(11.))
+                                .text_size(theme.ui_px(12.))
                                 .text_color(theme.text_3)
                                 .child(ago),
                         )
                     })
                     .when(is_current, |row| {
-                        row.child(icon("icons/check.svg", 11., theme.accent))
+                        row.child(icon("icons/check.svg", 12., theme.accent))
                     }),
             );
         }
@@ -347,40 +358,60 @@ impl Render for WorkspacePicker {
             .on_action(cx.listener(Self::on_confirm))
             .on_action(cx.listener(Self::on_next))
             .on_action(cx.listener(Self::on_prev))
-            // search row
+            // search row — the picker register (44px, 14px inset, 14px text).
             .child(
                 div()
-                    .h(px(36.))
-                    .px(px(12.))
+                    .h(px(44.))
+                    .flex_none()
+                    .px(px(14.))
                     .flex()
                     .items_center()
-                    .gap(px(8.))
+                    .gap(px(10.))
                     .border_b_1()
                     .border_color(theme.border)
-                    .text_size(theme.ui_px(12.5))
-                    .child(icon("icons/search.svg", 13., theme.text_3))
+                    .text_size(theme.ui_px(14.))
+                    .text_color(theme.text)
+                    .child(icon("icons/search.svg", 16., theme.text_3))
                     .child(div().flex_1().min_w_0().child(self.filter.clone())),
             )
-            // section label
+            // section label — a count on the right, like every other list header.
             .child(
                 div()
                     .px(px(12.))
                     .pt(px(8.))
                     .pb(px(4.))
-                    .text_size(theme.ui_px(10.5))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(theme.ui_px(12.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_3)
-                    .child("Recent folders"),
+                    .child("Recent folders")
+                    .child(div().flex_1())
+                    .when(!rows.is_empty(), |row| row.child(rows.len().to_string())),
             )
             .child(if rows.is_empty() {
                 div()
-                    .h(px(56.))
+                    .h(px(96.))
                     .flex()
+                    .flex_col()
                     .items_center()
                     .justify_center()
-                    .text_size(theme.ui_px(12.))
-                    .text_color(theme.text_3)
-                    .child("No folders match")
+                    .gap(px(6.))
+                    .child(icon("icons/search.svg", 20., theme.text_3))
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(14.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text_2)
+                            .child("No folders match"),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(13.))
+                            .text_color(theme.text_3)
+                            .child("Try another name, or choose a folder below"),
+                    )
                     .into_any_element()
             } else {
                 list.into_any_element()
@@ -396,10 +427,9 @@ impl Render for WorkspacePicker {
                         div()
                             .id("workspace-browse-row")
                             .h(px(ROW_H))
-                            .mx(px(4.))
                             .my(px(4.))
                             .px(px(8.))
-                            .rounded(px(6.))
+                            .rounded(px(8.))
                             .flex()
                             .items_center()
                             .gap(px(8.))
@@ -429,11 +459,13 @@ impl Render for WorkspacePicker {
                                     (picker.on_browse)(window, cx);
                                 }),
                             )
-                            .child(icon("icons/folder.svg", 13., theme.text_2))
+                            // The browse action opens the OS dialog, so it
+                            // leads with a launch glyph, not a second folder.
+                            .child(icon("icons/arrow-up-right.svg", 16., theme.text_2))
                             .child(
                                 div()
                                     .flex_1()
-                                    .text_size(theme.ui_px(12.5))
+                                    .text_size(theme.ui_px(14.))
                                     .text_color(theme.text_2)
                                     .child("Choose folder…"),
                             ),

@@ -137,6 +137,8 @@ impl OrbitApp {
                 self.adopt_client(client);
                 self.send(CommandBody::GetState, "get_state");
                 self.refresh_catalogs();
+                // Capability probes queue after the state request.
+                self.probe_auth();
                 self.set_status("New task started");
             }
             Err(err) => {
@@ -376,6 +378,7 @@ impl OrbitApp {
                     cx.notify();
                 }
             }
+            PaletteCommand::CloneSession => self.clone_session(cx),
             PaletteCommand::OpenSettings(section) => {
                 self.settings_open = true;
                 self.set_settings_section(section, cx);

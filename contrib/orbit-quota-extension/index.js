@@ -49,6 +49,19 @@ function isStaleContext(error) {
   return String(error?.message ?? error).includes("This extension ctx is stale");
 }
 
+/**
+ * The most recent background snapshot. pi awaits async lifecycle handlers, so
+ * `session_start`/`turn_end` must NOT await the network fetch — doing so makes
+ * every `switch_session` wait out the provider round-trips (measured ~2.5s
+ * before this). The fetch runs detached; Orbit picks the entry up on its
+ * `get_entries` poll. Tests await this to stay deterministic.
+ */
+let inflight = Promise.resolve();
+
+export function pendingSnapshot() {
+  return inflight;
+}
+
 export default async function activate(pi) {
   let ctx = null;
   let timer = null;
@@ -131,7 +144,9 @@ export default async function activate(pi) {
     if (timer) clearInterval(timer);
     timer = setInterval(() => void snapshot(), REFRESH_INTERVAL_MS);
     timer.unref?.();
-    await snapshot();
+    // Detached: never make pi wait on quota before it answers the RPC that
+    // opened the session. The entry lands moments later for Orbit's poll.
+    inflight = snapshot();
   });
 
   pi.on("session_shutdown", async () => {
@@ -144,7 +159,9 @@ export default async function activate(pi) {
   pi.on("turn_end", async (_event, eventCtx) => {
     ctx = eventCtx;
     if (Date.now() - lastSnapshotAt < TURN_REFRESH_GAP_MS) return;
-    await snapshot();
+    // Detached for the same reason as session_start: a turn must not wait on
+    // provider quota before pi processes the next command.
+    inflight = snapshot();
   });
 
   pi.on("model_select", async (_event, eventCtx) => {

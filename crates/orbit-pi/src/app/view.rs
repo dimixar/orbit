@@ -50,6 +50,8 @@ impl Render for OrbitApp {
                 .map(|(path, _)| path.clone())
                 .collect(),
         );
+        // Every live process (running or warm-idle) — guards delete.
+        let live_paths: Rc<HashSet<PathBuf>> = Rc::new(self.lives.keys().cloned().collect());
 
         let workspace_label = self.workspace_label();
         // Focus ring on the composer box: the border strengthens while the
@@ -362,6 +364,7 @@ impl Render for OrbitApp {
                                                 &this,
                                                 agent_running,
                                                 &running_paths,
+                                                &live_paths,
                                                 session_menu.as_ref().as_ref(),
                                                 workspace_menu.as_ref().as_ref(),
                                                 *theme::get(cx),
@@ -510,8 +513,14 @@ impl Render for OrbitApp {
                                 window.viewport_size().height,
                                 main_width,
                                 Some(self.review_opener(cx)),
+                                Some(self.image_opener(cx)),
+                                self.search_hits(),
+                                self.search_active(),
                                 cx,
                             ))
+                            // In-transcript find bar (⌘F), floating over the
+                            // top-right of the transcript.
+                            .children(self.transcript_search_bar(cx))
                             .into_any_element()
                     })
                     // floating composer + status bar — one centered column
@@ -586,7 +595,7 @@ impl Render for OrbitApp {
                                             // dragged across it. Absolute, so
                                             // highlighting never shifts layout.
                                             .children(self.file_drag_hovered.then(|| {
-                                                div()
+                                                let overlay = div()
                                                     .absolute()
                                                     .inset_0()
                                                     .rounded_xl()
@@ -608,13 +617,20 @@ impl Render for OrbitApp {
                                                             .font_weight(FontWeight::MEDIUM)
                                                             .text_color(theme.accent)
                                                             .child("Drop to attach"),
-                                                    )
-                                                    .with_animation(
-                                                        "drop-overlay",
-                                                        Animation::new(Duration::from_millis(120)),
-                                                        |overlay, delta| overlay.opacity(delta),
-                                                    )
-                                                    .into_any_element()
+                                                    );
+                                                if theme::reduce_motion(cx) {
+                                                    overlay.into_any_element()
+                                                } else {
+                                                    overlay
+                                                        .with_animation(
+                                                            "drop-overlay",
+                                                            Animation::new(Duration::from_millis(
+                                                                120,
+                                                            )),
+                                                            |overlay, delta| overlay.opacity(delta),
+                                                        )
+                                                        .into_any_element()
+                                                }
                                             })),
                                     )
                                     .child(self.status_bar(&workspace_label, cx)),
@@ -636,6 +652,9 @@ impl Render for OrbitApp {
             // blocking modal above every other surface; pi holds the run until
             // the user answers. It cancels the incoming request otherwise.
             .children(dialog_layer.map(|dialog| crate::dialog::layer(dialog).into_any_element()))
+            // ── image lightbox — full-window, above everything; opened from a
+            // transcript image tile, dismissed by click or Escape.
+            .children(self.lightbox.clone().map(|image| self.lightbox_layer(image, cx)))
             .track_focus(&self.focus_handle(cx))
             // Sidebar resize: fires for every mouse move while the handle
             // drag is active, wherever the pointer travels.
@@ -671,6 +690,7 @@ impl Render for OrbitApp {
                 },
             ))
             .on_action(cx.listener(Self::on_submit))
+            .on_action(cx.listener(Self::on_steer))
             .on_action(cx.listener(Self::on_autocomplete_accept))
             .on_action(cx.listener(Self::on_abort))
             .on_action(cx.listener(Self::on_refresh))
@@ -681,6 +701,7 @@ impl Render for OrbitApp {
             .on_action(cx.listener(Self::on_toggle_usage))
             .on_action(cx.listener(Self::on_toggle_command_palette))
             .on_action(cx.listener(Self::on_check_for_updates))
+            .on_action(cx.listener(Self::on_toggle_search))
     }
 }
 
@@ -711,7 +732,42 @@ impl OrbitApp {
             .child(div().flex_1())
             .child(self.model_chip(compact, cx))
             .child(self.thinking_chip(cx))
+            .children(self.steer_button(cx))
             .child(self.send_button(cx))
+    }
+
+    /// While a run is in flight and the composer holds something to send, a
+    /// quiet steer control sits beside Stop: it injects the text into the live
+    /// turn (`steer`) rather than queuing a follow-up. Hidden when idle or
+    /// empty, since there is nothing to redirect.
+    pub(super) fn steer_button(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let theme = *theme::get(cx);
+        if !self.is_running() {
+            return None;
+        }
+        let has_text =
+            !self.input.read(cx).text().trim().is_empty() || !self.attachments.is_empty();
+        if !has_text {
+            return None;
+        }
+        Some(
+            div()
+                .id("steer-btn")
+                .size(px(28.))
+                .rounded_full()
+                .bg(theme.overlay)
+                .hover(|s| s.bg(theme.overlay_strong))
+                .cursor_pointer()
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| this.steer_current(cx)),
+                )
+                .child(icon("icons/arrow-up-right.svg", 13., theme.accent))
+                .into_any_element(),
+        )
     }
 
     /// The composer's "+" button and its add menu (anchored above the
@@ -2041,10 +2097,19 @@ impl OrbitApp {
                                 .text_size(theme.ui_px(11.))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.text_3)
-                                .child(format!(
-                                    "Queued — sends after the current task finishes ({})",
-                                    self.queue.len()
-                                )),
+                                .child(if self.queue.follow_up.is_empty() {
+                                    format!("Steering the running turn ({})", self.queue.len())
+                                } else if self.queue.steering.is_empty() {
+                                    format!(
+                                        "Queued — sends after the current task finishes ({})",
+                                        self.queue.len()
+                                    )
+                                } else {
+                                    format!(
+                                        "Steering now; follow-ups send after the task finishes ({})",
+                                        self.queue.len()
+                                    )
+                                }),
                         )
                         .child(
                             div()
@@ -2168,5 +2233,48 @@ impl OrbitApp {
         self.restore_queue_on_clear = false;
         self.send(CommandBody::ClearQueue, "clear_queue");
         cx.notify();
+    }
+
+    /// Full-window image lightbox: the clicked attachment at `Contain` scale
+    /// over a dimmed scrim. Any click (or Escape) closes it. No new surface
+    /// for the app — it reads `OrbitApp::lightbox`, set by `image_opener`.
+    pub(super) fn lightbox_layer(&self, image: std::sync::Arc<Image>, cx: &Context<Self>) -> AnyElement {
+        let theme = *theme::get(cx);
+        let scrim = match theme.mode {
+            theme::ThemeMode::Dark => gpui::hsla(0., 0., 0., 0.72),
+            theme::ThemeMode::Light => gpui::hsla(0., 0., 0., 0.6),
+        };
+        div()
+            .id("image-lightbox")
+            .debug_selector(|| "image-lightbox".to_string())
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(scrim)
+            .p(px(48.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.lightbox = None;
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        img(ImageSource::Image(image))
+                            .size_full()
+                            .object_fit(ObjectFit::Contain),
+                    ),
+            )
+            .into_any_element()
     }
 }

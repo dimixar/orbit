@@ -74,6 +74,7 @@ pub enum PaletteCommand {
     ChooseThinking,
     AbortRun,
     CopySessionId,
+    CloneSession,
     OpenSettings(SettingsSection),
 }
 
@@ -415,6 +416,14 @@ impl CommandPalette {
                 "copy session id uuid identifier debug",
                 next(),
             ));
+            items.push(PaletteItem::command(
+                "Clone Session",
+                "icons/git-fork.svg",
+                None,
+                PaletteCommand::CloneSession,
+                "clone duplicate fork copy session branch conversation",
+                next(),
+            ));
         }
         for (section, icon, label, keywords) in [
             (
@@ -446,6 +455,12 @@ impl CommandPalette {
                 "icons/extensions.svg",
                 "Plugins",
                 "settings preferences plugins extensions packages install npm git",
+            ),
+            (
+                SettingsSection::Models,
+                "icons/tag-01.svg",
+                "Models",
+                "settings preferences models catalog favorites providers",
             ),
             (
                 SettingsSection::Appearance,

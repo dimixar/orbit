@@ -1563,6 +1563,29 @@ impl Transcript {
         self.streaming.get().is_some()
     }
 
+    /// Message indices whose text contains `needle` (already lowercased), in
+    /// append order — drives the in-transcript find.
+    pub fn find_messages(&self, needle: &str) -> Vec<usize> {
+        self.messages
+            .borrow()
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.text().to_lowercase().contains(needle))
+            .map(|(ix, _)| ix)
+            .collect()
+    }
+
+    /// Number of messages currently held (the find uses it to notice new
+    /// arrivals while the bar is open).
+    pub fn message_count(&self) -> usize {
+        self.messages.borrow().len()
+    }
+
+    /// Scroll the transcript so message `ix` sits at the top of the viewport.
+    pub fn scroll_to_message(&self, ix: usize) -> bool {
+        self.scroller.scroll_to_item(ix)
+    }
+
     /// chars/4 heuristic over loaded messages — same estimate pi's /context
     /// view uses when the provider-serialized payload isn't available.
     pub fn estimated_tokens(&self) -> u64 {
@@ -1614,6 +1637,9 @@ impl Transcript {
         viewport_height: Pixels,
         main_width: Pixels,
         review_changes: Option<crate::transcript_view::ReviewOpener>,
+        image_opener: Option<crate::transcript_view::ImageOpener>,
+        search_hits: Option<HashSet<usize>>,
+        search_active: Option<usize>,
         cx: &gpui::App,
     ) -> impl IntoElement + use<> {
         self.resync_list();
@@ -1663,6 +1689,9 @@ impl Transcript {
                 summary_finished_at,
                 summary_usage,
                 review_changes,
+                image_opener,
+                search_hits: search_hits.map(|hits| Rc::new(RefCell::new(hits))),
+                search_active: search_active.map(|ix| Rc::new(Cell::new(Some(ix)))),
             },
             cx,
         )
@@ -1893,6 +1922,52 @@ mod tests {
         assert!(messages[0].user);
     }
 
+    /// Perf harness (P6): a 10k-message transcript is the documented scale
+    /// (README/PRODUCT). This guards against accidental O(n²) regressions in
+    /// the model layer; the virtualized list itself is count-agnostic.
+    /// The bound is deliberately generous so it never flakes on a cold CI box.
+    #[test]
+    fn ten_thousand_messages_stay_workable() {
+        const N: usize = 10_000;
+        let start = Instant::now();
+        let mut t = Transcript::new();
+        for ix in 0..N {
+            if ix % 7 == 0 {
+                t.append_user_message(&format!("needle {ix}"), Vec::new());
+            } else {
+                t.append_user_message(&format!("message {ix}"), Vec::new());
+            }
+        }
+        let appended = start.elapsed();
+        assert_eq!(t.message_count(), N);
+
+        let start = Instant::now();
+        let hits = t.find_messages("needle");
+        let search = start.elapsed();
+        assert_eq!(hits.len(), N.div_ceil(7));
+        assert!(
+            appended + search < Duration::from_secs(10),
+            "10k-message model work took {:?} (append) + {:?} (search)",
+            appended,
+            search
+        );
+        eprintln!(
+            "10k messages: append {:?}, search {:?}",
+            appended, search
+        );
+    }
+
+    #[test]
+    fn find_messages_matches_case_insensitively_in_order() {
+        let mut t = Transcript::new();
+        t.append_user_message("Fix the login bug", Vec::new());
+        t.append_user_message("unrelated", Vec::new());
+        t.append_user_message("another LOGIN issue", Vec::new());
+        assert_eq!(t.message_count(), 3);
+        assert_eq!(t.find_messages("login"), vec![0, 2]);
+        assert!(t.find_messages("missing").is_empty());
+    }
+
     #[test]
     fn live_assistant_steps_merge_into_one_row() {
         // One turn, many steps: each step is a separate assistant message
@@ -2013,6 +2088,48 @@ mod tests {
             Some("contents")
         );
         assert!(messages[1].has_hidden_work());
+    }
+
+    /// A transcript painted from a session file on disk (the cold-session
+    /// preview) must parse to the same rows as pi's `get_messages` snapshot:
+    /// user/assistant turns merge the same way and tool results attach by id.
+    #[test]
+    fn disk_session_payload_rebuilds_a_transcript() {
+        let dir = std::env::temp_dir().join(format!("orbit-disk-preview-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"session","id":"s","cwd":"/tmp/ws"}
+{"type":"model_change","provider":"ollama","modelId":"m"}
+{"type":"message","message":{"role":"user","content":"do it"}}
+{"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"},{"type":"toolCall","id":"c1","name":"read","arguments":{"path":"a.rs"}},{"type":"text","text":"first part"}]}}
+{"type":"message","message":{"role":"toolResult","toolCallId":"c1","toolName":"read","content":[{"type":"text","text":"contents"}]}}
+{"type":"message","message":{"role":"assistant","content":"second part"}}
+"#,
+        )
+        .unwrap();
+
+        let payload = crate::sessions::read_messages_payload(&path).expect("payload");
+        let mut transcript = Transcript::new();
+        transcript.load_from(&payload);
+        let messages = transcript.messages.borrow();
+        assert_eq!(messages.len(), 2, "user + merged assistant turn");
+        assert_eq!(messages[1].text(), "first part\n\nsecond part");
+        assert_eq!(messages[1].steps[0].thinking, "hmm");
+        assert_eq!(messages[1].tools().count(), 1);
+        assert_eq!(
+            messages[1]
+                .tools()
+                .next()
+                .unwrap()
+                .output
+                .as_ref()
+                .and_then(|v: &serde_json::Value| v.as_str()),
+            Some("contents")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

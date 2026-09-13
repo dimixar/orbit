@@ -16,13 +16,14 @@ use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     rc::Rc,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use gpui::{
     deferred, div, img, linear_color_stop, linear_gradient, list, point, prelude::*, px, svg,
     AnyElement, App, ClipboardItem, ElementId, Font, FontFeatures, FontStyle, FontWeight, Hsla,
-    ImageSource, InteractiveText, ObjectFit, Pixels, ScrollHandle, SharedString,
+    Image, ImageSource, InteractiveText, ObjectFit, Pixels, ScrollHandle, SharedString,
     StrikethroughStyle, StyledText, TextAlign, TextRun, UnderlineStyle, Window,
 };
 
@@ -44,6 +45,10 @@ use crate::transcript::{ChatMessage, Step, ToolCall};
 /// handed down from the app so the transcript's Review buttons can point
 /// at it without knowing the pane exists.
 pub(crate) type ReviewOpener = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// Opens one attachment image in the app's full-window lightbox. Handed down
+/// from the app so an image tile can open a surface it doesn't own.
+pub(crate) type ImageOpener = Rc<dyn Fn(Arc<Image>, &mut Window, &mut App)>;
 
 /// Waku `CONTENT_MAX_WIDTH` (the `max-w-[760px]` transcript column).
 /// Orbit uses 960 so fenced code and tables can use the full pane; body
@@ -155,6 +160,15 @@ pub(crate) struct TranscriptView {
     /// Opens the changed-files Review in the side pane (the cards'
     /// "Review" buttons); `None` hides the buttons.
     pub review_changes: Option<ReviewOpener>,
+    /// Opens an attachment image in the full-window lightbox; `None` leaves
+    /// the tiles non-interactive.
+    pub image_opener: Option<ImageOpener>,
+    /// Message indices matching the open find query; `None` when find is
+    /// closed. Rows get a quiet wash.
+    pub search_hits: Option<Rc<RefCell<HashSet<usize>>>>,
+    /// The selected find hit (stronger wash + a ring); `None` when find is
+    /// closed.
+    pub search_active: Option<Rc<Cell<Option<usize>>>>,
 }
 
 struct RowPaint {
@@ -178,6 +192,9 @@ struct RowPaint {
     expanded_sections: ExpandedSections,
     expanded_blocks: ExpandedBlocks,
     hovered_usage: Rc<Cell<Option<usize>>>,
+    image_opener: Option<ImageOpener>,
+    search_hit: bool,
+    search_active: bool,
 }
 
 /// The last message's own footer is suppressed when the tail summary owns
@@ -212,6 +229,9 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
     let summary_finished_at = view.summary_finished_at;
     let summary_usage = view.summary_usage.clone();
     let review_changes = view.review_changes.clone();
+    let image_opener = view.image_opener.clone();
+    let search_hits = view.search_hits.clone();
+    let search_active = view.search_active.clone();
 
     let (user_turns, active_turn) = {
         let messages = messages.borrow();
@@ -362,6 +382,13 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
             expanded_sections: expanded_sections.clone(),
             expanded_blocks: expanded_blocks.clone(),
             hovered_usage: hovered_usage.clone(),
+            image_opener: image_opener.clone(),
+            search_hit: search_hits
+                .as_ref()
+                .is_some_and(|hits| hits.borrow().contains(&ix)),
+            search_active: search_active
+                .as_ref()
+                .is_some_and(|active| active.get() == Some(ix)),
         })
         .into_any_element()
     })
@@ -787,6 +814,15 @@ fn render_row(paint: RowPaint) -> AnyElement {
         .when(first, |row| row.pt(px(22.)))
         .when(followup, |row| row.pt(px(FOLLOWUP_TURN_TOP_GAP)))
         .when(last, |row| row.pb(px(22.)))
+        // In-transcript find: matched rows get a quiet wash; the selected
+        // hit is stronger. Painted on the full-width row so it reads as a
+        // band, like a browser's find.
+        .when(paint.search_hit, |row| {
+            row.bg(paint.theme.overlay.opacity(0.5))
+        })
+        .when(paint.search_active, |row| {
+            row.bg(paint.theme.accent.opacity(0.14))
+        })
         .child(
             div()
                 .w_full()
@@ -821,19 +857,34 @@ fn render_user_bubble(message: &ChatMessage, paint: &RowPaint) -> impl IntoEleme
                     .flex_wrap()
                     .justify_end()
                     .gap(px(6.))
-                    .children(message.images.iter().map(|image| {
+                    .children(message.images.iter().enumerate().map(|(image_ix, image)| {
+                        let image = image.clone();
+                        let opener = paint.image_opener.clone();
                         div()
+                            .id(ElementId::NamedInteger(
+                                "user-image".into(),
+                                (ix as u64) << 20 | image_ix as u64,
+                            ))
                             .size(px(112.))
                             .rounded(px(10.))
                             .border_1()
                             .border_color(theme.border)
                             .overflow_hidden()
                             .bg(theme.bg_raised)
+                            .when(opener.is_some(), |tile| {
+                                tile.cursor_pointer()
+                                    .hover(|s| s.border_color(theme.border_strong))
+                            })
                             .child(
                                 img(ImageSource::Image(image.clone()))
                                     .size_full()
                                     .object_fit(ObjectFit::Cover),
                             )
+                            .on_click(move |_, window, cx| {
+                                if let Some(opener) = &opener {
+                                    opener(image.clone(), window, cx);
+                                }
+                            })
                     })),
             )
         })
@@ -3528,6 +3579,11 @@ fn render_code_block(
 /// `Plain text` for a bare fence.
 fn code_block_label(language: Option<&str>) -> String {
     match language {
+        // D2: no native diagram renderer. A mermaid fence stays a copyable
+        // code block — the label says so instead of pretending to preview.
+        Some(tag) if tag.eq_ignore_ascii_case("mermaid") => {
+            "Mermaid · source (preview unavailable)".to_string()
+        }
         Some(tag) => highlight::language_label(tag)
             .map(str::to_string)
             .unwrap_or_else(|| tag.to_string()),
@@ -4415,6 +4471,22 @@ mod tests {
         // A bare fence carries no language; the chip is simply absent.
         let bare = parse_blocks("```\nx\n```");
         assert!(matches!(&bare[0], Block::Code(None, lines) if lines == &["x".to_string()]));
+    }
+
+    #[test]
+    fn mermaid_fences_stay_copyable_code_blocks() {
+        // D2: diagrams are never faked. A mermaid fence parses as an ordinary
+        // code block (so it is copyable) and its label is honest about the
+        // missing preview.
+        let blocks = parse_blocks("```mermaid\ngraph TD; A-->B;\n```");
+        assert!(
+            matches!(&blocks[0], Block::Code(Some(lang), lines)
+                if lang == "mermaid" && lines == &["graph TD; A-->B;".to_string()])
+        );
+        assert_eq!(
+            code_block_label(Some("Mermaid")),
+            "Mermaid · source (preview unavailable)"
+        );
     }
 
     #[test]

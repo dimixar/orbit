@@ -91,7 +91,12 @@ actions!(
         CopyLastResponse,
         PrevTurn,
         NextTurn,
-        CheckForUpdates
+        CheckForUpdates,
+        SteerRun,
+        ToggleSearch,
+        SearchNext,
+        SearchPrev,
+        SearchClose
     ]
 );
 
@@ -140,6 +145,10 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-x", Cut, Some("Composer")),
         KeyBinding::new("enter", Submit, Some("Composer")),
         KeyBinding::new("cmd-enter", Submit, Some("Composer")),
+        // Steer: inject the composer text into the running turn instead of
+        // queuing a follow-up. With no run in flight it behaves like submit.
+        KeyBinding::new("cmd-shift-enter", SteerRun, Some("Composer")),
+        KeyBinding::new("alt-enter", SteerRun, Some("Composer")),
         // Tab accepts the highlighted `/`-command or `@`-file entry while
         // the autocomplete menu is open (Enter is the second way in).
         KeyBinding::new("tab", AutocompleteAccept, Some("Composer")),
@@ -188,6 +197,14 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", DialogConfirm, Some("DialogInput")),
         KeyBinding::new("up", DialogPrev, Some("DialogSelect")),
         KeyBinding::new("down", DialogNext, Some("DialogSelect")),
+        // In-transcript find (⌘F). The find field carries `Composer Search`,
+        // so editing keys stay live; these bindings are registered after the
+        // composer ones and win the same-depth tie, keeping Enter from
+        // submitting the real composer while the bar is open.
+        KeyBinding::new("cmd-f", ToggleSearch, None),
+        KeyBinding::new("enter", SearchNext, Some("Search")),
+        KeyBinding::new("shift-enter", SearchPrev, Some("Search")),
+        KeyBinding::new("escape", SearchClose, Some("Search")),
     ]);
 }
 

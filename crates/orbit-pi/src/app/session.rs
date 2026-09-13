@@ -3,18 +3,52 @@ use super::*;
 use crate::context_meter::context_ring;
 use crate::quota::{is_five_hour_window, QuotaHeadline};
 
+/// How a composer message is delivered while the agent is running. Both fall
+/// back to a normal `prompt` when the agent is idle, so a send never no-ops.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SendMode {
+    /// Queued and delivered only once the current task settles.
+    FollowUp,
+    /// Injected into the live turn after the current step, before the next
+    /// LLM call — a course correction.
+    Steer,
+}
+
 impl OrbitApp {
+    /// True while a run is in flight (busy flag or a streaming transcript).
+    pub(super) fn is_running(&self) -> bool {
+        self.busy || self.transcript.is_streaming()
+    }
+
     pub(super) fn submit(&mut self, text: String, cx: &mut Context<Self>) {
-        let text = text.trim().to_string();
-        if text.is_empty() {
+        self.submit_as(text, SendMode::FollowUp, cx);
+    }
+
+    /// Keyboard path for steering: inject the composer text into the running
+    /// turn. With no run in flight this is just a normal submit.
+    pub(super) fn on_steer(
+        &mut self,
+        _: &crate::SteerRun,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.commit_autocomplete_if_open(cx) {
             return;
         }
-        // Collect any paste that raced the submit tick.
-        self.drain_pasted_images(cx);
-        // pi's `follow_up` and `prompt` carry images, so attachments ride
-        // whatever we send.
-        let attachments = std::mem::take(&mut self.attachments);
-        let images = if attachments.is_empty() {
+        let text = self.input.read(cx).text();
+        self.submit_as(text, SendMode::Steer, cx);
+    }
+
+    /// Send the composer's current text/attachments as a steer; used by the
+    /// composer's steer control.
+    pub(super) fn steer_current(&mut self, cx: &mut Context<Self>) {
+        let text = self.input.read(cx).text();
+        self.submit_as(text, SendMode::Steer, cx);
+    }
+
+    /// The image payload pi expects on `prompt` / `follow_up` / `steer`.
+    fn prompt_images(attachments: &[Attachment]) -> Option<Vec<Value>> {
+        if attachments.is_empty() {
             None
         } else {
             Some(
@@ -23,26 +57,54 @@ impl OrbitApp {
                     .map(|a| a.to_prompt_image())
                     .collect::<Vec<_>>(),
             )
-        };
-        // While the agent is running, the message is queued as a follow-up:
-        // it is delivered only once the current task finishes. The queued bar
-        // above the composer shows it until then; pi emits the user message
-        // into the transcript when it is actually delivered.
-        let running = self.busy || self.transcript.is_streaming();
-        if running {
-            let body = CommandBody::FollowUp {
-                message: text.clone(),
-                images,
+        }
+    }
+
+    pub(super) fn submit_as(&mut self, text: String, mode: SendMode, cx: &mut Context<Self>) {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        // Collect any paste that raced the submit tick.
+        self.drain_pasted_images(cx);
+        // pi's `follow_up`, `steer`, and `prompt` all carry images, so
+        // attachments ride whatever we send.
+        let attachments = std::mem::take(&mut self.attachments);
+        // While the agent is running, steer redirects the live turn and
+        // follow-up waits for it to settle. pi emits the user message into the
+        // transcript when it is actually delivered; until then the queue bar
+        // above the composer mirrors it.
+        if self.is_running() {
+            let (body, label) = match mode {
+                SendMode::Steer => (
+                    CommandBody::Steer {
+                        message: text.clone(),
+                        images: Self::prompt_images(&attachments),
+                    },
+                    "steer",
+                ),
+                SendMode::FollowUp => (
+                    CommandBody::FollowUp {
+                        message: text.clone(),
+                        images: Self::prompt_images(&attachments),
+                    },
+                    "follow_up",
+                ),
             };
-            if !self.send(body, "follow_up") {
+            if !self.send(body, label) {
                 // Keep the prompt and attachments so nothing is lost.
                 self.attachments = attachments;
                 cx.notify();
                 return;
             }
             // Show it immediately; the next `queue_update` reconciles the list.
-            self.queue.follow_up.push(text.clone());
-            self.pending_follow_up = Some(text);
+            match mode {
+                SendMode::Steer => self.queue.steering.push(text),
+                SendMode::FollowUp => {
+                    self.queue.follow_up.push(text.clone());
+                    self.pending_follow_up = Some(text);
+                }
+            }
             self.input.update(cx, |input, cx| input.clear(cx));
             cx.notify();
             return;
@@ -50,7 +112,7 @@ impl OrbitApp {
         // Not running: a normal prompt starts a new turn.
         let body = CommandBody::Prompt {
             message: text.clone(),
-            images,
+            images: Self::prompt_images(&attachments),
             streaming_behavior: None,
         };
         if !self.send(body, "prompt") {
@@ -148,6 +210,8 @@ impl OrbitApp {
         self.turn_count = 0;
         self.turn_open = false;
         self.latest_turn = None;
+        // The find hits belong to the previous session's transcript.
+        self.transcript_search = None;
     }
 
     /// Forget the queued-message mirror — the queue belongs to the previous
@@ -155,6 +219,35 @@ impl OrbitApp {
     pub(super) fn reset_queue(&mut self) {
         self.queue = PendingQueue::default();
         self.restore_queue_on_clear = false;
+    }
+
+    /// Park the active session's process so it stays warm in the background,
+    /// whether it is mid-run or idle. Re-opening it resumes the same process
+    /// (no Node spawn), so session switching is near-instant. Running parked
+    /// sessions keep draining events; idle ones are reaped after
+    /// [`PARKED_IDLE_TTL`](crate::app::PARKED_IDLE_TTL).
+    pub(super) fn park_active_session(&mut self) {
+        let Some(client) = self.client.take() else {
+            return;
+        };
+        let Some(path) = self.current_session_path.take() else {
+            // No path claimed yet (still starting up): keep the client active.
+            self.client = Some(client);
+            return;
+        };
+        let busy = self.busy || self.transcript.is_streaming();
+        let transcript = std::mem::replace(&mut self.transcript, Transcript::new());
+        self.park(
+            path,
+            ParkedSession {
+                client,
+                transcript,
+                busy,
+                added: self.added,
+                removed: self.removed,
+                parked_at: Instant::now(),
+            },
+        );
     }
 
     /// Recover the newest completed turn from the persisted checkpoint refs,
@@ -237,9 +330,18 @@ impl OrbitApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Escape backs out of the topmost surface: the command palette (when
-        // focus somehow sits outside it), the autocomplete menu first, then
-        // settings, popovers, then a running agent.
+        // Escape backs out of the topmost surface: the image lightbox, the
+        // command palette (when focus somehow sits outside it), the
+        // autocomplete menu first, then settings, popovers, then a running
+        // agent.
+        if self.lightbox.take().is_some() {
+            cx.notify();
+            return;
+        }
+        if self.transcript_search.is_some() {
+            self.close_search(cx);
+            return;
+        }
         if self.command_palette.take().is_some() {
             self.input.read(cx).focus(window);
             cx.notify();
@@ -329,6 +431,14 @@ impl OrbitApp {
         cx.notify();
     }
 
+    /// Duplicate the open session as-is (`clone`). pi creates the copy and
+    /// switches the process onto it; the `clone` response handler reloads the
+    /// transcript and re-keys the session.
+    pub(super) fn clone_session(&mut self, cx: &mut Context<Self>) {
+        self.send(CommandBody::CloneSession, "clone");
+        cx.notify();
+    }
+
     /// Plus on a workspace group: start a fresh session rooted at that cwd.
     pub(super) fn on_new_session_in_workspace(
         &mut self,
@@ -346,24 +456,7 @@ impl OrbitApp {
         // Leaving this session: cancel any open blocking dialog first, so a
         // parked run never waits on a modal tied to the previous session.
         self.cancel_open_dialog(cx);
-        if let Some(old_path) = self.current_session_path.take() {
-            let old_busy = self.busy || self.transcript.is_streaming();
-            if let Some(client) = self.client.take() {
-                if old_busy {
-                    let transcript = std::mem::replace(&mut self.transcript, Transcript::new());
-                    self.park(
-                        old_path,
-                        ParkedSession {
-                            client,
-                            transcript,
-                            busy: true,
-                            added: self.added,
-                            removed: self.removed,
-                        },
-                    );
-                }
-            }
-        }
+        self.park_active_session();
 
         self.busy = false;
         self.transcript.clear();
@@ -381,6 +474,8 @@ impl OrbitApp {
                 self.adopt_client(client);
                 self.send(CommandBody::NewSession, "new_session");
                 self.refresh_catalogs();
+                // Capability probes queue after the new-session request.
+                self.probe_auth();
                 self.set_status("New session");
             }
             Err(err) => {
@@ -436,29 +531,8 @@ impl OrbitApp {
         // A blocking dialog belongs to the session being left; cancel it so
         // the now-parked run can settle instead of waiting on an unseen modal.
         self.cancel_open_dialog(cx);
-        // ── park the outgoing session ──
-        if let Some(old_path) = self.current_session_path.take() {
-            let old_busy = self.busy || self.transcript.is_streaming();
-            if let Some(client) = self.client.take() {
-                if old_busy {
-                    // Swap the transcript out first so the park doesn't
-                    // borrow `self.transcript` while `self` is borrowed.
-                    let transcript = std::mem::replace(&mut self.transcript, Transcript::new());
-                    self.park(
-                        old_path,
-                        ParkedSession {
-                            client,
-                            transcript,
-                            busy: true,
-                            added: self.added,
-                            removed: self.removed,
-                        },
-                    );
-                }
-                // Idle: drop the client — the process is torn down and the
-                // session reloads from pi's session file when reopened.
-            }
-        }
+        // ── park the outgoing session (running or idle) ──
+        self.park_active_session();
         self.busy = false;
         self.added = 0;
         self.removed = 0;
@@ -479,10 +553,16 @@ impl OrbitApp {
             self.removed = parked.removed;
             self.send(CommandBody::GetState, "get_state");
             self.refresh_context_stats();
+            // A warm process already reported capabilities; a cheap refresh
+            // keeps a long-parked session's auth/quota current.
+            self.probe_auth();
         } else {
-            // Fresh open: spawn a dedicated pi process rooted at the
-            // session's workspace and point it at the session file. The
-            // `switch_session` response triggers the get_messages snapshot.
+            // Cold session (its process was torn down): paint the stored
+            // transcript from disk in the same frame so the switch never waits
+            // on pi boot. `get_messages` supersedes it moments later.
+            self.preview_session_transcript(session.path.clone(), cx);
+            // Spawn a dedicated pi process rooted at the session's workspace
+            // and point it at the session file.
             let spawned = self.quota_bridge.spawn(&session.cwd).or_else(|_| {
                 self.quota_bridge
                     .spawn(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
@@ -496,10 +576,12 @@ impl OrbitApp {
                         },
                         "switch_session",
                     );
-                    // `get_state` is sent from the switch_session success
-                    // handler: querying it eagerly here races the switch,
-                    // and pi answers with the default model instead of the
-                    // session's own.
+                    // `get_state` and the capability probes are sent from the
+                    // switch_session success handler: querying state eagerly
+                    // here races the switch (pi answers with the default
+                    // model), and the probes only get queued after the load
+                    // commands, so a slow auth/quota lookup can't delay the
+                    // transcript.
                 }
                 Err(err) => {
                     let message = format!("pi spawn failed: {err}");
@@ -525,6 +607,36 @@ impl OrbitApp {
             self.history_index = self.session_history.len().saturating_sub(1);
         }
         cx.notify();
+    }
+
+    /// Render a session's stored messages straight from disk, off the UI
+    /// thread, so reopening a cold session shows content immediately instead
+    /// of waiting for pi to boot and answer `switch_session` → `get_messages`.
+    /// The authoritative snapshot replaces this when it lands; a preview that
+    /// is already superseded (snapshot arrived, or the user switched again) is
+    /// dropped.
+    pub(super) fn preview_session_transcript(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let payload = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move { sessions::read_messages_payload(&path) }
+                })
+                .await;
+            let Some(payload) = payload else {
+                return;
+            };
+            let _ = this.update(cx, |app, cx| {
+                let still_active = app.current_session_path.as_ref() == Some(&path);
+                if !still_active || !app.transcript.is_empty() {
+                    return;
+                }
+                app.apply_messages_snapshot(&payload);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(super) fn on_open_session(&mut self, session: SessionInfo, cx: &mut Context<Self>) {
@@ -569,6 +681,14 @@ impl OrbitApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The open popover dismisses on this same click's mouse-down; without
+        // this guard the mouse-up would toggle it straight back open.
+        const GESTURE: Duration = Duration::from_millis(200);
+        if let Some(dismissed) = self.menu_dismissed_at.take() {
+            if dismissed.elapsed() < GESTURE {
+                return;
+            }
+        }
         // The top-bar info affordance shows the active session's details.
         self.session_details_open = !self.session_details_open;
         // Only one top-bar popover is meaningful at a time.
@@ -718,6 +838,10 @@ impl OrbitApp {
                 move |_: &MouseDownEvent, _, cx: &mut App| {
                     this.update(cx, |app, cx| {
                         if app.session_details_open {
+                            // Arm the click-through guard so this same click's
+                            // mouse-up on the info button cannot reopen the
+                            // popover it just dismissed.
+                            app.menu_dismissed_at = Some(Instant::now());
                             app.session_details_open = false;
                             cx.notify();
                         }
@@ -1177,6 +1301,19 @@ impl OrbitApp {
         let latest = self.latest_turn;
         Rc::new(move |_window, cx| {
             pane.update(cx, |pane, cx| pane.show_review_turn(latest, cx));
+        })
+    }
+
+    /// Hands the transcript's attachment tiles a way to open the app's
+    /// full-window image lightbox (the tiles don't own that surface).
+    pub(super) fn image_opener(&self, cx: &Context<Self>) -> crate::transcript_view::ImageOpener {
+        let this = cx.weak_entity();
+        Rc::new(move |image, _window, cx| {
+            this.update(cx, |app, cx| {
+                app.lightbox = Some(image);
+                cx.notify();
+            })
+            .ok();
         })
     }
 

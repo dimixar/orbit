@@ -14,8 +14,20 @@ fn repo_root() -> std::path::PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Mirror `live_pi.rs`: skip when `pi` is not installed (CI, clean machines).
+fn pi_available() -> bool {
+    let bin = std::env::var("PI_BIN").unwrap_or_else(|_| "pi".into());
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .map(|p| p.join(&bin))
+        .any(|p| p.is_file())
+}
+
 #[test]
 fn live_catalog_round_trip() {
+    if !pi_available() {
+        eprintln!("skipping: pi CLI not found");
+        return;
+    }
     let client =
         PiClient::spawn(&repo_root(), Some(Path::new("/tmp/orbit-pi-sessions"))).expect("spawn pi");
     let _ = client.send(CommandBody::GetAvailableModels).expect("send");

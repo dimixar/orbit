@@ -15,7 +15,7 @@ import path from "node:path";
 import test, { beforeEach } from "node:test";
 
 import { resetQuotaRuntime } from "./adapters.js";
-import activate, { ENTRY_TYPE } from "./index.js";
+import activate, { ENTRY_TYPE, pendingSnapshot } from "./index.js";
 
 beforeEach(() => resetQuotaRuntime());
 
@@ -85,6 +85,8 @@ test("session start appends one normalized snapshot for configured providers", a
     const pi = fakePi();
     await activate(pi);
     await pi.fire("session_start", fakeCtx(["deepseek"]));
+    // session_start detaches the fetch; wait for the background snapshot.
+    await pendingSnapshot();
 
     assert.equal(pi.entries.length, 1);
     const entry = pi.entries[0];
@@ -105,6 +107,7 @@ test("an unconfigured account appends nothing", async () => {
     const pi = fakePi();
     await activate(pi);
     await pi.fire("session_start", fakeCtx([]));
+    await pendingSnapshot();
     assert.equal(pi.entries.length, 0);
     await pi.fire("session_shutdown");
   });
@@ -123,7 +126,9 @@ test("a turn end inside the refresh gap does not append again", async () => {
     const pi = fakePi();
     await activate(pi);
     await pi.fire("session_start", fakeCtx(["deepseek"]));
+    await pendingSnapshot();
     await pi.fire("turn_end", fakeCtx(["deepseek"]));
+    await pendingSnapshot();
     assert.equal(pi.entries.length, 1, "no duplicate entry");
     assert.equal(calls, 1, "no duplicate fetch inside the per-provider TTL");
     await pi.fire("session_shutdown");
@@ -140,6 +145,7 @@ test("a stale activation context never throws out of the extension", async () =>
       },
     };
     await pi.fire("session_start", stale);
+    await pendingSnapshot();
     assert.equal(pi.entries.length, 0);
     await pi.fire("session_shutdown");
   });

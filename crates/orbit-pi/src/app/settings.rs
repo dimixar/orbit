@@ -31,7 +31,7 @@ impl OrbitApp {
     pub(super) fn render_settings(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let this = cx.entity();
         let theme = *theme::get(cx);
-        let sections: [(SettingsSection, &'static str, &'static str); 8] = [
+        let sections: [(SettingsSection, &'static str, &'static str); 9] = [
             (SettingsSection::General, "icons/settings.svg", "General"),
             (
                 SettingsSection::Runtime,
@@ -41,6 +41,7 @@ impl OrbitApp {
             (SettingsSection::Agent, "icons/spark.svg", "Agent"),
             (SettingsSection::Skills, "icons/magic-wand.svg", "Skills"),
             (SettingsSection::Plugins, "icons/extensions.svg", "Plugins"),
+            (SettingsSection::Models, "icons/tag-01.svg", "Models"),
             (
                 SettingsSection::Appearance,
                 "icons/contrast.svg",
@@ -242,6 +243,10 @@ impl OrbitApp {
                 "Plugins",
                 "pi packages for this machine and this project. pi loads them at startup — restart pi to apply changes.",
             ),
+            SettingsSection::Models => (
+                "Models",
+                "Every model the running pi reports, grouped by provider. Favorites are shared with the composer's model picker.",
+            ),
             SettingsSection::Appearance => ("Appearance", "Window, layout, and color preferences."),
             SettingsSection::Providers => (
                 "Providers",
@@ -321,6 +326,7 @@ impl OrbitApp {
             // Rendered by `skills_ui::render_skills_page`, not the card body.
             SettingsSection::Skills => Vec::new(),
             SettingsSection::Plugins => self.plugin_rows(theme, this.clone(), cx),
+            SettingsSection::Models => self.model_rows(theme, this.clone(), cx),
             SettingsSection::Appearance => self.appearance_rows(theme, this.clone(), cx),
             SettingsSection::Providers => self.provider_rows(theme, this.clone(), cx),
             SettingsSection::About => vec![
@@ -369,8 +375,272 @@ impl OrbitApp {
         match self.settings_section {
             SettingsSection::Providers => Some(self.provider_toolbar(theme, this, cx)),
             SettingsSection::Plugins => Some(self.plugin_toolbar(theme, this, cx)),
+            SettingsSection::Models => Some(self.model_toolbar(theme, this, cx)),
             _ => None,
         }
+    }
+
+    // ── Settings → Models ──────────────────────────────────────────────
+
+    /// The sticky Models header: a search field plus a live count. The
+    /// catalog is pi's own (`get_available_models`), grouped by provider in
+    /// the body; favorites toggle the same store the composer picker reads.
+    pub(super) fn model_toolbar(
+        &self,
+        theme: Theme,
+        _this: Entity<OrbitApp>,
+        _cx: &Context<Self>,
+    ) -> AnyElement {
+        let search = div()
+            .w_full()
+            .h(px(34.))
+            .px(px(10.))
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_main)
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_size(theme.ui_px(13.))
+            .child(icon("icons/search.svg", 14., theme.text_3))
+            .child(self.models_filter.clone());
+
+        let count = self.available_models.len();
+        let favorites = crate::favorites::all();
+        let favorite_count = self
+            .available_models
+            .iter()
+            .filter(|model| favorites.contains(&model.provider, &model.id))
+            .count();
+
+        let toolbar = div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(theme.ui_px(12.))
+                    .text_color(theme.text_3)
+                    .child(if count == 0 {
+                        "No models reported by the runtime".to_string()
+                    } else {
+                        format!("{count} models · {favorite_count} favorites")
+                    }),
+            );
+
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(search)
+            .child(toolbar)
+            .into_any_element()
+    }
+
+    /// The Models page: the catalog grouped by provider, each row a real
+    /// `SetModel` action plus a favorite star.
+    pub(super) fn model_rows(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        if self.available_models.is_empty() {
+            return vec![self.empty_resource_card(
+                theme,
+                "icons/tag-01.svg",
+                "No models reported",
+                "The running pi has not returned a model catalog yet. Refresh from Settings → Providers, or start a session.",
+            )];
+        }
+        let needle = self.models_filter.read(cx).text().trim().to_lowercase();
+        let favorites = crate::favorites::all();
+
+        // Group in catalog order: a stable provider order with its models.
+        let mut providers: Vec<String> = Vec::new();
+        for model in &self.available_models {
+            if !providers.contains(&model.provider) {
+                providers.push(model.provider.clone());
+            }
+        }
+
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for provider in providers {
+            let models: Vec<&ModelEntry> = self
+                .available_models
+                .iter()
+                .filter(|model| model.provider == provider)
+                .filter(|model| {
+                    needle.is_empty()
+                        || model.name.to_lowercase().contains(&needle)
+                        || model.id.to_lowercase().contains(&needle)
+                        || provider.to_lowercase().contains(&needle)
+                })
+                .collect();
+            if models.is_empty() {
+                continue;
+            }
+            let mut group = div()
+                .id(ElementId::NamedInteger(
+                    "model-group".into(),
+                    rows.len() as u64,
+                ))
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .pb(px(4.))
+                        .child(icon_dyn(provider_icon(&provider), 14., theme.text_3))
+                        .child(
+                            div()
+                                .text_size(theme.ui_px(12.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text_2)
+                                .child(crate::providers::provider_display_name(&provider)),
+                        )
+                        .child(
+                            div()
+                                .text_size(theme.ui_px(11.))
+                                .text_color(theme.text_3)
+                                .child(models.len().to_string()),
+                        ),
+                );
+            for model in models {
+                let (id, model_provider) = (model.id.clone(), model.provider.clone());
+                let active = self.model_id == model.id && self.model_provider == model.provider;
+                let is_favorite = favorites.contains(&model.provider, &model.id);
+                let (star_provider, star_id) = (model.provider.clone(), model.id.clone());
+                let mut row = div()
+                    .id(ElementId::Name(
+                        format!("model-row-{model_provider}-{id}").into(),
+                    ))
+                    .w_full()
+                    .px(px(10.))
+                    .py(px(7.))
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(if active {
+                        theme.accent
+                    } else {
+                        theme.border
+                    })
+                    .bg(if active {
+                        theme.active
+                    } else {
+                        theme.bg_raised
+                    })
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .cursor_pointer()
+                    .when(!active, |row| row.hover(|s| s.bg(theme.bg_hover)))
+                    .on_mouse_up(MouseButton::Left, {
+                        let this = this.clone();
+                        let provider = model_provider.clone();
+                        let id = id.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |app, cx| app.set_model(id.clone(), provider.clone(), cx));
+                        }
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(theme.ui_px(13.))
+                                    .font_weight(if active {
+                                        FontWeight::MEDIUM
+                                    } else {
+                                        FontWeight::NORMAL
+                                    })
+                                    .text_color(if active { theme.active_fg } else { theme.text })
+                                    .child(model.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .font_family(theme::code_font_family())
+                                    .text_size(theme.ui_px(11.))
+                                    .text_color(theme.text_3)
+                                    .child(model.id.clone()),
+                            ),
+                    );
+                if let Some(window) = model.context_window {
+                    row = row.child(
+                        div()
+                            .flex_none()
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text_3)
+                            .child(format!(
+                                "{} ctx",
+                                crate::context_meter::format_tokens(window)
+                            )),
+                    );
+                }
+                if active {
+                    row = row.child(icon("icons/check.svg", 13., theme.accent));
+                }
+                row = row.child(
+                    div()
+                        .id(ElementId::Name(
+                            format!("model-star-{star_provider}-{star_id}").into(),
+                        ))
+                        .size(px(24.))
+                        .flex_none()
+                        .rounded_md()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.overlay))
+                        .on_mouse_up(MouseButton::Left, {
+                            let this = this.clone();
+                            move |_, _, cx| {
+                                // Keep the star from bubbling to the row's
+                                // "set active model" handler.
+                                cx.stop_propagation();
+                                crate::favorites::toggle(&star_provider, &star_id);
+                                this.update(cx, |_, cx| cx.notify());
+                            }
+                        })
+                        .child(icon(
+                            "icons/star.svg",
+                            14.,
+                            if is_favorite {
+                                theme.accent
+                            } else {
+                                theme.text_3
+                            },
+                        )),
+                );
+                group = group.child(row);
+            }
+            rows.push(group.into_any_element());
+        }
+
+        if rows.is_empty() {
+            rows.push(self.empty_resource_card(
+                theme,
+                "icons/search.svg",
+                "No models match",
+                "Try a different search — the catalog itself is unchanged.",
+            ));
+        }
+        rows
     }
 
     // ── Settings → Plugins ─────────────────────────────────────────────
@@ -382,7 +652,7 @@ impl OrbitApp {
         &self,
         theme: Theme,
         this: Entity<OrbitApp>,
-        _cx: &Context<Self>,
+        cx: &Context<Self>,
     ) -> Vec<AnyElement> {
         let mut rows: Vec<AnyElement> = Vec::new();
         if let Some(error) = &self.plugins_error {
@@ -398,6 +668,20 @@ impl OrbitApp {
             return rows;
         }
 
+        let needle = self.plugins_filter.read(cx).text().trim().to_lowercase();
+        let visible: Vec<&PluginPackage> = self
+            .plugins
+            .iter()
+            .filter(|package| {
+                needle.is_empty()
+                    || package.source.to_lowercase().contains(&needle)
+                    || package
+                        .version
+                        .as_deref()
+                        .is_some_and(|version| version.to_lowercase().contains(&needle))
+            })
+            .collect();
+
         let installed = self
             .plugins
             .iter()
@@ -408,10 +692,23 @@ impl OrbitApp {
                 .w_full()
                 .text_size(theme.ui_px(12.))
                 .text_color(theme.text_3)
-                .child(format!("{} of {} installed", installed, self.plugins.len()))
+                .child(if visible.len() == self.plugins.len() {
+                    format!("{} of {} installed", installed, self.plugins.len())
+                } else {
+                    format!("{} of {} shown · {} installed", visible.len(), self.plugins.len(), installed)
+                })
                 .into_any_element(),
         );
-        for package in &self.plugins {
+        if visible.is_empty() {
+            rows.push(self.empty_resource_card(
+                theme,
+                "icons/search.svg",
+                "No plugins match",
+                "Try a different search — installed packages are unchanged.",
+            ));
+            return rows;
+        }
+        for package in visible {
             rows.push(self.plugin_card(package, theme, this.clone()));
         }
         rows
@@ -660,6 +957,25 @@ impl OrbitApp {
             PluginAction::Refresh,
         );
 
+        let plugin_spinner: AnyElement = if theme.ui.reduce_motion {
+            icon("icons/loader.svg", 13., theme.text_2).into_any_element()
+        } else {
+            gpui::svg()
+                .path("icons/loader.svg")
+                .flex_none()
+                .size(px(13.))
+                .text_color(theme.text_2)
+                .with_animation(
+                    "plugin-action-spin",
+                    Animation::new(Duration::from_millis(900)).repeat(),
+                    |svg, delta| {
+                        svg.with_transformation(Transformation::rotate(radians(
+                            delta * std::f32::consts::TAU,
+                        )))
+                    },
+                )
+                .into_any_element()
+        };
         let status: AnyElement = match &self.plugin_action {
             Some(action) => div()
                 .flex_1()
@@ -669,22 +985,7 @@ impl OrbitApp {
                 .gap_2()
                 .text_size(theme.ui_px(12.))
                 .text_color(theme.text_2)
-                .child(
-                    gpui::svg()
-                        .path("icons/loader.svg")
-                        .flex_none()
-                        .size(px(13.))
-                        .text_color(theme.text_2)
-                        .with_animation(
-                            "plugin-action-spin",
-                            Animation::new(Duration::from_millis(900)).repeat(),
-                            |svg, delta| {
-                                svg.with_transformation(Transformation::rotate(radians(
-                                    delta * std::f32::consts::TAU,
-                                )))
-                            },
-                        ),
-                )
+                .child(plugin_spinner)
                 .child(action.clone())
                 .into_any_element(),
             None => div()
@@ -699,6 +1000,21 @@ impl OrbitApp {
                 ))
                 .into_any_element(),
         };
+
+        let search = div()
+            .w_full()
+            .h(px(34.))
+            .px(px(10.))
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_main)
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_size(theme.ui_px(13.))
+            .child(icon("icons/search.svg", 14., theme.text_3))
+            .child(self.plugins_filter.clone());
 
         div()
             .w_full()
@@ -724,6 +1040,7 @@ impl OrbitApp {
                     .child(status)
                     .child(refresh),
             )
+            .child(search)
             .into_any_element()
     }
 
@@ -885,7 +1202,7 @@ impl OrbitApp {
             .child(icon("icons/search.svg", 14., theme.text_3))
             .child(self.provider_filter.clone());
 
-        let refresh_icon: AnyElement = if self.providers_refreshing {
+        let refresh_icon: AnyElement = if self.providers_refreshing && !theme.ui.reduce_motion {
             gpui::svg()
                 .path("icons/loader.svg")
                 .flex_none()
@@ -3686,6 +4003,20 @@ impl OrbitApp {
         cx.notify();
     }
 
+    /// Appearance → Reduce motion: persist the preference; every paint site
+    /// reads it through `Theme.ui`, so the change is live.
+    pub(super) fn toggle_reduce_motion(&mut self, cx: &mut Context<Self>) {
+        let mut ui = theme::get(cx).ui;
+        ui.reduce_motion = !ui.reduce_motion;
+        theme::set_ui_prefs(cx, ui);
+        self.set_status(if ui.reduce_motion {
+            "Reduce motion on"
+        } else {
+            "Reduce motion off"
+        });
+        cx.notify();
+    }
+
     pub(super) fn compact_now(&mut self, cx: &mut Context<Self>) {
         if self.is_compacting {
             return;
@@ -3929,6 +4260,19 @@ impl OrbitApp {
                         Some("Stream commits are coalesced (~8 Hz) and highlighting is paint-only, so long tasks never reflow the transcript."),
                         None,
                         None,
+                    ),
+                    self.setting_row(
+                        theme,
+                        "Reduce motion",
+                        Some("Stop looping animations — spinners and the running-session shimmer render static."),
+                        None,
+                        Some(self.settings_toggle(
+                            "reduce-motion",
+                            theme.ui.reduce_motion,
+                            theme,
+                            this.clone(),
+                            Self::toggle_reduce_motion,
+                        )),
                     ),
                 ],
             ),
@@ -4804,7 +5148,9 @@ impl OrbitApp {
         match section {
             SettingsSection::General => self.refresh_notification_auth(cx),
             SettingsSection::Providers => {
-                self.reload_custom_providers(cx);
+                // Paint from cached state now; the file re-read (models.json,
+                // auth.json) lands after this frame.
+                self.reload_custom_providers_later(cx);
                 self.refresh_auth();
             }
             SettingsSection::Skills => self.refresh_skills(cx),
@@ -4921,11 +5267,15 @@ impl OrbitApp {
         }
     }
 
-    /// Re-read `~/.pi/agent/models.json` and `~/.pi/agent/auth.json`. Read
-    /// errors are kept, not fatal, so a broken file can be seen and fixed
-    /// rather than overwritten.
-    pub(super) fn reload_custom_providers(&mut self, cx: &mut Context<Self>) {
-        match providers::read_custom() {
+    /// Apply the result of reading both provider files to state. Read errors
+    /// are kept, not fatal, so a broken file can be seen and fixed rather than
+    /// overwritten.
+    fn apply_provider_reads(
+        &mut self,
+        custom: Result<Vec<CustomProvider>, String>,
+        auth: Result<HashMap<String, providers::ProviderAuth>, String>,
+    ) {
+        match custom {
             Ok(list) => {
                 self.custom_providers = list;
                 self.custom_providers_error = None;
@@ -4935,7 +5285,7 @@ impl OrbitApp {
                 self.custom_providers_error = Some(err);
             }
         }
-        match providers::read_auth() {
+        match auth {
             Ok(auth) => {
                 self.provider_auth = auth;
                 self.provider_auth_error = None;
@@ -4945,8 +5295,37 @@ impl OrbitApp {
                 self.provider_auth_error = Some(err);
             }
         }
+    }
+
+    /// Re-read `~/.pi/agent/models.json` and `~/.pi/agent/auth.json` on the
+    /// calling thread. Used by explicit actions (Refresh, save/remove,
+    /// credential load) where the result gates the next step.
+    pub(super) fn reload_custom_providers(&mut self, cx: &mut Context<Self>) {
+        let custom = providers::read_custom();
+        let auth = providers::read_auth();
+        self.apply_provider_reads(custom, auth);
         self.ensure_provider_metadata(cx);
         cx.notify();
+    }
+
+    /// The same re-read, but off the UI thread: the Providers page paints from
+    /// cached state first and the fresh files land a frame later, so clicking
+    /// the nav row never blocks on disk (Waku's no-blink page switch).
+    pub(super) fn reload_custom_providers_later(&mut self, cx: &mut Context<Self>) {
+        // Idempotent, already off-thread; kick it now so a first visit still
+        // has metadata as soon as it arrives.
+        self.ensure_provider_metadata(cx);
+        cx.spawn(async move |this, cx| {
+            let (custom, auth) = cx
+                .background_executor()
+                .spawn(async { (providers::read_custom(), providers::read_auth()) })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                app.apply_provider_reads(custom, auth);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Load pi's built-in catalog sizes and authoritative provider metadata

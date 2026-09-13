@@ -12,6 +12,8 @@ impl OrbitApp {
             cx.notify();
         }
         self.tick_background(cx);
+        // Bound the warm-session pool: reap idle parked processes past the TTL.
+        self.reap_idle_parked();
         // A banner click routes back to the session it announced.
         if let Some(path) = notifications::take_clicked_session() {
             self.activate_session_from_notification(PathBuf::from(path), cx);
@@ -65,6 +67,8 @@ impl OrbitApp {
         }
         // Images pasted in the composer become message attachments.
         self.drain_pasted_images(cx);
+        // Refresh the in-transcript find hits when the query or messages moved.
+        self.sync_transcript_search(cx);
         // A drag that left the window clears gpui's active drag without any
         // element event seeing it — the heartbeat drops a stale highlight.
         if self.file_drag_hovered && !cx.has_active_drag() {
@@ -366,6 +370,23 @@ impl OrbitApp {
         }
     }
 
+    /// Replace the transcript with a `get_messages`-shaped snapshot and
+    /// rebuild the top-bar diff counts from it. Shared by pi's authoritative
+    /// `get_messages` response and the disk preview that paints a cold session
+    /// before pi answers.
+    pub(super) fn apply_messages_snapshot(&mut self, data: &Value) {
+        self.transcript.load_from(data);
+        self.added = 0;
+        self.removed = 0;
+        if let Some(messages) = data.get("messages").and_then(Value::as_array) {
+            for message in messages {
+                let (a, r) = transcript::diff_from_message(message);
+                self.added += a;
+                self.removed += r;
+            }
+        }
+    }
+
     pub(super) fn on_response(
         &mut self,
         command: &str,
@@ -457,6 +478,35 @@ impl OrbitApp {
                 self.send(CommandBody::GetState, "get_state");
                 return;
             }
+            // `clone` duplicates the session and moves the process onto the
+            // copy. Adopt the new file/id when pi reports them, then reload.
+            "clone" => {
+                self.transcript.clear();
+                self.current_title = None;
+                self.current_session_path = None;
+                self.added = 0;
+                self.removed = 0;
+                self.context = None;
+                self.session_usage = None;
+                self.reset_turns();
+                self.reset_queue();
+                self.session_id = None;
+                if let Some(data) = data.as_ref() {
+                    if let Some(file) = data.get("sessionFile").and_then(Value::as_str) {
+                        self.adopt_session_file(PathBuf::from(file));
+                    }
+                    if let Some(id) = data.get("sessionId").and_then(Value::as_str) {
+                        self.session_id = Some(id.to_string());
+                        self.reset_quota_entries();
+                    }
+                }
+                *refresh_sessions = true;
+                self.set_status("Session cloned");
+                self.send(CommandBody::GetMessages, "get_messages");
+                self.send(CommandBody::GetState, "get_state");
+                self.refresh_catalogs();
+                return;
+            }
             _ => {}
         }
 
@@ -519,17 +569,7 @@ impl OrbitApp {
                 self.refresh_context_stats();
             }
             "get_messages" => {
-                self.transcript.load_from(data);
-                // Rebuild diff stats from the loaded history.
-                self.added = 0;
-                self.removed = 0;
-                if let Some(messages) = data.get("messages").and_then(serde_json::Value::as_array) {
-                    for message in messages {
-                        let (a, r) = transcript::diff_from_message(message);
-                        self.added += a;
-                        self.removed += r;
-                    }
-                }
+                self.apply_messages_snapshot(data);
                 self.refresh_context_stats();
             }
             "get_available_models" => {
@@ -599,9 +639,13 @@ impl OrbitApp {
                 if success {
                     self.reset_turns();
                     self.reset_queue();
+                    // Load the session *before* the slower auth/quota probes,
+                    // which would otherwise queue ahead of `get_messages` and
+                    // push the transcript out by a network round trip.
                     self.send(CommandBody::GetMessages, "get_messages");
                     self.send(CommandBody::GetState, "get_state");
                     self.refresh_catalogs();
+                    self.probe_auth();
                 }
             }
             "new_session" => {

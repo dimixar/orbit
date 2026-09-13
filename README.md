@@ -6,18 +6,20 @@ Same product philosophy as [Waku](https://github.com/egoist/waku): the UI layer 
 
 ## Features
 
-- **Chat-style agent sessions** — prompt composer with model selection, thinking-effort control, follow-up queueing, cancel, and streaming responses
-- **GPU-rendered transcript** — virtualized message list; 10k-message sessions scroll at frame rate; stick-to-latest streaming with coalesced commits
-- **Sessions grouped by project** — persistent sessions organized per working directory, with reopen support; cross-workspace sessions included
-- **Model catalog** — model selection from the pi runtime's own list (`get_available_models`), backed by providers on disk
+- **Chat-style agent sessions** — prompt composer with model selection, thinking-effort control, follow-up queueing, mid-run **steering**, cancel, and streaming responses
+- **GPU-rendered transcript** — virtualized message list whose cost is independent of message count; stick-to-latest streaming with coalesced commits (a 10k-message harness guards the model layer)
+- **In-transcript find** — ⌘F search with matches, counts, and previous/next jump
+- **Image lightbox** — click any attachment image for a full-window view
+- **Sessions grouped by project** — persistent sessions organized per working directory, with reopen support, cross-workspace sessions, hidden workspaces, and **clone session**
+- **Model catalog** — model selection from the pi runtime's own list (`get_available_models`), with favorites shared between the composer picker and a dedicated **Models** page
 - **Thinking effort** — level selection derived from each model's supported levels (`get_available_thinking_levels`)
-- **Tool activity** — bash, edit, todo, plan, search, mcp, thinking, and question rows plus approval dialogs, all rendered natively; tool rows expand into Arguments/Output detail cards with per-section copy
+- **Tool activity** — bash, thinking, edit, and other tool rows rendered natively; tool rows expand into Arguments/Output detail cards with per-section copy. Per-tool *permission* dialogs are pending the RPC protocol (see below) and are not faked
 - **Git diff panel** — review what the agent changed without leaving the app
 - **Side pane** — right-hand **Review** panel with a live `git diff HEAD` of the workspace, refreshed when a run settles; toggle from the top bar
 - **Workbench pages** — usage, skills, plugins, models, providers, and settings views backed by pi's on-disk data
-- **Markdown rendering** — GFM and syntax-highlighted code; highlighting is paint-only so streaming code blocks never reflow
-- **Theming** — dark/light, accent, font, and density settings persisted to pi's own settings
-- **Desktop native** — keyboard operability, native menus/dialogs, custom macOS window chrome
+- **Markdown rendering** — GFM and syntax-highlighted code; highlighting is paint-only so streaming code blocks never reflow. Mermaid fences stay copyable code blocks (no native renderer)
+- **Theming** — dark/light palettes, font, density, and reduce-motion settings persisted to Orbit's own store (`~/.orbit-pi/`)
+- **Desktop native** — keyboard operability, custom macOS window chrome, native dialogs, and a signed/notarizable app bundle
 
 ## Architecture
 
@@ -45,10 +47,11 @@ The app spawns the `pi` CLI as a child process and speaks its RPC protocol: JSON
 
 The v0.1 web app (React 19 + Vite + Tauri 2 + pi SDK daemon) has been **removed**; the GPUI app is the only app. What works today:
 
-- **Working now** — real pi process integration (`crates/orbit-rpc`), sessions sidebar grouped by project, live streaming transcript over the RPC, composer with enter-to-send, model/thinking cycling, virtualized rendering
-- **In progress** — markdown rendering, rich tool renderers, diff panel, workbench pages, theming
+- **Working now** — real pi process integration (`crates/orbit-rpc`), sessions sidebar grouped by project, live streaming transcript over the RPC, composer with enter-to-send, steering, follow-up queueing, model/thinking cycling, transcript find, image lightbox, virtualized rendering, markdown, diff/Review, Git page, and the workbench pages (usage, skills, plugins, models, providers, settings)
+- **Pending the protocol** — per-tool *permission* dialogs: pi's permission system has not been confirmed to surface over RPC mode, so Orbit launches with full access rather than faking an approval UI
+- **Still open** — conversation fork/rewind (clone is available; rewinding to an earlier turn needs entry-id plumbing), and on-device scroll-perf measurement
 
-Feature work is tracked in `INTENT.md` (decisions + phase plan) and `AGENT.md` (conventions + protocol notes). Live behavior is covered by integration tests that spawn a real pi process.
+Feature work is tracked in `INTENT.md` (decisions + phase plan) and `AGENT.md` (conventions + protocol notes). Live behavior is covered by integration tests that spawn a real pi process (they skip cleanly when `pi` is not installed).
 
 ## Getting Started
 
@@ -245,13 +248,19 @@ info "Done. DMGs in: $DIST"
 ```
 
 **Notarize** (recommended for public distribution) — a Developer-ID-signed DMG
-still triggers a Gatekeeper warning on other Macs until it is notarized:
+still triggers a Gatekeeper warning on other Macs until it is notarized. Set a
+`notarytool` keychain profile and `make-dmg.sh` notarizes and staples each
+`.app` and DMG automatically:
 
 ```bash
-xcrun notarytool submit "dist/Orbit Pi-0.1.0-universal.dmg" \
-  --keychain-profile "notarytool" --wait
-xcrun stapler staple "dist/Orbit Pi-0.1.0-universal.dmg"
+xcrun notarytool store-credentials notarytool \
+  --apple-id you@example.com --team-id TEAMID --password app-specific-password
+
+NOTARY_PROFILE=notarytool ./scripts/make-dmg.sh universal
 ```
+
+Without `NOTARY_PROFILE` the build still succeeds and prints a warning that the
+artifacts are un-notarized.
 
 > **Note on `pi` discovery:** a bundled `.app` launches with a minimal PATH, so
 > Orbit now probes common install dirs (`/opt/homebrew/bin`, `/usr/local/bin`)
@@ -294,7 +303,7 @@ AGENT.md             Conventions for agents/humans working on this repo
 
 ## Roadmap
 
-Orbit is growing toward a full workbench: diff review, file tree, terminal, parallel sessions, and a per-tool permission UI once the RPC probe confirms the surface. The current single-session chat is a waypoint, not the destination.
+Orbit is growing toward a full workbench: a file tree, terminal, and conversation fork/rewind. Parallel sessions already run (up to six parked processes); the view is single-active. A per-tool permission UI lands if and when the RPC protocol confirms the surface — it is not faked in the meantime.
 
 ## Contributing
 

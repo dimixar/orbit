@@ -31,7 +31,7 @@ use gpui::{
     anchored, deferred, div, img, linear_color_stop, linear_gradient, list, point, prelude::*, px,
     radians, relative, svg, uniform_list, AnchoredPositionMode, Animation, AnimationExt,
     AnyElement, App, ClipboardItem, Context, Corner, CursorStyle, DragMoveEvent, ElementId, Entity,
-    ExternalPaths, FocusHandle, Focusable, FontWeight, Hsla, ImageSource, IntoElement,
+    ExternalPaths, FocusHandle, Focusable, FontWeight, Hsla, Image, ImageSource, IntoElement,
     ListAlignment, ListState, MouseButton, MouseDownEvent, MouseUpEvent, ObjectFit, Pixels, Render,
     ScrollStrategy, SharedString, StatefulInteractiveElement, Subscription, TextAlign,
     Transformation, UniformListScrollHandle, Window, WindowControlArea,
@@ -115,21 +115,29 @@ const ADD_MENU_ITEMS: [(&str, &str, &str); 3] = [
     ("icons/at-sign.svg", "Mention file", "@"),
 ];
 
-/// Maximum sessions kept alive in the background. Beyond this, settled
-/// sessions are evicted (their process torn down); running ones never are.
+/// Maximum sessions kept alive in the background. Beyond this, the
+/// least-recently parked idle session is evicted (its process torn down);
+/// running ones never are.
 const MAX_LIVE_SESSIONS: usize = 6;
 
-/// A session running (or recently run) in the background: its own pi
-/// process, its own live transcript, and its own agent-run state. Parked
-/// when the user switches away mid-run; the run continues and events keep
-/// draining every tick, so reopening the session resumes exactly where the
-/// stream left off.
+/// How long an idle parked session stays warm before its process is reaped.
+/// Reusing a warm pi process makes re-opening a recent session instant
+/// instead of paying Node startup again; the TTL bounds the memory cost.
+const PARKED_IDLE_TTL: Duration = Duration::from_secs(300);
+
+/// A session kept warm in the background: its own pi process, its own live
+/// transcript, and its own agent-run state. Both running and idle sessions
+/// are parked when the user switches away, so reopening is a resume (no
+/// process spawn). Events keep draining every tick; a running session
+/// resumes exactly where the stream left off.
 struct ParkedSession {
     client: PiClient,
     transcript: Transcript,
     busy: bool,
     added: u64,
     removed: u64,
+    /// When this session was last parked; drives idle TTL reaping.
+    parked_at: Instant,
 }
 
 /// An in-flight automatic retry (`auto_retry_start` → `auto_retry_end`):
@@ -250,6 +258,13 @@ pub struct OrbitApp {
     /// Focus the dialog (or its text field) on the next paint — `tick` has no
     /// window to focus with.
     dialog_focus_pending: bool,
+    /// Full-window image lightbox for a transcript attachment image. `None`
+    /// is closed. Opened by clicking an image tile, dismissed by click or
+    /// Escape.
+    lightbox: Option<Arc<Image>>,
+    /// Open in-transcript find (⌘F): a find field, the matching message
+    /// indices, and the selected hit. `None` is closed.
+    transcript_search: Option<search::TranscriptSearch>,
     /// Open row-actions menu in the sessions sidebar (which session's path
     /// plus whether the popup is showing the delete confirmation).
     session_menu: Option<SessionMenu>,
@@ -443,6 +458,10 @@ pub struct OrbitApp {
     provider_filter: Entity<ComposerInput>,
     /// Re-render the grid as the filter is typed.
     _provider_filter_sub: Subscription,
+    /// Search filter for the Models page.
+    models_filter: Entity<ComposerInput>,
+    /// Re-render the model list as the filter is typed.
+    _models_filter_sub: Subscription,
     /// Skills discovered for the current workspace (project + user scope).
     skills: Vec<Skill>,
     /// Installed pi packages (plugins) from user + project settings.
@@ -459,6 +478,10 @@ pub struct OrbitApp {
     plugin_remove_confirm: Option<String>,
     /// Re-render the toolbar as the install field is typed.
     _plugin_source_sub: Subscription,
+    /// Search filter for the installed-plugin list.
+    plugins_filter: Entity<ComposerInput>,
+    /// Re-render the plugin list as the filter is typed.
+    _plugins_filter_sub: Subscription,
     /// Settings → Skills: filter field for the skill list.
     skills_filter: Entity<ComposerInput>,
     /// The skill selected in the master-detail page (its `SKILL.md` path).
@@ -579,6 +602,14 @@ impl OrbitApp {
                 .with_max_lines(1)
         });
         let provider_filter_sub = cx.observe(&provider_filter, |_, _, cx| cx.notify());
+        let models_filter = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("models-filter")
+                .with_placeholder("Search models…")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+        });
+        let models_filter_sub = cx.observe(&models_filter, |_, _, cx| cx.notify());
 
         // Settings → Plugins: the install-source field. `Composer Picker`
         // keeps editing keys live; Enter is unhandled, so the Install button
@@ -591,6 +622,14 @@ impl OrbitApp {
                 .with_max_lines(1)
         });
         let plugin_source_sub = cx.observe(&plugin_source_input, |_, _, cx| cx.notify());
+        let plugins_filter = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("plugins-filter")
+                .with_placeholder("Search installed plugins…")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+        });
+        let plugins_filter_sub = cx.observe(&plugins_filter, |_, _, cx| cx.notify());
 
         // Settings → Skills: the list filter. `Composer Picker` keeps editing
         // keys live so typing filters the master list.
@@ -696,6 +735,8 @@ impl OrbitApp {
             command_palette: None,
             dialog: None,
             dialog_focus_pending: false,
+            lightbox: None,
+            transcript_search: None,
             session_menu: None,
             settings_open: false,
             settings_section: SettingsSection::General,
@@ -776,6 +817,8 @@ impl OrbitApp {
             providers_refreshing: false,
             provider_filter: provider_filter.clone(),
             _provider_filter_sub: provider_filter_sub,
+            models_filter: models_filter.clone(),
+            _models_filter_sub: models_filter_sub,
             skills: Vec::new(),
             plugins: Vec::new(),
             plugins_error: None,
@@ -784,6 +827,8 @@ impl OrbitApp {
             plugin_action: None,
             plugin_remove_confirm: None,
             _plugin_source_sub: plugin_source_sub,
+            plugins_filter: plugins_filter.clone(),
+            _plugins_filter_sub: plugins_filter_sub,
             skills_filter: skills_filter.clone(),
             selected_skill: None,
             skill_content: None,
@@ -1064,6 +1109,7 @@ pub(crate) enum SettingsSection {
     Agent,
     Skills,
     Plugins,
+    Models,
     Appearance,
     Providers,
     About,
@@ -1325,6 +1371,7 @@ mod helpers;
 mod open_in;
 mod pickers;
 mod runtime;
+mod search;
 mod session;
 mod settings;
 mod sidebar;

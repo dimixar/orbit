@@ -236,6 +236,9 @@ pub(crate) fn render_side_row(
     this: &Entity<OrbitApp>,
     agent_running: bool,
     running_paths: &Rc<HashSet<PathBuf>>,
+    // Every session with a live (running or warm-idle) pi process. Guards
+    // delete, which would otherwise let an alive process recreate the file.
+    live_paths: &Rc<HashSet<PathBuf>>,
     session_menu: Option<&SessionMenu>,
     workspace_menu: Option<&WorkspaceMenu>,
     theme: Theme,
@@ -427,9 +430,9 @@ pub(crate) fn render_side_row(
             let this_for_row = this.clone();
             let this_for_menu = this.clone();
             let menu = session_menu.filter(|m| m.path == session.path);
-            // Sessions with a live pi process must not be deleted — the
-            // process would recreate the file mid-run.
-            let deletable = !active && !running;
+            // Sessions with a live pi process (running or warm) must not be
+            // deleted — the process would recreate the file mid-run.
+            let deletable = !active && !running && !live_paths.contains(&session.path);
             // Running sessions lead with a small spinner and a shimmering
             // title (shadcn's Marker + `shimmer`); row actions stay available
             // on hover.
@@ -770,6 +773,20 @@ fn session_title(
             .line_height(line_height)
             .font_weight(weight)
             .text_color(color)
+            .child(title)
+            .into_any_element();
+    }
+    // Reduce-motion: keep the running signal (accent title) without the
+    // perpetual sweep.
+    if theme.ui.reduce_motion {
+        return div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_size(size)
+            .line_height(line_height)
+            .font_weight(weight)
+            .text_color(theme.accent)
             .child(title)
             .into_any_element();
     }
@@ -1415,6 +1432,12 @@ impl OrbitApp {
     /// Confirmed: remove the session file from disk and refresh the list.
     pub(super) fn on_menu_delete_confirm(&mut self, cx: &mut Context<Self>) {
         if let Some(menu) = self.session_menu.take() {
+            // Defensive: a warm parked process would recreate the file.
+            if self.lives.contains_key(&menu.path) {
+                self.set_status("Session has a live process — switch away and wait, then delete");
+                cx.notify();
+                return;
+            }
             if let Err(err) = fs::remove_file(&menu.path) {
                 self.set_status(format!("delete failed: {err}"));
             } else {

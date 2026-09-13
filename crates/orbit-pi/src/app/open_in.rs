@@ -73,6 +73,14 @@ impl OrbitApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The open menu dismisses on this same click's mouse-down; without
+        // this guard the mouse-up would toggle it straight back open.
+        const GESTURE: Duration = Duration::from_millis(200);
+        if let Some(dismissed) = self.menu_dismissed_at.take() {
+            if dismissed.elapsed() < GESTURE {
+                return;
+            }
+        }
         if self.open_in_apps.is_empty() || self.current_workspace.is_none() {
             return;
         }
@@ -260,6 +268,10 @@ impl OrbitApp {
                 move |_: &MouseDownEvent, _, cx: &mut App| {
                     this.update(cx, |app, cx| {
                         if app.open_in_menu_open {
+                            // Arm the click-through guard so this same click's
+                            // mouse-up on the caret cannot reopen the menu it
+                            // just dismissed.
+                            app.menu_dismissed_at = Some(Instant::now());
                             app.open_in_menu_open = false;
                             cx.notify();
                         }

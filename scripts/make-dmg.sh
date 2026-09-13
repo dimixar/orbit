@@ -9,8 +9,11 @@
 #   ./scripts/make-dmg.sh both       # both (default)
 #
 # Overrides (env):
-#   SIGN_ID    codesign identity (default: Developer ID Application)
-#   VERSION    bundle version (default: read from Cargo.toml)
+#   SIGN_ID         codesign identity (default: Developer ID Application)
+#   VERSION         bundle version (default: read from Cargo.toml)
+#   NOTARY_PROFILE  notarytool keychain profile; when set, each .app and DMG
+#                   is notarized and stapled (otherwise notarization is
+#                   skipped with a warning and Gatekeeper warns on other Macs)
 #
 set -euo pipefail
 
@@ -109,6 +112,37 @@ make_dmg() {
   echo "  -> $dmg"
 }
 
+# --- notarization (opt-in) -------------------------------------------------
+# A Developer-ID-signed artifact still triggers Gatekeeper until it is
+# notarized and stapled. Set NOTARY_PROFILE to a `notarytool` keychain profile
+# (`xcrun notarytool store-credentials`) to enable it; without one the build
+# still succeeds and prints what is missing.
+notary_enabled() { [[ -n "${NOTARY_PROFILE:-}" ]]; }
+
+notarize_app() {
+  local app="$1"
+  if ! notary_enabled; then
+    warn "NOTARY_PROFILE unset — skipping notarization (Gatekeeper will warn on other Macs)"
+    return 0
+  fi
+  local zip="$BUILD_ROOT/${APP_NAME}.zip"
+  info "Notarizing .app (this can take a few minutes)…"
+  rm -f "$zip"
+  ditto -c -k --keepParent "$app" "$zip"
+  xcrun notarytool submit "$zip" --keychain-profile "$NOTARY_PROFILE" --wait
+  info "Stapling .app…"
+  xcrun stapler staple "$app"
+}
+
+notarize_dmg() {
+  local dmg="$1"
+  notary_enabled || return 0
+  info "Notarizing DMG…"
+  xcrun notarytool submit "$dmg" --keychain-profile "$NOTARY_PROFILE" --wait
+  info "Stapling DMG…"
+  xcrun stapler staple "$dmg"
+}
+
 build_and_package() {
   local label="$1"   # e.g. arm64
   local arch="$2"    # rust target triple
@@ -116,9 +150,11 @@ build_and_package() {
 
   local app="$BUILD_ROOT/${APP_NAME}-${label}.app"
   make_app "$binary" "$app"
+  notarize_app "$app"
 
   local dmg="$DIST/${APP_NAME}-${VERSION}-${label}.dmg"
   make_dmg "$app" "$dmg"
+  notarize_dmg "$dmg"
 }
 
 # --- build the release binaries -------------------------------------------

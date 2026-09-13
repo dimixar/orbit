@@ -515,7 +515,14 @@ impl GitPanel {
                     };
                     let provider = (!provider.is_empty()).then_some(provider.as_str());
                     let model = (!model.is_empty()).then_some(model.as_str());
-                    match commit_message::generate(&cwd, provider, model, &staged, &unstaged) {
+                    match commit_message::generate(
+                        &cwd,
+                        provider,
+                        model,
+                        &staged,
+                        &unstaged,
+                        &staged_rows,
+                    ) {
                         Ok(message) => Ok(message),
                         Err(_) => Ok(commit_message::heuristic(&staged_rows)),
                     }

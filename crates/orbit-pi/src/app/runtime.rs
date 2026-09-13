@@ -102,6 +102,10 @@ impl OrbitApp {
     }
 
     /// Make `client` the active pi process, resetting uptime / exit state.
+    ///
+    /// Callers send their primary command (`switch_session` / `new_session` /
+    /// `get_state`) *before* [`probe_auth`](Self::probe_auth), so the slow
+    /// provider-auth/quota probes never queue in front of the session load.
     pub(super) fn adopt_client(&mut self, client: PiClient) {
         self.runtime = RuntimeStatus {
             started_at: Some(Instant::now()),
@@ -113,9 +117,6 @@ impl OrbitApp {
         // A new process starts a new session stream: entry ids from the old
         // process mean nothing here.
         self.reset_quota_entries();
-        // Re-probe provider-auth capabilities against the new process and
-        // reconcile any login the restart interrupted.
-        self.probe_auth();
     }
 
     /// Tear down the active pi process (dropping `PiClient` kills the child).
@@ -315,6 +316,8 @@ impl OrbitApp {
                 self.adopt_client(client);
                 self.send(CommandBody::GetState, "get_state");
                 self.refresh_catalogs();
+                // Capability probes queue after the state request.
+                self.probe_auth();
                 self.set_status("pi process started");
             }
             Err(err) => {
@@ -355,19 +358,33 @@ impl OrbitApp {
         }
     }
 
-    /// Park a background session, evicting a settled one if over the cap.
-    /// Running sessions are never evicted.
-    pub(super) fn park(&mut self, path: PathBuf, parked: ParkedSession) {
+    /// Park a background session, evicting the least-recently parked idle one
+    /// if over the cap. Running sessions are never evicted.
+    pub(super) fn park(&mut self, path: PathBuf, mut parked: ParkedSession) {
+        parked.parked_at = Instant::now();
         if self.lives.len() >= MAX_LIVE_SESSIONS {
             let victim = self
                 .lives
                 .iter()
-                .find(|(_, p)| !p.busy)
+                .filter(|(_, p)| !p.busy)
+                .min_by_key(|(_, p)| p.parked_at)
                 .map(|(k, _)| k.clone());
             if let Some(victim) = victim {
                 self.lives.remove(&victim);
             }
         }
         self.lives.insert(path, parked);
+    }
+
+    /// Reap idle parked processes past [`PARKED_IDLE_TTL`]. Running sessions
+    /// stay regardless of age. Called from the heartbeat; a no-op when nothing
+    /// is parked.
+    pub(super) fn reap_idle_parked(&mut self) {
+        if self.lives.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        self.lives
+            .retain(|_, parked| parked.busy || now.duration_since(parked.parked_at) < PARKED_IDLE_TTL);
     }
 }

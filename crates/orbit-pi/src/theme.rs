@@ -383,6 +383,9 @@ pub struct UiPrefs {
     pub editor_font_size: f32,
     /// Global spacing multiplier, percent (Waku's "Spacing Density").
     pub spacing_density: u32,
+    /// Honor reduce-motion: perpetual/looping animations (spinners, the
+    /// running-session shimmer, the drop-overlay fade) render static.
+    pub reduce_motion: bool,
 }
 
 /// The interface text size authored against, px. Chrome sizes scale relative
@@ -401,6 +404,7 @@ impl Default for UiPrefs {
             terminal_font_size: 13.,
             editor_font_size: 13.,
             spacing_density: 100,
+            reduce_motion: false,
         }
     }
 }
@@ -471,6 +475,9 @@ impl UiPrefs {
                 prefs.spacing_density = density;
             }
         }
+        if let Some(reduce) = value.get("reduce_motion").and_then(Value::as_bool) {
+            prefs.reduce_motion = reduce;
+        }
         prefs
     }
 
@@ -487,6 +494,7 @@ impl UiPrefs {
                 "terminal_font_size": self.terminal_font_size,
                 "editor_font_size": self.editor_font_size,
                 "spacing_density": self.spacing_density,
+                "reduce_motion": self.reduce_motion,
             })
             .to_string(),
         );
@@ -2314,6 +2322,12 @@ pub fn init(cx: &mut App) {
 /// Current theme. Panics if [`init`] has not run.
 pub fn get(cx: &App) -> &Theme {
     cx.global::<Theme>()
+}
+
+/// Whether the user asked to reduce motion. Looping animations should render
+/// static when this is true.
+pub fn reduce_motion(cx: &App) -> bool {
+    get(cx).ui.reduce_motion
 }
 
 /// Switch to a palette, persist the choice, and notify global observers.

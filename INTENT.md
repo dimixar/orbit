@@ -99,9 +99,15 @@ legacy app today:
 5. Git diff panel + file-change blocks
 6. Workbench pages — usage (charts), skills, plugins, models, providers (CRUD), settings
 7. Markdown — GFM, syntax-highlighted code, copy-able code blocks, image lightbox
-8. Theming — dark/light, accent, font, density, persisted to pi's settings
+8. Theming — dark/light palettes, accent, font, density, reduce-motion. Persisted to **Orbit's own store** (`~/.orbit-pi/{theme,ui.json,fonts.json}`), not pi's settings: theme/UI state is Orbit's, and writing it into pi's config would fork pi's own source of truth. (Revised from "persisted to pi's settings".)
 9. Attachments — files read to base64 images for prompts
-10. macOS native expectations — traffic lights, menus, dialogs, keyboard operability
+10. macOS native expectations — traffic lights, native dialogs, keyboard operability. Menu-bar menus are **not** implemented; Orbit's actions are keyboard/mouse surfaces (⌘P palette, shortcuts), not an `NSMenu`.
+
+### Implementation status (living)
+
+Done: streaming transcript + virtualization; markdown + highlighting; composer with steering, follow-ups, cancel, autocomplete, attachments; extension dialogs; diff/Review + Git page; sessions (list/switch/new/delete/clone/cross-workspace/hidden) with a **warm process pool** so re-opening a recent session is a resume, not a Node spawn; usage, skills, plugins, models, providers, settings pages; transcript find; image lightbox; theming + reduce-motion; signed/notarizable packaging; CI.
+
+Open: per-tool **permission** dialogs (blocked on the RPC probe, D1); conversation **fork/rewind** (clone exists; rewind needs entry ids); on-device scroll-perf measurement.
 
 ## Non-goals (explicitly out of scope)
 
