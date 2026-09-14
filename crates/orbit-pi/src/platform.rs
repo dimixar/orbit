@@ -271,6 +271,59 @@ pub fn open_url(url: &str) -> Result<(), String> {
         .map_err(|err| format!("could not open the browser: {err}"))
 }
 
+/// Rename the running process so macOS labels the application menu with the
+/// product name instead of the executable (`orbit-pi` under `cargo run`).
+///
+/// AppKit ignores any title set on the first menu item and always paints the
+/// resolved application name — `CFBundleName` for a bundle, else the process
+/// name — so the title must be changed at the source. The Carbon Process
+/// Manager call below is the supported-by-practice way to do that at runtime;
+/// it also keeps the app menu bold. (`NSMenu.setTitle` on the app submenu is
+/// ignored by current macOS, so it is not used.)
+#[cfg(target_os = "macos")]
+pub fn set_process_name(name: &str) {
+    use std::ffi::{c_char, c_int, c_void, CString};
+
+    #[repr(C)]
+    struct ProcessSerialNumber {
+        high_long_of_psn: u32,
+        low_long_of_psn: u32,
+    }
+    type GetCurrentProcessFn = unsafe extern "C" fn(*mut ProcessSerialNumber) -> c_int;
+    type CpSetProcessNameFn =
+        unsafe extern "C" fn(*const ProcessSerialNumber, *const c_char) -> c_int;
+
+    // `RTLD_DEFAULT` (-2): search images AppKit has already loaded.
+    const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;
+    let Ok(name) = CString::new(name) else {
+        return;
+    };
+
+    // SAFETY: both symbols are resolved by name from ApplicationServices and
+    // transmuted to their documented C signatures before use.
+    unsafe {
+        let get_sym = libc::dlsym(RTLD_DEFAULT, c"GetCurrentProcess".as_ptr());
+        let set_sym = libc::dlsym(RTLD_DEFAULT, c"CPSSetProcessName".as_ptr());
+        if get_sym.is_null() || set_sym.is_null() {
+            return;
+        }
+        let get: GetCurrentProcessFn = std::mem::transmute(get_sym);
+        let set: CpSetProcessNameFn = std::mem::transmute(set_sym);
+        let mut psn = ProcessSerialNumber {
+            high_long_of_psn: 0,
+            low_long_of_psn: 0,
+        };
+        if get(&mut psn) == 0 {
+            let _ = set(&psn, name.as_ptr());
+        }
+    }
+}
+
+/// Menu bars only exist on macOS; GPUI's Windows/Linux platforms store the
+/// menu but never paint one, so there is nothing to relabel.
+#[cfg(not(target_os = "macos"))]
+pub fn set_process_name(_name: &str) {}
+
 /// Only `http`/`https` URLs reach the OS opener, so a compromised or buggy
 /// server can never hand the shell a `file:`/`javascript:` target.
 fn is_safe_browser_url(url: &str) -> bool {

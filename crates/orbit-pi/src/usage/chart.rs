@@ -98,6 +98,7 @@ fn axis_label(value: f64, metric: ChartMetric) -> String {
 /// `on_hover` reports the bucket under the pointer (or nothing when the
 /// pointer leaves the plot), so the page keeps the readout in its own state
 /// and the marker and card always agree.
+#[allow(clippy::too_many_arguments)]
 pub fn timeline(
     id: &'static str,
     series: &TimeSeries,

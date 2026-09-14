@@ -62,6 +62,13 @@ const LIST_MAX_H: f32 = 6. * (ROW_H + ROW_GAP + SEP_H);
 /// Popup shell radius — the popover register (composer is the larger 16).
 const SHELL_RADIUS: f32 = 12.;
 
+/// Model-select callback: model name, model id, and the ambient window.
+type SelectModel = Box<dyn Fn(&str, &str, &mut Window, &mut App)>;
+/// Thinking-level callback: the chosen level plus the ambient window.
+type SelectLevel = Box<dyn Fn(&str, &mut Window, &mut App)>;
+/// Dismiss callback; `bool` is true when an outside mouse-down closed it.
+type SelectorDismiss = Box<dyn Fn(bool, &mut Window, &mut App)>;
+
 /// Which single-section dropdown a picker popup shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PickerKind {
@@ -142,11 +149,11 @@ pub struct ModelSelector {
     /// Deferred popovers need a follow-up scroll after layout settles.
     needs_scroll: bool,
     last_filter: String,
-    on_select_model: Box<dyn Fn(&str, &str, &mut Window, &mut App)>,
-    on_select_level: Box<dyn Fn(&str, &mut Window, &mut App)>,
+    on_select_model: SelectModel,
+    on_select_level: SelectLevel,
     /// `bool` = dismissed by an outside mouse-down (vs. escape), so the
     /// owner can suppress the trigger chip's click-through.
-    on_dismiss: Box<dyn Fn(bool, &mut Window, &mut App)>,
+    on_dismiss: SelectorDismiss,
 }
 
 impl ModelSelector {
@@ -159,9 +166,9 @@ impl ModelSelector {
         current_model_id: String,
         current_model_provider: String,
         current_level: String,
-        on_select_model: Box<dyn Fn(&str, &str, &mut Window, &mut App)>,
-        on_select_level: Box<dyn Fn(&str, &mut Window, &mut App)>,
-        on_dismiss: Box<dyn Fn(bool, &mut Window, &mut App)>,
+        on_select_model: SelectModel,
+        on_select_level: SelectLevel,
+        on_dismiss: SelectorDismiss,
         cx: &mut Context<Self>,
     ) -> Self {
         // The filter input carries both the `Composer` context (so backspace,
@@ -266,6 +273,7 @@ impl ModelSelector {
     /// list is flat because the chip already states the provider. Thinking
     /// levels are always flat. Filtering is a case-insensitive substring
     /// match on name/id/provider/level.
+    #[allow(clippy::too_many_arguments)]
     fn rows_for(
         kind: PickerKind,
         models: &[ModelEntry],
@@ -570,6 +578,7 @@ impl ModelSelector {
 
     /// Live catalog refresh while the popup is open (pi re-reports these
     /// after `set_model`, session switches, etc.).
+    #[allow(clippy::too_many_arguments)]
     pub fn set_catalog(
         &mut self,
         models: Vec<ModelEntry>,

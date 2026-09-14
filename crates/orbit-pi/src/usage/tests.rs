@@ -6,8 +6,6 @@
 //! (determinism). Everything is built on a hand-made [`UsageIndex`], so the
 //! math is tested without touching the disk.
 
-use std::rc::Rc;
-
 use super::aggregate::{ChartMetric, Direction, LatencyMetric, LatencyStats, UsageSnapshot};
 use super::model::*;
 use super::page::{query_sessions, SessionQuery, SessionSort};

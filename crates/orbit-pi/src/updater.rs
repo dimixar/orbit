@@ -68,18 +68,26 @@ const FEED_URL: &str = match option_env!("ORBIT_UPDATE_FEED_URL") {
     None => DEFAULT_FEED_URL,
 };
 
+// Appcasts are committed under `appcasts/` on `main` and served by GitHub's
+// raw CDN. Keep these paths in sync with `.github/workflows/appcasts.yml`.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const DEFAULT_FEED_URL: &str = "https://releases.orbit.dev/appcast-macos-aarch64.xml";
+const DEFAULT_FEED_URL: &str =
+    "https://raw.githubusercontent.com/imrj05/orbit/main/appcasts/appcast-macos-aarch64.xml";
 #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
-const DEFAULT_FEED_URL: &str = "https://releases.orbit.dev/appcast-macos-x86_64.xml";
+const DEFAULT_FEED_URL: &str =
+    "https://raw.githubusercontent.com/imrj05/orbit/main/appcasts/appcast-macos-x86_64.xml";
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-const DEFAULT_FEED_URL: &str = "https://releases.orbit.dev/appcast-linux-aarch64.xml";
+const DEFAULT_FEED_URL: &str =
+    "https://raw.githubusercontent.com/imrj05/orbit/main/appcasts/appcast-linux-aarch64.xml";
 #[cfg(all(target_os = "linux", not(target_arch = "aarch64")))]
-const DEFAULT_FEED_URL: &str = "https://releases.orbit.dev/appcast-linux-x86_64.xml";
+const DEFAULT_FEED_URL: &str =
+    "https://raw.githubusercontent.com/imrj05/orbit/main/appcasts/appcast-linux-x86_64.xml";
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-const DEFAULT_FEED_URL: &str = "https://releases.orbit.dev/appcast-windows-aarch64.xml";
+const DEFAULT_FEED_URL: &str =
+    "https://raw.githubusercontent.com/imrj05/orbit/main/appcasts/appcast-windows-aarch64.xml";
 #[cfg(all(target_os = "windows", not(target_arch = "aarch64")))]
-const DEFAULT_FEED_URL: &str = "https://releases.orbit.dev/appcast-windows-x86_64.xml";
+const DEFAULT_FEED_URL: &str =
+    "https://raw.githubusercontent.com/imrj05/orbit/main/appcasts/appcast-windows-x86_64.xml";
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 const DEFAULT_FEED_URL: &str = "";
 

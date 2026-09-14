@@ -547,6 +547,9 @@ type ExpandedSections = Rc<RefCell<HashSet<(usize, usize, u8)>>>;
 /// `(message_ix, prose_salt, block_ix)` — the salt scopes the block index to
 /// the step/user prose run it was parsed from.
 type ExpandedBlocks = Rc<RefCell<HashSet<(usize, u64, usize)>>>;
+/// `toolCallId` -> `(message_ix, tool_ix, flat_tool_ix)` so tool results land
+/// on the right row.
+type ToolPositions = Rc<RefCell<HashMap<String, (usize, usize, usize)>>>;
 
 /// How long the one-time rail hint stays up before dismissing itself.
 const RAIL_HINT_TTL: Duration = Duration::from_secs(10);
@@ -627,7 +630,7 @@ pub struct Transcript {
     expanded_blocks: ExpandedBlocks,
     /// `toolCallId` -> `(message_ix, tool_ix)` so `tool_execution_end` results
     /// land on the right row.
-    tool_positions: Rc<RefCell<HashMap<String, (usize, usize, usize)>>>,
+    tool_positions: ToolPositions,
     /// Rail tick currently hovered (drives the turn preview card).
     hovered_turn: Rc<Cell<Option<usize>>>,
     /// Assistant row whose footer usage metric is hovered (drives the
@@ -1678,6 +1681,7 @@ impl Transcript {
     /// workspace roots the changed-files Review git diff; the viewport
     /// height caps the rail, and the main-area width gates its visibility.
     /// `review_changes` wires the cards' Review buttons to the side pane.
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
         workspace: Option<&Path>,

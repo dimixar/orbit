@@ -790,9 +790,11 @@ pub fn tree_rows(files: &[File], expanded_paths: &HashSet<String>, filter: &str)
         .iter()
         .enumerate()
         .filter(|(_, file)| {
-            filtering
-                .then(|| file.path.to_ascii_lowercase().contains(&filter))
-                .unwrap_or(true)
+            if filtering {
+                file.path.to_ascii_lowercase().contains(&filter)
+            } else {
+                true
+            }
         })
         .map(|(index, _)| index)
         .collect::<Vec<_>>();

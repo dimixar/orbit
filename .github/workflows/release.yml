@@ -1,26 +1,26 @@
 name: Release
 
-# Build the universal macOS app, Developer-ID sign it, notarize + staple the
-# DMGs, then publish them as a GitHub Release.
+# Build, sign, notarize, and bundle every platform, then draft a GitHub Release
+# whose notes come from CHANGELOG.md. Adapted from the reference Waku app's
+# release pipeline (`.github/workflows/release.yml` + `scripts/changelog.ts`).
 #
-# Trigger: push a version tag (e.g. `git tag v0.0.1 && git push origin v0.0.1`)
+# Trigger: push a version tag (cut one with `./scripts/bump-version.sh x.y.z`)
 # or run it by hand from the Actions tab (workflow_dispatch).
 #
-# Required repository secrets (Settings → Secrets and variables → Actions):
-#   APPLE_CERTIFICATE_P12        base64 of your "Developer ID Application" .p12
+# The version is read from crates/orbit-pi/Cargo.toml; a tag push must agree
+# with it. macOS produces a signed + notarized DMG when the signing secrets
+# exist, and an unsigned one otherwise. Windows and Linux are best-effort
+# (continue-on-error) until those platforms are validated.
+#
+# Secrets (Settings → Secrets and variables → Actions):
+#   APPLE_CERTIFICATE_P12        base64 Developer ID Application .p12
 #   APPLE_CERTIFICATE_PASSWORD   password for that .p12
 #   KEYCHAIN_PASSWORD            any throwaway password for the temp keychain
 #   APPLE_ID                     Apple ID for notarytool
-#   APPLE_TEAM_ID                10-char Apple Team ID
+#   APPLE_TEAM_ID                10-char Team ID
 #   APPLE_APP_PASSWORD           app-specific password for that Apple ID
-#
-# Optional repository variable:
-#   SIGN_ID                      codesign identity; auto-detected from the
-#                                imported cert when unset.
-#
-# Without APPLE_CERTIFICATE_P12 the job still builds unsigned DMGs and skips
-# notarization (make-dmg.sh warns and continues), so the workflow is safe to
-# run before the secrets exist.
+# Variable:
+#   SIGN_ID                      optional; auto-detected from the cert when unset
 
 on:
   push:
@@ -28,15 +28,75 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  macos-dmg:
-    name: build · sign · notarize DMGs
+  version:
+    name: Resolve version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      published: ${{ steps.published.outputs.published }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version from Cargo.toml
+        id: resolve
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/orbit-pi/Cargo.toml | head -1)"
+          if [ -z "$version" ]; then
+            echo "::error::no version found in crates/orbit-pi/Cargo.toml"
+            exit 1
+          fi
+          # Cargo.toml is the source of truth. A tag push must agree with it; a
+          # manual run has no tag and releases whatever Cargo.toml says.
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [ "$tag" != "$version" ]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+              exit 1
+            fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing $version as v$version"
+
+      # A published release is the finished product; a leftover draft is this
+      # workflow's own output and gets rebuilt.
+      - name: Look for an existing published release
+        id: published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          draft="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --json isDraft --jq .isDraft 2>/dev/null || echo missing)"
+          if [ "$draft" = "false" ]; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$TAG is already published; skipping this run"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  macos:
+    name: macOS (signed + notarized DMG)
+    needs: version
+    if: needs.version.outputs.published != 'true'
     runs-on: macos-latest
     timeout-minutes: 60
     env:
+      VERSION: ${{ needs.version.outputs.version }}
       NOTARY_PROFILE: orbit-notary
+      # Baked into the binary by build.rs; empty leaves the updater dormant.
+      ORBIT_UPDATE_PUBLIC_KEY: ${{ secrets.ORBIT_UPDATE_PUBLIC_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -48,8 +108,6 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # Import the Developer ID cert into a throwaway keychain. Skipped
-      # content-wise when the secret is empty (unsigned build still succeeds).
       - name: Import Developer ID certificate
         env:
           CERT_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
@@ -63,12 +121,10 @@ jobs:
             echo "SIGNING=0" >> "$GITHUB_ENV"
             exit 0
           fi
-
           KEYCHAIN=build.keychain
           printf '%s' "$CERT_P12" \
             | python3 -c 'import sys,base64; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' \
             > /tmp/cert.p12
-
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security default-keychain -s "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
@@ -79,7 +135,6 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
           rm -f /tmp/cert.p12
-
           IDENTITY="${SIGN_ID_OVERRIDE:-$(security find-identity -v -p codesigning "$KEYCHAIN" \
             | grep 'Developer ID Application' | head -1 | sed 's/.*"\(.*\)"/\1/')}"
           echo "Signing identity: ${IDENTITY:-<none found>}"
@@ -99,13 +154,7 @@ jobs:
             --password "$APPLE_APP_PASSWORD"
 
       - name: Build, sign, notarize, staple
-        run: |
-          set -euo pipefail
-          # Tag v0.0.1 → VERSION=0.0.1, so the DMG name matches the tag.
-          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-            export VERSION="${GITHUB_REF_NAME#v}"
-          fi
-          ./scripts/make-dmg.sh universal
+        run: ./scripts/make-dmg.sh universal
 
       - name: Verify notarization
         if: env.SIGNING == '1'
@@ -119,31 +168,139 @@ jobs:
           done
 
       - name: Checksums
-        run: shasum -a 256 dist/*.dmg | tee dist/SHA256SUMS.txt
+        run: shasum -a 256 dist/*.dmg dist/*.tar.gz > dist/SHA256SUMS-macos.txt
 
-      - name: Upload DMGs as a workflow artifact
+      - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Orbit-Pi-DMGs
+          name: macos
           path: |
             dist/*.dmg
-            dist/SHA256SUMS.txt
-
-      - name: Publish GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/orbit-pi/Cargo.toml | head -1)"
-          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-            TAG="$GITHUB_REF_NAME"
-          else
-            TAG="v$VERSION"
-          fi
-          gh release create "$TAG" dist/*.dmg dist/SHA256SUMS.txt \
-            --title "Orbit Pi $VERSION" --generate-notes \
-            || gh release upload "$TAG" dist/*.dmg dist/SHA256SUMS.txt --clobber
+            dist/*.tar.gz
+            dist/SHA256SUMS-macos.txt
+          if-no-files-found: error
 
       - name: Clean up keychain
         if: always()
         run: security delete-keychain build.keychain 2>/dev/null || true
+
+  linux:
+    name: Linux x86_64
+    needs: version
+    if: needs.version.outputs.published != 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            clang cmake pkg-config \
+            libfontconfig-dev libvulkan1 \
+            libwayland-dev libx11-xcb-dev libxi-dev libxtst-dev \
+            libxkbcommon-x11-dev libssl-dev
+
+      - name: Bundle
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          ORBIT_UPDATE_PUBLIC_KEY: ${{ secrets.ORBIT_UPDATE_PUBLIC_KEY }}
+        run: ./scripts/bundle-linux.sh
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/orbit-pi-*.tar.gz
+          if-no-files-found: warn
+
+  windows:
+    name: Windows x86_64
+    needs: version
+    if: needs.version.outputs.published != 'true'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Bundle
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          ORBIT_UPDATE_PUBLIC_KEY: ${{ secrets.ORBIT_UPDATE_PUBLIC_KEY }}
+        run: ./scripts/bundle-windows.ps1
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/orbit-pi-*.zip
+          if-no-files-found: warn
+
+  draft-release:
+    name: Draft GitHub release
+    needs: [version, macos, linux, windows]
+    if: >-
+      always()
+      && needs.version.result == 'success'
+      && needs.version.outputs.published != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Best-effort: a platform that failed simply contributes nothing.
+      - name: Download artifacts
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Write release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if python3 scripts/release-notes.py CHANGELOG.md "$VERSION" > release-notes.md 2>/dev/null; then
+            echo "Notes for $VERSION taken from CHANGELOG.md"
+          else
+            echo "See CHANGELOG.md for details." > release-notes.md
+          fi
+          cat release-notes.md
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mapfile -d '' files < <(find artifacts -maxdepth 1 -type f -print0 2>/dev/null)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::no artifacts were produced"
+            exit 1
+          fi
+          printf 'Uploading:\n'; printf '  %s\n' "${files[@]}"
+          gh release create "$TAG" "${files[@]}" \
+            --draft --title "Orbit Pi $VERSION" --notes-file release-notes.md \
+            || gh release upload "$TAG" "${files[@]}" --clobber

@@ -26,7 +26,7 @@ export function OrbitWordmark({
 }
 
 /**
- * The Orbit Pi app mark — a rounded tile with the bold `P`. Mirrors
+ * The Orbit Pi app mark — a rounded tile with the chrome `OP`. Mirrors
  * `assets/icons/logo-icon.png` in the desktop app.
  */
 export function OrbitIcon({
@@ -42,8 +42,8 @@ export function OrbitIcon({
     <Image
       src="/logo-icon.png"
       alt={alt}
-      width={1254}
-      height={1254}
+      width={1024}
+      height={1024}
       priority={priority}
       className={className}
     />

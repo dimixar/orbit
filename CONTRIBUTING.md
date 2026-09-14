@@ -107,6 +107,85 @@ docs/open-source-files
 A maintainer will review. Expect comments on architecture fit, performance, and
 the invariants above.
 
+## Releasing
+
+The version lives in `crates/orbit-pi/Cargo.toml` and is the single source of
+truth. Changing it on `main` is all it takes: CI tags the version and builds
+the release. Notes come from `CHANGELOG.md`.
+
+1. Add what changed under `## [Unreleased]` in `CHANGELOG.md` (Keep a Changelog
+   sections: Added / Changed / Fixed).
+2. Bump and push:
+
+   ```bash
+   ./scripts/bump-version.sh 0.0.2
+   ```
+
+   That sets the version in both crates and the bundled pi extensions, refreshes
+   `Cargo.lock`, rolls `[Unreleased]` under a new `[0.0.2]` heading, then commits
+   `chore(release): v0.0.2` and pushes to `main`. `NO_PUSH=1` stops before the
+   push. Editing the version in `crates/orbit-pi/Cargo.toml` and pushing by hand
+   works the same way.
+
+3. `.github/workflows/auto-tag.yml` sees the new version on `main`, creates the
+   annotated tag `v0.0.2` if it does not already exist, and starts the Release
+   build for it. (Pushing a tag yourself, `git tag v0.0.2 && git push origin
+   v0.0.2`, triggers the same build.)
+
+4. `.github/workflows/release.yml` then:
+
+   - resolves the version and rejects a tag that disagrees with `Cargo.toml`;
+   - **macOS** — builds the universal `.app`, signs it with your Developer ID,
+     notarizes and staples the `.app` and DMG, and emits the updater `.tar.gz`
+     (`scripts/make-dmg.sh`);
+   - **Linux** — builds `orbit-pi` and packages a tarball (`scripts/bundle-linux.sh`);
+   - **Windows** — builds `orbit-pi.exe` and packages a zip (`scripts/bundle-windows.ps1`);
+   - **drafts** a GitHub Release with notes pulled from `CHANGELOG.md`
+     (`scripts/release-notes.py`).
+
+   Review the draft and publish it. macOS signing needs the Apple secrets listed
+   at the top of the workflow file; without them the macOS job builds an
+   unsigned DMG. Windows and Linux are `continue-on-error` while those platforms
+   are validated.
+
+5. `.github/workflows/appcasts.yml` runs once the release is **published**: it
+   downloads the assets, signs each one, regenerates `appcasts/*.xml`, and
+   commits them to `main`. The app reads those from
+   `https://raw.githubusercontent.com/imrj05/orbit/main/appcasts/appcast-<os>-<arch>.xml`.
+
+Assets and the bundled pi extensions are compiled into the binary
+(`include_dir!` / `include_str!`), so every artifact is self-contained.
+
+### In-app updates
+
+The updater verifies every downloaded artifact against an Ed25519 public key
+compiled into the binary (`ORBIT_UPDATE_PUBLIC_KEY`). Generate the keypair once:
+
+```bash
+openssl genpkey -algorithm ed25519 -out orbit-update.pem
+
+# Public key → repository secret ORBIT_UPDATE_PUBLIC_KEY
+openssl pkey -in orbit-update.pem -pubout -outform DER | tail -c 32 | base64
+
+# Private key → repository secret ORBIT_UPDATE_PRIVATE_KEY
+base64 -i orbit-update.pem
+```
+
+Add both under Settings → Secrets and variables → Actions, and keep
+`orbit-update.pem` somewhere safe — lose it and you can never sign another
+update. With no public key the updater stays dormant, and debug builds never
+update themselves (`ORBIT_FORCE_UPDATER=1` arms the flow for testing).
+
+Each feed's `<enclosure>` must point at an artifact the updater can install —
+a Sparkle appcast cannot describe an architecture, which is why there is one
+feed per target:
+
+| Platform | Feed points at |
+|---|---|
+| macOS | `Orbit-Pi-<version>-universal.tar.gz`, one top-level `Orbit Pi.app` |
+| Linux | `orbit-pi-<version>-<triple>.tar.gz`, containing `bin/orbit-pi` |
+| Windows | a `*-Setup.exe` installer — **not built yet**; the current zip cannot be installed in place |
+
 ## Licensing of contributions
 
 Orbit is licensed under the [Apache License 2.0](LICENSE). Unless you state

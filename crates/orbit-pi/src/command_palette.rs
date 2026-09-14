@@ -193,6 +193,13 @@ fn fuzzy_score(query: &str, candidate: &str) -> Option<u32> {
     (qi == query.len()).then_some(score)
 }
 
+/// Open callback: the chosen session plus the ambient window.
+type OpenSession = Box<dyn Fn(SessionInfo, &mut Window, &mut App)>;
+/// Command callback: the chosen palette command plus the ambient window.
+type RunCommand = Box<dyn Fn(PaletteCommand, &mut Window, &mut App)>;
+/// Dismiss callback; `bool` is true when an outside mouse-down closed it.
+type PaletteDismiss = Box<dyn Fn(bool, &mut Window, &mut App)>;
+
 /// The palette entity. Created by `OrbitApp` on ⌘P; talks back exclusively
 /// through the callbacks it was built with.
 pub struct CommandPalette {
@@ -201,18 +208,18 @@ pub struct CommandPalette {
     scroll: ScrollHandle,
     highlighted: usize,
     last_filter: String,
-    on_open: Box<dyn Fn(SessionInfo, &mut Window, &mut App)>,
-    on_command: Box<dyn Fn(PaletteCommand, &mut Window, &mut App)>,
+    on_open: OpenSession,
+    on_command: RunCommand,
     /// `bool` = dismissed by an outside mouse-down (vs. escape).
-    on_dismiss: Box<dyn Fn(bool, &mut Window, &mut App)>,
+    on_dismiss: PaletteDismiss,
 }
 
 impl CommandPalette {
     pub fn new(
         snapshot: PaletteSnapshot,
-        on_open: Box<dyn Fn(SessionInfo, &mut Window, &mut App)>,
-        on_command: Box<dyn Fn(PaletteCommand, &mut Window, &mut App)>,
-        on_dismiss: Box<dyn Fn(bool, &mut Window, &mut App)>,
+        on_open: OpenSession,
+        on_command: RunCommand,
+        on_dismiss: PaletteDismiss,
         cx: &mut Context<Self>,
     ) -> Self {
         let filter = cx.new(|cx| {

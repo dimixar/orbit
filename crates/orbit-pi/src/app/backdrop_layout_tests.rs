@@ -359,9 +359,9 @@ fn provider_grid_columns_fit_inside_the_content_column(cx: &mut gpui::TestAppCon
     });
     let scroll = cx.debug_bounds("grid-scroll").expect("scroll container");
     assert_eq!(scroll.size.width, px(CONTENT_MAX_W));
-    for i in 0..3 {
+    for (i, name) in NAMES.iter().enumerate() {
         let card = cx
-            .debug_bounds(NAMES[i])
+            .debug_bounds(name)
             .unwrap_or_else(|| panic!("card {i} laid out"));
         assert!(
             card.size.width > px(250.),

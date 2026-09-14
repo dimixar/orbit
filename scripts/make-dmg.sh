@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# Build and package Orbit as a macOS .app bundle, then wrap it in a DMG.
+# Build and package Orbit as a macOS .app bundle, wrap it in a DMG, and emit
+# the .tar.gz the in-app updater installs from.
 #
 # Usage:
 #   ./scripts/make-dmg.sh            # arm64 + universal DMGs
@@ -10,6 +11,7 @@
 #
 # Overrides (env):
 #   SIGN_ID         codesign identity (default: Developer ID Application)
+#   SIGNING=0       ad-hoc sign instead (no Developer ID needed)
 #   VERSION         bundle version (default: read from Cargo.toml)
 #   NOTARY_PROFILE  notarytool keychain profile; when set, each .app and DMG
 #                   is notarized and stapled (otherwise notarization is
@@ -26,7 +28,13 @@ APP_NAME="Orbit Pi"
 EXEC_NAME="orbit-pi"
 BUNDLE_ID="dev.orbit.pi"
 ICON="assets/icons/icon.icns"
-SIGN_ID="${SIGN_ID:-Developer ID Application: One Man Wireless Inc. (RFBXG4V45C)}"
+# `SIGNING=0` ad-hoc signs the bundle — what CI builds when the Apple secrets
+# are absent. Otherwise default to the maintainer's Developer ID identity.
+if [ "${SIGNING:-1}" = "0" ]; then
+  SIGN_ID="-"
+else
+  SIGN_ID="${SIGN_ID:-Developer ID Application: One Man Wireless Inc. (RFBXG4V45C)}"
+fi
 
 BUILD_ROOT="$ROOT/target/package"
 STAGE="$BUILD_ROOT/stage"
@@ -86,7 +94,13 @@ EOF
 
   chmod +x "$out/Contents/MacOS/$EXEC_NAME"
   info "Signing .app with: $SIGN_ID"
-  codesign --force --deep --options runtime --timestamp --sign "$SIGN_ID" "$out"
+  local args=(--force --deep --sign "$SIGN_ID")
+  # Hardened runtime and a secure timestamp need a real Developer ID; an
+  # ad-hoc signature ("-") rejects them.
+  if [ "$SIGN_ID" != "-" ]; then
+    args+=(--options runtime --timestamp)
+  fi
+  codesign "${args[@]}" "$out"
 }
 
 # --- wrap a signed .app into a DMG -----------------------------------------
@@ -125,7 +139,7 @@ notarize_app() {
     warn "NOTARY_PROFILE unset — skipping notarization (Gatekeeper will warn on other Macs)"
     return 0
   fi
-  local zip="$BUILD_ROOT/${APP_NAME}.zip"
+  local zip="$app.zip"
   info "Notarizing .app (this can take a few minutes)…"
   rm -f "$zip"
   ditto -c -k --keepParent "$app" "$zip"
@@ -148,13 +162,27 @@ build_and_package() {
   local arch="$2"    # rust target triple
   local binary="$3"  # path to the release binary for this arch
 
-  local app="$BUILD_ROOT/${APP_NAME}-${label}.app"
+  # The bundle is always named "Orbit Pi.app" — the label only distinguishes
+  # the DMG/tarball downloads. A per-label directory keeps the two builds from
+  # clobbering each other without putting the label in the app's Finder name.
+  local app="$BUILD_ROOT/${label}/${APP_NAME}.app"
   make_app "$binary" "$app"
   notarize_app "$app"
 
   local dmg="$DIST/${APP_NAME}-${VERSION}-${label}.dmg"
   make_dmg "$app" "$dmg"
   notarize_dmg "$dmg"
+
+  # Updater payload: a .tar.gz whose single top-level entry is the .app. The
+  # in-app updater extracts it and swaps the bundle in place. Named without
+  # spaces so the appcast enclosure URL stays clean.
+  local tarball="$DIST/Orbit-Pi-${VERSION}-${label}.tar.gz"
+  local payload="$BUILD_ROOT/updater-${label}"
+  rm -rf "$payload"
+  mkdir -p "$payload"
+  cp -R "$app" "$payload/${APP_NAME}.app"
+  info "Creating updater archive: $tarball"
+  tar -C "$payload" -czf "$tarball" "${APP_NAME}.app"
 }
 
 # --- build the release binaries -------------------------------------------
@@ -170,6 +198,12 @@ fi
 
 # universal (arm64 + x86_64)
 if [[ "$TARGET" == "universal" || "$TARGET" == "both" ]]; then
+  # lipo needs an arm64 slice; build it unless the arm64 DMG already did.
+  if [[ ! -f "$ROOT/target/aarch64-apple-darwin/release/$EXEC_NAME" ]]; then
+    info "Building release (aarch64-apple-darwin)…"
+    cargo build --release -p orbit-pi --target aarch64-apple-darwin
+  fi
+
   info "Building release (x86_64-apple-darwin)…"
   cargo build --release -p orbit-pi --target x86_64-apple-darwin
 

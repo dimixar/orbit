@@ -34,6 +34,13 @@ const LIST_MAX_H: f32 = 4. * ROW_H;
 /// Recents the app hands us at most.
 pub const MAX_RECENTS: usize = 8;
 
+/// Pick callback: the chosen folder plus the ambient window.
+type WorkspacePick = Box<dyn Fn(PathBuf, &mut Window, &mut App)>;
+/// Browse callback: open the native folder dialog.
+type WorkspaceBrowse = Box<dyn Fn(&mut Window, &mut App)>;
+/// Dismiss callback; `bool` is true when an outside mouse-down closed it.
+type WorkspacePickerDismiss = Box<dyn Fn(bool, &mut Window, &mut App)>;
+
 /// Field/popover width for a given main-area width. The new-task field takes
 /// this as a definite `w()` (not `w_full().max_w(FIELD_MAX_W)`): percent
 /// widths nested under the centered max-width column resolve against the
@@ -66,10 +73,10 @@ pub struct WorkspacePicker {
     /// `0..rows.len()` — one past the last folder row is "Choose folder…".
     highlighted: usize,
     last_filter: String,
-    on_pick: Box<dyn Fn(PathBuf, &mut Window, &mut App)>,
-    on_browse: Box<dyn Fn(&mut Window, &mut App)>,
+    on_pick: WorkspacePick,
+    on_browse: WorkspaceBrowse,
     /// `bool` = dismissed by an outside mouse-down (vs. escape).
-    on_dismiss: Box<dyn Fn(bool, &mut Window, &mut App)>,
+    on_dismiss: WorkspacePickerDismiss,
 }
 
 impl WorkspacePicker {
@@ -77,9 +84,9 @@ impl WorkspacePicker {
         entries: Vec<WorkspaceEntry>,
         current: Option<PathBuf>,
         width: f32,
-        on_pick: Box<dyn Fn(PathBuf, &mut Window, &mut App)>,
-        on_browse: Box<dyn Fn(&mut Window, &mut App)>,
-        on_dismiss: Box<dyn Fn(bool, &mut Window, &mut App)>,
+        on_pick: WorkspacePick,
+        on_browse: WorkspaceBrowse,
+        on_dismiss: WorkspacePickerDismiss,
         cx: &mut Context<Self>,
     ) -> Self {
         let filter = cx.new(|cx| {

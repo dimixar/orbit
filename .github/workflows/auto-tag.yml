@@ -1,0 +1,59 @@
+name: Auto tag
+
+# When the app version lands on main with no tag of its own, create v<version>
+# and start the Release build. Editing crates/orbit-pi/Cargo.toml — or running
+# ./scripts/bump-version.sh — is then the only step needed to cut a release.
+#
+# Tags pushed with the workflow's GITHUB_TOKEN do not trigger other workflows,
+# so Release is dispatched explicitly on the new tag (workflow_dispatch is the
+# documented exception to that rule).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - crates/orbit-pi/Cargo.toml
+  # Allow tagging the current main version by hand.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: auto-tag
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    name: Tag version and start release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so `git rev-parse --verify refs/tags/...` sees every tag.
+          fetch-depth: 0
+
+      - name: Tag and dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/orbit-pi/Cargo.toml | head -1)"
+          if [ -z "$version" ]; then
+            echo "::error::no version found in crates/orbit-pi/Cargo.toml"
+            exit 1
+          fi
+          tag="v$version"
+
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "::notice::$tag already exists; nothing to tag"
+            exit 0
+          fi
+
+          git tag -a "$tag" -m "$tag" "$GITHUB_SHA"
+          git push origin "$tag"
+          echo "Created $tag at $GITHUB_SHA; starting the release build"
+
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$tag"

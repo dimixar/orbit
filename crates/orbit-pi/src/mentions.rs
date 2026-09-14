@@ -481,7 +481,7 @@ mod tests {
             AcEntry::File { path } => path.clone(),
         };
         assert_eq!(
-            entries.iter().map(|e| title(e)).collect::<Vec<_>>(),
+            entries.iter().map(title).collect::<Vec<_>>(),
             // All three basenames start with "main" — rank ties break by
             // catalog order. "README.md" (contains-match) is excluded.
             vec![

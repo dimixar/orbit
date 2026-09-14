@@ -258,14 +258,11 @@ impl OrbitApp {
         method: String,
         cx: &mut Context<Self>,
     ) {
-        match self.auth.support() {
-            AuthSupport::Unsupported => {
-                // pi has no auth RPC: hand the login to the Terminal the way
-                // the page has always done.
-                self.provider_oauth_login(provider, name, cx);
-                return;
-            }
-            _ => {}
+        if self.auth.support() == AuthSupport::Unsupported {
+            // pi has no auth RPC: hand the login to the Terminal the way
+            // the page has always done.
+            self.provider_oauth_login(provider, name, cx);
+            return;
         }
         let session_id = self.auth.start_login(&provider, &method);
         self.send(

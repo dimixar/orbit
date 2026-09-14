@@ -3963,7 +3963,7 @@ impl OrbitApp {
             .when(on, |t| t.bg(theme.accent).justify_end())
             .when(!on, |t| t.bg(theme.bg_raised).justify_start())
             .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-                this.update(cx, |app, cx| action(app, cx));
+                this.update(cx, action);
             })
             .child(div().size(px(14.)).rounded_full().bg(theme.text))
             .into_any_element()
@@ -4115,7 +4115,7 @@ impl OrbitApp {
         }
         button
             .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-                this.update(cx, |app, cx| action(app, cx));
+                this.update(cx, action);
             })
             .child(label.to_string())
             .into_any_element()
@@ -4688,6 +4688,7 @@ impl OrbitApp {
     }
 
     /// A Waku-style select: value chip + caret, dropdown below when open.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn select_control(
         &self,
         id: &'static str,
@@ -5104,6 +5105,19 @@ impl OrbitApp {
         cx: &mut Context<Self>,
     ) {
         self.open_settings(cx);
+    }
+
+    /// App-menu “About Orbit Pi”: the same surface Settings → About owns, so
+    /// there is one place that states the versions and upstream projects.
+    pub(super) fn on_open_about(
+        &mut self,
+        _: &crate::OpenAbout,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.refresh_updater(cx);
+        self.settings_open = true;
+        self.set_settings_section(SettingsSection::About, cx);
     }
 
     pub(super) fn on_settings_gear_click(

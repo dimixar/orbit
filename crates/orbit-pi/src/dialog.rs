@@ -31,6 +31,9 @@ const LIST_MAX_H: f32 = 320.;
 /// Footer hint row.
 const FOOTER_H: f32 = 32.;
 
+/// Response callback: the answer plus the ambient window.
+type DialogRespond = Box<dyn Fn(DialogResponse, &mut Window, &mut App)>;
+
 /// The answer the host sends back over RPC (`extension_ui_response`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialogResponse {
@@ -179,15 +182,11 @@ pub struct Dialog {
     scroll: ScrollHandle,
     /// Guards against answering twice (e.g. a click double-firing).
     responded: bool,
-    on_respond: Box<dyn Fn(DialogResponse, &mut Window, &mut App)>,
+    on_respond: DialogRespond,
 }
 
 impl Dialog {
-    pub fn new(
-        request: DialogRequest,
-        on_respond: Box<dyn Fn(DialogResponse, &mut Window, &mut App)>,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(request: DialogRequest, on_respond: DialogRespond, cx: &mut Context<Self>) -> Self {
         let input = match &request.kind {
             DialogKind::Input { placeholder } => Some(cx.new(|cx| {
                 ComposerInput::new(cx)

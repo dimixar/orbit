@@ -4380,6 +4380,7 @@ fn workspace_relative_path(path: &str, workspace: Option<&Path>) -> String {
 /// Waku `ChangedFilesCard`: raised tile, "Changed N files" with a ±delta
 /// underneath, a Review affordance, and roomy file rows with right-aligned
 /// line counts. Shows 3 rows; expanded shows up to 12 with a clip note.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_changed_files(
     files: &[(String, u64, u64)],
     theme: Theme,

@@ -1,5 +1,4 @@
 use super::helpers::*;
-use super::*;
 
 #[test]
 fn dev_file_icons_carry_glyph_and_parsed_color() {

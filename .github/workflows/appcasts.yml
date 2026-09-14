@@ -1,0 +1,91 @@
+name: Appcasts
+
+# Regenerate the signed appcasts after a release is published, and commit them
+# under appcasts/ on main. The app fetches them from
+# https://raw.githubusercontent.com/<owner>/<repo>/main/appcasts/appcast-*.xml
+# (see crates/orbit-pi/src/updater.rs).
+#
+# Runs on publish rather than on the draft, because a draft release's assets are
+# not downloadable yet — the enclosure URLs would 404.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to regenerate appcasts for
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: appcasts
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Sign and commit appcasts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          # A linear history keeps `git pull --rebase` below conflict-free.
+          fetch-depth: 0
+
+      - name: Resolve tag and version
+        id: release
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-$EVENT_TAG}"
+          if [ -z "$tag" ]; then
+            echo "::error::no release tag provided"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          gh release download "$TAG" --dir artifacts --repo "$GITHUB_REPOSITORY"
+          ls -lah artifacts
+
+      - name: Sign each artifact and write appcasts
+        env:
+          ORBIT_UPDATE_PRIVATE_KEY: ${{ secrets.ORBIT_UPDATE_PRIVATE_KEY }}
+        run: |
+          python3 scripts/appcast.py \
+            --version "${{ steps.release.outputs.version }}" \
+            --tag "${{ steps.release.outputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --assets artifacts \
+            --out appcasts
+
+      - name: Commit to main
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add appcasts
+          if git diff --cached --quiet; then
+            echo "appcasts unchanged"
+            exit 0
+          fi
+          git commit -m "chore(appcast): $TAG"
+          # main may have moved while this ran; rebase before pushing.
+          git pull --rebase --autostash origin main
+          git push origin main

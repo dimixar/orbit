@@ -286,10 +286,7 @@ impl AuthManager {
         // Merge into the status map so `auth.status` detail survives a list
         // refresh while the capability list itself is authoritative.
         for provider in &providers {
-            let status = self
-                .statuses
-                .entry(provider.id.clone())
-                .or_insert_with(ProviderStatus::default);
+            let status = self.statuses.entry(provider.id.clone()).or_default();
             status.authenticated = provider.authenticated;
             if !provider.credential.is_empty() {
                 status.credential = provider.credential.clone();

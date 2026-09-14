@@ -14,3 +14,11 @@ crates/**/target
 *.njsproj
 *.sln
 *.sw?
+
+# Signing secrets — never commit a private key
+# (see CONTRIBUTING.md → Releasing → In-app updates)
+orbit-update.pem
+*.pem
+*.key
+*.p12
+*.pfx

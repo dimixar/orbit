@@ -50,7 +50,8 @@ use std::time::Duration;
 use app::OrbitApp;
 use gpui::{
     actions, point, prelude::*, px, size, App, Application, AsyncWindowContext, Bounds, Entity,
-    Focusable, KeyBinding, SharedString, Timer, TitlebarOptions, WindowBounds, WindowOptions,
+    Focusable, KeyBinding, Menu, MenuItem, SharedString, SystemMenuType, Timer, TitlebarOptions,
+    WindowBounds, WindowOptions,
 };
 
 // Composer-scoped actions (bound in the `Composer` key context).
@@ -86,6 +87,7 @@ actions!(
         NewSession,
         RefreshSessions,
         OpenSettings,
+        OpenAbout,
         ToggleUsage,
         ToggleCommandPalette,
         ToggleModelMenu,
@@ -237,6 +239,60 @@ fn bind_keys(cx: &mut App) {
     ]);
 }
 
+/// The native macOS menu bar. GPUI dispatches these as ordinary actions
+/// (`cx.dispatch_action`), validated against the focused window, so each item
+/// is enabled only where its handler is live and shows the key equivalent
+/// bound in [`bind_keys`].
+///
+/// GPUI's menu API only exposes app/action menus and the system `Services`
+/// submenu — there is no selector for the standard Hide/Hide Others/Show All
+/// or Window items — so this is deliberately the smallest set that matches the
+/// real commands the app can perform.
+fn app_menus() -> Vec<Menu> {
+    vec![
+        Menu {
+            name: "Orbit".into(),
+            items: vec![
+                MenuItem::action("About Orbit Pi", OpenAbout),
+                MenuItem::action("Check for Updates…", CheckForUpdates),
+                MenuItem::separator(),
+                MenuItem::action("Settings…", OpenSettings),
+                MenuItem::separator(),
+                MenuItem::os_submenu("Services", SystemMenuType::Services),
+                MenuItem::separator(),
+                MenuItem::action("Quit Orbit Pi", Quit),
+            ],
+        },
+        Menu {
+            name: "File".into(),
+            items: vec![
+                MenuItem::action("New Task", NewSession),
+                MenuItem::action("Refresh Sessions", RefreshSessions),
+            ],
+        },
+        // Editing keys ride the `Composer` context, so these enable while a
+        // text field owns focus and grey out elsewhere.
+        Menu {
+            name: "Edit".into(),
+            items: vec![
+                MenuItem::action("Cut", Cut),
+                MenuItem::action("Copy", Copy),
+                MenuItem::action("Paste", Paste),
+                MenuItem::action("Select All", SelectAll),
+            ],
+        },
+        Menu {
+            name: "View".into(),
+            items: vec![
+                MenuItem::action("Command Palette…", ToggleCommandPalette),
+                MenuItem::action("Find in Transcript…", ToggleSearch),
+                MenuItem::separator(),
+                MenuItem::action("Usage", ToggleUsage),
+            ],
+        },
+    ]
+}
+
 fn main() {
     // A hidden re-exec of this binary performs the Unix install swap after
     // the app quits; it must run before any GPUI setup.
@@ -251,7 +307,13 @@ fn main() {
         application = application.with_http_client(client);
     }
     application.run(|cx: &mut App| {
+        // Rename the process before the menu bar is built so macOS labels the
+        // application menu "Orbit" instead of the executable (`orbit-pi`).
+        platform::set_process_name("Orbit");
         bind_keys(cx);
+        // Install the native menu bar after the keymap exists so each item
+        // picks up its key equivalent.
+        cx.set_menus(app_menus());
         theme::init(cx);
         // Arm the background updater before the app reads its global. Debug
         // builds, a keyless build, and a bare `cargo run` binary all leave it
@@ -296,7 +358,7 @@ fn main() {
                     ..Default::default()
                 },
                 |window, cx| {
-                    let app: Entity<OrbitApp> = cx.new(|cx| OrbitApp::new(cx));
+                    let app: Entity<OrbitApp> = cx.new(OrbitApp::new);
 
                     // Focus the composer so typing works immediately; track
                     // window focus so background notifications know whether

@@ -18,6 +18,11 @@ const ROW_GAP: f32 = 1.;
 const ROW_STRIDE: f32 = ROW_H + ROW_GAP;
 const LIST_MAX_H: f32 = 7. * ROW_STRIDE;
 
+/// Checkout/create callback: the chosen branch plus the ambient window.
+type BranchAction = Box<dyn Fn(String, &mut Window, &mut App)>;
+/// Dismiss callback; `bool` is true when an outside mouse-down closed it.
+type BranchPickerDismiss = Box<dyn Fn(bool, &mut Window, &mut App)>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Browse,
@@ -33,9 +38,9 @@ pub struct BranchPicker {
     list_scroll: ScrollHandle,
     highlighted: usize,
     last_filter: String,
-    on_checkout: Box<dyn Fn(String, &mut Window, &mut App)>,
-    on_create: Box<dyn Fn(String, &mut Window, &mut App)>,
-    on_dismiss: Box<dyn Fn(bool, &mut Window, &mut App)>,
+    on_checkout: BranchAction,
+    on_create: BranchAction,
+    on_dismiss: BranchPickerDismiss,
 }
 
 impl BranchPicker {
@@ -43,9 +48,9 @@ impl BranchPicker {
         workspace_label: String,
         branches: Vec<String>,
         current: String,
-        on_checkout: Box<dyn Fn(String, &mut Window, &mut App)>,
-        on_create: Box<dyn Fn(String, &mut Window, &mut App)>,
-        on_dismiss: Box<dyn Fn(bool, &mut Window, &mut App)>,
+        on_checkout: BranchAction,
+        on_create: BranchAction,
+        on_dismiss: BranchPickerDismiss,
         cx: &mut Context<Self>,
     ) -> Self {
         let filter = cx.new(|cx| {
