@@ -33,7 +33,7 @@ export function SiteNav() {
                 </a>
               ))}
               <a
-                href="https://github.com/rajeshwar-hyphun/orbit"
+                href="https://github.com/imrj05/orbit"
                 target="_blank"
                 rel="noreferrer"
                 className="text-ink no-underline transition-colors duration-[120ms] hover:text-ink-2"

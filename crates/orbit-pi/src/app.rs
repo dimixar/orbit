@@ -51,7 +51,7 @@ use crate::checkpoint;
 use crate::command_palette::{self, CommandPalette, PaletteCommand, PaletteSnapshot};
 use crate::composer::ComposerInput;
 use crate::context_meter::{self, ContextMeterData, ContextPopup};
-use crate::dialog::{Dialog, DialogRequest, DialogResponse};
+use crate::dialog::{ApprovalRequest, Dialog, DialogRequest, DialogResponse};
 use crate::git_panel::GitPanel;
 use crate::mentions::{self, AcEntry, SharedAutocomplete, SlashCommand, Trigger, TriggerKind};
 use crate::model_selector::{
@@ -260,6 +260,17 @@ pub struct OrbitApp {
     /// Focus the dialog (or its text field) on the next paint — `tick` has no
     /// window to focus with.
     dialog_focus_pending: bool,
+    /// The open inline access-guard approval, if any: a compact bar above the
+    /// composer rather than the modal above. pi holds the tool call until it
+    /// is answered.
+    approval: Option<ApprovalRequest>,
+    /// Highlighted button in the approval bar (arrow keys + hover move it).
+    approval_highlight: usize,
+    /// Focus handle that carries the `Approval` key context while the bar is
+    /// open (focus moves here so ↑/↓/Enter/Escape hit it).
+    approval_focus: FocusHandle,
+    /// Focus the approval bar on the next paint (`tick` has no window).
+    approval_focus_pending: bool,
     /// Full-window image lightbox for a transcript attachment image. `None`
     /// is closed. Opened by clicking an image tile, dismissed by click or
     /// Escape.
@@ -750,6 +761,10 @@ impl OrbitApp {
             command_palette: None,
             dialog: None,
             dialog_focus_pending: false,
+            approval: None,
+            approval_highlight: 0,
+            approval_focus: cx.focus_handle(),
+            approval_focus_pending: false,
             lightbox: None,
             transcript_search: None,
             session_menu: None,

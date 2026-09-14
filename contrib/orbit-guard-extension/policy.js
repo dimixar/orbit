@@ -9,18 +9,37 @@
  *   auto-accept-edits read/edit → allow · exec/other → ask
  *   full-access       allow everything (no prompts)
  *
- * `full-access` is the default, matching the app's historical behavior; the
- * mode is written by Orbit to `~/.orbit-pi/access.json` and read fresh on
- * every tool call, so changing it in the app re-arms live sessions without a
- * restart.
+ * A user who answers "Always allow this tool" is recorded in
+ * `~/.orbit-pi/access-allow.json` under the active mode, so the same tool in
+ * that mode no longer asks. The mode itself lives in `~/.orbit-pi/access.json`
+ * and is read fresh on every tool call, so changing it in the app re-arms live
+ * sessions without a restart.
  */
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 /** Fallback when the file is missing, unreadable, or names an unknown mode. */
 export const DEFAULT_MODE = "full-access";
 
 /** Every mode Orbit can write. Kept in sync with `crate::access::AccessMode`. */
 export const MODES = ["supervised", "auto-accept-edits", "full-access"];
+
+/**
+ * Marker Orbit's dialog router looks for: a `select` whose title carries it is
+ * rendered as the inline access-guard bar instead of the blocking modal. The
+ * title is `PREFIX + tool + "\t" + detail`. Kept in sync with
+ * `crate::dialog::GUARD_TITLE_PREFIX`.
+ */
+export const GUARD_TITLE_PREFIX = "[orbit-guard] ";
+
+/** Options offered for a confirmation-required call. */
+export const OPTION_ALLOW_ONCE = "Allow once";
+export const OPTION_ALWAYS_ALLOW = "Always allow this tool";
+export const OPTION_DENY = "Deny";
+
+/** The option list, in display order. */
+export const CONFIRM_OPTIONS = [OPTION_ALLOW_ONCE, OPTION_ALWAYS_ALLOW, OPTION_DENY];
 
 /** Tools that only observe: they never mutate the workspace. */
 const READ_TOOLS = new Set(["read", "grep", "find", "ls", "glob", "list", "webfetch"]);
@@ -52,12 +71,15 @@ export function classify(toolName) {
 }
 
 /**
- * The decision for one tool call under `mode`: `"allow"` or `"ask"`. There is
- * intentionally no `"block"` — the guard prompts rather than silently denying,
- * and a failed prompt is treated as a denial by the caller (fail-safe).
+ * The decision for one tool call under `mode`: `"allow"` or `"ask"`. A tool in
+ * the mode's allowlist is always allowed. There is intentionally no `"block"` —
+ * the guard prompts rather than silently denying, and a failed prompt is
+ * treated as a denial by the caller (fail-safe).
  */
-export function decide(mode, toolName) {
-  const kind = classify(toolName);
+export function decide(mode, toolName, allowlist = []) {
+  const name = String(toolName ?? "");
+  if (allowlist.includes(name)) return "allow";
+  const kind = classify(name);
   const resolved = normalizeMode(mode);
   if (resolved === "full-access") return "allow";
   // Reads are non-mutating, so every confined mode allows them.
@@ -68,8 +90,14 @@ export function decide(mode, toolName) {
 
 /** The path Orbit writes the active mode to. */
 export function modeFilePath() {
-  const home = process.env.HOME || process.env.USERPROFILE || ".";
-  return `${home}/.orbit-pi/access.json`;
+  const home = process.env.HOME || process.env.USERPROFILE || os.homedir() || ".";
+  return path.join(home, ".orbit-pi", "access.json");
+}
+
+/** The path the "always allow" decisions live in. */
+export function allowlistPath() {
+  const home = process.env.HOME || process.env.USERPROFILE || os.homedir() || ".";
+  return path.join(home, ".orbit-pi", "access-allow.json");
 }
 
 /**
@@ -86,9 +114,44 @@ export function readMode(filePath = modeFilePath()) {
   }
 }
 
-/** A short, single-line summary of a tool call for the confirmation body. */
+/** Tool names the user chose "Always allow" for under `mode`. */
+export function readAllowlist(mode, filePath = allowlistPath()) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    const list = parsed?.[normalizeMode(mode)];
+    return Array.isArray(list) ? list.filter((name) => typeof name === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Record `toolName` as always-allowed under `mode`. Best-effort. */
+export function addToAllowlist(mode, toolName, filePath = allowlistPath()) {
+  const resolved = normalizeMode(mode);
+  let all = {};
+  try {
+    all = JSON.parse(fs.readFileSync(filePath, "utf8")) ?? {};
+  } catch {
+    all = {};
+  }
+  const list = new Set(Array.isArray(all[resolved]) ? all[resolved] : []);
+  list.add(String(toolName));
+  all[resolved] = [...list];
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, JSON.stringify(all));
+  } catch {
+    // Best-effort: a failed write just means the prompt appears again.
+  }
+}
+
+/** Build the guard title Orbit recognizes: `PREFIX + tool + "\t" + detail`. */
+export function formatTitle(toolName, detail) {
+  return `${GUARD_TITLE_PREFIX}${toolName}\t${detail}`;
+}
+
+/** A short, single-line summary of a tool call's salient argument. */
 export function summarize(toolName, input) {
-  const name = String(toolName ?? "tool");
   const value = input ?? {};
   const first = (...keys) => {
     for (const key of keys) {
@@ -100,5 +163,5 @@ export function summarize(toolName, input) {
     first("command", "path", "file_path", "filename", "pattern", "url", "query") ??
     JSON.stringify(value);
   const text = String(detail ?? "").replace(/\s+/g, " ").trim();
-  return text.length > 200 ? `${name}: ${text.slice(0, 200)}…` : `${name}: ${text}`;
+  return text.length > 200 ? `${text.slice(0, 200)}…` : text;
 }

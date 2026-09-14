@@ -112,6 +112,59 @@ impl DialogRequest {
     }
 }
 
+/// Marker the access-guard extension puts at the start of a `select` title so
+/// Orbit routes it to the inline approval bar instead of the modal dialog.
+/// Kept in sync with `GUARD_TITLE_PREFIX` in the extension's `policy.js`.
+pub const GUARD_TITLE_PREFIX: &str = "[orbit-guard] ";
+
+/// An inline access-guard approval: the guard extension asks before a mutating
+/// tool call runs. Unlike [`DialogRequest`], this renders as a compact bar
+/// above the composer — no scrim, no window-sized modal — with one button per
+/// option (Allow once / Always allow this tool / Deny).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalRequest {
+    /// RPC request id — echoed in the response.
+    pub id: String,
+    /// The tool pi wants to run (`bash`, `edit`, …).
+    pub tool: String,
+    /// The salient argument (command, path, …), already trimmed to one line.
+    pub detail: String,
+    /// Buttons to offer, in order; the extension maps the chosen string back.
+    pub options: Vec<String>,
+}
+
+impl ApprovalRequest {
+    /// Build an approval from an `extension_ui_request`, or `None` when it is
+    /// not a guard request (wrong method, or no marker in the title).
+    pub fn from_event(id: String, method: &str, value: &serde_json::Value) -> Option<Self> {
+        if method != "select" {
+            return None;
+        }
+        let title = value.get("title").and_then(serde_json::Value::as_str)?;
+        let rest = title.strip_prefix(GUARD_TITLE_PREFIX)?;
+        // The title is `tool\tdetail`; a missing tab degrades to the whole
+        // remainder as the detail so a malformed request still renders.
+        let (tool, detail) = rest.split_once('\t').unwrap_or(("", rest));
+        let options = value
+            .get("options")
+            .and_then(serde_json::Value::as_array)
+            .map(|options| {
+                options
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(Self {
+            id,
+            tool: tool.to_string(),
+            detail: detail.to_string(),
+            options,
+        })
+    }
+}
+
 /// A blocking extension dialog, rendered as a modal card.
 pub struct Dialog {
     request: DialogRequest,
@@ -635,6 +688,44 @@ mod tests {
                 "{method} must not open a modal"
             );
         }
+    }
+
+    #[test]
+    fn guard_select_parses_tool_detail_and_options() {
+        let request = ApprovalRequest::from_event(
+            "id-1".into(),
+            "select",
+            &json!({
+                "title": "[orbit-guard] bash\trm -rf build",
+                "options": ["Allow once", "Always allow this tool", "Deny"],
+            }),
+        )
+        .unwrap();
+        assert_eq!(request.tool, "bash");
+        assert_eq!(request.detail, "rm -rf build");
+        assert_eq!(request.options.len(), 3);
+    }
+
+    #[test]
+    fn a_guard_title_without_a_tab_still_renders() {
+        let request = ApprovalRequest::from_event(
+            "id".into(),
+            "select",
+            &json!({"title": "[orbit-guard] edit", "options": ["Deny"]}),
+        )
+        .unwrap();
+        assert_eq!(request.tool, "");
+        assert_eq!(request.detail, "edit");
+    }
+
+    #[test]
+    fn plain_select_and_confirm_are_not_approvals() {
+        let plain =
+            ApprovalRequest::from_event("id".into(), "select", &json!({"title": "Pick", "options": []}));
+        assert!(plain.is_none(), "an unmarked select is a normal dialog");
+        let confirm =
+            ApprovalRequest::from_event("id".into(), "confirm", &json!({"title": "Sure?"}));
+        assert!(confirm.is_none(), "confirm is never an approval");
     }
 
     /// The select dialog lays out a bounded card with its option rows — the

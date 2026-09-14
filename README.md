@@ -14,7 +14,7 @@ Same product philosophy as [Waku](https://github.com/egoist/waku): the UI layer 
 - **Model catalog** — model selection from the pi runtime's own list (`get_available_models`), with favorites shared between the composer picker and a dedicated **Models** page
 - **Thinking effort** — level selection derived from each model's supported levels (`get_available_thinking_levels`)
 - **Tool activity** — bash, thinking, edit, and other tool rows rendered natively; tool rows expand into Arguments/Output detail cards with per-section copy
-- **Access modes** — a composer chip selects Supervised / Auto-accept edits / Full access; a bundled pi extension (`tool_call` guard) confirms mutating calls the mode does not auto-approve, rendered as a native dialog. It is a guard, not a sandbox (pi ships no sandbox)
+- **Access modes** — a composer chip selects Supervised / Auto-accept edits / Full access; a bundled pi extension (`tool_call` guard) asks before mutating calls the mode does not auto-approve, as an inline bar above the composer with **Allow once / Always allow this tool / Deny**. It is a guard, not a sandbox (pi ships no sandbox)
 - **Git diff panel** — review what the agent changed without leaving the app
 - **Side pane** — right-hand **Review** panel with a live `git diff HEAD` of the workspace, refreshed when a run settles; toggle from the top bar
 - **Workbench pages** — usage, skills, plugins, models, providers, and settings views backed by pi's on-disk data
@@ -49,7 +49,7 @@ The app spawns the `pi` CLI as a child process and speaks its RPC protocol: JSON
 The v0.1 web app (React 19 + Vite + Tauri 2 + pi SDK daemon) has been **removed**; the GPUI app is the only app. What works today:
 
 - **Working now** — real pi process integration (`crates/orbit-rpc`), sessions sidebar grouped by project, live streaming transcript over the RPC, composer with enter-to-send, steering, follow-up queueing, model/thinking cycling, transcript find, image lightbox, virtualized rendering, markdown, diff/Review, Git page, and the workbench pages (usage, skills, plugins, models, providers, settings)
-- **Access guard** — the Supervised / Auto-accept edits / Full access modes are enforced by a bundled pi extension that hooks `tool_call` and asks through `ctx.ui.confirm` (rendered natively). pi core has no per-tool permission surface and no sandbox, so this is a confirmation guard, not isolation; an "Auto" AI-reviewer mode is not shipped because the installed pi exposes no reviewer API for extensions
+- **Access guard** — the Supervised / Auto-accept edits / Full access modes are enforced by a bundled pi extension that hooks `tool_call` and asks through `ctx.ui.select` (rendered as an inline bar, not a modal). pi core has no per-tool permission surface and no sandbox, so this is a confirmation guard, not isolation; an "Auto" AI-reviewer mode is not shipped because the installed pi exposes no reviewer API for extensions
 - **Still open** — conversation fork/rewind (clone is available; rewinding to an earlier turn needs entry-id plumbing), and on-device scroll-perf measurement
 
 Feature work is tracked in `INTENT.md` (decisions + phase plan) and `AGENT.md` (conventions + protocol notes). Live behavior is covered by integration tests that spawn a real pi process (they skip cleanly when `pi` is not installed).
@@ -64,7 +64,11 @@ Feature work is tracked in `INTENT.md` (decisions + phase plan) and `AGENT.md` (
 
 ### Run
 
+Clone the repository and launch:
+
 ```bash
+git clone https://github.com/imrj05/orbit.git
+cd orbit
 cargo run -p orbit-pi
 ```
 
@@ -310,7 +314,7 @@ Orbit is growing toward a full workbench: a file tree, terminal, and conversatio
 
 Contributions are welcome! Please open an issue to discuss larger changes before submitting a pull request.
 
-1. Fork the repository
+1. Fork the [repository](https://github.com/imrj05/orbit)
 2. Create your branch (`git checkout -b feat/my-feature`)
 3. Commit your changes (`git commit -m 'feat: add my feature'`)
 4. Push to the branch (`git push origin feat/my-feature`)

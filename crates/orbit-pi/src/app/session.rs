@@ -356,6 +356,11 @@ impl OrbitApp {
             cx.notify();
             return;
         }
+        // A pending access-guard approval is answered first: escape denies it.
+        if self.approval.is_some() {
+            self.respond_to_approval(None, window, cx);
+            return;
+        }
         if self.autocomplete.borrow().open {
             self.autocomplete_dismissed = true;
             cx.notify();

@@ -18,7 +18,7 @@ export function Closer() {
             Download for macOS
           </ButtonLink>
           <ButtonLink
-            href="https://github.com/rajeshwar-hyphun/orbit"
+            href="https://github.com/imrj05/orbit"
             variant="secondary"
             external
           >

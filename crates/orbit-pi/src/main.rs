@@ -128,6 +128,13 @@ actions!(
     [AccessMenuNext, AccessMenuPrev, AccessMenuConfirm, AccessMenuClose]
 );
 
+// Inline access-guard approval actions (bound to the `Approval` context on the
+// approval bar above the composer).
+actions!(
+    approval_keys,
+    [ApprovalNext, ApprovalPrev, ApprovalConfirm, ApprovalClose]
+);
+
 // Extension-dialog actions (bound to the `DialogSelect` context on the option
 // card and `DialogInput` on its text field).
 actions!(
@@ -201,6 +208,13 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", AccessMenuConfirm, Some("AccessMenu")),
         KeyBinding::new("up", AccessMenuPrev, Some("AccessMenu")),
         KeyBinding::new("down", AccessMenuNext, Some("AccessMenu")),
+        // Inline approval bar keys. Registered after the composer bindings so
+        // Enter confirms the highlighted action instead of submitting, and
+        // Escape dismisses (denies) instead of aborting the run.
+        KeyBinding::new("escape", ApprovalClose, Some("Approval")),
+        KeyBinding::new("enter", ApprovalConfirm, Some("Approval")),
+        KeyBinding::new("up", ApprovalPrev, Some("Approval")),
+        KeyBinding::new("down", ApprovalNext, Some("Approval")),
         // Extension-dialog keys. `DialogSelect` rides the option card;
         // `DialogInput` rides the dialog's text field (which also carries
         // `Composer`, so caret/clipboard keys stay live). Registered after

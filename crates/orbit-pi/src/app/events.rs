@@ -234,6 +234,8 @@ impl OrbitApp {
                     // answered, so drop it without a reply.
                     self.dialog = None;
                     self.dialog_focus_pending = false;
+                    self.approval = None;
+                    self.approval_focus_pending = false;
                     self.runtime.alive = false;
                     self.runtime.exited = true;
                     self.auth.on_disconnect();

@@ -265,6 +265,11 @@ impl Render for OrbitApp {
                 window.focus(&dialog.read(cx).focus_handle(cx));
             }
         }
+        // The inline approval bar owns the keyboard the same way.
+        if self.approval_focus_pending {
+            self.approval_focus_pending = false;
+            window.focus(&self.approval_focus);
+        }
 
         div()
             .size_full()
@@ -558,6 +563,11 @@ impl Render for OrbitApp {
                             // aligns to the composer's edges.
                             .child(
                                 div()
+                                    // A stable element identity keeps the
+                                    // popovers and inline bars below from
+                                    // re-keying when a sibling appears, so
+                                    // their animations never restart mid-way.
+                                    .id("composer-column")
                                     .max_w(px(CONTENT_MAX_W))
                                     .w_full()
                                     .flex()
@@ -573,6 +583,9 @@ impl Render for OrbitApp {
                                     // persistent while active, never a
                                     // transient status line.
                                     .children(self.run_status_strip(cx))
+                                    // Access-guard approval — inline, above
+                                    // the queue and composer (no scrim modal).
+                                    .children(self.approval_bar(cx))
                                     // Queued follow-ups wait here (sticky above
                                     // the composer) until the task finishes.
                                     .children(self.queue_bar(cx))
@@ -580,6 +593,7 @@ impl Render for OrbitApp {
                                     // anchored above their own chips
                                     .child(
                                         div()
+                                            .id("composer-box")
                                             .w_full()
                                             .relative()
                                             .bg(theme.bg_composer)
@@ -741,6 +755,7 @@ impl OrbitApp {
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
         div()
+            .id("composer-row")
             .flex()
             .items_center()
             .gap_2()
@@ -757,7 +772,8 @@ impl OrbitApp {
     }
 
     /// The access-mode chip: a lock glyph, the active mode's label, and a
-    /// caret. Ghost style until hovered/open, matching the model chip.
+    /// caret that turns over when the picker opens. Ghost style until
+    /// hovered/open, matching the model chip.
     pub(super) fn access_chip(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = *theme::get(cx);
         div()
@@ -783,20 +799,54 @@ impl OrbitApp {
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_access_trigger_click))
                     .child(icon(self.access_mode.icon(), 12., theme.text_3))
                     .child(div().text_color(theme.text_2).child(self.access_mode.label()))
-                    .child(icon("icons/chevron-down.svg", 11., theme.text_3)),
+                    .child(self.access_caret(cx)),
             )
     }
 
-    /// The access-mode picker popup, while open. Three rows: icon, label, and
-    /// a one-line description; the active mode carries an accent check. The
-    /// popup owns the keyboard via the `AccessMenu` key context.
+    /// The chip's caret. It turns a half-turn when the picker opens — animated
+    /// on open (reduce-motion aware) so the turn reads as a transition, and
+    /// resting flat when closed so there is no reverse flicker.
+    fn access_caret(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = *theme::get(cx);
+        let open = self.access_menu_open;
+        let svg = gpui::svg()
+            .path("icons/chevron-down.svg")
+            .flex_none()
+            .size(px(11.))
+            .text_color(theme.text_3);
+        if !open {
+            return svg
+                .with_transformation(Transformation::rotate(radians(0.0)))
+                .into_any_element();
+        }
+        if theme::reduce_motion(cx) {
+            return svg
+                .with_transformation(Transformation::rotate(radians(std::f32::consts::PI)))
+                .into_any_element();
+        }
+        svg.with_animation(
+            "access-caret-turn",
+            Animation::new(Duration::from_millis(150)).with_easing(|d| 1.0 - (1.0 - d).powi(3)),
+            |svg, d| {
+                svg.with_transformation(Transformation::rotate(radians(
+                    std::f32::consts::PI * d,
+                )))
+            },
+        )
+        .into_any_element()
+    }
+
+    /// The access-mode picker popup, while open. Minimal rows: an icon tile,
+    /// the mode name over its one-line description, and an accent check on the
+    /// active mode. The popup owns the keyboard via the `AccessMenu` context
+    /// and eases in rather than popping.
     pub(super) fn access_popup(&self, cx: &Context<Self>) -> Option<AnyElement> {
         if !self.access_menu_open {
             return None;
         }
         let theme = *theme::get(cx);
         let this = cx.weak_entity();
-        let mut list = div().w_full().p(px(4.)).flex().flex_col().gap(px(2.));
+        let mut list = div().w_full().p(px(5.)).flex().flex_col().gap(px(2.));
         for (ix, mode) in AccessMode::ALL.iter().enumerate() {
             let mode = *mode;
             let highlighted = ix == self.access_menu_highlight;
@@ -807,14 +857,15 @@ impl OrbitApp {
                     .id(ElementId::NamedInteger("access-row".into(), ix as u64))
                     .w_full()
                     .px(px(8.))
-                    .py(px(7.))
-                    .rounded(px(6.))
+                    .py(px(8.))
+                    .rounded(px(8.))
                     .flex()
-                    .items_start()
+                    .items_center()
                     .gap(px(10.))
                     .cursor_pointer()
-                    .when(highlighted, |row| row.bg(theme.active))
-                    .hover(|style| style.bg(theme.overlay))
+                    .when(highlighted, |row| row.bg(theme.overlay_strong))
+                    .when(selected && !highlighted, |row| row.bg(theme.accent.opacity(0.1)))
+                    .hover(|style| style.bg(theme.overlay_strong))
                     .on_hover(move |hovered, _, cx| {
                         if *hovered {
                             this.update(cx, |app, cx| {
@@ -833,7 +884,25 @@ impl OrbitApp {
                                 .ok();
                         }
                     })
-                    .child(icon(mode.icon(), 14., theme.text_3))
+                    .child(
+                        div()
+                            .flex_none()
+                            .size(px(26.))
+                            .rounded(px(7.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(if selected {
+                                theme.accent.opacity(0.16)
+                            } else {
+                                theme.overlay
+                            })
+                            .child(icon(
+                                mode.icon(),
+                                14.,
+                                if selected { theme.accent } else { theme.text_3 },
+                            )),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -867,9 +936,9 @@ impl OrbitApp {
         }
 
         let popup = div()
-            .w(px(320.))
+            .w(px(300.))
             .font_family(theme::ui_font_family())
-            .rounded(px(10.))
+            .rounded(px(12.))
             .border_1()
             .border_color(theme.border_strong)
             .bg(theme.menu_bg)
@@ -889,6 +958,19 @@ impl OrbitApp {
                 app.close_access_menu(window, cx);
             }))
             .child(list);
+
+        let popup: AnyElement = if theme::reduce_motion(cx) {
+            popup.into_any_element()
+        } else {
+            popup
+                .with_animation(
+                    "access-menu-in",
+                    Animation::new(Duration::from_millis(130))
+                        .with_easing(|d| 1.0 - (1.0 - d).powi(3)),
+                    |el, d| el.opacity(d),
+                )
+                .into_any_element()
+        };
 
         Some(
             anchored()
@@ -2220,6 +2302,149 @@ impl OrbitApp {
             );
         }
         None
+    }
+
+    /// The inline access-guard approval: a compact bar directly above the
+    /// composer asking whether a mutating tool call may run. Rendered here
+    /// rather than as the scrim modal so the transcript stays visible and the
+    /// answer sits next to the composer. Each option is a button; the bar also
+    /// owns the `Approval` key context (↑/↓ move, ⏎ confirms, esc denies). It
+    /// reveals by animating its own height so the page never jumps.
+    pub(super) fn approval_bar(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        /// Fixed row height — a single-line prompt, so the reveal can animate
+        /// a known height and the surrounding layout can never reflow abruptly.
+        const BAR_H: f32 = 48.;
+        const GAP: f32 = 8.;
+
+        let request = self.approval.as_ref()?;
+        let theme = *theme::get(cx);
+        let heading = if request.tool.trim().is_empty() {
+            "Permission needed".to_string()
+        } else {
+            format!("Allow {}?", request.tool)
+        };
+        let detail = request.detail.clone();
+
+        let mut buttons = div().flex().items_center().gap(px(6.));
+        for (ix, option) in request.options.iter().enumerate() {
+            let highlighted = ix == self.approval_highlight;
+            let is_deny = option.eq_ignore_ascii_case("deny");
+            let is_primary = !is_deny && !option.to_ascii_lowercase().contains("always");
+            let mut button = div()
+                .id(ElementId::NamedInteger("approval-option".into(), ix as u64))
+                .h(px(28.))
+                .px(px(12.))
+                .rounded(px(7.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(theme.ui_px(11.5))
+                .font_weight(FontWeight::MEDIUM)
+                .cursor_pointer()
+                .border_1()
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| this.approval_choose(ix, window, cx)),
+                );
+            // Ember stays an accent, never a fill: the affirmative is an
+            // ember-washed tile with ember ink, matching the One Accent Rule.
+            button = if is_primary {
+                button
+                    .bg(theme.accent.opacity(0.16))
+                    .text_color(theme.accent)
+                    .hover(|s| s.bg(theme.accent.opacity(0.26)))
+            } else if is_deny {
+                button
+                    .bg(theme.overlay)
+                    .text_color(theme.text_2)
+                    .hover(|s| s.bg(theme.crit.opacity(0.14)).text_color(theme.crit))
+            } else {
+                button
+                    .bg(theme.overlay)
+                    .text_color(theme.text_2)
+                    .hover(|s| s.bg(theme.overlay_strong).text_color(theme.text))
+            };
+            // The keyboard cursor reads as a strong border.
+            button = button.border_color(if highlighted {
+                theme.border_strong
+            } else {
+                gpui::transparent_black()
+            });
+            buttons = buttons.child(button.child(option.clone()));
+        }
+
+        let bar = div()
+            .id("approval-bar")
+            .w_full()
+            .h(px(BAR_H))
+            .mb(px(GAP))
+            .px(px(12.))
+            .rounded(px(12.))
+            .border_1()
+            .border_color(theme.accent.opacity(0.3))
+            .bg(theme.bg_raised)
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .overflow_hidden()
+            .key_context("Approval")
+            .track_focus(&self.approval_focus)
+            .on_action(cx.listener(Self::on_approval_next))
+            .on_action(cx.listener(Self::on_approval_prev))
+            .on_action(cx.listener(Self::on_approval_confirm))
+            .on_action(cx.listener(Self::on_approval_close))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(28.))
+                    .rounded(px(8.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(theme.accent.opacity(0.16))
+                    .child(icon("icons/lock.svg", 14., theme.accent)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(heading),
+                    )
+                    .when(!detail.trim().is_empty(), |col| {
+                        col.child(
+                            div()
+                                .mt(px(1.))
+                                .font_family(theme::code_font_family())
+                                .truncate()
+                                .text_size(theme.ui_px(11.))
+                                .text_color(theme.text_3)
+                                .child(detail),
+                        )
+                    }),
+            )
+            .child(buttons);
+
+        // Reveal by easing the bar's own height (and its gap) from zero, so the
+        // prompt unfolds in place instead of the page snapping down a row.
+        let bar: AnyElement = if theme::reduce_motion(cx) {
+            bar.into_any_element()
+        } else {
+            bar.with_animation(
+                "approval-in",
+                Animation::new(Duration::from_millis(170))
+                    .with_easing(|d| 1.0 - (1.0 - d).powi(3)),
+                move |el, d| el.max_h(px(BAR_H * d)).mb(px(GAP * d)).opacity(d),
+            )
+            .into_any_element()
+        };
+        Some(bar)
     }
 
     /// The pending queue pi is holding, shown as a bar directly above the

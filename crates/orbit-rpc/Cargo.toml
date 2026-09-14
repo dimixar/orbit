@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Rust client for the pi CLI RPC protocol (pi --mode rpc)"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }

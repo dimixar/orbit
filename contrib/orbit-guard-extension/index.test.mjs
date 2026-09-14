@@ -2,11 +2,11 @@
 /**
  * Behaviour tests for the Orbit guard extension entry.
  *
- * Run: node --test contrib/orbit-guard-extension/
+ * Run: node --test contrib/orbit-guard-extension/index.test.mjs
  *
  * Drives the extension the way pi does — `activate(pi)`, then `tool_call`
  * events — with a fake `pi` and a fake `ctx.ui`, asserting exactly when a
- * tool call is confirmed, allowed, or blocked.
+ * tool call is prompted, allowed, or blocked.
  */
 
 import assert from "node:assert/strict";
@@ -16,24 +16,26 @@ import path from "node:path";
 import test, { beforeEach } from "node:test";
 
 import activate from "./index.js";
+import { OPTION_ALLOW_ONCE, OPTION_ALWAYS_ALLOW, OPTION_DENY } from "./policy.js";
 
 let home;
-let confirmCalls;
-let confirmResult;
+let selectCalls;
+let selectResult;
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), "orbit-guard-entry-"));
   fs.mkdirSync(path.join(home, ".orbit-pi"), { recursive: true });
-  confirmCalls = 0;
-  confirmResult = true;
+  selectCalls = 0;
+  selectResult = OPTION_ALLOW_ONCE;
   process.env.HOME = home;
 });
 
 function setMode(mode) {
-  fs.writeFileSync(
-    path.join(home, ".orbit-pi", "access.json"),
-    JSON.stringify({ mode }),
-  );
+  fs.writeFileSync(path.join(home, ".orbit-pi", "access.json"), JSON.stringify({ mode }));
+}
+
+function allowFile() {
+  return path.join(home, ".orbit-pi", "access-allow.json");
 }
 
 function fakePi() {
@@ -54,9 +56,11 @@ function fakeCtx({ hasUI = true } = {}) {
   return {
     hasUI,
     ui: {
-      confirm: async () => {
-        confirmCalls += 1;
-        return confirmResult;
+      select: async (title, options) => {
+        selectCalls += 1;
+        assert.equal(options.length, 3, "offers three options");
+        assert.ok(title.startsWith("[orbit-guard] "), "title carries the marker");
+        return selectResult;
       },
     },
   };
@@ -72,26 +76,26 @@ test("full-access never prompts", async () => {
     fakeCtx(),
   );
   assert.equal(result, undefined);
-  assert.equal(confirmCalls, 0);
+  assert.equal(selectCalls, 0);
 });
 
-test("supervised allows reads and confirms edits", async () => {
+test("supervised allows reads and prompts for edits", async () => {
   setMode("supervised");
   const pi = fakePi();
   activate(pi);
 
   const read = await pi.fire("tool_call", { toolName: "read", input: { path: "a" } }, fakeCtx());
   assert.equal(read, undefined, "reads pass through");
-  assert.equal(confirmCalls, 0);
+  assert.equal(selectCalls, 0);
 
   const edit = await pi.fire("tool_call", { toolName: "edit", input: { path: "a" } }, fakeCtx());
-  assert.equal(edit, undefined, "confirmed edit runs");
-  assert.equal(confirmCalls, 1);
+  assert.equal(edit, undefined, "allowed once runs");
+  assert.equal(selectCalls, 1);
 });
 
-test("a denied confirmation blocks the tool with a reason", async () => {
+test("a denied call blocks with a reason", async () => {
   setMode("supervised");
-  confirmResult = false;
+  selectResult = OPTION_DENY;
   const pi = fakePi();
   activate(pi);
   const result = await pi.fire(
@@ -103,6 +107,23 @@ test("a denied confirmation blocks the tool with a reason", async () => {
   assert.match(result.reason, /Denied/);
 });
 
+test("always allow records the tool and stops prompting for it", async () => {
+  setMode("supervised");
+  selectResult = OPTION_ALWAYS_ALLOW;
+  const pi = fakePi();
+  activate(pi);
+
+  await pi.fire("tool_call", { toolName: "bash", input: { command: "ls" } }, fakeCtx());
+  assert.equal(selectCalls, 1);
+  const written = JSON.parse(fs.readFileSync(allowFile(), "utf8"));
+  assert.deepEqual(written.supervised, ["bash"]);
+
+  // A second bash call in the same mode is allowed without a prompt.
+  const second = await pi.fire("tool_call", { toolName: "bash", input: { command: "pwd" } }, fakeCtx());
+  assert.equal(second, undefined);
+  assert.equal(selectCalls, 1, "no second prompt");
+});
+
 test("auto-accept-edits skips the prompt for edits but asks for exec", async () => {
   setMode("auto-accept-edits");
   const pi = fakePi();
@@ -110,10 +131,10 @@ test("auto-accept-edits skips the prompt for edits but asks for exec", async () 
 
   const edit = await pi.fire("tool_call", { toolName: "write", input: { path: "a" } }, fakeCtx());
   assert.equal(edit, undefined);
-  assert.equal(confirmCalls, 0, "edits are not confirmed");
+  assert.equal(selectCalls, 0, "edits are not confirmed");
 
   await pi.fire("tool_call", { toolName: "bash", input: { command: "ls" } }, fakeCtx());
-  assert.equal(confirmCalls, 1, "exec is confirmed");
+  assert.equal(selectCalls, 1, "exec is confirmed");
 });
 
 test("without a UI a confirmation-required call is blocked, not allowed", async () => {
@@ -126,23 +147,28 @@ test("without a UI a confirmation-required call is blocked, not allowed", async 
     fakeCtx({ hasUI: false }),
   );
   assert.equal(result.block, true);
-  assert.equal(confirmCalls, 0);
+  assert.equal(selectCalls, 0);
 });
 
-test("a throwing confirm fails closed", async () => {
+test("a dismissed or throwing prompt fails closed", async () => {
   setMode("supervised");
   const pi = fakePi();
   activate(pi);
-  const ctx = {
+
+  selectResult = undefined; // Esc / cancel
+  const dismissed = await pi.fire("tool_call", { toolName: "bash", input: { command: "ls" } }, fakeCtx());
+  assert.equal(dismissed.block, true);
+
+  const throwing = {
     hasUI: true,
     ui: {
-      confirm: async () => {
+      select: async () => {
         throw new Error("dialog cancelled");
       },
     },
   };
-  const result = await pi.fire("tool_call", { toolName: "bash", input: { command: "ls" } }, ctx);
-  assert.equal(result.block, true);
+  const threw = await pi.fire("tool_call", { toolName: "bash", input: { command: "ls" } }, throwing);
+  assert.equal(threw.block, true);
 });
 
 test("a missing mode file behaves as full-access", async () => {
@@ -150,22 +176,22 @@ test("a missing mode file behaves as full-access", async () => {
   activate(pi);
   const result = await pi.fire("tool_call", { toolName: "bash", input: { command: "ls" } }, fakeCtx());
   assert.equal(result, undefined);
-  assert.equal(confirmCalls, 0);
+  assert.equal(selectCalls, 0);
 });
 
-test("parallel confirms are serialized, never stacked", async () => {
+test("parallel prompts are serialized, never stacked", async () => {
   setMode("supervised");
   let active = 0;
   let maxActive = 0;
   const ctx = {
     hasUI: true,
     ui: {
-      confirm: async () => {
+      select: async () => {
         active += 1;
         maxActive = Math.max(maxActive, active);
         await new Promise((resolve) => setTimeout(resolve, 5));
         active -= 1;
-        return true;
+        return OPTION_ALLOW_ONCE;
       },
     },
   };
@@ -175,5 +201,5 @@ test("parallel confirms are serialized, never stacked", async () => {
     pi.fire("tool_call", { toolName: "bash", input: { command: "a" } }, ctx),
     pi.fire("tool_call", { toolName: "bash", input: { command: "b" } }, ctx),
   ]);
-  assert.equal(maxActive, 1, "only one confirm in flight at a time");
+  assert.equal(maxActive, 1, "only one prompt in flight at a time");
 });

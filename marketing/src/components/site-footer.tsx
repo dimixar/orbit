@@ -8,7 +8,7 @@ const links = [
   { label: "Get started", href: "#install", external: false },
   {
     label: "GitHub",
-    href: "https://github.com/rajeshwar-hyphun/orbit",
+    href: "https://github.com/imrj05/orbit",
     external: true,
   },
   {
