@@ -1,0 +1,149 @@
+name: Release
+
+# Build the universal macOS app, Developer-ID sign it, notarize + staple the
+# DMGs, then publish them as a GitHub Release.
+#
+# Trigger: push a version tag (e.g. `git tag v0.0.1 && git push origin v0.0.1`)
+# or run it by hand from the Actions tab (workflow_dispatch).
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   APPLE_CERTIFICATE_P12        base64 of your "Developer ID Application" .p12
+#   APPLE_CERTIFICATE_PASSWORD   password for that .p12
+#   KEYCHAIN_PASSWORD            any throwaway password for the temp keychain
+#   APPLE_ID                     Apple ID for notarytool
+#   APPLE_TEAM_ID                10-char Apple Team ID
+#   APPLE_APP_PASSWORD           app-specific password for that Apple ID
+#
+# Optional repository variable:
+#   SIGN_ID                      codesign identity; auto-detected from the
+#                                imported cert when unset.
+#
+# Without APPLE_CERTIFICATE_P12 the job still builds unsigned DMGs and skips
+# notarization (make-dmg.sh warns and continues), so the workflow is safe to
+# run before the secrets exist.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos-dmg:
+    name: build · sign · notarize DMGs
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      NOTARY_PROFILE: orbit-notary
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (arm64 + x86_64)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Import the Developer ID cert into a throwaway keychain. Skipped
+      # content-wise when the secret is empty (unsigned build still succeeds).
+      - name: Import Developer ID certificate
+        env:
+          CERT_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          SIGN_ID_OVERRIDE: ${{ vars.SIGN_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CERT_P12:-}" ]; then
+            echo "APPLE_CERTIFICATE_P12 not set — building unsigned DMGs."
+            echo "SIGNING=0" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          KEYCHAIN=build.keychain
+          printf '%s' "$CERT_P12" \
+            | python3 -c 'import sys,base64; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))' \
+            > /tmp/cert.p12
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" \
+            $(security list-keychains -d user | sed 's/[[:space:]]*"//g')
+          security import /tmp/cert.p12 -k "$KEYCHAIN" -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          rm -f /tmp/cert.p12
+
+          IDENTITY="${SIGN_ID_OVERRIDE:-$(security find-identity -v -p codesigning "$KEYCHAIN" \
+            | grep 'Developer ID Application' | head -1 | sed 's/.*"\(.*\)"/\1/')}"
+          echo "Signing identity: ${IDENTITY:-<none found>}"
+          echo "SIGN_ID=$IDENTITY" >> "$GITHUB_ENV"
+          echo "SIGNING=1" >> "$GITHUB_ENV"
+
+      - name: Store notarization credentials
+        if: env.SIGNING == '1'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          xcrun notarytool store-credentials "$NOTARY_PROFILE" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD"
+
+      - name: Build, sign, notarize, staple
+        run: |
+          set -euo pipefail
+          # Tag v0.0.1 → VERSION=0.0.1, so the DMG name matches the tag.
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            export VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          ./scripts/make-dmg.sh universal
+
+      - name: Verify notarization
+        if: env.SIGNING == '1'
+        run: |
+          set -euo pipefail
+          for dmg in dist/*.dmg; do
+            echo "::group::$dmg"
+            spctl -a -t open --context context:primary-signature -v "$dmg" || true
+            xcrun stapler validate "$dmg"
+            echo "::endgroup::"
+          done
+
+      - name: Checksums
+        run: shasum -a 256 dist/*.dmg | tee dist/SHA256SUMS.txt
+
+      - name: Upload DMGs as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Orbit-Pi-DMGs
+          path: |
+            dist/*.dmg
+            dist/SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/orbit-pi/Cargo.toml | head -1)"
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            TAG="v$VERSION"
+          fi
+          gh release create "$TAG" dist/*.dmg dist/SHA256SUMS.txt \
+            --title "Orbit Pi $VERSION" --generate-notes \
+            || gh release upload "$TAG" dist/*.dmg dist/SHA256SUMS.txt --clobber
+
+      - name: Clean up keychain
+        if: always()
+        run: security delete-keychain build.keychain 2>/dev/null || true
