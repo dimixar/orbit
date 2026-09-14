@@ -1,0 +1,1196 @@
+use super::helpers::*;
+use super::*;
+
+use gpui::point;
+
+use crate::shimmer::ShimmerText;
+
+/// Whether a workspace group is collapsed in the sidebar. The active
+/// workspace is expanded by default; all others are collapsed unless the
+/// user has toggled them.
+pub(crate) fn is_workspace_group_collapsed(
+    label: &str,
+    working_label: &str,
+    collapsed_workspaces: &HashSet<String>,
+    expanded_workspace_groups: &HashSet<String>,
+) -> bool {
+    if label == working_label {
+        collapsed_workspaces.contains(label)
+    } else {
+        !expanded_workspace_groups.contains(label)
+    }
+}
+
+/// Toggle a workspace group's open/closed state against the defaults above.
+pub(crate) fn toggle_workspace_group(
+    label: String,
+    working_label: &str,
+    collapsed_workspaces: &mut HashSet<String>,
+    expanded_workspace_groups: &mut HashSet<String>,
+) {
+    if label == working_label {
+        if !collapsed_workspaces.remove(&label) {
+            collapsed_workspaces.insert(label);
+        }
+    } else if !expanded_workspace_groups.remove(&label) {
+        expanded_workspace_groups.insert(label);
+    }
+}
+
+/// Sessions visible under one workspace group when it is not expanded.
+pub(crate) fn visible_sessions_in_group(
+    ixs: &[usize],
+    sessions: &[SessionInfo],
+    expanded: bool,
+    active_path: &Option<PathBuf>,
+) -> Vec<usize> {
+    if expanded || ixs.len() <= SIDEBAR_GROUP_SESSIONS_VISIBLE {
+        return ixs.to_vec();
+    }
+
+    let limit = SIDEBAR_GROUP_SESSIONS_VISIBLE;
+    let mut indices: Vec<usize> = ixs.iter().take(limit).copied().collect();
+    if let Some(active) = active_path {
+        if let Some(active_ix) = sessions.iter().position(|s| &s.path == active) {
+            if ixs.contains(&active_ix) && !indices.contains(&active_ix) {
+                indices.pop();
+                indices.push(active_ix);
+                indices.sort_by_key(|ix| ixs.iter().position(|&i| i == *ix).unwrap_or(usize::MAX));
+            }
+        }
+    }
+    indices
+}
+
+/// Sidebar session list: `sessions` (newest-first, from disk) plus a
+/// placeholder row for the open session when its file is not in the store
+/// yet — see [`OrbitApp::sidebar_sessions`]. The placeholder carries the
+/// workspace the pi process runs in, pi's live title when it has already
+/// named the session, and a `now` stamp so it sorts to the top of the
+/// sidebar. A session that hasn't started (`session_started` = false — no
+/// user message sent yet) gets no placeholder: a draft is not listed
+/// (Waku drafts parity).
+pub(crate) fn sessions_with_placeholder(
+    sessions: &[SessionInfo],
+    current_path: Option<&Path>,
+    current_title: Option<&str>,
+    current_workspace: Option<&Path>,
+    session_started: bool,
+) -> Vec<SessionInfo> {
+    let mut rows = sessions.to_vec();
+    let Some(path) = current_path else {
+        return rows;
+    };
+    if rows.iter().any(|s| s.path == path) {
+        return rows;
+    }
+    if !session_started {
+        return rows;
+    }
+    let workspace = current_workspace
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    rows.insert(
+        0,
+        SessionInfo {
+            path: path.to_path_buf(),
+            id: path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            cwd: workspace,
+            title: current_title
+                .filter(|title| !title.is_empty())
+                .unwrap_or("New Task")
+                .to_string(),
+            first_message: String::new(),
+            modified: SystemTime::now(),
+        },
+    );
+    rows
+}
+
+/// Build the grouped sidebar session list from Orbit's own project list. A
+/// workspace appears because the user added it, not because pi happens to
+/// have sessions there; sessions in unlisted folders are omitted entirely
+/// (they stay on disk). Each group shows at most
+/// [`SIDEBAR_GROUP_SESSIONS_VISIBLE`] sessions until expanded.
+pub(crate) fn build_sidebar_rows(
+    sessions: &[SessionInfo],
+    workspaces: &[PathBuf],
+    working_label: &str,
+    collapsed_workspaces: &HashSet<String>,
+    expanded_workspace_groups: &HashSet<String>,
+    expanded_session_groups: &HashSet<String>,
+    active_path: &Option<PathBuf>,
+) -> Vec<SideRow> {
+    let mut side_rows: Vec<SideRow> = Vec::new();
+    // One group per listed project, in the order the user added them — an
+    // empty project still gets a header (and its `+`) so a task can start
+    // there. Groups are keyed by label, so two paths with the same basename
+    // share one header (the first listed path wins).
+    let mut groups: Vec<(String, PathBuf, Vec<usize>)> = Vec::new();
+    for ws in workspaces {
+        let label = sessions::workspace_label(ws);
+        if groups.iter().any(|(l, _, _)| *l == label) {
+            continue;
+        }
+        groups.push((label, ws.clone(), Vec::new()));
+    }
+    // Attach each session to its project; a folder that is not listed simply
+    // finds no group and stays out of the sidebar.
+    for (ix, session) in sessions.iter().enumerate() {
+        let label = sessions::workspace_label(&session.cwd);
+        if let Some((_, _, ixs)) = groups.iter_mut().find(|(l, _, _)| *l == label) {
+            ixs.push(ix);
+        }
+    }
+    for (label, cwd, ixs) in groups {
+        let collapsed = is_workspace_group_collapsed(
+            &label,
+            working_label,
+            collapsed_workspaces,
+            expanded_workspace_groups,
+        );
+        side_rows.push(SideRow::Workspace {
+            label: label.clone(),
+            count: ixs.len(),
+            collapsed,
+            cwd,
+        });
+        if collapsed {
+            // A collapsed group hides its sessions — except the open one,
+            // which stays pinned under the header so the sidebar always
+            // shows where the live session lives.
+            if let Some(active) = active_path {
+                if let Some(&ix) = ixs.iter().find(|&&ix| sessions[ix].path == *active) {
+                    side_rows.push(SideRow::Session(ix));
+                }
+            }
+            continue;
+        }
+
+        let sessions_expanded = expanded_session_groups.contains(&label);
+        let visible = visible_sessions_in_group(&ixs, sessions, sessions_expanded, active_path);
+        for ix in &visible {
+            side_rows.push(SideRow::Session(*ix));
+        }
+
+        if sessions_expanded {
+            if ixs.len() > SIDEBAR_GROUP_SESSIONS_VISIBLE {
+                side_rows.push(SideRow::ShowLess { label });
+            }
+        } else if ixs.len() > SIDEBAR_GROUP_SESSIONS_VISIBLE {
+            let hidden_count = ixs.len().saturating_sub(visible.len());
+            if hidden_count > 0 {
+                side_rows.push(SideRow::ShowMore {
+                    label,
+                    count: hidden_count,
+                });
+            }
+        }
+    }
+    side_rows
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_side_row(
+    rows: &Rc<Vec<SideRow>>,
+    sessions_data: &Rc<Vec<SessionInfo>>,
+    active_path: Option<&Path>,
+    ix: usize,
+    this: &Entity<OrbitApp>,
+    agent_running: bool,
+    running_paths: &Rc<HashSet<PathBuf>>,
+    // Every session with a live (running or warm-idle) pi process. Guards
+    // delete, which would otherwise let an alive process recreate the file.
+    live_paths: &Rc<HashSet<PathBuf>>,
+    session_menu: Option<&SessionMenu>,
+    workspace_menu: Option<&WorkspaceMenu>,
+    theme: Theme,
+) -> impl IntoElement {
+    match &rows[ix] {
+        SideRow::Workspace {
+            label,
+            count,
+            collapsed,
+            cwd,
+        } => {
+            let label = label.clone();
+            let label_for_click = label.clone();
+            let cwd_for_new = cwd.clone();
+            let this_toggle = this.clone();
+            let this_new = this.clone();
+            let this_menu = this.clone();
+            let menu_open = workspace_menu.is_some_and(|m| m.label == label);
+            // Outer shell: inter-group spacing only — hover lives on the inner
+            // card so the highlight doesn't bleed into the padding (same split
+            // as session rows below). The header is a minimal label row:
+            // chevron + folder + name, the session count pinned to the very
+            // end, and the row actions (a `…` menu, then the new-session `+`)
+            // fading in to the count's left on hover (all flex_none, so
+            // nothing shifts when they appear).
+            div()
+                .w_full()
+                .px_2()
+                .pt(px(12.))
+                .pb(px(2.))
+                .group("workspace-row")
+                .child(
+                    div()
+                        .w_full()
+                        .h(px(24.))
+                        .px(px(6.))
+                        .rounded_md()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.bg_hover))
+                        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                            let label = label_for_click.clone();
+                            this_toggle.update(cx, |app, cx| {
+                                let working = app.workspace_label();
+                                toggle_workspace_group(
+                                    label,
+                                    &working,
+                                    &mut app.collapsed_workspaces,
+                                    &mut app.expanded_workspace_groups,
+                                );
+                                cx.notify();
+                            });
+                        })
+                        .child(icon(
+                            if *collapsed {
+                                "icons/chevron-right.svg"
+                            } else {
+                                "icons/chevron-down.svg"
+                            },
+                            10.,
+                            theme.text_3,
+                        ))
+                        .child(icon("icons/folder.svg", 13., theme.text_2))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(theme.ui_px(11.5))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.text_2)
+                                .child(label.clone()),
+                        )
+                        // Row actions, revealed on hover: a `…` menu
+                        // (remove / copy path) beside the direct new-task `+`.
+                        .child(workspace_menu_button(
+                            label.clone(),
+                            cwd.clone(),
+                            menu_open,
+                            this_menu.clone(),
+                            theme,
+                        ))
+                        .child(
+                            div()
+                                .id(ElementId::Name(format!("workspace-new-{label}").into()))
+                                .flex_none()
+                                .size(px(18.))
+                                .rounded(px(4.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                // Revealed on row hover — the quiet default
+                                // keeps group headers to just label + count.
+                                .opacity(0.)
+                                .group_hover("workspace-row", |s| s.opacity(1.))
+                                .hover(|s| s.bg(theme.overlay))
+                                .on_mouse_up(MouseButton::Left, {
+                                    let this = this_new.clone();
+                                    move |_, window, cx| {
+                                        cx.stop_propagation();
+                                        let cwd = cwd_for_new.clone();
+                                        this.update(cx, |app, cx| {
+                                            app.on_new_session_in_workspace(cwd, window, cx);
+                                        });
+                                    }
+                                })
+                                .child(icon("icons/plus.svg", 13., theme.text_3)),
+                        )
+                        // Session count, pinned to the header's right edge.
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(theme.ui_px(10.5))
+                                .text_color(theme.text_3)
+                                .child(format!("{count}")),
+                        ),
+                )
+                .into_any_element()
+        }
+        SideRow::ShowMore { label, count } => {
+            let this = this.clone();
+            let label_for_click = label.clone();
+            div()
+                .w_full()
+                .h(px(26.))
+                .pl(px(22.))
+                .pr_2()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.bg_hover))
+                .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                    let label = label_for_click.clone();
+                    this.update(cx, |app, cx| {
+                        app.expanded_session_groups.insert(label);
+                        cx.notify();
+                    });
+                })
+                .child(
+                    div()
+                        .text_size(theme.ui_px(11.5))
+                        .text_color(theme.text_3)
+                        .child(format!("Show {count} more")),
+                )
+                .into_any_element()
+        }
+        SideRow::ShowLess { label } => {
+            let this = this.clone();
+            let label_for_click = label.clone();
+            div()
+                .w_full()
+                .h(px(26.))
+                .pl(px(22.))
+                .pr_2()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.bg_hover))
+                .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                    let label = label_for_click.clone();
+                    this.update(cx, |app, cx| {
+                        app.expanded_session_groups.remove(&label);
+                        cx.notify();
+                    });
+                })
+                .child(
+                    div()
+                        .text_size(theme.ui_px(11.5))
+                        .text_color(theme.text_3)
+                        .child("Show less"),
+                )
+                .into_any_element()
+        }
+        SideRow::Session(ix) => {
+            let session = sessions_data[*ix].clone();
+            let session_for_click = session.clone();
+            let active = active_path == Some(session.path.as_path());
+            // The open session runs live; parked (background) sessions run
+            // in their own pi processes — both get the loader (Waku).
+            let running = (active && agent_running) || running_paths.contains(&session.path);
+            let this = this.clone();
+            let this_for_row = this.clone();
+            let this_for_menu = this.clone();
+            let menu = session_menu.filter(|m| m.path == session.path);
+            // Sessions with a live pi process (running or warm) must not be
+            // deleted — the process would recreate the file mid-run.
+            let deletable = !active && !running && !live_paths.contains(&session.path);
+            // Running sessions lead with a small spinner and a shimmering
+            // title (shadcn's Marker + `shimmer`); row actions stay available
+            // on hover.
+            let title = session_title(*ix, session.title.clone().into(), theme, active, running);
+            // Two-line row (title + actions, then preview · age),
+            // indented under its workspace group so the list reads as a
+            // tree. The open session gets a raised fill and an accent bar
+            // in the indent gutter; row actions are revealed on hover.
+            // Outer item carries the inter-row spacing (padding) and the click
+            // handler; the inner card holds the background/hover so the gap
+            // between cards stays clear. Padding (not margin) is used because
+            // the list measures each item's border-box — margins are dropped.
+            let mut row = div()
+                .id(ElementId::NamedInteger("side-session".into(), *ix as u64))
+                .w_full()
+                .py(px(1.))
+                .cursor_pointer()
+                .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                    let session = session_for_click.clone();
+                    this_for_row.update(cx, |app, cx| {
+                        app.on_open_session(session, cx);
+                    });
+                });
+            let mut card = div()
+                .group("srow")
+                .relative()
+                .w_full()
+                .pl(px(22.))
+                .pr(px(8.))
+                .py(theme.space(5.))
+                .rounded_md()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .when(active, |card| card.bg(theme.bg_raised))
+                .when(!active, |card| card.hover(|s| s.bg(theme.bg_hover)));
+            // Active marker: a short accent bar in the indent gutter.
+            if active {
+                card = card.child(
+                    div()
+                        .absolute()
+                        .left(px(8.))
+                        .top(px(8.))
+                        .bottom(px(8.))
+                        .w(px(2.))
+                        .rounded_full()
+                        .bg(theme.accent),
+                );
+            }
+            // Two-line text column: title + actions on top, then the
+            // preview with the age pinned to its right end.
+            card = card.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .justify_center()
+                    .gap(px(2.))
+                    // Line 1 — title with the row actions pinned to its
+                    // right: a small running spinner leads, the hover-revealed
+                    // `…` menu trails. Wrapped in a flex row so the
+                    // `flex_1 min_w_0` title takes the full column width and
+                    // paints the name — instead of collapsing to "…" as a bare
+                    // flex-column child.
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .when(running, |line| line.child(running_loader(theme, *ix)))
+                            .child(title)
+                            .child(session_menu_button(
+                                *ix,
+                                menu,
+                                session.path.clone(),
+                                session.title.clone(),
+                                deletable,
+                                this_for_menu,
+                                theme,
+                            )),
+                    )
+                    // Line 2 — first-message preview with the age at the very
+                    // end (accent at low opacity, so the timestamp reads as
+                    // metadata, not content).
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(theme.ui_px(11.))
+                                    .line_height(px(14.))
+                                    .text_color(theme.text_3)
+                                    .child(session.first_message.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(theme.ui_px(10.5))
+                                    .text_color(theme.accent.opacity(0.75))
+                                    .child(sessions::relative_time(session.modified)),
+                            ),
+                    ),
+            );
+            row = row.child(card);
+            row.into_any_element()
+        }
+    }
+}
+
+/// The hover-revealed '…' button on a quiet session row. Clicking it opens
+/// the row's actions popup; propagation stops so the row's open handler
+/// doesn't also fire.
+pub(crate) fn session_menu_button(
+    ix: usize,
+    menu: Option<&SessionMenu>,
+    path: PathBuf,
+    title: String,
+    deletable: bool,
+    this: Entity<OrbitApp>,
+    theme: Theme,
+) -> impl IntoElement + use<> {
+    let menu_open = menu.is_some();
+    let this_for_popup = this.clone();
+    div()
+        .id(ElementId::NamedInteger("side-more".into(), ix as u64))
+        .relative()
+        .flex_none()
+        .size(px(18.))
+        .rounded(px(4.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        // Hidden until the row (or the button itself) is hovered, or while
+        // this row's menu is open. Icon-only, no background — a filled hover
+        // square reads as a patch covering the row's right edge.
+        .opacity(if menu_open { 1.0 } else { 0.0 })
+        .group_hover("srow", |s| s.opacity(1.))
+        .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+            // Keep the click from also opening the session via the row.
+            cx.stop_propagation();
+            let (path, title, deletable) = (path.clone(), title.clone(), deletable);
+            this.update(cx, |app, cx| {
+                app.toggle_session_menu(
+                    SessionMenu {
+                        path,
+                        title,
+                        deletable,
+                        confirm_delete: false,
+                    },
+                    window,
+                    cx,
+                );
+            });
+        })
+        .child(icon("icons/more.svg", 14., theme.text_3))
+        // The dropdown hangs off a zero-size anchor pinned to the button's
+        // top-left corner. The button centers its icon (`items_center` +
+        // `justify_center`), and Taffy lays absolutely-positioned children out
+        // with the container's alignment — without the pin, the popup's
+        // static position is pulled toward the button's center and it opens
+        // up-left of the trigger instead of just below it.
+        .children(menu.map(|menu| {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size(px(0.))
+                .child(session_menu_popup(menu, this_for_popup.clone(), theme))
+        }))
+}
+
+/// A small spinner at the start of a running session row — the shadcn
+/// Marker + Spinner pattern. `with_animation` rotates it; no app tick.
+fn running_loader(theme: Theme, id: usize) -> impl IntoElement + use<> {
+    gpui::svg()
+        .path("icons/loader.svg")
+        .flex_none()
+        .size(px(11.))
+        .text_color(theme.accent)
+        .with_animation(
+            ElementId::NamedInteger("side-spin".into(), id as u64),
+            Animation::new(Duration::from_millis(900)).repeat(),
+            |svg, delta| {
+                svg.with_transformation(Transformation::rotate(radians(
+                    delta * std::f32::consts::TAU,
+                )))
+            },
+        )
+}
+
+/// A session row's title. Quiet rows render as one truncated line; a running
+/// row paints the shadcn `shimmer` — a highlight band sweeping across the
+/// glyphs — driven by `with_animation` (self-repainting, no app tick).
+fn session_title(
+    id: usize,
+    title: SharedString,
+    theme: Theme,
+    active: bool,
+    running: bool,
+) -> AnyElement {
+    let color = if active { theme.text } else { theme.text_2 };
+    let weight = if active {
+        FontWeight::MEDIUM
+    } else {
+        FontWeight::NORMAL
+    };
+    let size = theme.ui_px(13.);
+    let line_height = px(18.);
+    if !running {
+        return div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_size(size)
+            .line_height(line_height)
+            .font_weight(weight)
+            .text_color(color)
+            .child(title)
+            .into_any_element();
+    }
+    // Reduce-motion: keep the running signal (accent title) without the
+    // perpetual sweep.
+    if theme.ui.reduce_motion {
+        return div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_size(size)
+            .line_height(line_height)
+            .font_weight(weight)
+            .text_color(theme.accent)
+            .child(title)
+            .into_any_element();
+    }
+    // The sweep catches the accent: ink at the edges, ember through the band
+    // (shadcn's highlight, spent on the one hue the system rations).
+    let highlight = theme.accent;
+    div()
+        .flex_1()
+        .min_w_0()
+        .text_size(size)
+        .line_height(line_height)
+        .font_weight(weight)
+        .child(ShimmerText::new(title, color, highlight).with_animation(
+            ElementId::NamedInteger("side-shimmer".into(), id as u64),
+            Animation::new(Duration::from_millis(2000)).repeat(),
+            |mut text, delta| {
+                text.phase = delta;
+                text
+            },
+        ))
+        .into_any_element()
+}
+
+// ── sidebar row-actions popup ──────────────────────────────────────────
+
+/// The actions popup anchored to a session row: Copy path / Reveal in
+/// Finder / Delete, or the delete confirmation once armed. Painted via
+/// `deferred` + `anchored` (same convention as the composer pickers),
+/// dismissed by any outside mouse-down.
+pub(crate) fn session_menu_popup(
+    menu: &SessionMenu,
+    this: Entity<OrbitApp>,
+    theme: Theme,
+) -> AnyElement {
+    let deletable = menu.deletable;
+    let confirm = menu.confirm_delete;
+
+    let body: AnyElement = if confirm {
+        // Delete confirmation — the destructive step gets a named victim.
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child("Delete this session?"),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text_2)
+                            .child("Removes the session file from disk."),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .id("menu-cancel")
+                            .h(px(24.))
+                            .px(px(10.))
+                            .flex()
+                            .items_center()
+                            .rounded(px(6.))
+                            .bg(theme.bg_raised)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.bg_hover))
+                            .text_size(theme.ui_px(11.5))
+                            .text_color(theme.text_2)
+                            .on_mouse_down(MouseButton::Left, {
+                                let this = this.clone();
+                                move |_, _, cx| {
+                                    cx.stop_propagation();
+                                    this.update(cx, |app, cx| app.on_menu_cancel(cx));
+                                }
+                            })
+                            .child("Cancel"),
+                    )
+                    .child(
+                        div()
+                            .id("menu-confirm-delete")
+                            .h(px(24.))
+                            .px(px(10.))
+                            .flex()
+                            .items_center()
+                            .rounded(px(6.))
+                            .bg(theme.stop_red)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.stop_red_hover))
+                            .text_size(theme.ui_px(11.5))
+                            .text_color(theme.send_fg)
+                            .on_mouse_down(MouseButton::Left, {
+                                let this = this.clone();
+                                move |_, _, cx| {
+                                    cx.stop_propagation();
+                                    this.update(cx, |app, cx| app.on_menu_delete_confirm(cx));
+                                }
+                            })
+                            .child("Delete"),
+                    ),
+            )
+            .into_any_element()
+    } else {
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(menu_item(
+                "menu-copy-path",
+                "icons/copy.svg",
+                "Copy path",
+                theme,
+                this.clone(),
+                false,
+                |app, cx| app.on_menu_copy_path(cx),
+            ))
+            .child(menu_item(
+                "menu-reveal",
+                "icons/folder.svg",
+                "Reveal in Finder",
+                theme,
+                this.clone(),
+                false,
+                |app, cx| app.on_menu_reveal(cx),
+            ))
+            .when(deletable, |menu| {
+                menu.child(div().h(px(1.)).w_full().bg(theme.border).my(px(4.)))
+                    .child(menu_item(
+                        "menu-delete",
+                        "icons/trash.svg",
+                        "Delete session…",
+                        theme,
+                        this.clone(),
+                        true,
+                        |app, cx| app.on_menu_delete_request(cx),
+                    ))
+            })
+            .into_any_element()
+    };
+
+    let popup = div()
+        .w(px(190.))
+        .p(px(4.))
+        .when(confirm, |pop| pop.w(px(210.)).p(px(10.)))
+        .rounded(px(10.))
+        .border_1()
+        .border_color(theme.border_strong)
+        .bg(theme.menu_bg)
+        .shadow(theme.popover_shadow())
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .occlude()
+        // Any mouse-down outside dismisses; clicks inside are stopped by
+        // the item handlers, so they never read as "outside".
+        .on_mouse_down_out({
+            let this = this.clone();
+            move |_, _, cx| {
+                this.update(cx, |app, cx| {
+                    // Arm the gesture guard so this same click's mouse-up
+                    // cannot immediately re-open the menu.
+                    app.menu_dismissed_at = Some(Instant::now());
+                    app.session_menu = None;
+                    cx.notify();
+                })
+            }
+        })
+        .child(body);
+
+    // Float the popup: `anchored` takes it out of the layout (no other row
+    // moves) and pins its top-left corner just below the '…' button (the
+    // button is 18px, so +20px drops the top edge 2px under it, left-aligned
+    // to the trigger — the standard app dropdown position). The wrapping
+    // zero-size anchor in `session_menu_button` guarantees the static origin
+    // is the button's top-left regardless of the button's own centering.
+    // `deferred` paints it above the rest of the list — same convention as
+    // the composer chip pickers. `snap_to_window` keeps it inside the window
+    // near the edges.
+    anchored()
+        .position_mode(AnchoredPositionMode::Local)
+        .anchor(Corner::TopLeft)
+        .offset(point(px(0.), px(20.)))
+        .snap_to_window()
+        .child(deferred(popup))
+        .into_any_element()
+}
+
+/// The hover-revealed '…' button on a workspace group header. Clicking it
+/// opens the header's actions popup; propagation stops so the header's
+/// collapse toggle doesn't also fire.
+pub(crate) fn workspace_menu_button(
+    label: String,
+    cwd: PathBuf,
+    menu_open: bool,
+    this: Entity<OrbitApp>,
+    theme: Theme,
+) -> impl IntoElement + use<> {
+    let this_for_popup = this.clone();
+    let label_for_click = label.clone();
+    let cwd_for_click = cwd.clone();
+    div()
+        .id(ElementId::Name(format!("workspace-more-{label}").into()))
+        .relative()
+        .flex_none()
+        .size(px(18.))
+        .rounded(px(4.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        // Revealed on row hover, or while this header's menu is open.
+        .opacity(if menu_open { 1.0 } else { 0.0 })
+        .group_hover("workspace-row", |s| s.opacity(1.))
+        .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            let menu = WorkspaceMenu {
+                label: label_for_click.clone(),
+                cwd: cwd_for_click.clone(),
+            };
+            this.update(cx, |app, cx| app.toggle_workspace_menu(menu, window, cx));
+        })
+        .child(icon("icons/more.svg", 14., theme.text_3))
+        .children(menu_open.then(|| {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size(px(0.))
+                .child(workspace_menu_popup(this_for_popup.clone(), theme))
+        }))
+}
+
+/// The actions popup anchored to a workspace header: Copy path / Remove
+/// from sidebar. Painted with the same deferred + anchored convention as
+/// the session row menu, dismissed by any outside mouse-down.
+pub(crate) fn workspace_menu_popup(this: Entity<OrbitApp>, theme: Theme) -> AnyElement {
+    let popup = div()
+        .w(px(200.))
+        .p(px(4.))
+        .rounded(px(10.))
+        .border_1()
+        .border_color(theme.border_strong)
+        .bg(theme.menu_bg)
+        .shadow(theme.popover_shadow())
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .occlude()
+        .on_mouse_down_out({
+            let this = this.clone();
+            move |_, _, cx| {
+                this.update(cx, |app, cx| {
+                    // Arm the gesture guard so this same click's mouse-up
+                    // cannot immediately re-open the menu.
+                    app.menu_dismissed_at = Some(Instant::now());
+                    app.workspace_menu = None;
+                    cx.notify();
+                })
+            }
+        })
+        .child(menu_item(
+            "wm-copy-path",
+            "icons/copy.svg",
+            "Copy path",
+            theme,
+            this.clone(),
+            false,
+            |app, cx| app.on_workspace_copy_path(cx),
+        ))
+        .child(div().h(px(1.)).w_full().bg(theme.border).my(px(4.)))
+        .child(menu_item(
+            "wm-remove",
+            "icons/minus.svg",
+            "Remove from sidebar",
+            theme,
+            this.clone(),
+            false,
+            |app, cx| app.on_workspace_remove(cx),
+        ));
+
+    anchored()
+        .position_mode(AnchoredPositionMode::Local)
+        .anchor(Corner::TopLeft)
+        .offset(point(px(0.), px(20.)))
+        .snap_to_window()
+        .child(deferred(popup))
+        .into_any_element()
+}
+
+pub(crate) fn menu_item<C: Fn(&mut OrbitApp, &mut Context<OrbitApp>) + 'static>(
+    id: &'static str,
+    icon_path: &'static str,
+    label: &'static str,
+    theme: Theme,
+    this: Entity<OrbitApp>,
+    danger: bool,
+    on_click: C,
+) -> impl IntoElement + use<C> {
+    let on_click = on_click;
+    let (hover_bg, text_color, icon_color) = if danger {
+        (theme.stop_red_hover, theme.send_fg, theme.send_fg)
+    } else {
+        (theme.bg_hover, theme.text_2, theme.text_3)
+    };
+    div()
+        .id(id)
+        .h(px(30.))
+        .px(px(8.))
+        .rounded(px(6.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .cursor_pointer()
+        .when(danger, |s| s.bg(theme.stop_red))
+        .hover(move |s| s.bg(hover_bg))
+        .text_size(theme.ui_px(12.5))
+        .text_color(text_color)
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            cx.stop_propagation();
+            this.update(cx, |app, cx| (on_click)(app, cx));
+        })
+        .child(icon(icon_path, 13., icon_color))
+        .child(label.to_string())
+}
+
+/// Reveal a session file in the OS file manager (macOS first, matching the
+/// product's platform stance; other platforms get the containing folder).
+pub(crate) fn reveal_in_file_manager(path: PathBuf) {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn();
+    #[cfg(not(target_os = "macos"))]
+    if let Some(dir) = path.parent() {
+        #[cfg(target_os = "linux")]
+        let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+        #[cfg(target_os = "windows")]
+        let _ = std::process::Command::new("explorer").arg(dir).spawn();
+        let _ = dir;
+    }
+}
+
+/// Empty-state panel for a fresh pi store: what this space is for and how
+/// to fill it. No cards, no illustration — one calm statement.
+pub(crate) fn empty_sessions_state(theme: Theme) -> impl IntoElement + use<> {
+    div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(6.))
+        .px(px(20.))
+        .pb(px(40.))
+        .child(
+            div()
+                .size(px(36.))
+                .rounded_full()
+                .bg(theme.bg_raised)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon("icons/spark.svg", 16., theme.accent)),
+        )
+        .child(
+            div()
+                .text_size(theme.ui_px(12.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text_2)
+                .child("No projects yet"),
+        )
+        .child(
+            div()
+                .text_size(theme.ui_px(11.5))
+                .text_color(theme.text_3)
+                .text_align(TextAlign::Center)
+                .child("Pick a folder to start your first task."),
+        )
+}
+
+// ── controller ────────────────────────────────────────────────────
+impl OrbitApp {
+    /// Open (or toggle closed) the row-actions popup for a session row.
+    pub(super) fn toggle_session_menu(
+        &mut self,
+        menu: SessionMenu,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Same-click dismissal must not re-open (see toggle_session_picker).
+        const GESTURE: Duration = Duration::from_millis(200);
+        if let Some(dismissed) = self.menu_dismissed_at.take() {
+            if dismissed.elapsed() < GESTURE {
+                return;
+            }
+        }
+        if self.session_menu.as_ref() == Some(&menu) {
+            self.session_menu = None;
+            cx.notify();
+            return;
+        }
+        if self.command_palette.take().is_some() {
+            self.input.read(cx).focus(window);
+        }
+        if self.branch_picker.take().is_some() {
+            self.input.read(cx).focus(window);
+        }
+        if self.workspace_picker.take().is_some() {
+            self.input.read(cx).focus(window);
+        }
+        if self.model_selector.is_some() {
+            self.close_model_selector(window, cx);
+        }
+        self.workspace_menu = None;
+        self.session_menu = Some(menu);
+        cx.notify();
+    }
+
+    pub(super) fn on_menu_copy_path(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = &self.session_menu {
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                menu.path.to_string_lossy().into_owned(),
+            ));
+        }
+        self.session_menu = None;
+        cx.notify();
+    }
+
+    pub(super) fn on_menu_reveal(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = &self.session_menu {
+            reveal_in_file_manager(menu.path.clone());
+        }
+        self.session_menu = None;
+        cx.notify();
+    }
+
+    /// First Delete click: swap the popup to the confirmation state.
+    pub(super) fn on_menu_delete_request(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = self.session_menu.as_mut() {
+            menu.confirm_delete = true;
+            cx.notify();
+        }
+    }
+
+    /// Confirmed: remove the session file from disk and refresh the list.
+    pub(super) fn on_menu_delete_confirm(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = self.session_menu.take() {
+            // Defensive: a warm parked process would recreate the file.
+            if self.lives.contains_key(&menu.path) {
+                self.set_status("Session has a live process — switch away and wait, then delete");
+                cx.notify();
+                return;
+            }
+            if let Err(err) = fs::remove_file(&menu.path) {
+                self.set_status(format!("delete failed: {err}"));
+            } else {
+                self.set_status("Session deleted");
+            }
+            self.sessions = sessions::load_sessions();
+            cx.notify();
+        }
+    }
+
+    pub(super) fn on_menu_cancel(&mut self, cx: &mut Context<Self>) {
+        self.session_menu = None;
+        cx.notify();
+    }
+
+    /// Open (or toggle closed) the row-actions popup for a workspace header.
+    pub(super) fn toggle_workspace_menu(
+        &mut self,
+        menu: WorkspaceMenu,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Same-click dismissal must not re-open (see toggle_session_menu).
+        const GESTURE: Duration = Duration::from_millis(200);
+        if let Some(dismissed) = self.menu_dismissed_at.take() {
+            if dismissed.elapsed() < GESTURE {
+                return;
+            }
+        }
+        if self.workspace_menu.as_ref() == Some(&menu) {
+            self.workspace_menu = None;
+            cx.notify();
+            return;
+        }
+        if self.command_palette.take().is_some() {
+            self.input.read(cx).focus(window);
+        }
+        if self.branch_picker.take().is_some() {
+            self.input.read(cx).focus(window);
+        }
+        if self.workspace_picker.take().is_some() {
+            self.input.read(cx).focus(window);
+        }
+        self.session_menu = None;
+        if self.model_selector.is_some() {
+            self.close_model_selector(window, cx);
+        }
+        self.workspace_menu = Some(menu);
+        cx.notify();
+    }
+
+    pub(super) fn on_workspace_copy_path(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = &self.workspace_menu {
+            cx.write_to_clipboard(ClipboardItem::new_string(
+                menu.cwd.to_string_lossy().into_owned(),
+            ));
+        }
+        self.workspace_menu = None;
+        cx.notify();
+    }
+
+    /// Remove the workspace the open header menu belongs to from Orbit's own
+    /// project list. pi's session files are never touched — the folder can be
+    /// added again by picking it to work in.
+    pub(super) fn on_workspace_remove(&mut self, cx: &mut Context<Self>) {
+        let Some(menu) = self.workspace_menu.take() else {
+            return;
+        };
+        self.remove_workspace(&menu.cwd);
+        // Forget the dropped group's view state so re-adding it starts fresh.
+        self.collapsed_workspaces.remove(&menu.label);
+        self.expanded_workspace_groups.remove(&menu.label);
+        self.expanded_session_groups.remove(&menu.label);
+        self.set_status(format!("Removed {} from the sidebar", menu.label));
+        cx.notify();
+    }
+
+    /// Keep the row menu honest: close it when its session vanishes from
+    /// the store (deleted externally, session ended, …).
+    pub(super) fn sync_session_menu(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = &self.session_menu {
+            if !menu.path.exists() {
+                self.session_menu = None;
+                cx.notify();
+            }
+        }
+    }
+}

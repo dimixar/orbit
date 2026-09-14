@@ -1,0 +1,1475 @@
+//! The Orbit shell model: the `OrbitApp` struct (shared state), the
+//! `Render`/`Focusable` entry points, and the feature modules that drive it.
+//!
+//! This file keeps the state model, the shared types, and the controller
+//! wiring. Feature logic lives in descendant modules (see the map at the
+//! bottom of the file), which can reach the struct's private fields directly:
+//!
+//! - [`runtime`] — pi process lifecycle, status/error, provider auth
+//! - [`events`] — the heartbeat: event drain, responses, session watcher
+//! - [`session`] — prompt/queue/turn lifecycle and navigation
+//! - [`pickers`] — model, command-palette, branch, and workspace pickers
+//! - [`composer_ops`] — autocomplete, attachments, add-menu, model chips
+//! - [`sidebar`] — session/workspace sidebar rendering + row menus
+//! - [`settings`] — Settings surface (General/Runtime/Agent/Skills/Plugins/Providers)
+//! - [`skills_ui`] — Settings → Skills master-detail page + controllers
+//! - [`view`] — top-level chrome: sidebar, transcript, composer, status bar
+//! - [`open_in`] — "open workspace in" app detection and menu
+//! - [`helpers`] — icons, file glyphs, and small formatting helpers
+
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::Arc,
+    time::{Duration, Instant, SystemTime},
+};
+
+use base64::Engine as _;
+use gpui::{
+    anchored, deferred, div, img, linear_color_stop, linear_gradient, list, point, prelude::*, px,
+    radians, relative, svg, uniform_list, AnchoredPositionMode, Animation, AnimationExt,
+    AnyElement, App, ClipboardItem, Context, Corner, CursorStyle, DragMoveEvent, ElementId, Entity,
+    ExternalPaths, FocusHandle, Focusable, FontWeight, Hsla, Image, ImageSource, IntoElement,
+    ListAlignment, ListState, MouseButton, MouseDownEvent, MouseUpEvent, ObjectFit,
+    PathPromptOptions, Pixels, Render, Resource, ScrollStrategy, SharedString,
+    StatefulInteractiveElement, Subscription, TextAlign, Transformation, UniformListScrollHandle,
+    Window, WindowControlArea,
+};
+use orbit_rpc::{
+    CommandBody, ContextUsage, Event, PendingQueue, PiClient, QuotaReport, SessionState,
+    SessionUsage,
+};
+use serde_json::Value;
+
+use crate::access::AccessMode;
+use crate::auth::{AuthEffect, AuthManager, AuthSupport, LoginPhase, ProviderStatus};
+use crate::branch_picker::BranchPicker;
+use crate::bundled_extensions::BundledExtensions;
+use crate::checkpoint;
+use crate::command_palette::{self, CommandPalette, PaletteCommand, PaletteSnapshot};
+use crate::composer::ComposerInput;
+use crate::context_meter::{self, ContextMeterData, ContextPopup};
+use crate::dialog::{ApprovalRequest, Dialog, DialogRequest, DialogResponse};
+use crate::git_panel::GitPanel;
+use crate::mentions::{self, AcEntry, SharedAutocomplete, SlashCommand, Trigger, TriggerKind};
+use crate::model_selector::{
+    provider_icon, thinking_display, thinking_icon, ModelSelector, PickerKind,
+};
+use crate::notifications;
+use crate::onboarding::{self, Dependency};
+use crate::platform::{self, ExternalApp};
+use crate::plugins::{PackageScope, PluginPackage};
+use crate::providers::{self, CustomProvider};
+use crate::quota::{QuotaManager, QuotaSupport};
+use crate::sessions::{self, SessionInfo};
+use crate::sidepane::{SidePane, SidePaneResize};
+use crate::skills::Skill;
+use crate::theme::{self, Theme, ThemeId, ThemeMode};
+use crate::transcript::{self, Transcript};
+use crate::usage::page::UsagePage;
+use crate::watch;
+use crate::workspace_picker::{WorkspaceEntry, WorkspacePicker};
+
+const SIDEBAR_DEFAULT_W: f32 = 248.;
+const SIDEBAR_MIN_W: f32 = 200.;
+/// Sessions shown under each workspace group before "Show more" appears.
+const SIDEBAR_GROUP_SESSIONS_VISIBLE: usize = 10;
+/// Room the side-pane resize keeps for the transcript column.
+const PANE_MAX_RESERVE: f32 = 480.;
+
+/// Drag marker for the sidebar resize handle (gpui typed drag state).
+struct SidebarResize;
+
+/// An invisible drag ghost — resizing leaves no floating preview.
+struct DragGhost;
+
+impl Render for DragGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+const CONTENT_MAX_W: f32 = 960.;
+
+/// Rows shown in the `/`-command and `@`-file autocomplete menu.
+const AUTOCOMPLETE_LIMIT: usize = 8;
+/// Images that may ride along with one prompt.
+const MAX_ATTACHMENTS: usize = 8;
+
+/// How long a status message stays visible in the status bar.
+const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(6);
+
+/// How often the app polls pi for new quota-bridge session entries. The
+/// bridge appends only on change, so this is a cheap idempotent read.
+const QUOTA_ENTRY_POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Session start races the bridge's first fetch (it runs on `session_start`
+/// too), so the first few polls use a short interval until a snapshot lands
+/// — or the bootstrap budget runs out for an account with no providers.
+const QUOTA_ENTRY_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(3);
+const QUOTA_ENTRY_BOOTSTRAP_POLLS: u8 = 10;
+
+/// Rows in the composer's "+" add menu (icon, label, trailing hint).
+const ADD_MENU_ITEMS: [(&str, &str, &str); 3] = [
+    ("icons/image.svg", "Attach image…", ""),
+    ("icons/file.svg", "Attach file…", ""),
+    ("icons/at-sign.svg", "Mention file", "@"),
+];
+
+/// Maximum sessions kept alive in the background. Beyond this, the
+/// least-recently parked idle session is evicted (its process torn down);
+/// running ones never are.
+const MAX_LIVE_SESSIONS: usize = 6;
+
+/// How long an idle parked session stays warm before its process is reaped.
+/// Reusing a warm pi process makes re-opening a recent session instant
+/// instead of paying Node startup again; the TTL bounds the memory cost.
+const PARKED_IDLE_TTL: Duration = Duration::from_secs(300);
+
+/// A session kept warm in the background: its own pi process, its own live
+/// transcript, and its own agent-run state. Both running and idle sessions
+/// are parked when the user switches away, so reopening is a resume (no
+/// process spawn). Events keep draining every tick; a running session
+/// resumes exactly where the stream left off.
+struct ParkedSession {
+    client: PiClient,
+    transcript: Transcript,
+    busy: bool,
+    added: u64,
+    removed: u64,
+    /// When this session was last parked; drives idle TTL reaping.
+    parked_at: Instant,
+}
+
+/// An in-flight automatic retry (`auto_retry_start` → `auto_retry_end`):
+/// which attempt pi is waiting on, out of how many, and the transient
+/// provider error that triggered it.
+struct RetryDetail {
+    attempt: u64,
+    max: Option<u64>,
+    error: String,
+}
+
+/// The status bar's branch chip: the checked-out branch and its divergence
+/// from upstream. `ahead_behind` is `None` without an upstream — unknown is
+/// not the same fact as `↑0 ↓0`.
+#[derive(PartialEq)]
+struct BranchStatus {
+    name: String,
+    ahead_behind: Option<(usize, usize)>,
+    /// Local branches other than the current one (`None` when the list could
+    /// not be read).
+    other_branches: Option<usize>,
+}
+
+pub struct OrbitApp {
+    client: Option<PiClient>,
+    /// Live state of the active pi process, surfaced in Settings → Runtime.
+    runtime: RuntimeStatus,
+    /// Sessions with a live pi process, keyed by session-file path. The
+    /// active session lives in `client`/`transcript` above; this map holds
+    /// the background ones (see `ParkedSession`).
+    /// Sidebar width in pixels — adjusted by dragging its right edge.
+    sidebar_width: Pixels,
+    lives: HashMap<PathBuf, ParkedSession>,
+    transcript: Transcript,
+    sessions: Vec<SessionInfo>,
+    /// Debounced watcher over pi's session store — sessions written by the
+    /// CLI or another Orbit window refresh the sidebar without `cmd-r`.
+    session_watcher: Option<sessions::SessionWatcher>,
+    /// Watches the active workspace so Review and the Git page refresh when
+    /// files or git state change without an RPC event.
+    workspace_watcher: Option<watch::WorkspaceWatcher>,
+    /// The directory `workspace_watcher` is pointed at, so a workspace move
+    /// re-points the watch (and a failed start is not retried every tick).
+    workspace_watch_dir: Option<PathBuf>,
+    sidebar_list: ListState,
+    sidebar_visible: bool,
+    pub(crate) input: Entity<ComposerInput>,
+    model_label: String,
+    /// Pi model id of the active model (stable match key for the picker).
+    model_id: String,
+    /// Provider id of the active model (drives the brand glyph on the chip).
+    model_provider: String,
+    thinking_label: String,
+    busy: bool,
+    /// Pending steering + follow-up messages reported by pi's `queue_update`
+    /// (and echoed by `clear_queue`). While the agent runs, messages sent from
+    /// the composer are queued as follow-ups and shown here until delivered.
+    queue: PendingQueue,
+    /// A `clear_queue` was sent as part of Escape; restore the returned text
+    /// into the composer when the response arrives (docs' interactive-Esc).
+    restore_queue_on_clear: bool,
+    /// Settings → Agent: `set_follow_up_mode` value.
+    follow_up_mode: String,
+    /// Settings → Agent: `set_auto_compaction` value (read back from state).
+    auto_compaction: bool,
+    /// Settings → Agent: `set_auto_retry` value. pi's `get_state` does not
+    /// expose this, so it reflects the last value Orbit sent.
+    auto_retry: bool,
+    /// Display name pi reports for the session (`get_state.sessionName`).
+    session_name: Option<String>,
+    /// pi is compacting right now (`get_state` / `compaction_*`).
+    is_compacting: bool,
+    /// pi is inside an automatic-retry delay (`auto_retry_*`). pi doesn't
+    /// expose this in `get_state`, so it's event-driven.
+    retrying: bool,
+    /// Detail of the in-flight automatic retry (attempt counter + the
+    /// provider's transient error), shown on the persistent run-status
+    /// strip until the retry resolves.
+    retry_detail: Option<RetryDetail>,
+    /// The most recent command / protocol / extension error. Shown as a
+    /// dismissible red banner until cleared — a failure is never dropped
+    /// (docs: #error-handling).
+    error: Option<String>,
+    /// Text of the last optimistic follow-up. Cleared once pi confirms it in
+    /// `queue_update`; restored to the composer if the command fails.
+    pending_follow_up: Option<String>,
+    /// The Agent section's session rename field.
+    session_name_input: Entity<ComposerInput>,
+    status: String,
+    /// When the current `status` message was set; the status bar shows it
+    /// for [`STATUS_MESSAGE_TTL`] and then lets it lapse.
+    status_at: Option<Instant>,
+    current_title: Option<String>,
+    current_workspace: Option<PathBuf>,
+    /// Status-bar branch chip: the checked-out branch and its divergence from
+    /// upstream, fetched off-thread so render never shells out to git.
+    branch: Option<BranchStatus>,
+    /// Generation of the newest branch fetch; a late result from an older
+    /// fetch is discarded.
+    branch_fetch: u64,
+    /// Real line counts from edit/write tool calls this session.
+    added: u64,
+    removed: u64,
+    focus: FocusHandle,
+    /// Catalog of models reported by `get_available_models`.
+    available_models: Vec<ModelEntry>,
+    /// Thinking levels reported by `get_available_thinking_levels`.
+    available_thinking_levels: Vec<String>,
+    /// The open picker popup (model or thinking dropdown), if any. The
+    /// kind travels with the entity; creating/dropping this *is* the
+    /// open/closed state. Each popup is anchored above its own chip.
+    model_selector: Option<(PickerKind, Entity<ModelSelector>)>,
+    /// The window-wide command palette (⌘P / sidebar Search row), if open.
+    command_palette: Option<Entity<CommandPalette>>,
+    /// A blocking extension dialog (`extension_ui_request`), if one is open.
+    /// pi holds the run until the answer is sent, so this is a modal surface.
+    dialog: Option<Entity<Dialog>>,
+    /// Focus the dialog (or its text field) on the next paint — `tick` has no
+    /// window to focus with.
+    dialog_focus_pending: bool,
+    /// The open inline access-guard approval, if any: a compact bar above the
+    /// composer rather than the modal above. pi holds the tool call until it
+    /// is answered.
+    approval: Option<ApprovalRequest>,
+    /// Highlighted button in the approval bar (arrow keys + hover move it).
+    approval_highlight: usize,
+    /// Focus handle that carries the `Approval` key context while the bar is
+    /// open (focus moves here so ↑/↓/Enter/Escape hit it).
+    approval_focus: FocusHandle,
+    /// Focus the approval bar on the next paint (`tick` has no window).
+    approval_focus_pending: bool,
+    /// Full-window image lightbox for a transcript attachment image. `None`
+    /// is closed. Opened by clicking an image tile, dismissed by click or
+    /// Escape.
+    lightbox: Option<Arc<Image>>,
+    /// Open in-transcript find (⌘F): a find field, the matching message
+    /// indices, and the selected hit. `None` is closed.
+    transcript_search: Option<search::TranscriptSearch>,
+    /// Open row-actions menu in the sessions sidebar (which session's path
+    /// plus whether the popup is showing the delete confirmation).
+    session_menu: Option<SessionMenu>,
+    /// Whether the settings surface replaces the main content area.
+    settings_open: bool,
+    /// Active section within the settings surface.
+    settings_section: SettingsSection,
+    /// Open dropdown on the settings surface (language / font sizes).
+    settings_select: Option<SettingsSelect>,
+    /// Filter text for the open settings dropdown.
+    settings_filter: Entity<ComposerInput>,
+    /// Keyboard cursor in the open settings dropdown: an original option
+    /// index, so it survives filtering. `<Enter>` picks it; the list keeps
+    /// it in view.
+    settings_select_highlight: Option<usize>,
+    /// Scroll handle for the settings dropdown's option list.
+    settings_select_scroll: UniformListScrollHandle,
+    /// Settings → General: which notification channels are on (persisted to
+    /// `~/.orbit-pi/notifications.json`), plus the last macOS permission
+    /// read. The read drives the honest "blocked" / "unbundled" rows — a
+    /// switch the OS is blocking must not look like it is working.
+    notification_prefs: notifications::Prefs,
+    notification_auth: notifications::DesktopAuth,
+    notification_auth_pending: bool,
+    /// Whether this window is frontmost. Notifications are held while it is:
+    /// the transcript itself is the notification then.
+    window_active: bool,
+    /// A banner click asked for the window; the next paint brings it forward
+    /// (`tick` has no `Window` to activate with).
+    activate_window_pending: bool,
+    /// Keeps the window-activation observer alive (registered from `main`
+    /// once the window exists).
+    _window_activation: Option<Subscription>,
+    /// Visited sessions, oldest first — drives the top-bar back/forward
+    /// navigation. `history_index` points at the active entry.
+    session_history: Vec<SessionInfo>,
+    history_index: usize,
+    /// Active workspace groups the user has explicitly collapsed.
+    collapsed_workspaces: HashSet<String>,
+    /// Non-active workspace groups the user has explicitly expanded.
+    expanded_workspace_groups: HashSet<String>,
+    /// Workspace groups whose session list is expanded past
+    /// [`SIDEBAR_GROUP_SESSIONS_VISIBLE`] (Show more).
+    expanded_session_groups: HashSet<String>,
+    /// The projects Orbit lists in its sidebar — its own, user-curated folder
+    /// list. pi owns the session files; this only records which folders the
+    /// user added, persisted to `~/.orbit-pi/workspaces.json`. A workspace is
+    /// added when the user picks it to work in; removing one drops only this
+    /// entry and never touches pi.
+    workspaces: Vec<PathBuf>,
+    /// Open row-actions menu on a workspace group header (which workspace's
+    /// label + cwd). Mutually exclusive with `session_menu`.
+    workspace_menu: Option<WorkspaceMenu>,
+    /// Path of the active session file, for the sidebar highlight.
+    current_session_path: Option<PathBuf>,
+    /// When the popup was dismissed by an outside mouse-down; guards against
+    /// the same click's mouse-up immediately re-opening it via the chip.
+    menu_dismissed_at: Option<Instant>,
+    /// Live context-window usage from `get_session_stats`. `None` when pi
+    /// hasn't advertised a window (no model) or the command isn't supported.
+    context: Option<ContextUsage>,
+    /// Cumulative session token/cost totals from the same `get_session_stats`
+    /// response. Unlike `context`, this spans the whole session (all turns,
+    /// tools, and compaction summaries), so the popup can show cost + cache.
+    session_usage: Option<SessionUsage>,
+    /// Hover compact card vs click-to-open breakdown for the context ring.
+    context_popup: ContextPopup,
+    /// Shared `/`-command and `@`-file menu state between the composer
+    /// (which owns ↑/↓) and this app (which owns Enter/Escape + rendering).
+    autocomplete: SharedAutocomplete,
+    /// Dismissed via outside mouse-down; cleared when the trigger changes.
+    autocomplete_dismissed: bool,
+    /// Trigger (kind + query) the autocomplete highlight was synced against.
+    last_ac_trigger: Option<(TriggerKind, String)>,
+    /// Slash commands reported by pi (`get_commands` — extensions + skills).
+    slash_commands: Vec<SlashCommand>,
+    /// Workspace files for `@`-mentions (cached per workspace).
+    mention_files: Vec<String>,
+    mention_files_workspace: Option<PathBuf>,
+    /// Images queued to ride along with the next prompt (pasted or picked).
+    attachments: Vec<Attachment>,
+    /// Files are being dragged over the composer (external OS drag).
+    file_drag_hovered: bool,
+    /// Installed folder-capable apps for the header's "open in" control.
+    open_in_apps: Rc<Vec<ExternalApp>>,
+    /// Whether the open-in app picker dropdown is open.
+    open_in_menu_open: bool,
+    /// Filter text for the open-in menu.
+    open_in_filter: Entity<ComposerInput>,
+    /// Whether the composer's "+" add menu is open.
+    add_menu_open: bool,
+    /// Highlighted row in the add menu (arrow keys + hover move it).
+    add_menu_highlight: usize,
+    /// Focus handle that carries the `AddMenu` key context while the menu
+    /// is open (focus moves here so ↑/↓/Enter/Escape hit the menu, then
+    /// returns to the composer).
+    add_menu_focus: FocusHandle,
+    /// Git branch picker anchored to the status-bar branch chip.
+    branch_picker: Option<Entity<BranchPicker>>,
+    /// Folder selector anchored under the new-task page's workspace field.
+    workspace_picker: Option<Entity<WorkspacePicker>>,
+    /// A checkout/create is running on the background executor.
+    branch_operation_pending: bool,
+    /// Persisted preferred open-in app id (see [`ExternalApp::id`]).
+    preferred_open_in_app: Option<String>,
+    /// Keeps the theme global observer alive so a settings toggle redraws.
+    _theme_sub: Subscription,
+    /// Keeps the composer observer alive: edits re-render the app so the
+    /// send button's quiet/ready state tracks the text live.
+    _input_sub: Subscription,
+    /// Onboarding dependency check results (pi, node, git).
+    deps: Vec<Dependency>,
+    /// Whether the setup page's Refresh check is in flight (spins the button).
+    refreshing: bool,
+    /// Whether the top-bar session-details popover is open.
+    session_details_open: bool,
+    /// Whether the top-bar provider-quota popover is open.
+    quota_popup_open: bool,
+    /// The `sessionId` pi reports for the active session (its task id).
+    session_id: Option<String>,
+    /// Current agent turn number for this session (0 = none yet).
+    turn_count: usize,
+    /// A turn's start checkpoint was captured and awaits its end.
+    turn_open: bool,
+    /// Latest turn with a captured end checkpoint (drives Review's Last Turn).
+    latest_turn: Option<usize>,
+    /// Right side pane — Review (git diff).
+    sidepane: Entity<SidePane>,
+    /// Whether the Git page replaces the chat area.
+    git_open: bool,
+    /// The full-page Git panel (tabs + commit bar).
+    git_panel: Entity<GitPanel>,
+    /// Whether the Usage page replaces the chat area.
+    usage_open: bool,
+    /// The Usage page: analytics over pi's own session store.
+    usage: Entity<UsagePage>,
+    /// Custom providers read from `~/.pi/agent/models.json` (cached; reloaded
+    /// when the Providers page opens, on Refresh, and after a save/remove).
+    custom_providers: Vec<CustomProvider>,
+    /// Parse/read error from models.json, surfaced on the Providers page
+    /// instead of silently overwriting a hand-edited file.
+    custom_providers_error: Option<String>,
+    /// Credentials read from `~/.pi/agent/auth.json` (cached alongside the
+    /// custom providers).
+    provider_auth: HashMap<String, providers::ProviderAuth>,
+    /// Parse/read error from auth.json.
+    provider_auth_error: Option<String>,
+    /// Non-sensitive provider-authentication state driven by the `auth.*`
+    /// RPC namespace. When pi doesn't advertise those commands this stays
+    /// unsupported and the page keeps the Terminal login fallback.
+    auth: AuthManager,
+    /// Non-secret account quota/balance/spend per connected provider, from the
+    /// `quota.*` RPC namespace and the bundled bridge extension's session
+    /// entries. Empty when nothing has been reported yet.
+    quota: QuotaManager,
+    /// The bundled pi extensions (quota bridge + access guard), spawned with
+    /// `--extension` on every session process.
+    extensions: BundledExtensions,
+    /// The active access mode. Persisted to `~/.orbit-pi/access.json`, which
+    /// the guard extension reads fresh on every tool call.
+    access_mode: AccessMode,
+    /// Whether the composer's access-mode picker popover is open.
+    access_menu_open: bool,
+    /// Highlighted row in the access-mode picker (arrow keys + hover move it).
+    access_menu_highlight: usize,
+    /// Focus handle that carries the `AccessMenu` key context while the picker
+    /// is open (focus moves here so ↑/↓/Enter/Escape hit it).
+    access_menu_focus: FocusHandle,
+    /// `get_entries` cursor for the bridge's quota snapshots. Entry ids are
+    /// per-session, so this resets when the active session changes.
+    quota_entries_cursor: Option<String>,
+    /// One bridge poll in flight at a time.
+    quota_entries_inflight: bool,
+    /// Remaining fast (bootstrap) polls for a fresh session; 0 = steady state.
+    quota_entries_bootstrap: u8,
+    /// When the next bridge poll is due; throttles the 90 ms heartbeat.
+    quota_entries_next_poll: Instant,
+    /// True once a credential changed and pi needs a restart to load it
+    /// (pi reads auth.json only at startup). Only used on the file-based
+    /// fallback path; RPC logins take effect live.
+    provider_auth_dirty: bool,
+    /// Built-in catalog size per provider (from pi's bundled model data),
+    /// loaded off-thread so unconfigured providers show a real count.
+    provider_catalog_counts: HashMap<String, usize>,
+    /// Authoritative provider metadata introspected from pi-ai (empty when
+    /// unavailable — then the curated table is used instead).
+    provider_metadata: Vec<providers::DynamicProvider>,
+    /// The metadata load was kicked off (success or not) — avoids re-spawning
+    /// on every reload.
+    provider_metadata_loaded: bool,
+    /// The open API-key editor, if any.
+    provider_key_editor: Option<ProviderKeyEditor>,
+    /// The open provider editor (add or edit), if any.
+    provider_editor: Option<ProviderEditor>,
+    /// Provider id awaiting inline remove confirmation.
+    provider_remove_confirm: Option<String>,
+    /// Refresh button spin state on the Providers page.
+    providers_refreshing: bool,
+    /// Search filter for the provider grid.
+    provider_filter: Entity<ComposerInput>,
+    /// Re-render the grid as the filter is typed.
+    _provider_filter_sub: Subscription,
+    /// Search filter for the Models page.
+    models_filter: Entity<ComposerInput>,
+    /// Re-render the model list as the filter is typed.
+    _models_filter_sub: Subscription,
+    /// Skills discovered for the current workspace (project + user scope).
+    skills: Vec<Skill>,
+    /// Installed pi packages (plugins) from user + project settings.
+    plugins: Vec<PluginPackage>,
+    /// A malformed settings file surfaced on the Plugins page.
+    plugins_error: Option<String>,
+    /// Source field for installing a new plugin.
+    plugin_source_input: Entity<ComposerInput>,
+    /// Install the next plugin into project scope instead of user scope.
+    plugin_install_project: bool,
+    /// Description of the plugin operation in flight, if any.
+    plugin_action: Option<String>,
+    /// Plugin source awaiting inline remove confirmation.
+    plugin_remove_confirm: Option<String>,
+    /// Re-render the toolbar as the install field is typed.
+    _plugin_source_sub: Subscription,
+    /// Search filter for the installed-plugin list.
+    plugins_filter: Entity<ComposerInput>,
+    /// Re-render the plugin list as the filter is typed.
+    _plugins_filter_sub: Subscription,
+    /// Settings → Skills: filter field for the skill list.
+    skills_filter: Entity<ComposerInput>,
+    /// The skill selected in the master-detail page (its `SKILL.md` path).
+    selected_skill: Option<PathBuf>,
+    /// Cached `SKILL.md` body for the selected skill.
+    skill_content: Option<String>,
+    /// A skill directory awaiting delete confirmation.
+    skill_delete_confirm: Option<PathBuf>,
+    /// Re-render the skill list as the filter is typed.
+    _skills_filter_sub: Subscription,
+    /// Background updater status mirrored from the global: `Idle` (nothing to
+    /// show), `Available` (the footer offers the update), `Updating` (spinning
+    /// until the app quits to install). The details stay on the worker.
+    updater_status: crate::updater::UpdateStatus,
+    /// Mirror of the persisted automatic-check preference, refreshed when the
+    /// updater reports and on toggle, so frames never read the file.
+    automatic_updates_enabled: bool,
+}
+
+/// An image queued to ride along with the next prompt.
+struct Attachment {
+    name: String,
+    mime: String,
+    /// base64 payload (no `data:` prefix) — pi's prompt image shape.
+    data: String,
+    /// Decoded image for the chip thumbnail.
+    preview: Option<Arc<gpui::Image>>,
+}
+
+impl Attachment {
+    fn from_image(image: &gpui::Image, index: usize) -> Self {
+        let ext = match image.format {
+            gpui::ImageFormat::Png => "png",
+            gpui::ImageFormat::Jpeg => "jpg",
+            gpui::ImageFormat::Webp => "webp",
+            gpui::ImageFormat::Gif => "gif",
+            gpui::ImageFormat::Bmp => "bmp",
+            gpui::ImageFormat::Svg => "svg",
+            gpui::ImageFormat::Tiff => "tiff",
+        };
+        Self {
+            name: format!("Pasted image {}.{ext}", index + 1),
+            mime: image.format.mime_type().to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(&image.bytes),
+            preview: Some(Arc::new(image.clone())),
+        }
+    }
+
+    /// Images only — anything else returns `None` so a drop can fall back to
+    /// referencing the file by path instead.
+    fn from_path(path: &Path) -> Option<Self> {
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_lowercase)?;
+        let (mime, format) = match ext.as_str() {
+            "png" => ("image/png", gpui::ImageFormat::Png),
+            "jpg" | "jpeg" => ("image/jpeg", gpui::ImageFormat::Jpeg),
+            "webp" => ("image/webp", gpui::ImageFormat::Webp),
+            "gif" => ("image/gif", gpui::ImageFormat::Gif),
+            "bmp" => ("image/bmp", gpui::ImageFormat::Bmp),
+            _ => return None,
+        };
+        let bytes = std::fs::read(path).ok()?;
+        let preview = Arc::new(gpui::Image::from_bytes(format, bytes.clone()));
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "image".into());
+        Some(Self {
+            name,
+            mime: mime.into(),
+            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            preview: Some(preview),
+        })
+    }
+
+    /// The wire shape pi's `prompt.images` expects.
+    fn to_prompt_image(&self) -> Value {
+        serde_json::json!({ "type": "image", "data": self.data, "mimeType": self.mime })
+    }
+}
+
+/// A model choice from the pi runtime catalog.
+#[derive(Debug, Clone)]
+pub(crate) struct ModelEntry {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) provider: String,
+    /// Provider-reported context window in tokens, when the catalog exposes it.
+    pub(crate) context_window: Option<u64>,
+}
+
+impl OrbitApp {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        let autocomplete: SharedAutocomplete = Rc::new(std::cell::RefCell::new(
+            mentions::AutocompleteState::default(),
+        ));
+        let input = cx.new(|cx| ComposerInput::new(cx).with_autocomplete(autocomplete.clone()));
+        // Filter fields for the settings dropdowns and the open-in menu.
+        // `Composer Picker` keeps backspace/delete working while Enter/arrows
+        // dispatch to the (unhandled) Picker actions rather than submitting.
+        let settings_filter = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_placeholder("Filter…")
+                .with_key_context("Composer Picker")
+        });
+        let open_in_filter = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_placeholder("Filter…")
+                .with_key_context("Composer Picker")
+        });
+        let provider_filter = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("provider-filter")
+                .with_placeholder("Search providers…")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+        });
+        let provider_filter_sub = cx.observe(&provider_filter, |_, _, cx| cx.notify());
+        let models_filter = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("models-filter")
+                .with_placeholder("Search models…")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+        });
+        let models_filter_sub = cx.observe(&models_filter, |_, _, cx| cx.notify());
+
+        // Settings → Plugins: the install-source field. `Composer Picker`
+        // keeps editing keys live; Enter is unhandled, so the Install button
+        // is the only commit path.
+        let plugin_source_input = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("plugin-source-input")
+                .with_placeholder("npm:@scope/pkg, git:github.com/owner/repo, or ./path")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+        });
+        let plugin_source_sub = cx.observe(&plugin_source_input, |_, _, cx| cx.notify());
+        let plugins_filter = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("plugins-filter")
+                .with_placeholder("Search installed plugins…")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+        });
+        let plugins_filter_sub = cx.observe(&plugins_filter, |_, _, cx| cx.notify());
+
+        // Settings → Skills: the list filter. `Composer Picker` keeps editing
+        // keys live so typing filters the master list.
+        let skills_filter = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("skills-filter")
+                .with_placeholder("Search skills…")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+        });
+        let skills_filter_sub = cx.observe(&skills_filter, |_, _, cx| cx.notify());
+
+        // Settings → Agent: rename field. Default `Composer` key context keeps
+        // real text editing (selection, clipboard, arrows); Enter routes to the
+        // app's Submit, which no-ops on the empty main composer.
+        let session_name_input = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("session-name-input")
+                .with_placeholder("Session name…")
+                .with_max_lines(1)
+        });
+
+        // Spawn pi rooted at the repo; sessions live in the real
+        // ~/.pi/agent/sessions so they are shared with the CLI.
+        let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let extensions = BundledExtensions::install();
+        // Load the access mode and write it back so the guard extension finds
+        // the file on the very first tool call of the session.
+        let access_mode = AccessMode::load();
+        access_mode.persist();
+        let (client, connect_error) = match extensions.spawn(&workspace) {
+            Ok(client) => (Some(client), String::new()),
+            Err(err) => (None, format!("pi spawn failed: {err}")),
+        };
+        let runtime = RuntimeStatus {
+            started_at: client.as_ref().map(|_| Instant::now()),
+            alive: client.is_some(),
+            exited: false,
+            error: (!connect_error.is_empty()).then(|| connect_error.clone()),
+        };
+
+        let theme_sub = cx.observe_global::<Theme>(|this, cx| {
+            this.input.update(cx, |_, cx| cx.notify());
+            if let Some((_, selector)) = &this.model_selector {
+                selector.update(cx, |_, cx| cx.notify());
+            }
+            cx.notify();
+        });
+
+        // Composer edits notify only the input entity; re-render the app so
+        // the send button's quiet/ready state tracks the text as you type.
+        let input_sub = cx.observe(&input, |_, _, cx| cx.notify());
+
+        // Probe the runtime pieces we need (pi, node, git) so the setup page
+        // can show install commands when something is missing.
+        let deps = onboarding::check_dependencies();
+
+        // Right side pane: Review (git diff).
+        let sidepane = cx.new(SidePane::new);
+        // Full-page Git panel (Changes / History / Graph).
+        let git_panel = cx.new(GitPanel::new);
+        // Usage analytics over pi's own session store.
+        let usage = cx.new(UsagePage::new);
+
+        let mut app = Self {
+            client,
+            runtime,
+            sidebar_width: px(SIDEBAR_DEFAULT_W),
+            lives: HashMap::new(),
+            transcript: Transcript::new(),
+            sessions: sessions::load_sessions(),
+            session_watcher: sessions::SessionWatcher::start(),
+            workspace_watcher: None,
+            workspace_watch_dir: None,
+            sidebar_list: ListState::new(0, ListAlignment::Top, px(44.)),
+            sidebar_visible: true,
+            input,
+            model_label: "…".into(),
+            model_id: String::new(),
+            model_provider: String::new(),
+            thinking_label: "…".into(),
+            busy: false,
+            queue: PendingQueue::default(),
+            restore_queue_on_clear: false,
+            follow_up_mode: "one-at-a-time".into(),
+            auto_compaction: true,
+            auto_retry: true,
+            session_name: None,
+            is_compacting: false,
+            retrying: false,
+            retry_detail: None,
+            error: None,
+            pending_follow_up: None,
+            session_name_input,
+            status: connect_error.clone(),
+            status_at: (!connect_error.is_empty()).then(Instant::now),
+            current_title: None,
+            current_workspace: None,
+            branch: None,
+            branch_fetch: 0,
+            added: 0,
+            removed: 0,
+            focus: cx.focus_handle(),
+            available_models: Vec::new(),
+            available_thinking_levels: Vec::new(),
+            model_selector: None,
+            command_palette: None,
+            dialog: None,
+            dialog_focus_pending: false,
+            approval: None,
+            approval_highlight: 0,
+            approval_focus: cx.focus_handle(),
+            approval_focus_pending: false,
+            lightbox: None,
+            transcript_search: None,
+            session_menu: None,
+            settings_open: false,
+            settings_section: SettingsSection::General,
+            settings_select: None,
+            settings_filter: settings_filter,
+            settings_select_highlight: None,
+            settings_select_scroll: UniformListScrollHandle::new(),
+            notification_prefs: notifications::Prefs::load(),
+            notification_auth: notifications::DesktopAuth::Unknown,
+            notification_auth_pending: false,
+            window_active: true,
+            activate_window_pending: false,
+            _window_activation: None,
+            session_history: Vec::new(),
+            history_index: 0,
+            collapsed_workspaces: HashSet::new(),
+            expanded_workspace_groups: HashSet::new(),
+            expanded_session_groups: HashSet::new(),
+            workspaces: load_workspaces(),
+            workspace_menu: None,
+            current_session_path: None,
+            menu_dismissed_at: None,
+            context: None,
+            session_usage: None,
+            context_popup: ContextPopup::None,
+            autocomplete,
+            autocomplete_dismissed: false,
+            last_ac_trigger: None,
+            slash_commands: Vec::new(),
+            mention_files: Vec::new(),
+            mention_files_workspace: None,
+            attachments: Vec::new(),
+            file_drag_hovered: false,
+            open_in_apps: Rc::new(Vec::new()),
+            open_in_menu_open: false,
+            open_in_filter: open_in_filter,
+            add_menu_open: false,
+            add_menu_highlight: 0,
+            add_menu_focus: cx.focus_handle(),
+            branch_picker: None,
+            workspace_picker: None,
+            branch_operation_pending: false,
+            preferred_open_in_app: platform::load_preferred_open_in_app(),
+            _theme_sub: theme_sub,
+            _input_sub: input_sub,
+            deps,
+            refreshing: false,
+            session_details_open: false,
+            quota_popup_open: false,
+            session_id: None,
+            turn_count: 0,
+            turn_open: false,
+            latest_turn: None,
+            sidepane,
+            git_open: false,
+            git_panel: git_panel.clone(),
+            usage_open: false,
+            usage: usage.clone(),
+            custom_providers: Vec::new(),
+            custom_providers_error: None,
+            provider_auth: HashMap::new(),
+            provider_auth_error: None,
+            auth: AuthManager::new(),
+            quota: QuotaManager::new(),
+            extensions,
+            access_mode,
+            access_menu_open: false,
+            access_menu_highlight: 0,
+            access_menu_focus: cx.focus_handle(),
+            quota_entries_cursor: None,
+            quota_entries_inflight: false,
+            quota_entries_bootstrap: QUOTA_ENTRY_BOOTSTRAP_POLLS,
+            quota_entries_next_poll: Instant::now(),
+            provider_auth_dirty: false,
+            provider_catalog_counts: HashMap::new(),
+            provider_metadata: Vec::new(),
+            provider_metadata_loaded: false,
+            provider_key_editor: None,
+            provider_editor: None,
+            provider_remove_confirm: None,
+            providers_refreshing: false,
+            provider_filter: provider_filter.clone(),
+            _provider_filter_sub: provider_filter_sub,
+            models_filter: models_filter.clone(),
+            _models_filter_sub: models_filter_sub,
+            skills: Vec::new(),
+            plugins: Vec::new(),
+            plugins_error: None,
+            plugin_source_input: plugin_source_input.clone(),
+            plugin_install_project: false,
+            plugin_action: None,
+            plugin_remove_confirm: None,
+            _plugin_source_sub: plugin_source_sub,
+            plugins_filter: plugins_filter.clone(),
+            _plugins_filter_sub: plugins_filter_sub,
+            skills_filter: skills_filter.clone(),
+            selected_skill: None,
+            skill_content: None,
+            skill_delete_confirm: None,
+            _skills_filter_sub: skills_filter_sub,
+            updater_status: cx
+                .try_global::<crate::updater::UpdaterState>()
+                .and_then(|state| state.0.as_ref())
+                .map(|updater| updater.status())
+                .unwrap_or_default(),
+            automatic_updates_enabled: cx
+                .try_global::<crate::updater::UpdaterState>()
+                .and_then(|state| state.0.as_ref())
+                .map(|updater| updater.automatically_checks_for_updates())
+                .unwrap_or(false),
+        };
+
+        // A changed-file row on the Git page opens its diff in Review.
+        let review_sidepane = app.sidepane.clone();
+        app.git_panel.update(cx, |panel, _| {
+            panel.set_open_file(Rc::new(move |path, _window, cx| {
+                review_sidepane.update(cx, |pane, cx| pane.show_file(path, cx));
+            }));
+        });
+        // The Git page's Back button leaves the page. The panel closes itself
+        // first, so this only clears the app flag (never re-enters the panel).
+        let app_weak = cx.entity().downgrade();
+        app.git_panel.update(cx, |panel, _| {
+            panel.set_on_close(Rc::new(move |_window, cx| {
+                let _ = app_weak.update(cx, |app, cx| {
+                    app.git_open = false;
+                    cx.notify();
+                });
+            }));
+        });
+
+        // The Usage page's two callbacks: leave the page, and open a session
+        // it names (by pi session id, resolved against the loaded sessions).
+        let app_weak = cx.entity().downgrade();
+        app.usage.update(cx, |page, _| {
+            page.set_on_close(Rc::new(move |_window, cx| {
+                let _ = app_weak.update(cx, |app, cx| {
+                    app.usage_open = false;
+                    cx.notify();
+                });
+            }));
+        });
+        let app_weak = cx.entity().downgrade();
+        app.usage.update(cx, |page, _| {
+            page.set_open_session(Rc::new(move |session_id, window, cx| {
+                let _ = app_weak.update(cx, |app, cx| {
+                    app.open_session_by_id(session_id, window, cx);
+                });
+            }));
+        });
+        // Warm the store scan at launch so the page is instant when opened.
+        app.usage.update(cx, |page, cx| page.open(cx));
+
+        // The theme observer above only fires on a *change*; the first sync
+        // happens in `main`, so the initial paint is already themed.
+
+        if app.client.is_some() {
+            app.send(CommandBody::GetState, "get_state");
+            app.send(CommandBody::GetAvailableModels, "get_available_models");
+            app.send(
+                CommandBody::GetAvailableThinkingLevels,
+                "get_available_thinking_levels",
+            );
+            app.send(CommandBody::GetCommands, "get_commands");
+            app.probe_auth();
+        }
+        // The branch chip tracks the launch workspace even before a session
+        // is open.
+        app.refresh_branch_status(cx);
+        // Route banner clicks back to their session (bundle builds only).
+        notifications::init();
+        // A first launch with notifications on shows macOS's permission
+        // prompt, the way any native app announces them. Unbundled runs
+        // no-op here; the settings row reports that state instead.
+        if app.notification_prefs.desktop {
+            notifications::request_permission();
+        }
+        app
+    }
+
+    /// Track whether the window is frontmost — the gate on background
+    /// notifications. Registered from `main` after the window exists;
+    /// `observe_window_activation` invokes the callback once at
+    /// registration, so the field starts truthful.
+    pub(super) fn watch_window_activation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.window_active = window.is_window_active();
+        self._window_activation = Some(cx.observe_window_activation(window, |app, window, _| {
+            app.window_active = window.is_window_active();
+        }));
+    }
+
+    /// Sidebar view of the session store: the sessions on disk plus a
+    /// placeholder row for the open session while pi hasn't flushed its
+    /// file yet. pi creates a session's `.jsonl` lazily — only when the
+    /// first message is appended — so right after `new_session` the store
+    /// holds nothing new and a disk-only list hides the session the user
+    /// just started. A draft (nothing sent yet) stays hidden; once the
+    /// first prompt lands in the transcript the placeholder shows it
+    /// instantly at the top, and it disappears once the real row loads
+    /// (same path ⇒ no duplicate).
+    ///
+    /// Only sessions inside Orbit's own project list reach the sidebar (and
+    /// the ⌘P palette); everything else pi has on disk is left where it is.
+    pub(super) fn sidebar_sessions(&self) -> Vec<SessionInfo> {
+        let listed: Vec<SessionInfo> = self
+            .sessions
+            .iter()
+            .filter(|session| {
+                let cwd = normalize_workspace_path(&session.cwd.to_string_lossy());
+                self.workspaces.contains(&cwd)
+            })
+            .cloned()
+            .collect();
+        sessions_with_placeholder(
+            &listed,
+            self.current_session_path.as_deref(),
+            self.current_title.as_deref(),
+            self.current_workspace.as_deref(),
+            !self.transcript.is_empty(),
+        )
+    }
+
+    pub(super) fn workspace_label(&self) -> String {
+        self.current_workspace
+            .as_ref()
+            .map(|p| sessions::workspace_label(p))
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                    .unwrap_or_else(|| "workspace".into())
+            })
+    }
+
+    /// Add `cwd` to Orbit's project list if it isn't already there. Called
+    /// whenever the user picks a folder to work in — starting a task there,
+    /// browsing for one, or opening one of its sessions. Never writes to pi.
+    pub(super) fn add_workspace(&mut self, cwd: PathBuf) {
+        let cwd = normalize_workspace_path(&cwd.to_string_lossy());
+        if self.workspaces.iter().any(|w| w == &cwd) {
+            return;
+        }
+        self.workspaces.push(cwd);
+        persist_workspaces(&self.workspaces);
+    }
+
+    /// Drop a project from Orbit's sidebar. pi's session files stay exactly
+    /// where they are — only Orbit's own list changes.
+    pub(super) fn remove_workspace(&mut self, cwd: &Path) {
+        let before = self.workspaces.len();
+        self.workspaces.retain(|w| w.as_path() != cwd);
+        if self.workspaces.len() != before {
+            persist_workspaces(&self.workspaces);
+        }
+    }
+
+    /// Refetch the status bar's branch chip off-thread: branch name plus
+    /// ahead/behind against its upstream. Called at launch, when the workspace
+    /// moves, when the workspace watcher reports git state changed (commit,
+    /// checkout, fetch), and after an in-app branch switch — render must never
+    /// spawn `git`.
+    pub(super) fn refresh_branch_status(&mut self, cx: &mut Context<Self>) {
+        self.branch_fetch = self.branch_fetch.wrapping_add(1);
+        let fetch = self.branch_fetch;
+        let cwd = self
+            .current_workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok());
+        let Some(cwd) = cwd else {
+            self.branch = None;
+            cx.notify();
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let branch = cx
+                .background_executor()
+                .spawn(async move {
+                    crate::git::current_branch(&cwd).map(|name| {
+                        // The picker's own list, so the count and the popup it
+                        // opens always agree.
+                        let other_branches = crate::git::list_branches(&cwd).ok().map(|branches| {
+                            branches.iter().filter(|branch| **branch != name).count()
+                        });
+                        BranchStatus {
+                            name,
+                            ahead_behind: crate::git::ahead_behind(&cwd),
+                            other_branches,
+                        }
+                    })
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                // A newer fetch (workspace move or fresh git state) superseded
+                // this one; drop the stale result.
+                if app.branch_fetch != fetch {
+                    return;
+                }
+                if app.branch != branch {
+                    app.branch = branch;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+}
+
+impl Focusable for OrbitApp {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+// ── sidebar model ──────────────────────────────────────────────────────────
+
+enum SideRow {
+    /// Workspace group header: label, session count, collapsed state.
+    Workspace {
+        label: String,
+        count: usize,
+        collapsed: bool,
+        /// Workspace path — used to spawn a new session in this project.
+        cwd: PathBuf,
+    },
+    /// Session row — index into the (newest-first) sessions list.
+    Session(usize),
+    /// Expand a workspace group to reveal hidden sessions (`count` = how many).
+    ShowMore { label: String, count: usize },
+    /// Collapse a workspace group back to the truncated list.
+    ShowLess { label: String },
+}
+
+/// `~/.orbit-pi/workspaces.json` — the folders Orbit lists in its sidebar.
+/// Orbit-owned: pi owns the session files, this only records which projects
+/// the user added. Removing a workspace here never touches pi.
+fn workspaces_path() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".orbit-pi")
+        .join("workspaces.json")
+}
+
+fn load_workspaces() -> Vec<PathBuf> {
+    let Ok(raw) = fs::read_to_string(workspaces_path()) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+        return Vec::new();
+    };
+    value
+        .get("workspaces")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(Value::as_str)
+                .map(normalize_workspace_path)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn persist_workspaces(workspaces: &[PathBuf]) {
+    let path = workspaces_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let paths: Vec<String> = workspaces
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    let payload = serde_json::json!({ "workspaces": paths });
+    let _ = fs::write(path, payload.to_string());
+}
+
+/// A workspace path without a trailing separator, so it compares equal to
+/// pi's `cwd` values (which never carry one). An empty remainder (`/`) is
+/// kept as-is.
+fn normalize_workspace_path(raw: &str) -> PathBuf {
+    let trimmed = raw.trim_end_matches(std::path::MAIN_SEPARATOR);
+    if trimmed.is_empty() {
+        PathBuf::from(raw)
+    } else {
+        PathBuf::from(trimmed)
+    }
+}
+
+/// State of the row-actions popup in the sessions sidebar: which session
+/// it belongs to (by path), what the row can offer, and whether the popup
+/// is currently showing the delete confirmation.
+#[derive(Clone, PartialEq)]
+struct SessionMenu {
+    path: PathBuf,
+    /// Copy of the row title for the confirm copy.
+    title: String,
+    /// Sessions with a live pi process (active or parked) must not be
+    /// deleted — the process would recreate the file mid-run.
+    deletable: bool,
+    /// The popup is showing the delete confirmation instead of the menu.
+    confirm_delete: bool,
+}
+
+/// State of the row-actions popup on a workspace group header: which
+/// workspace it belongs to (by group label + cwd).
+#[derive(Clone, PartialEq)]
+struct WorkspaceMenu {
+    label: String,
+    cwd: PathBuf,
+}
+
+/// Sections of the settings surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsSection {
+    General,
+    Runtime,
+    Agent,
+    Skills,
+    Plugins,
+    Models,
+    Appearance,
+    Providers,
+    About,
+}
+
+/// The provider editor's open state. Inputs are `ComposerInput` entities so
+/// they get real text editing (selection, IME, clipboard) for free.
+struct ProviderEditor {
+    /// Existing provider id, or `None` when adding a new one.
+    original_id: Option<String>,
+    /// Present in the live catalog — a built-in, or a custom provider pi has
+    /// already loaded. Allows saving with an empty model list (an override).
+    in_catalog: bool,
+    id: Entity<ComposerInput>,
+    name: Entity<ComposerInput>,
+    base_url: Entity<ComposerInput>,
+    api_key: Entity<ComposerInput>,
+    models: Entity<ComposerInput>,
+    /// Selected API family (chips above the fields).
+    api: String,
+    /// A key is already stored in models.json (placeholder + hint).
+    had_api_key: bool,
+    error: Option<String>,
+}
+
+/// What a [`ProviderKeyEditor`] is collecting. Ollama Cloud needs both a
+/// monthly-credit API key and an optional legacy session; everything else uses
+/// the plain API-key form.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProviderKeyKind {
+    ApiKey,
+    /// A pasted `Cookie:` header for Ollama Cloud's settings-page usage.
+    OllamaCloudSession,
+}
+
+/// The API-key editor's open state (one field, provider-scoped).
+struct ProviderKeyEditor {
+    provider_id: String,
+    provider_name: String,
+    /// Supports OAuth too, so the modal can offer the sign-in path as well.
+    oauth: bool,
+    note: &'static str,
+    kind: ProviderKeyKind,
+    key: Entity<ComposerInput>,
+    error: Option<String>,
+}
+
+/// API families pi can speak for a custom endpoint, shown as chips.
+const PROVIDER_APIS: [&str; 9] = [
+    "openai-completions",
+    "openai-responses",
+    "anthropic-messages",
+    "google-generative-ai",
+    "mistral-conversations",
+    "amazon-bedrock",
+    "azure-openai-responses",
+    "openai-codex-responses",
+    "google-vertex",
+];
+
+/// One row of the Providers grid — the built-in catalog merged with the live
+/// model catalog, models.json, and auth.json.
+struct ProviderView {
+    id: String,
+    name: String,
+    /// Has models in the live catalog (pi is serving it right now).
+    active: bool,
+    model_count: usize,
+    /// Built-in catalog size from pi's bundled data (0 when unknown).
+    catalog_count: usize,
+    /// Has an entry in models.json (custom, or a built-in override).
+    custom: bool,
+    has_api_key: bool,
+    base_url: String,
+    api: String,
+    /// pi ships this provider (vs. a models.json-only custom endpoint).
+    builtin: bool,
+    /// `/login <id>` offers a subscription/OAuth flow.
+    oauth: bool,
+    /// Storing an API key in auth.json works for this provider.
+    api_key: bool,
+    /// Environment variables pi reads for this provider's key.
+    env_names: Vec<String>,
+    /// The one that is actually set in this process, if any.
+    env_var: Option<String>,
+    note: &'static str,
+    /// Credential in auth.json, if any.
+    auth: Option<providers::ProviderAuth>,
+    /// Live credential facts from the `auth.*` RPC namespace, when pi
+    /// supports it. Preferred over the on-disk `auth` snapshot.
+    live_status: Option<ProviderStatus>,
+    /// Account quota/balance/spend from the `quota.*` RPC namespace, when
+    /// available and connected.
+    quota: Option<QuotaReport>,
+    /// The provider's env var is set in this process's environment.
+    env_authed: bool,
+}
+
+impl ProviderView {
+    /// Any credential present (RPC status, auth.json, or environment).
+    fn connected(&self) -> bool {
+        self.live_status
+            .as_ref()
+            .is_some_and(|status| status.authenticated)
+            || self.auth.is_some()
+            || self.env_authed
+    }
+
+    /// The credential kind to display: live RPC status wins over the file.
+    fn credential_kind(&self) -> Option<&str> {
+        if let Some(status) = &self.live_status {
+            if status.authenticated {
+                return Some(status.credential.as_str());
+            }
+        }
+        self.auth.map(|auth| match auth.kind {
+            providers::AuthKind::OAuth => "oauth",
+            providers::AuthKind::ApiKey => "api_key",
+            providers::AuthKind::OllamaSession => "session",
+        })
+    }
+}
+
+/// Render an epoch-millisecond expiry as a short local date/time.
+fn format_epoch_ms(ms: i64) -> String {
+    use chrono::{Local, TimeZone};
+    match Local.timestamp_millis_opt(ms).single() {
+        Some(datetime) => datetime.format("%b %-d %H:%M").to_string(),
+        None => "—".to_string(),
+    }
+}
+
+/// Human label for a discovered auth method. pi's own label wins; otherwise a
+/// sensible default keyed off the method id (never off a provider id).
+fn method_label(id: &str, label: &str, connected: bool) -> String {
+    if !label.is_empty() && label != id {
+        return label.to_string();
+    }
+    match id {
+        "browser" | "oauth" => {
+            if connected {
+                "Reconnect".to_string()
+            } else {
+                "Sign in".to_string()
+            }
+        }
+        "device_code" => "Use device code".to_string(),
+        other => {
+            let mut chars = other.replace(['_', '-'], " ").chars().collect::<Vec<_>>();
+            if let Some(first) = chars.first_mut() {
+                first.make_ascii_uppercase();
+            }
+            chars.into_iter().collect()
+        }
+    }
+}
+
+/// A provider-card button action, dispatched through one handler so the card
+/// can build buttons without a closure per action.
+#[derive(Clone)]
+enum ProviderAction {
+    SignIn {
+        id: String,
+        name: String,
+    },
+    /// Start a login through the `auth.*` RPC namespace using a discovered
+    /// method id (`browser`, `device_code`, …).
+    AuthStart {
+        id: String,
+        name: String,
+        method: String,
+    },
+    /// Cancel the active login for a provider.
+    AuthCancel,
+    /// Dismiss a finished login card.
+    AuthDismiss,
+    /// Open a device-code / verification URL in the browser.
+    AuthOpenUrl(String),
+    /// Copy a value (device code) to the clipboard.
+    AuthCopy(String),
+    EditKey {
+        id: String,
+        name: String,
+        oauth: bool,
+        note: &'static str,
+    },
+    /// Open the Ollama Cloud session editor (a pasted cookie header) — the
+    /// legacy session/weekly path, distinct from the monthly-credit API key.
+    EditOllamaSession {
+        name: String,
+    },
+    SignOut {
+        id: String,
+    },
+    Configure {
+        id: String,
+    },
+    Remove {
+        id: String,
+    },
+    ConfirmRemove {
+        id: String,
+    },
+    CancelRemove,
+    SaveKey,
+    Restart,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProviderButtonStyle {
+    Primary,
+    Ghost,
+    Danger,
+}
+
+/// Live state of the active pi agent process, for Settings → Runtime.
+#[derive(Default)]
+struct RuntimeStatus {
+    /// When the active process was adopted (drives the uptime readout).
+    started_at: Option<Instant>,
+    /// Whether the process is still running.
+    alive: bool,
+    /// Whether it exited on its own (as opposed to being stopped here).
+    exited: bool,
+    /// The last spawn failure, if any.
+    error: Option<String>,
+}
+
+/// The runtime panel's headline state.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RuntimeState {
+    Running,
+    Exited,
+    Stopped,
+    Failed,
+}
+
+/// Which dropdown is open on the settings surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsSelect {
+    Theme,
+    Language,
+    UiFontSize,
+    TerminalFont,
+    EditorFont,
+    SpacingDensity,
+    UiFontFamily,
+    CodeFontFamily,
+}
+
+// ── feature modules ───────────────────────────────────────────────────────
+// `app.rs` keeps the `OrbitApp` model, the shared types, and the controller
+// wiring. Rendering and feature-specific logic live in child modules; they
+// are descendants of `app`, so they reach private fields/methods directly.
+mod composer_ops;
+mod dialogs;
+mod events;
+mod helpers;
+mod open_in;
+mod pickers;
+mod runtime;
+mod search;
+mod session;
+mod settings;
+mod sidebar;
+mod skills_ui;
+mod updater_ui;
+mod view;
+
+#[cfg(test)]
+mod backdrop_layout_tests;
+#[cfg(test)]
+mod devicons_tests;
+#[cfg(test)]
+mod error_label_tests;
+#[cfg(test)]
+mod popup_layout_tests;
+#[cfg(test)]
+mod sidebar_active_reveal_tests;
+#[cfg(test)]
+mod sidebar_placeholder_tests;
+
+// `icon` and friends are part of the crate-wide UI kit; keep their original
+// `crate::app::…` paths stable for the other modules that import them.
+pub(crate) use helpers::{file_glyph, icon, icon_dyn, nerd_font_family};
+use sidebar::sessions_with_placeholder;

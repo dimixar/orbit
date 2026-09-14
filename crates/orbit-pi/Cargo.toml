@@ -1,0 +1,103 @@
+[package]
+name = "orbit-pi"
+version = "0.1.0"
+description = "Native GPUI workbench for the pi coding agent"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[package.metadata.bundle]
+name = "Orbit Pi"
+identifier = "dev.orbit.pi"
+icon = ["../../assets/icons/icon.icns"]
+osx_minimum_system_version = "13.0"
+
+[dependencies]
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+# Native open/folder dialogs (NSOpenPanel on macOS) for folder selection
+rfd = "0.15"
+orbit-rpc = { path = "../orbit-rpc" }
+serde_json = { workspace = true }
+unicode-segmentation = "1"
+include_dir = "0.7"
+# Watch pi's on-disk session store so sessions written by the CLI or another
+# Orbit window refresh the sidebar live (debounced FSEvents on macOS, the
+# notify backend elsewhere). Scans run off-thread; the UI only drains a list.
+notify-debouncer-mini = { version = "0.7", features = ["macos_fsevent"] }
+anyhow = { workspace = true }
+# Signed in-app updates: verify the EdDSA signature every release feed and
+# artifact carries, against the key embedded by `build.rs`. The same key
+# verifies the appcast signature on every platform, so the three update
+# paths cannot drift apart.
+ed25519-dalek = "2"
+# Local-time formatting for response-footer timestamps
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# base64 payloads for prompt image attachments
+base64 = "0.22"
+devicons = "0.6"
+# Decode + resize the new-task background before the CPU dither pass — the
+# same `image` gpui already decodes through, so no new crate versions.
+image = "0.25"
+# Remote author avatars rendered by GPUI's image loader. `reqwest` is the
+# same zed-reqwest already in the graph via gpui, so no new crate versions;
+# `futures` provides the BoxFuture/oneshot the HttpClient trait is built on.
+futures = "0.3"
+reqwest = { version = "0.12.15-zed", package = "zed-reqwest", default-features = false, features = [
+    "blocking",
+    "rustls-tls-native-roots",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Match gpui 0.2.2 so we can set the Dock icon from the embedded PNG
+# when running without a bundled .app (cargo run).
+cocoa = "=0.26.0"
+# Detect installed editors/terminals and open workspace folders in them.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSBitmapImageRep",
+    "NSImage",
+    "NSImageRep",
+    "NSSound",
+    "NSWorkspace",
+    "block2",
+    "objc2-core-graphics",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSBundle",
+    "NSDictionary",
+    "NSString",
+    "NSURL",
+] }
+# App-attributed notification banners: `UNUserNotificationCenter` is the only
+# supported API — `osascript` banners belong to Script Editor, and the
+# deprecated `NSUserNotification` is not exposed by objc2-app-kit. Same
+# objc2 0.6 / block2 0.6 generation already in the tree. `block2` is a direct
+# dependency here because the authorization/settings calls take blocks.
+objc2-user-notifications = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationResponse",
+    "UNNotificationSettings",
+    "UNNotificationTrigger",
+    "UNNotification",
+    "UNUserNotificationCenter",
+] }
+block2 = "0.6"
+url = "2.5"
+
+[target.'cfg(unix)'.dependencies]
+# The Unix self-update unpacks a signed `.tar.gz` release beside the running
+# install before swapping it in.
+flate2 = "1"
+tar = "0.4"
+# Probe the parent process's liveness (`kill(pid, 0)`) while the update
+# helper waits for the app to finish quitting before it swaps directories.
+libc = "0.2"
+
+[dev-dependencies]
+gpui = { version = "0.2.2", features = ["runtime_shaders", "test-support"] }

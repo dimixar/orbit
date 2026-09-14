@@ -1,0 +1,762 @@
+use super::helpers::*;
+use super::*;
+
+impl OrbitApp {
+    /// The filtered menu entries for the active trigger (empty when none).
+    pub(super) fn autocomplete_entries(&mut self, trigger: &Trigger) -> Vec<AcEntry> {
+        match trigger.kind {
+            TriggerKind::Slash => mentions::filter_entries(
+                &trigger.query,
+                &[],
+                &self.slash_commands,
+                AUTOCOMPLETE_LIMIT,
+            ),
+            TriggerKind::At => {
+                self.ensure_mention_files();
+                mentions::filter_entries(
+                    &trigger.query,
+                    &self.mention_files,
+                    &[],
+                    AUTOCOMPLETE_LIMIT,
+                )
+            }
+        }
+    }
+
+    /// (Re)build the workspace file cache when the workspace changed.
+    pub(super) fn ensure_mention_files(&mut self) {
+        if self.mention_files_workspace == self.current_workspace {
+            return;
+        }
+        self.mention_files_workspace = self.current_workspace.clone();
+        self.mention_files = self
+            .current_workspace
+            .as_deref()
+            .map(mentions::list_workspace_files)
+            .unwrap_or_default();
+    }
+
+    /// Derive the open/closed/highlight state from the composer text.
+    /// The trigger is pure text state, so this runs every frame and the
+    /// menu opens/closes by itself as the user types.
+    pub(super) fn sync_autocomplete(&mut self, cx: &Context<Self>) {
+        let trigger = self.input.read(cx).active_trigger();
+        let key = trigger.as_ref().map(|t| (t.kind, t.query.clone()));
+        if key != self.last_ac_trigger {
+            // A new (or changed) token re-arms a mouse dismissal and resets
+            // the highlight.
+            self.autocomplete_dismissed = false;
+        }
+        self.last_ac_trigger = key;
+        let mut state = self.autocomplete.borrow_mut();
+        if !self.autocomplete_dismissed {
+            if let Some(trigger) = &trigger {
+                let count = match trigger.kind {
+                    TriggerKind::Slash => mentions::filter_entries(
+                        &trigger.query,
+                        &[],
+                        &self.slash_commands,
+                        AUTOCOMPLETE_LIMIT,
+                    )
+                    .len(),
+                    TriggerKind::At => {
+                        drop(state);
+                        self.ensure_mention_files();
+                        state = self.autocomplete.borrow_mut();
+                        mentions::filter_entries(
+                            &trigger.query,
+                            &self.mention_files,
+                            &[],
+                            AUTOCOMPLETE_LIMIT,
+                        )
+                        .len()
+                    }
+                };
+                state.count = count;
+                state.open = count > 0;
+                state.highlighted = state.highlighted.min(count.saturating_sub(1));
+            } else {
+                state.open = false;
+                state.count = 0;
+                state.highlighted = 0;
+            }
+        } else {
+            state.open = false;
+        }
+    }
+
+    /// Commit the highlighted entry (Enter/click): replace the trigger
+    /// token with the completed `/name ` or `@path ` text.
+    pub(super) fn commit_autocomplete_if_open(&mut self, cx: &mut Context<Self>) -> bool {
+        let (open, highlighted) = {
+            let state = self.autocomplete.borrow();
+            (state.open, state.highlighted)
+        };
+        if !open {
+            return false;
+        }
+        let Some(trigger) = self.input.read(cx).active_trigger() else {
+            return false;
+        };
+        let entries = self.autocomplete_entries(&trigger);
+        let Some(entry) = entries.into_iter().nth(highlighted) else {
+            return false;
+        };
+        self.commit_entry(entry, cx);
+        true
+    }
+
+    /// Insert `entry`'s completion over the active trigger token.
+    pub(super) fn commit_entry(&mut self, entry: AcEntry, cx: &mut Context<Self>) {
+        let Some(trigger) = self.input.read(cx).active_trigger() else {
+            return;
+        };
+        let text = match &entry {
+            AcEntry::Command { name, .. } => format!("/{name} "),
+            AcEntry::File { path } => format!("@{path} "),
+        };
+        self.input.update(cx, |input, cx| {
+            input.replace_range(trigger.start..trigger.end, &text, cx)
+        });
+        // Keep the menu closed until the trigger changes (the replaced text
+        // still ends in a space, but stay explicit).
+        self.autocomplete_dismissed = true;
+        self.last_ac_trigger = None;
+        self.autocomplete.borrow_mut().open = false;
+        cx.notify();
+    }
+
+    /// Outside mouse-down dismisses the menu until the trigger changes.
+    pub(super) fn on_autocomplete_outside_down(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.autocomplete.borrow().open {
+            self.autocomplete_dismissed = true;
+            cx.notify();
+        }
+    }
+
+    /// The autocomplete popup, anchored above the composer box (mirrors
+    /// the model/thinking chip popovers). `None` while closed.
+    pub(super) fn autocomplete_popup(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let highlighted = {
+            let state = self.autocomplete.borrow();
+            if !state.open || state.count == 0 {
+                return None;
+            }
+            state.highlighted
+        };
+        let trigger = self.input.read(cx).active_trigger()?;
+        let entries = self.autocomplete_entries(&trigger);
+        if entries.is_empty() {
+            return None;
+        }
+        let highlighted = highlighted.min(entries.len() - 1);
+        let theme = *theme::get(cx);
+        let this = cx.weak_entity();
+        let mut list = div()
+            .id("ac-list")
+            .w_full()
+            .max_h(px(8. * 34.))
+            .overflow_y_scroll()
+            .px(px(4.))
+            .pt(px(4.))
+            .pb(px(4.))
+            .flex()
+            .flex_col()
+            .gap(px(2.));
+        for (ix, entry) in entries.iter().enumerate() {
+            let selected = ix == highlighted;
+            let this = this.clone();
+            let entry = entry.clone();
+            // Leading glyph: brand glyph for commands; for files, the
+            // devicons Nerd Font glyph (falls back to the extension text
+            // badge when no Nerd Font is installed).
+            let nerd = nerd_font_family(cx);
+            let leading: AnyElement = match &entry {
+                AcEntry::Command { .. } => {
+                    icon("icons/extensions.svg", 13., theme.text_3).into_any_element()
+                }
+                AcEntry::File { path } => file_glyph(
+                    path.as_str(),
+                    theme.mode == ThemeMode::Dark,
+                    nerd.as_ref(),
+                    13.,
+                    file_badge(path.as_str(), theme),
+                ),
+            };
+            let title = match &entry {
+                AcEntry::Command { name, .. } => format!("/{name}"),
+                AcEntry::File { path } => path.rsplit('/').next().unwrap_or(path).to_string(),
+            };
+            let subtitle = match &entry {
+                AcEntry::Command { description, .. } => description.clone(),
+                // The directory part, shown dimmed after the basename.
+                AcEntry::File { path } => match path.rsplit_once('/') {
+                    Some((dir, _)) if !dir.is_empty() => format!("{dir}/"),
+                    _ => String::new(),
+                },
+            };
+            list = list.child(
+                div()
+                    .id(ElementId::NamedInteger("ac-row".into(), ix as u64))
+                    .h(px(30.))
+                    .px(px(8.))
+                    .rounded(px(6.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .cursor_pointer()
+                    .when(selected, |row| row.bg(theme.active))
+                    .hover(|style| style.bg(theme.overlay))
+                    .on_click(move |_, _, cx| {
+                        this.update(cx, |app, cx| app.commit_entry(entry.clone(), cx))
+                            .ok();
+                    })
+                    .child(leading)
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            // Fuzzy match first: the basename (or command
+                            // name) leads, then — after a breath — the rest
+                            // of the path / description in dimmed text.
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .max_w(px(CONTENT_MAX_W / 2.))
+                                    .truncate()
+                                    .text_size(theme.ui_px(12.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(if selected {
+                                        theme.active_fg
+                                    } else {
+                                        theme.text_2
+                                    })
+                                    .child(title),
+                            )
+                            .when(!subtitle.is_empty(), |row| {
+                                row.child(
+                                    div()
+                                        .min_w_0()
+                                        .flex_1()
+                                        .truncate()
+                                        .text_size(theme.ui_px(11.))
+                                        .text_color(theme.text_3)
+                                        .child(subtitle),
+                                )
+                            }),
+                    ),
+            );
+        }
+        // Full width of the chat box, so long paths are never cut.
+        let popup = div()
+            .w(px(CONTENT_MAX_W))
+            .font_family(theme::ui_font_family())
+            .rounded(px(10.))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.menu_bg)
+            .shadow(theme.popover_shadow())
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .occlude()
+            .on_mouse_down_out(cx.listener(Self::on_autocomplete_outside_down))
+            .child(list);
+
+        Some(
+            anchored()
+                .position_mode(AnchoredPositionMode::Local)
+                .anchor(Corner::BottomLeft)
+                .offset(point(px(0.), px(-4.)))
+                .snap_to_window()
+                .child(deferred(popup))
+                .into_any_element(),
+        )
+    }
+
+    /// Attachment chips row shown above the input (pasted/picked images).
+    pub(super) fn attachments_row(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if self.attachments.is_empty() {
+            return None;
+        }
+        let theme = *theme::get(cx);
+        let row = div().w_full().flex().flex_wrap().gap(px(6.));
+        Some(
+            row.children(self.attachments.iter().enumerate().map(|(ix, a)| {
+                // Image attachments show the decoded image; the glyph is the
+                // fallback if a preview never decoded.
+                let visual: AnyElement = match &a.preview {
+                    Some(image) => div()
+                        .size(px(18.))
+                        .flex_none()
+                        .rounded(px(4.))
+                        .overflow_hidden()
+                        .child(
+                            img(ImageSource::Image(image.clone()))
+                                .size_full()
+                                .object_fit(ObjectFit::Cover),
+                        )
+                        .into_any_element(),
+                    None => file_glyph(
+                        &a.name,
+                        theme.mode == ThemeMode::Dark,
+                        nerd_font_family(cx).as_ref(),
+                        12.,
+                        icon("icons/task.svg", 12., theme.text_3).into_any_element(),
+                    )
+                    .into_any_element(),
+                };
+                div()
+                    .id(ElementId::NamedInteger("attachment".into(), ix as u64))
+                    .h(px(26.))
+                    .pl(px(7.))
+                    .pr(px(6.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.bg_raised)
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.overlay))
+                    .child(visual)
+                    .child(
+                        div()
+                            .max_w(px(160.))
+                            .truncate()
+                            .text_size(theme.ui_px(11.5))
+                            .text_color(theme.text_2)
+                            .child(a.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(11.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.text_3)
+                            .child("×".to_string()),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseUpEvent, _, cx| {
+                            if ix < this.attachments.len() {
+                                this.attachments.remove(ix);
+                                cx.notify();
+                            }
+                        }),
+                    )
+            }))
+            .into_any_element(),
+        )
+    }
+
+    /// Files dragged over the window (external OS drag — gpui mirrors them
+    /// as an `ExternalPaths` drag). `on_drag_move` fires for *every* move
+    /// during the drag with this element's bounds, so one handler tracks
+    /// both entering and leaving the composer.
+    pub(super) fn on_file_drag_move(
+        &mut self,
+        event: &DragMoveEvent<ExternalPaths>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings_open {
+            return;
+        }
+        let hovered = event.bounds.contains(&event.event.position);
+        if hovered != self.file_drag_hovered {
+            self.file_drag_hovered = hovered;
+            cx.notify();
+        }
+    }
+
+    /// Files dropped anywhere on the window: images become attachments
+    /// (thumbnail chips above the composer); anything else is referenced by
+    /// path at the caret so the agent can read it with its tools.
+    pub(super) fn on_file_drop(
+        &mut self,
+        paths: &ExternalPaths,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.file_drag_hovered = false;
+        if self.settings_open {
+            cx.notify();
+            return;
+        }
+        for path in paths.paths() {
+            if self.attachments.len() >= MAX_ATTACHMENTS {
+                self.set_status(format!("at most {MAX_ATTACHMENTS} images per message"));
+                break;
+            }
+            match Attachment::from_path(path) {
+                Some(attachment) => self.attachments.push(attachment),
+                None => {
+                    self.input.update(cx, |input, cx| {
+                        input.insert_at_caret(&format!("{} ", path.display()), cx);
+                    });
+                    self.input.read(cx).focus(window);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Add menu → "Attach image…": pick an image file and queue it.
+    pub(super) fn attach_image(&mut self, cx: &mut Context<Self>) {
+        if self.attachments.len() >= MAX_ATTACHMENTS {
+            self.set_status(format!("at most {MAX_ATTACHMENTS} images per message"));
+            cx.notify();
+            return;
+        }
+        // Opened asynchronously: a blocking `rfd::FileDialog` pumps a nested
+        // main-thread modal loop while GPUI still holds this entity's mutable
+        // borrow, so a queued task that updates the app aborts with
+        // `already borrowed`. The async panel shows as a sheet and resolves
+        // once the user answers, by which point the borrow is released.
+        let dialog = rfd::AsyncFileDialog::new()
+            .set_title("Attach an image")
+            .add_filter("Image", &["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
+        cx.spawn(async move |this, cx| {
+            let Some(handle) = dialog.pick_file().await else {
+                return;
+            };
+            let path = handle.path().to_path_buf();
+            let _ = this.update(cx, |app, cx| {
+                match Attachment::from_path(&path) {
+                    Some(attachment) => {
+                        if app.attachments.len() >= MAX_ATTACHMENTS {
+                            app.set_status(format!("at most {MAX_ATTACHMENTS} images per message"));
+                        } else {
+                            app.attachments.push(attachment);
+                        }
+                    }
+                    None => {
+                        app.set_status("unsupported image format");
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Add menu → "Attach file…": any file. Images become attachments;
+    /// anything else is referenced by path at the caret (same rule as a
+    /// file dropped on the window).
+    pub(super) fn attach_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // See `attach_image` — never block the main thread on the native panel
+        // while this entity is borrowed.
+        let dialog = rfd::AsyncFileDialog::new().set_title("Attach a file");
+        cx.spawn_in(window, async move |this, cx| {
+            let Some(handle) = dialog.pick_file().await else {
+                return;
+            };
+            let path = handle.path().to_path_buf();
+            let _ = this.update_in(cx, |app, window, cx| {
+                if let Some(attachment) = Attachment::from_path(&path) {
+                    if app.attachments.len() >= MAX_ATTACHMENTS {
+                        app.set_status(format!("at most {MAX_ATTACHMENTS} images per message"));
+                    } else {
+                        app.attachments.push(attachment);
+                    }
+                } else {
+                    app.input.update(cx, |input, cx| {
+                        input.insert_at_caret(&format!("{} ", path.display()), cx);
+                    });
+                    app.input.read(cx).focus(window);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Mouse-up on the composer's "+" button: toggle the add menu, with the
+    /// same click-through guard as the model/thinking chips.
+    pub(super) fn on_add_trigger_click(
+        &mut self,
+        _: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        const GESTURE: Duration = Duration::from_millis(200);
+        if let Some(dismissed) = self.menu_dismissed_at.take() {
+            if dismissed.elapsed() < GESTURE {
+                return;
+            }
+        }
+        self.toggle_add_menu(window, cx);
+    }
+
+    pub(super) fn toggle_add_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.add_menu_open {
+            self.close_add_menu(window, cx);
+            return;
+        }
+        // Mutually exclusive with the other composer popovers.
+        self.model_selector = None;
+        self.context_popup = ContextPopup::None;
+        self.access_menu_open = false;
+        self.autocomplete_dismissed = true;
+        self.autocomplete.borrow_mut().open = false;
+        self.add_menu_open = true;
+        self.add_menu_highlight = 0;
+        // Focus the menu so ↑/↓/Enter/Escape dispatch to it.
+        window.focus(&self.add_menu_focus);
+        cx.notify();
+    }
+
+    /// Close the add menu and hand focus back to the composer input.
+    pub(super) fn close_add_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.add_menu_open {
+            self.add_menu_open = false;
+            self.add_menu_highlight = 0;
+            self.input.read(cx).focus(window);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn on_add_menu_next(
+        &mut self,
+        _: &crate::AddMenuNext,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_menu_highlight = (self.add_menu_highlight + 1) % ADD_MENU_ITEMS.len();
+        cx.notify();
+    }
+
+    pub(super) fn on_add_menu_prev(
+        &mut self,
+        _: &crate::AddMenuPrev,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_menu_highlight =
+            (self.add_menu_highlight + ADD_MENU_ITEMS.len() - 1) % ADD_MENU_ITEMS.len();
+        cx.notify();
+    }
+
+    pub(super) fn on_add_menu_confirm(
+        &mut self,
+        _: &crate::AddMenuConfirm,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_add_menu_item(self.add_menu_highlight, window, cx);
+    }
+
+    pub(super) fn on_add_menu_close(
+        &mut self,
+        _: &crate::AddMenuClose,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_add_menu(window, cx);
+    }
+
+    /// Execute add-menu row `ix` (see [`ADD_MENU_ITEMS`]), then close.
+    pub(super) fn run_add_menu_item(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.add_menu_open = false;
+        self.add_menu_highlight = 0;
+        match ix {
+            0 => self.attach_image(cx),
+            1 => self.attach_file(window, cx),
+            // Insert `@` at the caret — the file-mention autocomplete opens
+            // on its own from the text trigger.
+            _ => self
+                .input
+                .update(cx, |input, cx| input.insert_at_caret("@", cx)),
+        }
+        self.input.read(cx).focus(window);
+        cx.notify();
+    }
+
+    /// Mouse-up on a chip that opens the given picker. If that picker was
+    /// just dismissed by this click's mouse-down (outside-click dismissal),
+    /// swallow the toggle so it stays closed.
+    pub(super) fn on_chip_trigger_click(
+        &mut self,
+        kind: PickerKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        const GESTURE: Duration = Duration::from_millis(200);
+        if let Some(dismissed) = self.menu_dismissed_at.take() {
+            if dismissed.elapsed() < GESTURE {
+                return;
+            }
+        }
+        self.toggle_picker(kind, window, cx);
+    }
+
+    pub(super) fn on_model_trigger_click(
+        &mut self,
+        _: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_chip_trigger_click(PickerKind::Model, window, cx);
+    }
+
+    pub(super) fn on_thinking_trigger_click(
+        &mut self,
+        _: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_chip_trigger_click(PickerKind::Thinking, window, cx);
+    }
+
+    pub(super) fn set_model(&mut self, id: String, provider: String, cx: &mut Context<Self>) {
+        self.send(
+            CommandBody::SetModel {
+                model_id: id,
+                provider,
+            },
+            "set_model",
+        );
+        cx.notify();
+    }
+
+    pub(super) fn set_thinking_level(&mut self, level: String, cx: &mut Context<Self>) {
+        self.send(
+            CommandBody::SetThinkingLevel { level },
+            "set_thinking_level",
+        );
+        cx.notify();
+    }
+
+    // ── access mode (the guard extension's policy) ──────────────────────
+
+    /// Mouse-up on the access chip. Swallows the toggle if the menu was just
+    /// dismissed by this click's mouse-down (outside-click dismissal).
+    pub(super) fn on_access_trigger_click(
+        &mut self,
+        _: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        const GESTURE: Duration = Duration::from_millis(200);
+        if let Some(dismissed) = self.menu_dismissed_at.take() {
+            if dismissed.elapsed() < GESTURE {
+                return;
+            }
+        }
+        self.toggle_access_menu(window, cx);
+    }
+
+    pub(super) fn toggle_access_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.access_menu_open {
+            self.close_access_menu(window, cx);
+            return;
+        }
+        // Mutually exclusive with the other composer popovers.
+        self.model_selector = None;
+        self.context_popup = ContextPopup::None;
+        self.add_menu_open = false;
+        self.autocomplete_dismissed = true;
+        self.autocomplete.borrow_mut().open = false;
+        self.access_menu_open = true;
+        self.access_menu_highlight = AccessMode::ALL
+            .iter()
+            .position(|mode| *mode == self.access_mode)
+            .unwrap_or(0);
+        // Focus the menu so ↑/↓/Enter/Escape dispatch to it.
+        window.focus(&self.access_menu_focus);
+        cx.notify();
+    }
+
+    /// Close the access menu and hand focus back to the composer input.
+    pub(super) fn close_access_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.access_menu_open {
+            self.access_menu_open = false;
+            self.input.read(cx).focus(window);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn on_access_menu_next(
+        &mut self,
+        _: &crate::AccessMenuNext,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.access_menu_highlight = (self.access_menu_highlight + 1) % AccessMode::ALL.len();
+        cx.notify();
+    }
+
+    pub(super) fn on_access_menu_prev(
+        &mut self,
+        _: &crate::AccessMenuPrev,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.access_menu_highlight =
+            (self.access_menu_highlight + AccessMode::ALL.len() - 1) % AccessMode::ALL.len();
+        cx.notify();
+    }
+
+    pub(super) fn on_access_menu_confirm(
+        &mut self,
+        _: &crate::AccessMenuConfirm,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_access_menu_item(self.access_menu_highlight, window, cx);
+    }
+
+    pub(super) fn on_access_menu_close(
+        &mut self,
+        _: &crate::AccessMenuClose,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_access_menu(window, cx);
+    }
+
+    /// Select access mode `ix` (see [`AccessMode::ALL`]) and close the menu.
+    pub(super) fn run_access_menu_item(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(mode) = AccessMode::ALL.get(ix).copied() {
+            self.set_access_mode(mode, cx);
+        }
+        self.close_access_menu(window, cx);
+    }
+
+    /// Apply an access mode: persist it (the guard extension reads the file
+    /// on every tool call, so this re-arms live sessions) and report it. When
+    /// the guard extension could not be installed the mode has no effect, and
+    /// the status line says so rather than implying it took.
+    pub(super) fn set_access_mode(&mut self, mode: AccessMode, cx: &mut Context<Self>) {
+        self.access_mode = mode;
+        mode.persist();
+        if self.extensions.guard().is_none() {
+            self.set_status(format!(
+                "Access mode set to {}, but the guard extension is unavailable",
+                mode.label()
+            ));
+        } else {
+            self.set_status(format!("Access mode: {}", mode.label()));
+        }
+        cx.notify();
+    }
+}

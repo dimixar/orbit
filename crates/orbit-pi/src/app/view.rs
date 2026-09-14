@@ -1,0 +1,2675 @@
+use super::helpers::*;
+use super::sidebar::*;
+use super::*;
+
+impl Render for OrbitApp {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A clicked banner asks for the window; bring it forward on the frame
+        // that follows the click (macOS activates the app, but a minimized
+        // window would otherwise stay behind).
+        if self.activate_window_pending {
+            self.activate_window_pending = false;
+            window.activate_window();
+        }
+        let theme = *theme::get(cx);
+        // `/`-command and `@`-file menu state derives from the composer text
+        // every frame, so typing opens/closes/filters it without extra sync.
+        self.sync_autocomplete(cx);
+        let working_label = self.workspace_label();
+        // Workspace groups (ordered by each group's most recently active
+        // session). Only the active workspace is expanded by default; each
+        // open group shows up to SIDEBAR_GROUP_SESSIONS_VISIBLE sessions
+        // with per-group Show more / Show less toggles.
+        let sidebar_sessions = self.sidebar_sessions();
+        let side_rows = Rc::new(build_sidebar_rows(
+            &sidebar_sessions,
+            &self.workspaces,
+            &working_label,
+            &self.collapsed_workspaces,
+            &self.expanded_workspace_groups,
+            &self.expanded_session_groups,
+            &self.current_session_path,
+        ));
+        let old = self.sidebar_list.item_count();
+        if old != side_rows.len() {
+            self.sidebar_list.splice(0..old, side_rows.len());
+        }
+        let sessions_data = Rc::new(sidebar_sessions);
+        let active_path = Rc::new(self.current_session_path.clone());
+        let session_menu = Rc::new(self.session_menu.clone());
+        let workspace_menu = Rc::new(self.workspace_menu.clone());
+        let this = cx.entity();
+        // The open session's agent activity, plus which parked (background)
+        // sessions are mid-run — both drive the sidebar's running loader.
+        let agent_running = self.busy || self.transcript.is_streaming();
+        let running_paths: Rc<HashSet<PathBuf>> = Rc::new(
+            self.lives
+                .iter()
+                .filter(|(_, parked)| parked.busy)
+                .map(|(path, _)| path.clone())
+                .collect(),
+        );
+        // Every live process (running or warm-idle) — guards delete.
+        let live_paths: Rc<HashSet<PathBuf>> = Rc::new(self.lives.keys().cloned().collect());
+
+        let workspace_label = self.workspace_label();
+        // Focus ring on the composer box: the border strengthens while the
+        // input is focused (focus changes refresh the window, so this
+        // tracks without extra wiring).
+        let composer_focused = self.input.read(cx).focus_handle(cx).is_focused(window);
+        let review_workspace = self
+            .current_workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok());
+        // The rail gates on the main area's width (Waku: 872px transcript
+        // container), which excludes the sessions sidebar when visible.
+        let viewport = window.viewport_size();
+        // The right side pane is hidden while settings/onboarding own the
+        // main area (same rule as the sessions sidebar).
+        let pane_visible = self.sidepane.read(cx).is_open()
+            && !self.settings_open
+            && !self.usage_open
+            && self.dependencies_ready();
+        let pane_width = if pane_visible {
+            self.sidepane.read(cx).width()
+        } else {
+            px(0.)
+        };
+        // Keep the pane's workspace in sync with the app (cheap no-op when
+        // unchanged; a change marks Review stale).
+        let pane_workspace = self.current_workspace.clone();
+        self.sidepane
+            .update(cx, |pane, cx| pane.set_workspace(pane_workspace, cx));
+        let pane_session = self.session_id.clone();
+        let pane_latest_turn = self.latest_turn;
+        self.sidepane.update(cx, |pane, cx| {
+            pane.set_turn_context(pane_session, pane_latest_turn, cx)
+        });
+        let git_workspace = self.current_workspace.clone();
+        let git_provider = self.model_provider.clone();
+        let git_model = self.model_id.clone();
+        self.git_panel.update(cx, |panel, cx| {
+            panel.set_context(git_workspace, git_provider, git_model, cx)
+        });
+        let main_width = viewport.width
+            - if self.sidebar_visible && !self.settings_open {
+                self.sidebar_width
+            } else {
+                px(0.)
+            }
+            - pane_width;
+        // Composer toolbar compaction: below this column width the access
+        // pill drops out and the model label clamps (Send stays reachable).
+        let composer_compact = (main_width - px(32.)).min(px(CONTENT_MAX_W)) < px(600.);
+        // The Usage page lays itself out against the real main-area width, so
+        // its tables and grids never overflow the column it is given.
+        if self.usage_open {
+            let width = f32::from(main_width);
+            self.usage
+                .update(cx, |page, cx| page.set_main_width(width, cx));
+        }
+
+        // ── top-bar left controls: sidebar toggle + session history ──
+        let back_enabled = self.history_index > 0;
+        let forward_enabled = self.history_index + 1 < self.session_history.len();
+        let left_controls = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .pr(px(6.))
+            .child(
+                div()
+                    .id("toggle-sidebar")
+                    .p_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_toggle_sidebar))
+                    .child(icon("icons/panel-left.svg", 16., theme.text_2)),
+            )
+            .child(
+                div()
+                    .id("history-back")
+                    .p_1()
+                    .rounded_sm()
+                    .when(back_enabled, |b| {
+                        b.cursor_pointer()
+                            .hover(|s| s.bg(theme.bg_hover))
+                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_history_back))
+                    })
+                    .child(icon(
+                        "icons/arrow-left.svg",
+                        14.,
+                        if back_enabled {
+                            theme.text_2
+                        } else {
+                            theme.text_3
+                        },
+                    )),
+            )
+            .child(
+                div()
+                    .id("history-forward")
+                    .p_1()
+                    .rounded_sm()
+                    .when(forward_enabled, |b| {
+                        b.cursor_pointer()
+                            .hover(|s| s.bg(theme.bg_hover))
+                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_history_forward))
+                    })
+                    .child(icon(
+                        "icons/arrow-right.svg",
+                        14.,
+                        if forward_enabled {
+                            theme.text_2
+                        } else {
+                            theme.text_3
+                        },
+                    )),
+            );
+
+        // ── top-bar right controls ──
+        let mut top_controls = div().flex().items_center().gap_2();
+        // Provider quota — a compact, provider-independent headroom meter.
+        // Hidden entirely on a pi without `quota.*` (or when no provider
+        // reports anything), so the bar never shows a fabricated value.
+        top_controls = top_controls.children(self.render_quota_pill(cx));
+        top_controls = top_controls.children(self.render_open_in_control(cx));
+        top_controls = top_controls
+            .child(
+                div()
+                    .id("top-diff-stats")
+                    .h(px(26.))
+                    .px(px(8.))
+                    .rounded_md()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(Self::on_open_uncommitted_review),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.add_green)
+                            .child(format!("+{}", self.added)),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.del_red)
+                            .child(format!("-{}", self.removed)),
+                    ),
+            )
+            .child(
+                div()
+                    .id("info")
+                    .relative()
+                    .p_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_info_click))
+                    .children(self.render_session_details_popup(cx))
+                    .child(icon("icons/info.svg", 16., theme.text_2)),
+            )
+            // side-pane toggle sits right after the about (info) button
+            .child(
+                div()
+                    .id("toggle-side-pane")
+                    .p_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_toggle_side_pane))
+                    .child(icon(
+                        "icons/panel-right.svg",
+                        16.,
+                        if pane_visible {
+                            theme.text
+                        } else {
+                            theme.text_2
+                        },
+                    )),
+            )
+            // GitHub affordance: opens the full-page Git surface.
+            .child(
+                div()
+                    .id("open-git-github")
+                    .p_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_open_git_click))
+                    .child(icon(
+                        "icons/github.svg",
+                        16.,
+                        if self.git_open {
+                            theme.text
+                        } else {
+                            theme.text_2
+                        },
+                    )),
+            );
+
+        // A blocking extension dialog owns the keyboard while it is open. Focus
+        // it (or its text field) once, on the first frame it appears — `tick`
+        // has no window to focus with.
+        let dialog_layer = self.dialog.clone();
+        if let Some(dialog) = &dialog_layer {
+            if self.dialog_focus_pending {
+                self.dialog_focus_pending = false;
+                window.focus(&dialog.read(cx).focus_handle(cx));
+            }
+        }
+        // The inline approval bar owns the keyboard the same way.
+        if self.approval_focus_pending {
+            self.approval_focus_pending = false;
+            window.focus(&self.approval_focus);
+        }
+
+        div()
+            .size_full()
+            .flex()
+            .bg(theme.bg_main)
+            .text_color(theme.text)
+            .font_family(theme::ui_font_family())
+            // Dropping files anywhere in the window attaches them (the
+            // composer highlights when the drag passes over it).
+            .on_drop(cx.listener(Self::on_file_drop))
+            // ── sidebar ── (hidden while the settings surface is open —
+            // settings is a full-window surface with its own nav, like the
+            // reference UI)
+            .children((self.sidebar_visible && !self.settings_open).then(|| {
+                div()
+                    .id("sidebar")
+                    .relative()
+                    .flex_none()
+                    .w(self.sidebar_width)
+                    .h_full()
+                    .bg(theme.bg_sidebar)
+                    .border_r_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .flex_col()
+                    // traffic-light strip (drag region)
+                    .child(
+                        div()
+                            .h(px(38.))
+                            .w_full()
+                            .window_control_area(WindowControlArea::Drag),
+                    )
+                    // Resize handle: drag the sidebar's right edge to adjust
+                    // its width. The drag-move listener lives on the root so
+                    // the drag keeps tracking beyond the handle.
+                    .child(
+                        div()
+                            .id("sidebar-resize-handle")
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .right(px(-3.))
+                            .w(px(6.))
+                            .cursor(CursorStyle::ResizeLeftRight)
+                            .hover(|style| style.bg(theme.accent.opacity(0.4)))
+                            .on_drag(SidebarResize, |_, _, _, cx| cx.new(|_| DragGhost)),
+                    )
+                    // brand — the Orbit wordmark, set over the nav column
+                    .child(
+                        div()
+                            .px_3()
+                            .pt(px(2.))
+                            .pb(px(6.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            // White mark on dark sidebars; the dark-ink mark
+                            // on light ones, where the white wordmark vanishes.
+                            // A compact fixed width keeps the brand quiet above
+                            // the nav rows.
+                            .child(embedded_image_w(
+                                if theme.mode == ThemeMode::Light {
+                                    crate::app_icon::LOGO_DARK_ASSET
+                                } else {
+                                    crate::app_icon::LOGO_ASSET
+                                },
+                                px(90.),
+                            )),
+                    )
+                    // nav — one primary action (New Task), one quiet row
+                    // (Search); the switcher palette anchors under Search
+                    .child(
+                        div()
+                            .px_3()
+                            .pt_1()
+                            .pb_2()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(self.sidebar_new_task_button(theme, cx))
+                            .child(self.sidebar_search_row(theme, cx))
+                            .child(self.sidebar_usage_row(theme, cx)),
+                    )
+                    // session list (scrolls), grouped by workspace — or the
+                    // empty state when pi's store has no sessions yet
+                    .child(if side_rows.is_empty() {
+                        empty_sessions_state(theme).into_any_element()
+                    } else {
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .flex()
+                            .flex_col()
+                            // section label — anchors the list below the nav
+                            .child(
+                                div()
+                                    .px(px(14.))
+                                    .pb(px(2.))
+                                    .text_size(theme.ui_px(11.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text_3)
+                                    .child("Projects"),
+                            )
+                            .child(
+                                div()
+                                    .id("sidebar-sessions")
+                                    .flex_1()
+                                    .min_h_0()
+                                    .px_2()
+                                    .relative()
+                                    .child(
+                                        list(self.sidebar_list.clone(), move |ix, _window, cx| {
+                                            render_side_row(
+                                                &side_rows,
+                                                &sessions_data,
+                                                active_path.as_deref(),
+                                                ix,
+                                                &this,
+                                                agent_running,
+                                                &running_paths,
+                                                &live_paths,
+                                                session_menu.as_ref().as_ref(),
+                                                workspace_menu.as_ref().as_ref(),
+                                                *theme::get(cx),
+                                            )
+                                            .into_any_element()
+                                        })
+                                        .w_full()
+                                        .h_full(),
+                                    ),
+                            )
+                            .into_any_element()
+                    })
+                    // footer — Settings row + connection status, set off
+                    // from the session list by a hairline
+                    .child(
+                        div()
+                            .h(px(44.))
+                            .px_3()
+                            .border_t_1()
+                            .border_color(theme.border)
+                            .flex()
+                            .items_center()
+                            .child(
+                                div()
+                                    .id("settings")
+                                    .h(px(28.))
+                                    .px(px(8.))
+                                    .rounded_md()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(7.))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(theme.bg_hover))
+                                    .on_mouse_up(
+                                        MouseButton::Left,
+                                        cx.listener(Self::on_settings_gear_click),
+                                    )
+                                    .child(icon("icons/settings.svg", 14., theme.text_3))
+                                    .child(
+                                        div()
+                                            .text_size(theme.ui_px(12.))
+                                            .text_color(theme.text_2)
+                                            .child("Settings"),
+                                    ),
+                            )
+                            .child(div().flex_1())
+                            .when_some(self.sidebar_updater_button(theme, cx), |footer, button| {
+                                footer.child(button).child(div().w(px(8.)))
+                            })
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .child(div().size(px(6.)).rounded_full().bg(
+                                        if self.client.is_some() {
+                                            theme.ok_green
+                                        } else {
+                                            theme.stop_red
+                                        },
+                                    ))
+                                    .child(
+                                        div()
+                                            .text_size(theme.ui_px(11.))
+                                            .text_color(theme.text_3)
+                                            .child(if self.client.is_some() {
+                                                "Connected"
+                                            } else {
+                                                "Offline"
+                                            }),
+                                    ),
+                            ),
+                    )
+            }))
+            // ── main ──
+            .child(if self.settings_open {
+                self.render_settings(cx).into_any_element()
+            } else if self.git_open {
+                self.git_panel.clone().into_any_element()
+            } else if self.usage_open {
+                // Usage reads pi's store from disk, so it stays available even
+                // when the runtime itself is missing.
+                self.usage.clone().into_any_element()
+            } else if !self.dependencies_ready() {
+                // Missing runtime pieces (pi / node): show the setup page
+                // with install commands instead of the empty composer.
+                self.render_onboarding(cx).into_any_element()
+            } else {
+                div()
+                    .flex_1()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    // `min_w_0` lets the center shrink below its content's
+                    // min-content width, so opening the side pane (or widening
+                    // the sidebar) reflows the transcript instead of holding
+                    // the column at a fixed width.
+                    .min_w_0()
+                    .min_h_0()
+                    // top bar — left controls clear the traffic lights when
+                    // the sessions sidebar is hidden; the drag spacer between
+                    // left controls and the right cluster drags the window
+                    .child(
+                        div()
+                            .h(px(44.))
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .pl(px(if self.sidebar_visible { 20. } else { 76. }))
+                            .pr(px(12.))
+                            .child(left_controls)
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .h_full()
+                                    .window_control_area(WindowControlArea::Drag)
+                                    .flex()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(theme.ui_px(13.))
+                                            .text_color(theme.text_2)
+                                            .child(
+                                                self.current_title
+                                                    .clone()
+                                                    .unwrap_or_else(|| "New task".into()),
+                                            ),
+                                    ),
+                            )
+                            .child(top_controls),
+                    )
+                    // transcript (centered column) or empty state
+                    .child(if self.transcript.is_empty() {
+                        self.render_empty_state(main_width, cx).into_any_element()
+                    } else {
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .w_full()
+                            .relative()
+                            .child(self.transcript.render(
+                                review_workspace.as_deref(),
+                                window.viewport_size().height,
+                                main_width,
+                                Some(self.review_opener(cx)),
+                                Some(self.image_opener(cx)),
+                                self.search_hits(),
+                                self.search_active(),
+                                cx,
+                            ))
+                            // In-transcript find bar (⌘F), floating over the
+                            // top-right of the transcript.
+                            .children(self.transcript_search_bar(cx))
+                            .into_any_element()
+                    })
+                    // floating composer + status bar — one centered column
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .px_4()
+                            .pb_4()
+                            // One centered column: composer + status bar share
+                            // the same max width so the folder/meta row always
+                            // aligns to the composer's edges.
+                            .child(
+                                div()
+                                    // A stable element identity keeps the
+                                    // popovers and inline bars below from
+                                    // re-keying when a sibling appears, so
+                                    // their animations never restart mid-way.
+                                    .id("composer-column")
+                                    .max_w(px(CONTENT_MAX_W))
+                                    .w_full()
+                                    .flex()
+                                    .flex_col()
+                                    // `/`-command and `@`-file menu — anchored
+                                    // above the composer box (same deferred
+                                    // + anchored pattern as the chip pickers)
+                                    .children(self.autocomplete_popup(cx))
+                                    // Command/protocol failures, above the
+                                    // queue and composer.
+                                    .children(self.error_banner(theme, cx))
+                                    // In-flight retry / compaction state —
+                                    // persistent while active, never a
+                                    // transient status line.
+                                    .children(self.run_status_strip(cx))
+                                    // Access-guard approval — inline, above
+                                    // the queue and composer (no scrim modal).
+                                    .children(self.approval_bar(cx))
+                                    // Queued follow-ups wait here (sticky above
+                                    // the composer) until the task finishes.
+                                    .children(self.queue_bar(cx))
+                                    // composer box — the picker popups are
+                                    // anchored above their own chips
+                                    .child(
+                                        div()
+                                            .id("composer-box")
+                                            .w_full()
+                                            .relative()
+                                            .bg(theme.bg_composer)
+                                            .border_1()
+                                            .border_color(if self.file_drag_hovered {
+                                                theme.accent
+                                            } else if composer_focused {
+                                                theme.border_strong
+                                            } else {
+                                                theme.border
+                                            })
+                                            .rounded_xl()
+                                            .shadow(theme.composer_shadow())
+                                            .px(theme.space(12.))
+                                            .pt(theme.space(8.))
+                                            .pb(theme.space(8.))
+                                            // Base interface font for the input
+                                            // (scales with the UI font-size
+                                            // setting); the editor inherits it.
+                                            .text_size(theme.ui_px(14.))
+                                            .flex()
+                                            .flex_col()
+                                            .gap(theme.space(8.))
+                                            .on_mouse_up(
+                                                MouseButton::Left,
+                                                cx.listener(Self::on_composer_click),
+                                            )
+                                            .on_drag_move(cx.listener(Self::on_file_drag_move))
+                                            .children(self.attachments_row(cx))
+                                            .child(self.input.clone())
+                                            .child(self.composer_row(composer_compact, cx))
+                                            // Drop-target overlay (Waku): fades
+                                            // in over the box while files are
+                                            // dragged across it. Absolute, so
+                                            // highlighting never shifts layout.
+                                            .children(self.file_drag_hovered.then(|| {
+                                                let overlay = div()
+                                                    .absolute()
+                                                    .inset_0()
+                                                    .rounded_xl()
+                                                    .bg(theme.bg_composer.opacity(0.92))
+                                                    .border_1()
+                                                    .border_color(theme.accent)
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .gap_2()
+                                                    .child(icon(
+                                                        "icons/plus.svg",
+                                                        14.,
+                                                        theme.accent,
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .text_size(theme.ui_px(12.5))
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .text_color(theme.accent)
+                                                            .child("Drop to attach"),
+                                                    );
+                                                if theme::reduce_motion(cx) {
+                                                    overlay.into_any_element()
+                                                } else {
+                                                    overlay
+                                                        .with_animation(
+                                                            "drop-overlay",
+                                                            Animation::new(Duration::from_millis(
+                                                                120,
+                                                            )),
+                                                            |overlay, delta| overlay.opacity(delta),
+                                                        )
+                                                        .into_any_element()
+                                                }
+                                            })),
+                                    )
+                                    .child(self.status_bar(&workspace_label, cx)),
+                            ),
+                    )
+                    .into_any_element()
+            })
+            // ── right side pane (Review) ──
+            .children(pane_visible.then(|| self.sidepane.clone().into_any_element()))
+            // ── command palette (⌘P) — a full-window deferred layer above
+            // every other floating surface; the entity renders its own
+            // absolute scrim + centered card.
+            .children(
+                self.command_palette
+                    .clone()
+                    .map(|palette| command_palette::layer(palette).into_any_element()),
+            )
+            // ── extension dialog (select / confirm / input / editor) — a
+            // blocking modal above every other surface; pi holds the run until
+            // the user answers. It cancels the incoming request otherwise.
+            .children(dialog_layer.map(|dialog| crate::dialog::layer(dialog).into_any_element()))
+            // ── image lightbox — full-window, above everything; opened from a
+            // transcript image tile, dismissed by click or Escape.
+            .children(
+                self.lightbox
+                    .clone()
+                    .map(|image| self.lightbox_layer(image, cx)),
+            )
+            .track_focus(&self.focus_handle(cx))
+            // Sidebar resize: fires for every mouse move while the handle
+            // drag is active, wherever the pointer travels.
+            .on_drag_move(cx.listener(
+                |app: &mut Self,
+                 event: &DragMoveEvent<SidebarResize>,
+                 _: &mut Window,
+                 cx: &mut Context<Self>| {
+                    let max = event.bounds.size.width - px(400.);
+                    let width = event
+                        .event
+                        .position
+                        .x
+                        .clamp(px(SIDEBAR_MIN_W), max.max(px(SIDEBAR_MIN_W)));
+                    if width != app.sidebar_width {
+                        app.sidebar_width = width;
+                        cx.notify();
+                    }
+                },
+            ))
+            .on_drag_move(cx.listener(
+                |app: &mut Self,
+                 event: &DragMoveEvent<SidePaneResize>,
+                 _: &mut Window,
+                 cx: &mut Context<Self>| {
+                    // The pane hugs the window's right edge, so its width is
+                    // the distance from the pointer to that edge.
+                    let width = event.bounds.size.width - event.event.position.x;
+                    let max = event.bounds.size.width - px(PANE_MAX_RESERVE);
+                    app.sidepane.update(cx, |pane, cx| {
+                        pane.set_width(width.min(max), cx);
+                    });
+                },
+            ))
+            .on_action(cx.listener(Self::on_submit))
+            .on_action(cx.listener(Self::on_steer))
+            .on_action(cx.listener(Self::on_autocomplete_accept))
+            .on_action(cx.listener(Self::on_abort))
+            .on_action(cx.listener(Self::on_refresh))
+            .on_action(cx.listener(Self::on_copy_last_response))
+            .on_action(cx.listener(Self::on_prev_turn))
+            .on_action(cx.listener(Self::on_next_turn))
+            .on_action(cx.listener(Self::on_open_settings))
+            .on_action(cx.listener(Self::on_toggle_usage))
+            .on_action(cx.listener(Self::on_toggle_command_palette))
+            .on_action(cx.listener(Self::on_check_for_updates))
+            .on_action(cx.listener(Self::on_toggle_search))
+    }
+}
+
+impl OrbitApp {
+    /// Bottom row inside the composer: the "+" add menu and the access-mode
+    /// chip on the left; model / thinking chips and the round send button on
+    /// the right. `compact` (narrow window) drops the access chip and clamps
+    /// the model label so Send always stays reachable.
+    pub(super) fn composer_row(
+        &self,
+        compact: bool,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        div()
+            .id("composer-row")
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(self.add_menu_button(cx))
+            // Access mode: a real control now — it selects the guard policy
+            // the bundled extension enforces. First thing to yield when the
+            // row gets narrow.
+            .when(!compact, |row| row.child(self.access_chip(cx)))
+            .child(div().flex_1())
+            .child(self.model_chip(compact, cx))
+            .child(self.thinking_chip(cx))
+            .children(self.steer_button(cx))
+            .child(self.send_button(cx))
+    }
+
+    /// The access-mode chip: a lock glyph, the active mode's label, and a
+    /// caret that turns over when the picker opens. Ghost style until
+    /// hovered/open, matching the model chip.
+    pub(super) fn access_chip(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let theme = *theme::get(cx);
+        div()
+            .flex()
+            .flex_col()
+            .items_start()
+            .children(self.access_popup(cx))
+            .child(
+                div()
+                    .id("access-chip")
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .px(px(7.))
+                    .h(px(24.))
+                    .rounded_md()
+                    .text_size(theme.ui_px(12.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.overlay))
+                    .when(self.access_menu_open, |chip| {
+                        chip.bg(theme.active).text_color(theme.active_fg)
+                    })
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_access_trigger_click))
+                    .child(icon(self.access_mode.icon(), 12., theme.text_3))
+                    .child(div().text_color(theme.text_2).child(self.access_mode.label()))
+                    .child(self.access_caret(cx)),
+            )
+    }
+
+    /// The chip's caret. It turns a half-turn when the picker opens — animated
+    /// on open (reduce-motion aware) so the turn reads as a transition, and
+    /// resting flat when closed so there is no reverse flicker.
+    fn access_caret(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = *theme::get(cx);
+        let open = self.access_menu_open;
+        let svg = gpui::svg()
+            .path("icons/chevron-down.svg")
+            .flex_none()
+            .size(px(11.))
+            .text_color(theme.text_3);
+        if !open {
+            return svg
+                .with_transformation(Transformation::rotate(radians(0.0)))
+                .into_any_element();
+        }
+        if theme::reduce_motion(cx) {
+            return svg
+                .with_transformation(Transformation::rotate(radians(std::f32::consts::PI)))
+                .into_any_element();
+        }
+        svg.with_animation(
+            "access-caret-turn",
+            Animation::new(Duration::from_millis(150)).with_easing(|d| 1.0 - (1.0 - d).powi(3)),
+            |svg, d| {
+                svg.with_transformation(Transformation::rotate(radians(
+                    std::f32::consts::PI * d,
+                )))
+            },
+        )
+        .into_any_element()
+    }
+
+    /// The access-mode picker popup, while open. Minimal rows: an icon tile,
+    /// the mode name over its one-line description, and an accent check on the
+    /// active mode. The popup owns the keyboard via the `AccessMenu` context
+    /// and eases in rather than popping.
+    pub(super) fn access_popup(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if !self.access_menu_open {
+            return None;
+        }
+        let theme = *theme::get(cx);
+        let this = cx.weak_entity();
+        let mut list = div().w_full().p(px(5.)).flex().flex_col().gap(px(2.));
+        for (ix, mode) in AccessMode::ALL.iter().enumerate() {
+            let mode = *mode;
+            let highlighted = ix == self.access_menu_highlight;
+            let selected = mode == self.access_mode;
+            let this = this.clone();
+            list = list.child(
+                div()
+                    .id(ElementId::NamedInteger("access-row".into(), ix as u64))
+                    .w_full()
+                    .px(px(8.))
+                    .py(px(8.))
+                    .rounded(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .cursor_pointer()
+                    .when(highlighted, |row| row.bg(theme.overlay_strong))
+                    .when(selected && !highlighted, |row| row.bg(theme.accent.opacity(0.1)))
+                    .hover(|style| style.bg(theme.overlay_strong))
+                    .on_hover(move |hovered, _, cx| {
+                        if *hovered {
+                            this.update(cx, |app, cx| {
+                                if app.access_menu_highlight != ix {
+                                    app.access_menu_highlight = ix;
+                                    cx.notify();
+                                }
+                            })
+                            .ok();
+                        }
+                    })
+                    .on_mouse_up(MouseButton::Left, {
+                        let this = cx.weak_entity();
+                        move |_, window, cx| {
+                            this.update(cx, |app, cx| app.run_access_menu_item(ix, window, cx))
+                                .ok();
+                        }
+                    })
+                    .child(
+                        div()
+                            .flex_none()
+                            .size(px(26.))
+                            .rounded(px(7.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(if selected {
+                                theme.accent.opacity(0.16)
+                            } else {
+                                theme.overlay
+                            })
+                            .child(icon(
+                                mode.icon(),
+                                14.,
+                                if selected { theme.accent } else { theme.text_3 },
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(theme.ui_px(12.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(if selected {
+                                        theme.text
+                                    } else {
+                                        theme.text_2
+                                    })
+                                    .child(mode.label()),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(2.))
+                                    .whitespace_normal()
+                                    .text_size(theme.ui_px(11.))
+                                    .text_color(theme.text_3)
+                                    .child(mode.description()),
+                            ),
+                    )
+                    .when(selected, |row| {
+                        row.child(icon("icons/check.svg", 13., theme.accent))
+                    }),
+            );
+        }
+
+        let popup = div()
+            .w(px(300.))
+            .font_family(theme::ui_font_family())
+            .rounded(px(12.))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.menu_bg)
+            .shadow(theme.popover_shadow())
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .occlude()
+            .key_context("AccessMenu")
+            .track_focus(&self.access_menu_focus)
+            .on_action(cx.listener(Self::on_access_menu_next))
+            .on_action(cx.listener(Self::on_access_menu_prev))
+            .on_action(cx.listener(Self::on_access_menu_confirm))
+            .on_action(cx.listener(Self::on_access_menu_close))
+            .on_mouse_down_out(cx.listener(|app, _, window, cx| {
+                app.menu_dismissed_at = Some(Instant::now());
+                app.close_access_menu(window, cx);
+            }))
+            .child(list);
+
+        let popup: AnyElement = if theme::reduce_motion(cx) {
+            popup.into_any_element()
+        } else {
+            popup
+                .with_animation(
+                    "access-menu-in",
+                    Animation::new(Duration::from_millis(130))
+                        .with_easing(|d| 1.0 - (1.0 - d).powi(3)),
+                    |el, d| el.opacity(d),
+                )
+                .into_any_element()
+        };
+
+        Some(
+            anchored()
+                .position_mode(AnchoredPositionMode::Local)
+                .anchor(Corner::BottomLeft)
+                .offset(point(px(0.), px(-4.)))
+                .snap_to_window()
+                .child(deferred(popup))
+                .into_any_element(),
+        )
+    }
+
+
+    /// While a run is in flight and the composer holds something to send, a
+    /// quiet steer control sits beside Stop: it injects the text into the live
+    /// turn (`steer`) rather than queuing a follow-up. Hidden when idle or
+    /// empty, since there is nothing to redirect.
+    pub(super) fn steer_button(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let theme = *theme::get(cx);
+        if !self.is_running() {
+            return None;
+        }
+        let has_text =
+            !self.input.read(cx).text().trim().is_empty() || !self.attachments.is_empty();
+        if !has_text {
+            return None;
+        }
+        Some(
+            div()
+                .id("steer-btn")
+                .size(px(28.))
+                .rounded_full()
+                .bg(theme.overlay)
+                .hover(|s| s.bg(theme.overlay_strong))
+                .cursor_pointer()
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| this.steer_current(cx)),
+                )
+                .child(icon("icons/arrow-up-right.svg", 13., theme.accent))
+                .into_any_element(),
+        )
+    }
+
+    /// The composer's "+" button and its add menu (anchored above the
+    /// button, same deferred pattern as the chip pickers). The menu carries
+    /// the `AddMenu` key context, so ↑/↓/Enter/Escape drive it while open.
+    pub(super) fn add_menu_button(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let theme = *theme::get(cx);
+        div()
+            .flex()
+            .flex_col()
+            .items_start()
+            .children(self.add_menu_popup(cx))
+            .child(
+                div()
+                    .id("attach-chip")
+                    .size(px(24.))
+                    .rounded_md()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.overlay))
+                    .when(self.add_menu_open, |b| {
+                        b.bg(theme.active).text_color(theme.active_fg)
+                    })
+                    .child(icon("icons/plus.svg", 13., theme.text_3))
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_add_trigger_click)),
+            )
+    }
+
+    /// The add menu popup, while open. Real actions only: attach an image,
+    /// attach any file (by path at the caret), or start an @-mention.
+    pub(super) fn add_menu_popup(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if !self.add_menu_open {
+            return None;
+        }
+        let theme = *theme::get(cx);
+        let this = cx.weak_entity();
+        let mut list = div().w_full().p(px(4.)).flex().flex_col().gap(px(2.));
+        for (ix, (icon_path, label, hint)) in ADD_MENU_ITEMS.iter().enumerate() {
+            let highlighted = ix == self.add_menu_highlight;
+            let this = this.clone();
+            list = list.child(
+                div()
+                    .id(ElementId::NamedInteger("add-menu-row".into(), ix as u64))
+                    .h(px(28.))
+                    .px(px(8.))
+                    .rounded(px(6.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .cursor_pointer()
+                    .when(highlighted, |row| row.bg(theme.active))
+                    .hover(|style| style.bg(theme.overlay))
+                    .on_hover(move |hovered, _, cx| {
+                        if *hovered {
+                            this.update(cx, |app, cx| {
+                                if app.add_menu_highlight != ix {
+                                    app.add_menu_highlight = ix;
+                                    cx.notify();
+                                }
+                            })
+                            .ok();
+                        }
+                    })
+                    .on_mouse_up(MouseButton::Left, {
+                        let this = cx.weak_entity();
+                        move |_, window, cx| {
+                            this.update(cx, |app, cx| app.run_add_menu_item(ix, window, cx))
+                                .ok();
+                        }
+                    })
+                    .child(icon(icon_path, 13., theme.text_3))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(if highlighted {
+                                theme.active_fg
+                            } else {
+                                theme.text_2
+                            })
+                            .child(*label),
+                    )
+                    .when(!hint.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .text_size(theme.ui_px(11.))
+                                .text_color(theme.text_3)
+                                .child(*hint),
+                        )
+                    }),
+            );
+        }
+
+        let popup = div()
+            .w(px(200.))
+            .font_family(theme::ui_font_family())
+            .rounded(px(8.))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.menu_bg)
+            .shadow(theme.popover_shadow())
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .occlude()
+            // The menu owns the keyboard while open (`AddMenu` bindings in
+            // main.rs sit deeper than the global escape/enter).
+            .key_context("AddMenu")
+            .track_focus(&self.add_menu_focus)
+            .on_action(cx.listener(Self::on_add_menu_next))
+            .on_action(cx.listener(Self::on_add_menu_prev))
+            .on_action(cx.listener(Self::on_add_menu_confirm))
+            .on_action(cx.listener(Self::on_add_menu_close))
+            .on_mouse_down_out(cx.listener(|app, _, window, cx| {
+                // Arm the click-through guard so the same click's mouse-up
+                // on the "+" button doesn't re-open the menu.
+                app.menu_dismissed_at = Some(Instant::now());
+                app.close_add_menu(window, cx);
+            }))
+            .child(list);
+
+        Some(
+            anchored()
+                .position_mode(AnchoredPositionMode::Local)
+                .anchor(Corner::BottomLeft)
+                .offset(point(px(0.), px(-4.)))
+                .snap_to_window()
+                .child(deferred(popup))
+                .into_any_element(),
+        )
+    }
+
+    /// The anchored popup for `kind`, when that picker is open. `deferred`
+    /// paints it on top of everything; `anchored` takes it out of the layout
+    /// and pins its bottom-left corner just above the chip, flipping at the
+    /// window edges via `snap_to_window`.
+    pub(super) fn chip_popup(&self, kind: PickerKind) -> Option<impl IntoElement + use<>> {
+        self.model_selector
+            .clone()
+            .and_then(|(open_kind, selector)| {
+                (open_kind == kind).then(move || {
+                    anchored()
+                        .position_mode(AnchoredPositionMode::Local)
+                        .anchor(Corner::BottomLeft)
+                        .offset(point(px(0.), px(-4.)))
+                        .snap_to_window()
+                        .child(deferred(selector))
+                })
+            })
+    }
+
+    /// The model chip: provider glyph + model name + caret. Ghost style —
+    /// configuration is secondary to the prompt, so chips carry no border
+    /// or fill until hovered/open. `compact` clamps the label so narrow
+    /// windows keep Send reachable.
+    pub(super) fn model_chip(&self, compact: bool, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let theme = *theme::get(cx);
+        div()
+            .flex()
+            .flex_col()
+            .items_start()
+            .children(self.chip_popup(PickerKind::Model))
+            .child(
+                div()
+                    .id("model-chip")
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .px(px(7.))
+                    .h(px(24.))
+                    .rounded_md()
+                    .text_size(theme.ui_px(12.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.overlay))
+                    .when(self.picker_is_open(PickerKind::Model), |chip| {
+                        chip.bg(theme.active).text_color(theme.active_fg)
+                    })
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_model_trigger_click))
+                    .child(icon_dyn(
+                        provider_icon(&self.model_provider),
+                        12.,
+                        theme.text_3,
+                    ))
+                    .child(
+                        div()
+                            .max_w(px(if compact { 120. } else { 220. }))
+                            .truncate()
+                            .text_color(theme.text_2)
+                            .child(self.model_label.clone()),
+                    )
+                    .child(icon("icons/chevron-down.svg", 11., theme.text_3)),
+            )
+    }
+
+    /// The thinking-level chip: level icon + reasoning level + caret. Ghost
+    /// style, same hierarchy as the model chip.
+    pub(super) fn thinking_chip(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let theme = *theme::get(cx);
+        div()
+            .flex()
+            .flex_col()
+            .items_start()
+            .children(self.chip_popup(PickerKind::Thinking))
+            .child(
+                div()
+                    .id("thinking-chip")
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .px(px(7.))
+                    .h(px(24.))
+                    .rounded_md()
+                    .text_size(theme.ui_px(12.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.overlay))
+                    .when(self.picker_is_open(PickerKind::Thinking), |chip| {
+                        chip.bg(theme.active).text_color(theme.active_fg)
+                    })
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(Self::on_thinking_trigger_click),
+                    )
+                    .child({
+                        let (path, color) = thinking_icon(&self.thinking_label, &theme);
+                        icon(path, 15., color)
+                    })
+                    .child(
+                        div()
+                            .text_color(theme.text_2)
+                            .child(thinking_display(&self.thinking_label)),
+                    )
+                    .child(icon("icons/chevron-down.svg", 11., theme.text_3)),
+            )
+    }
+
+    /// Fading dot-grid backdrop for the new-task page. GPUI tints the SVG
+    /// alpha mask with a theme color, so the art must be explicit circles
+    /// (patterns/masks do not survive the renderer).
+    /// The configured dithered background image, absolutely filling its
+    /// parent. Painted once at the window root, behind every column.
+    pub(super) fn dither_backdrop(theme: Theme) -> Option<AnyElement> {
+        Self::backdrop_image(crate::dither::background(), theme)
+    }
+
+    /// Wrap a dithered image so it fills its parent and nothing else, then
+    /// drop it into the page: a bottom gradient to `bg_main` so the picture
+    /// fades out under the composer instead of ending on a hard edge.
+    ///
+    /// The wrapper clips: gpui's `ObjectFit::Cover` scales the image up and
+    /// centers it, returning bounds *larger* than the element whenever the
+    /// ratios differ — a 16:9 image in a narrower main area painted its
+    /// overflow over the sessions sidebar until this clip was added.
+    pub(super) fn backdrop_image(
+        image: Option<std::sync::Arc<gpui::RenderImage>>,
+        theme: Theme,
+    ) -> Option<AnyElement> {
+        image.map(|image| {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .overflow_hidden()
+                .child(img(image).size_full().object_fit(ObjectFit::Cover))
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        // Proportional, so the drop stays put as the window
+                        // resizes instead of turning into a band.
+                        .h(relative(0.55))
+                        .bg(linear_gradient(
+                            180.,
+                            linear_color_stop(theme.bg_main.opacity(0.), 0.),
+                            linear_color_stop(theme.bg_main, 1.),
+                        )),
+                )
+                .into_any_element()
+        })
+    }
+
+    /// The default new-task dot grid.
+    pub(super) fn dot_backdrop(theme: Theme) -> impl IntoElement + use<> {
+        let dot_color = match theme.mode {
+            ThemeMode::Light => theme.text_3.opacity(0.75),
+            ThemeMode::Dark => theme.text_3.opacity(0.65),
+        };
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .child(
+                svg()
+                    .path("backgrounds/new-task-dots.svg")
+                    .size_full()
+                    .text_color(dot_color),
+            )
+    }
+
+    /// New-task empty state — minimal onboarding over the backdrop (the
+    /// configured dithered image, or the dot grid): one headline, a ghost
+    /// workspace row, and the composer below for input.
+    ///
+    /// `main_width` comes from the caller (window minus sidebar/pane) because
+    /// the field below gets a definite width: `w_full().max_w(_)` chains
+    /// nested under the centered column resolve their percentages against the
+    /// unclamped page width in this gpui/taffy stack, which painted the card
+    /// to the window's right edge. `width_for_window` keeps the field and the
+    /// picker popover the same width from one source of truth.
+    pub(super) fn render_empty_state(
+        &self,
+        main_width: Pixels,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let theme = *theme::get(cx);
+        let field_w = px(crate::workspace_picker::width_for_window(main_width.into()));
+        let cwd = self
+            .current_workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        let folder_name = sessions::workspace_label(&cwd);
+        let path_label = cwd.to_string_lossy().into_owned();
+        let picker_open = self.workspace_picker.is_some();
+
+        // This page owns the backdrop: the configured dithered image, or the
+        // default dot grid. The chat page deliberately has neither.
+        let backdrop = Self::dither_backdrop(theme);
+        let dithered = backdrop.is_some();
+        div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .relative()
+            .overflow_hidden()
+            .when(!dithered, |page| page.child(Self::dot_backdrop(theme)))
+            .children(backdrop)
+            .child(
+                div()
+                    .relative()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .px(px(crate::workspace_picker::PAGE_PAD))
+                    .pb(px(88.))
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(crate::workspace_picker::FIELD_MAX_W))
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap(px(20.))
+                            // Rocket mark (HugeIcons start-up-02) — hero-size
+                            // disc over the dot grid; soft accent wash, no
+                            // heavy card chrome. `flex_none` keeps the disc a
+                            // true circle when a larger UI font makes the
+                            // column shrink its children.
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .size(px(72.))
+                                    .rounded_full()
+                                    .bg(theme.accent.opacity(0.12))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(icon("icons/start-up.svg", 36., theme.accent)),
+                            )
+                            // Title block — one idea, one line of guidance.
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .child(
+                                        div()
+                                            .text_size(theme.ui_px(22.))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.text)
+                                            .child("What should we build?"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(theme.ui_px(13.))
+                                            .text_color(theme.text_3)
+                                            .text_align(TextAlign::Center)
+                                            .child(
+                                                "Pick a workspace, then describe your task below.",
+                                            ),
+                                    ),
+                            )
+                            // Workspace — a labeled select field, not a ghost
+                            // row. Click opens the workspace picker (recent
+                            // folders, filter, browse) anchored below; the
+                            // border takes the accent while it's open.
+                            //
+                            // Definite `w` (not `w_full().max_w()`): percent
+                            // widths nested under the centered `max_w` column
+                            // resolve against the unclamped page width here,
+                            // and the card painted to the window's edge.
+                            .child(
+                                div()
+                                    .w(field_w)
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(6.))
+                                    .child(
+                                        div()
+                                            .px(px(2.))
+                                            .text_size(theme.ui_px(10.5))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.text_3)
+                                            .child("Workspace"),
+                                    )
+                                    .child(
+                                        div()
+                                            .relative()
+                                            .w_full()
+                                            .child(
+                                                div()
+                                                    .id("pick-folder")
+                                                    .w_full()
+                                                    .pl(px(8.))
+                                                    .pr(px(10.))
+                                                    .py(px(7.))
+                                                    .rounded(px(12.))
+                                                    .border_1()
+                                                    .border_color(if picker_open {
+                                                        theme.accent.opacity(0.55)
+                                                    } else {
+                                                        theme.border
+                                                    })
+                                                    .bg(theme.bg_raised)
+                                                    .flex()
+                                                    .items_center()
+                                                    .gap(px(10.))
+                                                    .cursor_pointer()
+                                                    .hover(|s| {
+                                                        s.border_color(theme.border_strong)
+                                                            .bg(theme.overlay)
+                                                    })
+                                                    .on_mouse_up(
+                                                        MouseButton::Left,
+                                                        cx.listener(|app, _, window, cx| {
+                                                            app.toggle_workspace_picker(window, cx);
+                                                        }),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .size(px(34.))
+                                                            .flex_none()
+                                                            .rounded(px(9.))
+                                                            .bg(theme.accent.opacity(0.12))
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_center()
+                                                            .child(icon(
+                                                                "icons/folder.svg",
+                                                                16.,
+                                                                theme.accent,
+                                                            )),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .flex()
+                                                            .flex_col()
+                                                            .gap(px(1.))
+                                                            .child(
+                                                                div()
+                                                                    .text_size(theme.ui_px(13.))
+                                                                    .font_weight(FontWeight::MEDIUM)
+                                                                    .text_color(theme.text)
+                                                                    .truncate()
+                                                                    .child(folder_name),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_size(theme.ui_px(11.))
+                                                                    .text_color(theme.text_3)
+                                                                    .truncate()
+                                                                    .child(path_label),
+                                                            ),
+                                                    )
+                                                    // Open state: the affordance
+                                                    // answers in accent, matching
+                                                    // the border.
+                                                    .child(icon(
+                                                        "icons/chevron-down.svg",
+                                                        12.,
+                                                        if picker_open {
+                                                            theme.accent
+                                                        } else {
+                                                            theme.text_3
+                                                        },
+                                                    )),
+                                            )
+                                            .children(self.workspace_picker_popup()),
+                                    ),
+                            ),
+                    ),
+            )
+    }
+
+    /// Whether every required runtime dependency is installed.
+    pub(super) fn dependencies_ready(&self) -> bool {
+        onboarding::all_required_installed(&self.deps)
+    }
+
+    /// Re-run the dependency probe and, if `pi` just became available, spawn
+    /// the agent client. Runs the probe off the main thread and spins the
+    /// setup page's Refresh button while it's in flight.
+    pub(super) fn refresh_setup(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        if self.refreshing {
+            return; // ignore double-clicks while a refresh is running
+        }
+        self.refreshing = true;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let deps = cx
+                .background_executor()
+                .spawn(async {
+                    // Short pause so the spinner reads as "working" rather than
+                    // a flash before the probe returns.
+                    std::thread::sleep(Duration::from_millis(250));
+                    onboarding::check_dependencies()
+                })
+                .await;
+            let ready = onboarding::all_required_installed(&deps);
+            let _ = this.update(cx, |app, cx| {
+                app.deps = deps;
+                app.refreshing = false;
+                if ready && app.client.is_none() {
+                    let workspace = app
+                        .current_workspace
+                        .clone()
+                        .or_else(|| std::env::current_dir().ok())
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    match app.extensions.spawn(&workspace) {
+                        Ok(client) => {
+                            app.client = Some(client);
+                            app.send(CommandBody::GetState, "get_state");
+                            app.refresh_catalogs();
+                            app.set_status("Connected");
+                        }
+                        Err(err) => app.set_status(format!("pi spawn failed: {err}")),
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Full-page setup screen shown when a required dependency is missing.
+    pub(super) fn render_onboarding(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let theme = *theme::get(cx);
+        let missing = onboarding::missing_required_count(&self.deps);
+
+        div()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .relative()
+            .overflow_hidden()
+            .child(Self::dot_backdrop(theme))
+            .child(
+                div()
+                    .relative()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .px(px(24.))
+                    .pb(px(40.))
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(560.))
+                            .flex()
+                            .flex_col()
+                            .gap(px(18.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .gap(px(10.))
+                                    .child(
+                                        div()
+                                            .size(px(44.))
+                                            .rounded_full()
+                                            .bg(theme.accent.opacity(0.12))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(icon("icons/spark.svg", 18., theme.accent)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(theme.ui_px(22.))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.text)
+                                            .child("Set up Orbit"),
+                                    )
+                                    .child(
+                                        div()
+                                            .max_w(px(420.))
+                                            .text_size(theme.ui_px(13.))
+                                            .text_color(theme.text_3)
+                                            .text_align(TextAlign::Center)
+                                            .child(
+                                                "A few pieces are missing before Orbit can run the pi agent. Install them, then refresh.",
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(10.))
+                                    .children(self.deps.iter().enumerate().map(|(ix, dep)| {
+                                        self.render_dependency_row(dep, ix, cx).into_any_element()
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap(px(14.))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.))
+                                            .text_size(theme.ui_px(12.))
+                                            .text_color(theme.text_3)
+                                            .child(
+                                                div().size(px(8.)).rounded_full().bg(theme.stop_red),
+                                            )
+                                            .child(if missing > 0 {
+                                                format!("{missing} required piece(s) missing")
+                                            } else {
+                                                "Ready".to_string()
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("refresh-setup")
+                                            .px(px(12.))
+                                            .py(px(6.))
+                                            .rounded_md()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.))
+                                            .when(self.refreshing, |b| b.opacity(0.55))
+                                            .when(!self.refreshing, |b| {
+                                                b.cursor_pointer().hover(|s| s.bg(theme.bg_hover))
+                                            })
+                                            .on_click({
+                                                let this = cx.entity();
+                                                move |_, window, cx| {
+                                                    this.update(cx, |app, cx| {
+                                                        app.refresh_setup(window, cx);
+                                                    });
+                                                }
+                                            })
+                                            .child(if self.refreshing {
+                                                gpui::svg()
+                                                    .path("icons/loader.svg")
+                                                    .flex_none()
+                                                    .size(px(13.))
+                                                    .text_color(theme.text_2)
+                                                    .with_animation(
+                                                        "refresh-spin",
+                                                        Animation::new(Duration::from_millis(800))
+                                                            .repeat(),
+                                                        |svg, delta| {
+                                                            svg.with_transformation(
+                                                                Transformation::rotate(radians(
+                                                                    delta * std::f32::consts::TAU,
+                                                                )),
+                                                            )
+                                                        },
+                                                    )
+                                                    .into_any_element()
+                                            } else {
+                                                icon("icons/refresh.svg", 13., theme.text_2)
+                                                    .into_any_element()
+                                            })
+                                            .child(
+                                                div()
+                                                    .text_size(theme.ui_px(12.))
+                                                    .text_color(theme.text_2)
+                                                    .child(if self.refreshing {
+                                                        "Checking…"
+                                                    } else {
+                                                        "Refresh"
+                                                    }),
+                                            ),
+                                    ),
+                            ),
+                    ),
+            )
+    }
+
+    /// One dependency row: status dot, name + detail, and either a version
+    /// chip (installed) or the install command with a copy affordance.
+    pub(super) fn render_dependency_row(
+        &self,
+        dep: &Dependency,
+        ix: usize,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let theme = *theme::get(cx);
+        let status_color = if dep.installed {
+            theme.ok_green
+        } else {
+            theme.stop_red
+        };
+
+        div()
+            .w_full()
+            .px(px(14.))
+            .py(px(12.))
+            .rounded_lg()
+            .bg(theme.bg_raised)
+            .border_1()
+            .border_color(theme.border)
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(div().size(px(9.)).rounded_full().bg(status_color))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_size(theme.ui_px(13.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child(dep.name),
+                            )
+                            .child(
+                                div()
+                                    .text_size(theme.ui_px(11.))
+                                    .text_color(theme.text_3)
+                                    .child(if dep.required { "required" } else { "optional" }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(11.5))
+                            .text_color(theme.text_3)
+                            .child(dep.detail),
+                    ),
+            )
+            .child(if dep.installed {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .text_size(theme.ui_px(11.5))
+                    .text_color(theme.ok_green)
+                    .child(icon("icons/check.svg", 12., theme.ok_green))
+                    .child(dep.version.clone().unwrap_or_else(|| "installed".into()))
+                    .into_any_element()
+            } else {
+                let cmd = dep.install_hint;
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .px(px(8.))
+                            .py(px(4.))
+                            .rounded_md()
+                            .bg(theme.code_bg)
+                            .border_1()
+                            .border_color(theme.border)
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.code_text)
+                            .child(cmd),
+                    )
+                    .child(
+                        div()
+                            .id(("copy", ix))
+                            .p_1()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.bg_hover))
+                            .on_click(move |_, _window, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(cmd.to_string()));
+                            })
+                            .child(icon("icons/copy.svg", 13., theme.text_2)),
+                    )
+                    .into_any_element()
+            })
+    }
+
+    /// Status bar under the composer: workspace / branch on the left,
+    /// used-context percent + ring on the right.
+    pub(super) fn status_bar(
+        &self,
+        workspace_label: &str,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let theme = *theme::get(cx);
+        div()
+            .pt_1p5()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_4()
+            .text_size(theme.ui_px(11.5))
+            .text_color(theme.text_3)
+            .child(
+                div()
+                    .id("status-workspace")
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .px(px(4.))
+                    .py(px(2.))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.overlay).text_color(theme.text_2))
+                    .active(|s| s.bg(theme.active).text_color(theme.active_fg))
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_pick_folder_click))
+                    .child(icon("icons/folder.svg", 12., theme.text_3))
+                    .child(workspace_label.to_string()),
+            )
+            .children(self.branch.as_ref().map(|branch| {
+                let open = self.branch_picker.is_some();
+                let pending = self.branch_operation_pending;
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_4()
+                    .child(
+                        div()
+                            .relative()
+                            .child(
+                                div()
+                                    .id("status-branch")
+                                    .flex()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .px(px(4.))
+                                    .py(px(2.))
+                                    .rounded_md()
+                                    .when(!pending, |chip| chip.cursor_pointer())
+                                    .when(open, |chip| {
+                                        chip.bg(theme.active).text_color(theme.active_fg)
+                                    })
+                                    .when(!open && !pending, |chip| {
+                                        chip.hover(|s| s.bg(theme.overlay).text_color(theme.text_2))
+                                    })
+                                    .when(pending, |chip| chip.opacity(0.6))
+                                    .on_mouse_up(
+                                        MouseButton::Left,
+                                        cx.listener(|app, _, window, cx| {
+                                            if !app.branch_operation_pending {
+                                                app.toggle_branch_picker(window, cx);
+                                            }
+                                        }),
+                                    )
+                                    .child(icon("icons/branch.svg", 12., theme.text_3))
+                                    .child(branch.name.clone())
+                                    .children(branch.ahead_behind.map(|(ahead, behind)| {
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .child(format!("↑{ahead}"))
+                                            .child(format!("↓{behind}"))
+                                    })),
+                            )
+                            .children(self.branch_picker_popup()),
+                    )
+                    .children(branch.other_branches.map(|count| {
+                        div()
+                            .id("status-branch-count")
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .px(px(4.))
+                            .py(px(2.))
+                            .rounded_md()
+                            .when(!pending, |chip| chip.cursor_pointer())
+                            .when(open, |chip| {
+                                chip.bg(theme.active).text_color(theme.active_fg)
+                            })
+                            .when(!open && !pending, |chip| {
+                                chip.hover(|s| s.bg(theme.overlay).text_color(theme.text_2))
+                            })
+                            .when(pending, |chip| chip.opacity(0.6))
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|app, _, window, cx| {
+                                    if !app.branch_operation_pending {
+                                        app.toggle_branch_picker(window, cx);
+                                    }
+                                }),
+                            )
+                            .child(icon("icons/git-fork.svg", 12., theme.text_3))
+                            .child(format!("{count} more"))
+                    }))
+                    .into_any_element()
+            }))
+            .child(div().flex_1())
+            // Transient status (send failures, attachment limits, branch
+            // results): fresh messages only — the tick lets them lapse.
+            .children(
+                self.status_at
+                    .is_some_and(|at| at.elapsed() < STATUS_MESSAGE_TTL)
+                    .then(|| {
+                        div()
+                            .max_w(px(320.))
+                            .truncate()
+                            .text_color(theme.text_3)
+                            .child(self.status.clone())
+                    }),
+            )
+            .child(self.context_button(cx))
+    }
+
+    pub(super) fn context_button(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let entity = cx.entity();
+        let theme = *theme::get(cx);
+        context_meter::context_control(
+            ContextMeterData {
+                usage: self.context.as_ref(),
+                session: self.session_usage.as_ref(),
+                conversation_est: self.transcript.estimated_tokens(),
+            },
+            self.context_popup,
+            &entity,
+            theme,
+            |app, hovered, cx| {
+                if app.context_popup == ContextPopup::Details {
+                    return;
+                }
+                app.context_popup = if hovered {
+                    ContextPopup::Hover
+                } else {
+                    ContextPopup::None
+                };
+                cx.notify();
+            },
+            |app, _, cx| {
+                const GESTURE: Duration = Duration::from_millis(200);
+                if let Some(dismissed) = app.menu_dismissed_at.take() {
+                    if dismissed.elapsed() < GESTURE {
+                        return;
+                    }
+                }
+                app.context_popup = if app.context_popup == ContextPopup::Details {
+                    ContextPopup::None
+                } else {
+                    ContextPopup::Details
+                };
+                if app.context_popup == ContextPopup::Details {
+                    app.refresh_context_stats();
+                }
+                cx.notify();
+            },
+            |app, _, cx| {
+                app.menu_dismissed_at = Some(Instant::now());
+                app.context_popup = ContextPopup::None;
+                cx.notify();
+            },
+        )
+    }
+
+    /// Sidebar nav row — Waku `render_sidebar_action_row` shape: fixed height,
+    /// icon in a 20px slot, secondary label, rounded hover surface.
+    /// The sidebar's primary action: a raised New Task button with the
+    /// ⌘N shortcut hint — the one emphasized control in the nav column.
+    pub(super) fn sidebar_new_task_button(
+        &self,
+        theme: Theme,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        div()
+            .id("sidebar-new-session")
+            .w_full()
+            .h(px(34.))
+            .px(px(10.))
+            .rounded_md()
+            .bg(theme.bg_raised)
+            .border_1()
+            .border_color(theme.border)
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.bg_hover).border_color(theme.border_strong))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, w, cx| {
+                    this.on_new_session(&crate::NewSession, w, cx)
+                }),
+            )
+            .child(icon("icons/compose.svg", 13., theme.accent))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(theme.ui_px(13.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child("New Task"),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(theme.ui_px(11.))
+                    .text_color(theme.text_3)
+                    .child("\u{2318}N"),
+            )
+    }
+
+    /// The quiet nav row under the primary button: opens the command
+    /// palette. Ghost style — hover is the only affordance; the ⌘P hint
+    /// mirrors the ⌘N hint on the button above.
+    pub(super) fn sidebar_search_row(
+        &self,
+        theme: Theme,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        div()
+            .id("sidebar-search")
+            .w_full()
+            .h(px(28.))
+            .px(px(10.))
+            .rounded_md()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.bg_hover))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseUpEvent, w, cx| this.toggle_command_palette(w, cx)),
+            )
+            .child(icon("icons/search.svg", 13., theme.text_3))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(theme.ui_px(12.5))
+                    .text_color(theme.text_3)
+                    .child("Search"),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(theme.ui_px(11.))
+                    .text_color(theme.text_3)
+                    .child("\u{2318}P"),
+            )
+    }
+
+    /// ⌘U: open the Usage page, or leave it if it is already open.
+    pub(super) fn on_toggle_usage(
+        &mut self,
+        _: &crate::ToggleUsage,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.usage_open {
+            self.close_usage(cx);
+        } else {
+            self.open_usage(cx);
+        }
+    }
+
+    /// Sidebar nav row for the Usage page — a destination, not an action, so
+    /// it carries the same shape as Settings and marks the active state with
+    /// an `active` fill rather than accent color alone.
+    pub(super) fn sidebar_usage_row(
+        &self,
+        theme: Theme,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let active = self.usage_open;
+        div()
+            .id("sidebar-usage")
+            .w_full()
+            .h(px(28.))
+            .px(px(10.))
+            .rounded_md()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .cursor_pointer()
+            .when(active, |row| row.bg(theme.active))
+            .hover(|s| s.bg(if active { theme.active } else { theme.bg_hover }))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_usage_nav_click))
+            .child(icon(
+                "icons/usage-total.svg",
+                13.,
+                if active {
+                    theme.active_fg
+                } else {
+                    theme.text_3
+                },
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(theme.ui_px(12.5))
+                    .text_color(if active {
+                        theme.active_fg
+                    } else {
+                        theme.text_2
+                    })
+                    .child("Usage"),
+            )
+    }
+
+    pub(super) fn send_button(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let theme = *theme::get(cx);
+        if self.busy {
+            div()
+                .id("stop-btn")
+                .size(px(28.))
+                .rounded_full()
+                .bg(theme.stop_red)
+                .hover(|s| s.bg(theme.stop_red_hover))
+                .active(|s| s.bg(theme.stop_red))
+                .cursor_pointer()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(theme.send_fg)
+                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_abort_mouse))
+                .child(icon("icons/stop.svg", 12., theme.send_fg))
+        } else {
+            // Nothing to send yet: the button stays clickable (submit
+            // no-ops on empty) but reads as quiet until there's a message
+            // or an attachment.
+            let empty = self.input.read(cx).text().trim().is_empty() && self.attachments.is_empty();
+            div()
+                .id("send-btn")
+                .size(px(28.))
+                .rounded_full()
+                .bg(if empty { theme.overlay } else { theme.send_bg })
+                .when(!empty, |btn| {
+                    btn.hover(|s| s.bg(theme.send_bg_hover))
+                        .active(|s| s.bg(theme.send_bg))
+                        .cursor_pointer()
+                })
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_send_click))
+                .child(icon(
+                    "icons/send.svg",
+                    14.,
+                    if empty { theme.text_3 } else { theme.send_fg },
+                ))
+        }
+    }
+
+    /// Persistent run-status strip above the composer: a calm, single-line
+    /// account of what pi is doing between turns — waiting out a transient
+    /// provider error (with the attempt counter and a real Cancel that sends
+    /// `abort_retry`) or compacting the conversation context. Unlike the
+    /// status bar's transient messages, this stays up for the whole state.
+    pub(super) fn run_status_strip(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let theme = *theme::get(cx);
+        if let Some(retry) = &self.retry_detail {
+            let attempt = match retry.max {
+                Some(max) => format!("attempt {} of {}", retry.attempt, max),
+                None => format!("attempt {}", retry.attempt),
+            };
+            return Some(
+                div()
+                    .w_full()
+                    .mb(px(8.))
+                    .px(px(10.))
+                    .py(px(7.))
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.bg_raised)
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(div().size(px(6.)).flex_none().rounded_full().bg(theme.warn))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(theme.ui_px(11.5))
+                            .text_color(theme.text_2)
+                            .child(format!("Retrying — {attempt} · {}", retry.error)),
+                    )
+                    .child(
+                        div()
+                            .id("cancel-retry")
+                            .flex_none()
+                            .px(px(6.))
+                            .py(px(1.))
+                            .rounded(px(5.))
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text_2)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.overlay).text_color(theme.text))
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.abort_retry(cx);
+                                }),
+                            )
+                            .child("Cancel"),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if self.is_compacting {
+            return Some(
+                div()
+                    .w_full()
+                    .mb(px(8.))
+                    .px(px(10.))
+                    .py(px(7.))
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.bg_raised)
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .size(px(6.))
+                            .flex_none()
+                            .rounded_full()
+                            .bg(theme.accent),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(theme.ui_px(11.5))
+                            .text_color(theme.text_2)
+                            .child("Preparing conversation context…"),
+                    )
+                    .into_any_element(),
+            );
+        }
+        None
+    }
+
+    /// The inline access-guard approval: a compact bar directly above the
+    /// composer asking whether a mutating tool call may run. Rendered here
+    /// rather than as the scrim modal so the transcript stays visible and the
+    /// answer sits next to the composer. Each option is a button; the bar also
+    /// owns the `Approval` key context (↑/↓ move, ⏎ confirms, esc denies). It
+    /// reveals by animating its own height so the page never jumps.
+    pub(super) fn approval_bar(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        /// Fixed row height — a single-line prompt, so the reveal can animate
+        /// a known height and the surrounding layout can never reflow abruptly.
+        const BAR_H: f32 = 48.;
+        const GAP: f32 = 8.;
+
+        let request = self.approval.as_ref()?;
+        let theme = *theme::get(cx);
+        let heading = if request.tool.trim().is_empty() {
+            "Permission needed".to_string()
+        } else {
+            format!("Allow {}?", request.tool)
+        };
+        let detail = request.detail.clone();
+
+        let mut buttons = div().flex().items_center().gap(px(6.));
+        for (ix, option) in request.options.iter().enumerate() {
+            let highlighted = ix == self.approval_highlight;
+            let is_deny = option.eq_ignore_ascii_case("deny");
+            let is_primary = !is_deny && !option.to_ascii_lowercase().contains("always");
+            let mut button = div()
+                .id(ElementId::NamedInteger("approval-option".into(), ix as u64))
+                .h(px(28.))
+                .px(px(12.))
+                .rounded(px(7.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(theme.ui_px(11.5))
+                .font_weight(FontWeight::MEDIUM)
+                .cursor_pointer()
+                .border_1()
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, window, cx| this.approval_choose(ix, window, cx)),
+                );
+            // Ember stays an accent, never a fill: the affirmative is an
+            // ember-washed tile with ember ink, matching the One Accent Rule.
+            button = if is_primary {
+                button
+                    .bg(theme.accent.opacity(0.16))
+                    .text_color(theme.accent)
+                    .hover(|s| s.bg(theme.accent.opacity(0.26)))
+            } else if is_deny {
+                button
+                    .bg(theme.overlay)
+                    .text_color(theme.text_2)
+                    .hover(|s| s.bg(theme.crit.opacity(0.14)).text_color(theme.crit))
+            } else {
+                button
+                    .bg(theme.overlay)
+                    .text_color(theme.text_2)
+                    .hover(|s| s.bg(theme.overlay_strong).text_color(theme.text))
+            };
+            // The keyboard cursor reads as a strong border.
+            button = button.border_color(if highlighted {
+                theme.border_strong
+            } else {
+                gpui::transparent_black()
+            });
+            buttons = buttons.child(button.child(option.clone()));
+        }
+
+        let bar = div()
+            .id("approval-bar")
+            .w_full()
+            .h(px(BAR_H))
+            .mb(px(GAP))
+            .px(px(12.))
+            .rounded(px(12.))
+            .border_1()
+            .border_color(theme.accent.opacity(0.3))
+            .bg(theme.bg_raised)
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .overflow_hidden()
+            .key_context("Approval")
+            .track_focus(&self.approval_focus)
+            .on_action(cx.listener(Self::on_approval_next))
+            .on_action(cx.listener(Self::on_approval_prev))
+            .on_action(cx.listener(Self::on_approval_confirm))
+            .on_action(cx.listener(Self::on_approval_close))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(28.))
+                    .rounded(px(8.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(theme.accent.opacity(0.16))
+                    .child(icon("icons/lock.svg", 14., theme.accent)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(heading),
+                    )
+                    .when(!detail.trim().is_empty(), |col| {
+                        col.child(
+                            div()
+                                .mt(px(1.))
+                                .font_family(theme::code_font_family())
+                                .truncate()
+                                .text_size(theme.ui_px(11.))
+                                .text_color(theme.text_3)
+                                .child(detail),
+                        )
+                    }),
+            )
+            .child(buttons);
+
+        // Reveal by easing the bar's own height (and its gap) from zero, so the
+        // prompt unfolds in place instead of the page snapping down a row.
+        let bar: AnyElement = if theme::reduce_motion(cx) {
+            bar.into_any_element()
+        } else {
+            bar.with_animation(
+                "approval-in",
+                Animation::new(Duration::from_millis(170))
+                    .with_easing(|d| 1.0 - (1.0 - d).powi(3)),
+                move |el, d| el.max_h(px(BAR_H * d)).mb(px(GAP * d)).opacity(d),
+            )
+            .into_any_element()
+        };
+        Some(bar)
+    }
+
+    /// The pending queue pi is holding, shown as a bar directly above the
+    /// composer. While a task is running, messages sent from the composer are
+    /// queued as follow-ups here and delivered once the task finishes;
+    /// `queue_update` mirrors the list live.
+    pub(super) fn queue_bar(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if self.queue.is_empty() {
+            return None;
+        }
+        let theme = *theme::get(cx);
+        let mut chips = div().flex().flex_wrap().gap(px(6.));
+        for text in &self.queue.steering {
+            chips = chips.child(queue_chip("Steer", text, false, theme));
+        }
+        for text in &self.queue.follow_up {
+            chips = chips.child(queue_chip("Follow-up", text, true, theme));
+        }
+        Some(
+            div()
+                .w_full()
+                .mb(px(8.))
+                .px(px(10.))
+                .py(px(8.))
+                .rounded_lg()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.bg_raised)
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(theme.ui_px(11.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text_3)
+                                .child(if self.queue.follow_up.is_empty() {
+                                    format!("Steering the running turn ({})", self.queue.len())
+                                } else if self.queue.steering.is_empty() {
+                                    format!(
+                                        "Queued — sends after the current task finishes ({})",
+                                        self.queue.len()
+                                    )
+                                } else {
+                                    format!(
+                                        "Steering now; follow-ups send after the task finishes ({})",
+                                        self.queue.len()
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .id("clear-queue")
+                                .px(px(6.))
+                                .py(px(1.))
+                                .rounded(px(5.))
+                                .text_size(theme.ui_px(11.))
+                                .text_color(theme.text_2)
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme.overlay).text_color(theme.text))
+                                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_clear_queue))
+                                .child("Clear"),
+                        ),
+                )
+                .child(chips)
+                .into_any_element(),
+        )
+    }
+
+    /// The dismissible error banner: a command / protocol / extension failure
+    /// surfaced per the docs' error contract. Persists until dismissed. A
+    /// dead pi process offers a one-click Reconnect instead of sending the
+    /// user to Settings; every banner can copy its text for a bug report.
+    pub(super) fn error_banner(&self, theme: Theme, cx: &Context<Self>) -> Option<AnyElement> {
+        let message = self.error.as_ref()?;
+        let copy_text = message.clone();
+        let reconnect = self.runtime.exited;
+        Some(
+            div()
+                .w_full()
+                .mb(px(8.))
+                .bg(theme.crit.opacity(0.1))
+                .border_1()
+                .border_color(theme.crit.opacity(0.45))
+                .rounded_lg()
+                .px(px(12.))
+                .py(px(9.))
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(icon("icons/info.svg", 15., theme.crit))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(theme.ui_px(12.))
+                        .text_color(theme.text)
+                        .child(message.clone()),
+                )
+                .when(reconnect, |banner| {
+                    banner.child(
+                        div()
+                            .id("reconnect-runtime")
+                            .flex_none()
+                            .px(px(8.))
+                            .py(px(3.))
+                            .rounded_md()
+                            .text_size(theme.ui_px(11.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .cursor_pointer()
+                            .bg(theme.overlay)
+                            .hover(|s| s.bg(theme.overlay_strong))
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.error = None;
+                                    this.runtime_restart(cx);
+                                }),
+                            )
+                            .child("Reconnect"),
+                    )
+                })
+                .child(
+                    div()
+                        .id("copy-error")
+                        .size(px(20.))
+                        .rounded_md()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .text_color(theme.text_2)
+                        .hover(|s| s.bg(theme.overlay).text_color(theme.text))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(move |_, _, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
+                            }),
+                        )
+                        .child(icon("icons/copy.svg", 12., theme.text_2)),
+                )
+                .child(
+                    div()
+                        .id("dismiss-error")
+                        .size(px(20.))
+                        .rounded_md()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .text_size(theme.ui_px(13.))
+                        .text_color(theme.text_2)
+                        .hover(|s| s.bg(theme.overlay).text_color(theme.text))
+                        .on_mouse_up(MouseButton::Left, cx.listener(Self::dismiss_error))
+                        .child("×"),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Discard the pending queue without aborting the run. The composer text
+    /// stays untouched (unlike Escape, which restores queued text).
+    pub(super) fn on_clear_queue(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.restore_queue_on_clear = false;
+        self.send(CommandBody::ClearQueue, "clear_queue");
+        cx.notify();
+    }
+
+    /// Full-window image lightbox: the clicked attachment at `Contain` scale
+    /// over a dimmed scrim. Any click (or Escape) closes it. No new surface
+    /// for the app — it reads `OrbitApp::lightbox`, set by `image_opener`.
+    pub(super) fn lightbox_layer(
+        &self,
+        image: std::sync::Arc<Image>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let theme = *theme::get(cx);
+        let scrim = match theme.mode {
+            theme::ThemeMode::Dark => gpui::hsla(0., 0., 0., 0.72),
+            theme::ThemeMode::Light => gpui::hsla(0., 0., 0., 0.6),
+        };
+        div()
+            .id("image-lightbox")
+            .debug_selector(|| "image-lightbox".to_string())
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(scrim)
+            .p(px(48.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.lightbox = None;
+                    cx.notify();
+                }),
+            )
+            .child(
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        img(ImageSource::Image(image))
+                            .size_full()
+                            .object_fit(ObjectFit::Contain),
+                    ),
+            )
+            .into_any_element()
+    }
+}

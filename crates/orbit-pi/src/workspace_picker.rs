@@ -1,0 +1,475 @@
+//! Workspace picker — the new-task page's folder selector.
+//!
+//! Replaces the bare OS dialog with a popover that answers the common case
+//! first: the folders you already run sessions in, newest activity first,
+//! filterable, keyboard-driven. The native dialog is still one row away
+//! ("Choose folder…") for anywhere else. Follows the same popover conventions
+//! as [`crate::branch_picker::BranchPicker`].
+
+use std::path::PathBuf;
+
+use gpui::{
+    div, point, prelude::*, px, App, Context, ElementId, Entity, FocusHandle, Focusable,
+    FontWeight, IntoElement, MouseDownEvent, ParentElement, Render, ScrollHandle, Styled, Window,
+};
+
+use crate::app::icon;
+use crate::composer::ComposerInput;
+use crate::theme;
+
+/// The field caps at this width; the popover matches it exactly. Feeds
+/// [`width_for_window`], the single source of truth both the new-task field
+/// (`render_empty_state`) and this popover use, so the two can never drift
+/// apart.
+pub const FIELD_MAX_W: f32 = 400.;
+/// Page side padding around the field column (`render_empty_state`).
+pub const PAGE_PAD: f32 = 24.;
+/// Smallest the popover ever gets (very narrow windows).
+const POPOVER_MIN_W: f32 = 240.;
+const ROW_H: f32 = 38.;
+/// Tallest the recents list grows before scrolling (≈ 4 rows). Sized so the
+/// whole popover still fits below the centered field at the 960×640 minimum
+/// window, instead of `snap_to_window` shoving it up over the card.
+const LIST_MAX_H: f32 = 4. * ROW_H;
+/// Recents the app hands us at most.
+pub const MAX_RECENTS: usize = 8;
+
+/// Field/popover width for a given main-area width. The new-task field takes
+/// this as a definite `w()` (not `w_full().max_w(FIELD_MAX_W)`): percent
+/// widths nested under the centered max-width column resolve against the
+/// unclamped page width in this gpui/taffy stack, which let the card paint
+/// past the column to the window's right edge. Definite width here means the
+/// card is clamped up front and this popover always lands flush under it.
+pub fn width_for_window(viewport_w: f32) -> f32 {
+    (viewport_w - 2. * PAGE_PAD).clamp(POPOVER_MIN_W, FIELD_MAX_W)
+}
+
+/// One selectable folder: a recent workspace or the current one.
+#[derive(Debug, Clone)]
+pub struct WorkspaceEntry {
+    /// Folder display name (`workspace_label`).
+    pub name: String,
+    pub path: PathBuf,
+    /// Age of the newest session here (`2h`); `None` for a folder with no
+    /// sessions yet.
+    pub last_active: Option<String>,
+}
+
+pub struct WorkspacePicker {
+    entries: Vec<WorkspaceEntry>,
+    current: Option<PathBuf>,
+    /// Matches the field's rendered width — the app measures the window at
+    /// open time so the popover never overflows or juts past the card.
+    width: f32,
+    filter: Entity<ComposerInput>,
+    scroll: ScrollHandle,
+    /// `0..rows.len()` — one past the last folder row is "Choose folder…".
+    highlighted: usize,
+    last_filter: String,
+    on_pick: Box<dyn Fn(PathBuf, &mut Window, &mut App)>,
+    on_browse: Box<dyn Fn(&mut Window, &mut App)>,
+    /// `bool` = dismissed by an outside mouse-down (vs. escape).
+    on_dismiss: Box<dyn Fn(bool, &mut Window, &mut App)>,
+}
+
+impl WorkspacePicker {
+    pub fn new(
+        entries: Vec<WorkspaceEntry>,
+        current: Option<PathBuf>,
+        width: f32,
+        on_pick: Box<dyn Fn(PathBuf, &mut Window, &mut App)>,
+        on_browse: Box<dyn Fn(&mut Window, &mut App)>,
+        on_dismiss: Box<dyn Fn(bool, &mut Window, &mut App)>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let filter = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_placeholder("Filter folders…")
+                .with_key_context("Composer Picker")
+        });
+        Self {
+            entries,
+            current,
+            width,
+            filter,
+            scroll: ScrollHandle::new(),
+            highlighted: 0,
+            last_filter: String::new(),
+            on_pick,
+            on_browse,
+            on_dismiss,
+        }
+    }
+
+    // ── actions (Picker key context) ─────────────────────────────────────
+
+    fn on_cancel(&mut self, _: &crate::PickerCancel, window: &mut Window, cx: &mut Context<Self>) {
+        (self.on_dismiss)(false, window, cx);
+    }
+
+    fn on_confirm(
+        &mut self,
+        _: &crate::PickerConfirm,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rows = self.filtered(&self.last_filter);
+        self.activate(self.highlighted, &rows, window, cx);
+    }
+
+    fn on_next(&mut self, _: &crate::PickerSelectNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.step(1, cx);
+    }
+
+    fn on_prev(&mut self, _: &crate::PickerSelectPrev, _: &mut Window, cx: &mut Context<Self>) {
+        self.step(-1, cx);
+    }
+
+    fn on_outside_down(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        (self.on_dismiss)(true, window, cx);
+    }
+
+    // ── internals ────────────────────────────────────────────────────────
+
+    /// Folder rows matching the filter (name or path substring).
+    fn filtered(&self, needle: &str) -> Vec<WorkspaceEntry> {
+        let needle = needle.trim().to_lowercase();
+        self.entries
+            .iter()
+            .filter(|entry| {
+                needle.is_empty()
+                    || entry.name.to_lowercase().contains(&needle)
+                    || entry
+                        .path
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .contains(&needle)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Selectable row count: folder rows plus the "Choose folder…" row.
+    fn row_count(&self, rows: &[WorkspaceEntry]) -> usize {
+        rows.len() + 1
+    }
+
+    fn step(&mut self, dir: isize, cx: &mut Context<Self>) {
+        let rows = self.filtered(&self.last_filter);
+        let count = self.row_count(&rows);
+        if count == 0 {
+            return;
+        }
+        let pos = self.highlighted.min(count - 1) as isize;
+        let next = (pos + dir).rem_euclid(count as isize) as usize;
+        self.highlighted = next;
+        self.ensure_visible(rows.len());
+        cx.notify();
+    }
+
+    fn ensure_visible(&mut self, folder_rows: usize) {
+        // The browse row sits below the list: scroll to the very bottom.
+        let row_top = if self.highlighted >= folder_rows {
+            folder_rows as f32 * ROW_H + ROW_H
+        } else {
+            self.highlighted as f32 * ROW_H
+        };
+        let content_h = folder_rows as f32 * ROW_H;
+        let viewport_h = content_h.min(LIST_MAX_H);
+        let current: f32 = self.scroll.offset().y.into();
+        let mut offset = current;
+        if row_top < current {
+            offset = row_top;
+        } else if row_top + ROW_H > current + viewport_h {
+            offset = row_top + ROW_H - viewport_h;
+        }
+        let max_offset = (content_h - viewport_h).max(0.);
+        self.scroll
+            .set_offset(point(px(0.), px(offset.clamp(0., max_offset))));
+    }
+
+    fn activate(
+        &mut self,
+        ix: usize,
+        rows: &[WorkspaceEntry],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match rows.get(ix) {
+            Some(entry) if self.current.as_ref() == Some(&entry.path) => {
+                (self.on_dismiss)(false, window, cx)
+            }
+            Some(entry) => (self.on_pick)(entry.path.clone(), window, cx),
+            None => (self.on_browse)(window, cx),
+        }
+    }
+}
+
+impl Focusable for WorkspacePicker {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.filter.read(cx).focus_handle(cx)
+    }
+}
+
+impl Render for WorkspacePicker {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = *theme::get(cx);
+        let this = cx.entity();
+
+        let needle = self.filter.read(cx).text().to_lowercase();
+        if needle != self.last_filter {
+            self.last_filter = needle.clone();
+            self.highlighted = 0;
+            self.scroll.set_offset(point(px(0.), px(0.)));
+        }
+        let rows = self.filtered(&needle);
+        let count = self.row_count(&rows);
+        self.highlighted = self.highlighted.min(count - 1);
+
+        // ── folder rows ──
+        let mut list = div()
+            .id("workspace-picker-list")
+            .w_full()
+            .max_h(px(LIST_MAX_H))
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .px(px(4.))
+            .py(px(2.))
+            .flex()
+            .flex_col();
+        for (ix, entry) in rows.iter().enumerate() {
+            let is_current = self.current.as_ref() == Some(&entry.path);
+            let highlighted = ix == self.highlighted;
+            let this = this.clone();
+            list = list.child(
+                div()
+                    .id(ElementId::NamedInteger("workspace-row".into(), ix as u64))
+                    .h(px(ROW_H))
+                    .px(px(8.))
+                    .rounded(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .cursor_pointer()
+                    .when(highlighted, |row| row.bg(theme.overlay_strong))
+                    // The current folder keeps the `active` fill at rest (the
+                    // same "chosen" register the model picker uses); the accent
+                    // check alone is never the only signal.
+                    .when(!highlighted && is_current, |row| row.bg(theme.active))
+                    .when(!highlighted && !is_current, |row| {
+                        row.hover(|s| s.bg(theme.overlay))
+                    })
+                    .on_hover({
+                        let this = this.clone();
+                        move |hovering, _, cx| {
+                            if *hovering {
+                                this.update(cx, |picker, cx| {
+                                    if picker.highlighted != ix {
+                                        picker.highlighted = ix;
+                                        cx.notify();
+                                    }
+                                });
+                            }
+                        }
+                    })
+                    .on_mouse_up(
+                        gpui::MouseButton::Left,
+                        cx.listener(move |picker, _, window, cx| {
+                            let rows = picker.filtered(&picker.last_filter.clone());
+                            picker.activate(ix, &rows, window, cx);
+                        }),
+                    )
+                    // The check carries "current" — the icon stays quiet, one
+                    // accent signal per fact.
+                    .child(icon("icons/folder.svg", 16., theme.text_3))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_baseline()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .max_w(px(170.))
+                                    .truncate()
+                                    .text_size(theme.ui_px(14.))
+                                    .font_weight(if highlighted || is_current {
+                                        FontWeight::MEDIUM
+                                    } else {
+                                        FontWeight::NORMAL
+                                    })
+                                    .text_color(if highlighted {
+                                        theme.text
+                                    } else if is_current {
+                                        theme.active_fg
+                                    } else {
+                                        theme.text_2
+                                    })
+                                    .child(entry.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    // Paths are machine text — mono, like the
+                                    // model picker's id line.
+                                    .font_family(theme::code_font_family())
+                                    .text_size(theme.ui_px(12.))
+                                    .text_color(theme.text_3)
+                                    .child(entry.path.to_string_lossy().into_owned()),
+                            ),
+                    )
+                    .when_some(entry.last_active.clone(), |row, ago| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .text_size(theme.ui_px(12.))
+                                .text_color(theme.text_3)
+                                .child(ago),
+                        )
+                    })
+                    .when(is_current, |row| {
+                        row.child(icon("icons/check.svg", 12., theme.accent))
+                    }),
+            );
+        }
+
+        let browse_highlighted = self.highlighted == rows.len();
+
+        div()
+            .w(px(self.width))
+            .font_family(theme::ui_font_family())
+            .pt(px(6.))
+            .pb(px(4.))
+            .rounded(px(12.))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.menu_bg)
+            .shadow(theme.popover_shadow())
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .occlude()
+            .on_mouse_down_out(cx.listener(Self::on_outside_down))
+            .on_action(cx.listener(Self::on_cancel))
+            .on_action(cx.listener(Self::on_confirm))
+            .on_action(cx.listener(Self::on_next))
+            .on_action(cx.listener(Self::on_prev))
+            // search row — the picker register (44px, 14px inset, 14px text).
+            .child(
+                div()
+                    .h(px(44.))
+                    .flex_none()
+                    .px(px(14.))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .text_size(theme.ui_px(14.))
+                    .text_color(theme.text)
+                    .child(icon("icons/search.svg", 16., theme.text_3))
+                    .child(div().flex_1().min_w_0().child(self.filter.clone())),
+            )
+            // section label — a count on the right, like every other list header.
+            .child(
+                div()
+                    .px(px(12.))
+                    .pt(px(8.))
+                    .pb(px(4.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(theme.ui_px(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_3)
+                    .child("Recent folders")
+                    .child(div().flex_1())
+                    .when(!rows.is_empty(), |row| row.child(rows.len().to_string())),
+            )
+            .child(if rows.is_empty() {
+                div()
+                    .h(px(96.))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(6.))
+                    .child(icon("icons/search.svg", 20., theme.text_3))
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(14.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text_2)
+                            .child("No folders match"),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(13.))
+                            .text_color(theme.text_3)
+                            .child("Try another name, or choose a folder below"),
+                    )
+                    .into_any_element()
+            } else {
+                list.into_any_element()
+            })
+            // browse row — the OS dialog, one step away.
+            .child(
+                div()
+                    .mx(px(4.))
+                    .mt(px(4.))
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .id("workspace-browse-row")
+                            .h(px(ROW_H))
+                            .my(px(4.))
+                            .px(px(8.))
+                            .rounded(px(8.))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .cursor_pointer()
+                            .when(browse_highlighted, |row| row.bg(theme.overlay_strong))
+                            .when(!browse_highlighted, |row| {
+                                row.hover(|s| s.bg(theme.overlay))
+                            })
+                            .on_hover({
+                                let this = this.clone();
+                                move |hovering, _, cx| {
+                                    if *hovering {
+                                        this.update(cx, |picker, cx| {
+                                            let browse_ix =
+                                                picker.filtered(&picker.last_filter).len();
+                                            if picker.highlighted != browse_ix {
+                                                picker.highlighted = browse_ix;
+                                                cx.notify();
+                                            }
+                                        });
+                                    }
+                                }
+                            })
+                            .on_mouse_up(
+                                gpui::MouseButton::Left,
+                                cx.listener(|picker, _, window, cx| {
+                                    (picker.on_browse)(window, cx);
+                                }),
+                            )
+                            // The browse action opens the OS dialog, so it
+                            // leads with a launch glyph, not a second folder.
+                            .child(icon("icons/arrow-up-right.svg", 16., theme.text_2))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(theme.ui_px(14.))
+                                    .text_color(theme.text_2)
+                                    .child("Choose folder…"),
+                            ),
+                    ),
+            )
+    }
+}

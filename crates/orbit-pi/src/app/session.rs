@@ -1,0 +1,1700 @@
+use super::helpers::*;
+use super::*;
+use crate::context_meter::context_ring;
+use crate::quota::{is_five_hour_window, QuotaHeadline};
+
+/// How a composer message is delivered while the agent is running. Both fall
+/// back to a normal `prompt` when the agent is idle, so a send never no-ops.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum SendMode {
+    /// Queued and delivered only once the current task settles.
+    FollowUp,
+    /// Injected into the live turn after the current step, before the next
+    /// LLM call — a course correction.
+    Steer,
+}
+
+impl OrbitApp {
+    /// True while a run is in flight (busy flag or a streaming transcript).
+    pub(super) fn is_running(&self) -> bool {
+        self.busy || self.transcript.is_streaming()
+    }
+
+    pub(super) fn submit(&mut self, text: String, cx: &mut Context<Self>) {
+        self.submit_as(text, SendMode::FollowUp, cx);
+    }
+
+    /// Keyboard path for steering: inject the composer text into the running
+    /// turn. With no run in flight this is just a normal submit.
+    pub(super) fn on_steer(&mut self, _: &crate::SteerRun, _: &mut Window, cx: &mut Context<Self>) {
+        if self.commit_autocomplete_if_open(cx) {
+            return;
+        }
+        let text = self.input.read(cx).text();
+        self.submit_as(text, SendMode::Steer, cx);
+    }
+
+    /// Send the composer's current text/attachments as a steer; used by the
+    /// composer's steer control.
+    pub(super) fn steer_current(&mut self, cx: &mut Context<Self>) {
+        let text = self.input.read(cx).text();
+        self.submit_as(text, SendMode::Steer, cx);
+    }
+
+    /// The image payload pi expects on `prompt` / `follow_up` / `steer`.
+    fn prompt_images(attachments: &[Attachment]) -> Option<Vec<Value>> {
+        if attachments.is_empty() {
+            None
+        } else {
+            Some(
+                attachments
+                    .iter()
+                    .map(|a| a.to_prompt_image())
+                    .collect::<Vec<_>>(),
+            )
+        }
+    }
+
+    pub(super) fn submit_as(&mut self, text: String, mode: SendMode, cx: &mut Context<Self>) {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        // Collect any paste that raced the submit tick.
+        self.drain_pasted_images(cx);
+        // pi's `follow_up`, `steer`, and `prompt` all carry images, so
+        // attachments ride whatever we send.
+        let attachments = std::mem::take(&mut self.attachments);
+        // While the agent is running, steer redirects the live turn and
+        // follow-up waits for it to settle. pi emits the user message into the
+        // transcript when it is actually delivered; until then the queue bar
+        // above the composer mirrors it.
+        if self.is_running() {
+            let (body, label) = match mode {
+                SendMode::Steer => (
+                    CommandBody::Steer {
+                        message: text.clone(),
+                        images: Self::prompt_images(&attachments),
+                    },
+                    "steer",
+                ),
+                SendMode::FollowUp => (
+                    CommandBody::FollowUp {
+                        message: text.clone(),
+                        images: Self::prompt_images(&attachments),
+                    },
+                    "follow_up",
+                ),
+            };
+            if !self.send(body, label) {
+                // Keep the prompt and attachments so nothing is lost.
+                self.attachments = attachments;
+                cx.notify();
+                return;
+            }
+            // Show it immediately; the next `queue_update` reconciles the list.
+            match mode {
+                SendMode::Steer => self.queue.steering.push(text),
+                SendMode::FollowUp => {
+                    self.queue.follow_up.push(text.clone());
+                    self.pending_follow_up = Some(text);
+                }
+            }
+            self.input.update(cx, |input, cx| input.clear(cx));
+            cx.notify();
+            return;
+        }
+        // Not running: a normal prompt starts a new turn. Sending it commits
+        // the user to a folder, so make sure it is in Orbit's own sidebar
+        // list — the launch-cwd path never picked one explicitly.
+        if let Some(cwd) = self
+            .current_workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+        {
+            self.add_workspace(cwd);
+        }
+        let body = CommandBody::Prompt {
+            message: text.clone(),
+            images: Self::prompt_images(&attachments),
+            streaming_behavior: None,
+        };
+        if !self.send(body, "prompt") {
+            // Keep the prompt and the queued attachments so the user can
+            // retry (pi offline, broken pipe, …) instead of losing work.
+            self.attachments = attachments;
+            cx.notify();
+            return;
+        }
+        self.begin_turn(cx);
+        // Show the prompt immediately — pi does not echo it back in RPC mode.
+        // The decoded previews ride along so the chat window shows what was
+        // attached (pi echoes/snapshots carry image blocks for reloads).
+        self.transcript.append_user_message(
+            &text,
+            attachments
+                .iter()
+                .filter_map(|a| a.preview.clone())
+                .collect(),
+        );
+        self.input.update(cx, |input, cx| input.clear(cx));
+        cx.notify();
+    }
+
+    /// Start a new user turn: snapshot the workspace so Review's **Last Turn**
+    /// can diff exactly what the agent changes, then let the prompt run.
+    pub(super) fn begin_turn(&mut self, cx: &mut Context<Self>) {
+        if self.turn_open {
+            return;
+        }
+        let Some(session) = self.session_id.clone() else {
+            return;
+        };
+        self.turn_count += 1;
+        self.turn_open = true;
+        let turn = self.turn_count;
+        let cwd = self
+            .current_workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        cx.spawn(async move |_this, cx| {
+            let _ = cx
+                .background_executor()
+                .spawn(async move { checkpoint::capture_turn_start(&cwd, &session, turn) })
+                .await;
+        })
+        .detach();
+    }
+
+    /// A run settled: snapshot the workspace's end state so Review's **Last
+    /// Turn** has a complete range, then mark Review stale. Without an open
+    /// turn (e.g. a settled retry) it still refreshes Review.
+    pub(super) fn finish_turn(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session_id.clone() else {
+            self.turn_open = false;
+            self.sidepane
+                .update(cx, |pane, cx| pane.mark_review_stale(cx));
+            return;
+        };
+        if !self.turn_open {
+            self.sidepane
+                .update(cx, |pane, cx| pane.mark_review_stale(cx));
+            return;
+        }
+        // Close the turn synchronously so a second settle event can't start a
+        // duplicate capture while this one is still running.
+        self.turn_open = false;
+        let turn = self.turn_count;
+        let cwd = self
+            .current_workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { checkpoint::capture_turn(&cwd, &session, turn) })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                app.turn_open = false;
+                if result.is_ok() {
+                    app.latest_turn = Some(turn);
+                }
+                app.sidepane
+                    .update(cx, |pane, cx| pane.mark_review_stale(cx));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Forget turn checkpoints when the session or workspace changes.
+    pub(super) fn reset_turns(&mut self) {
+        self.turn_count = 0;
+        self.turn_open = false;
+        self.latest_turn = None;
+        // The find hits belong to the previous session's transcript.
+        self.transcript_search = None;
+    }
+
+    /// Forget the queued-message mirror — the queue belongs to the previous
+    /// session/process. The next `queue_update`/`get_state` re-establishes it.
+    pub(super) fn reset_queue(&mut self) {
+        self.queue = PendingQueue::default();
+        self.restore_queue_on_clear = false;
+    }
+
+    /// Park the active session's process so it stays warm in the background,
+    /// whether it is mid-run or idle. Re-opening it resumes the same process
+    /// (no Node spawn), so session switching is near-instant. Running parked
+    /// sessions keep draining events; idle ones are reaped after
+    /// [`PARKED_IDLE_TTL`](crate::app::PARKED_IDLE_TTL).
+    pub(super) fn park_active_session(&mut self) {
+        let Some(client) = self.client.take() else {
+            return;
+        };
+        let Some(path) = self.current_session_path.take() else {
+            // No path claimed yet (still starting up): keep the client active.
+            self.client = Some(client);
+            return;
+        };
+        let busy = self.busy || self.transcript.is_streaming();
+        let transcript = std::mem::replace(&mut self.transcript, Transcript::new());
+        self.park(
+            path,
+            ParkedSession {
+                client,
+                transcript,
+                busy,
+                added: self.added,
+                removed: self.removed,
+                parked_at: Instant::now(),
+            },
+        );
+    }
+
+    /// Recover the newest completed turn from the persisted checkpoint refs,
+    /// so Review's **Last Turn** is available immediately after a restart or
+    /// session switch. Waku persists the same fact in its session model; Orbit
+    /// keeps it in `refs/orbit/…` and reads it back here.
+    pub(super) fn recover_latest_turn(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session_id.clone() else {
+            return;
+        };
+        let cwd = self
+            .current_workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        cx.spawn(async move |this, cx| {
+            let lookup_session = session.clone();
+            let latest = cx
+                .background_executor()
+                .spawn(async move { checkpoint::latest_turn(&cwd, &lookup_session) })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                if app.session_id.as_deref() != Some(session.as_str()) {
+                    return;
+                }
+                app.latest_turn = latest;
+                if let Some(latest) = latest {
+                    // Continue numbering after the recovered turn so new refs
+                    // never clobber the persisted ones.
+                    app.turn_count = app.turn_count.max(latest);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn on_submit(&mut self, _: &crate::Submit, _: &mut Window, cx: &mut Context<Self>) {
+        // Enter commits the highlighted autocomplete entry while the menu
+        // is open; a second Enter submits.
+        if self.commit_autocomplete_if_open(cx) {
+            return;
+        }
+        let text = self.input.read(cx).text();
+        self.submit(text, cx);
+    }
+
+    /// Tab accepts the highlighted autocomplete entry; with the menu closed
+    /// it is a no-op (gpui binds no tab navigation in the Composer context).
+    pub(super) fn on_autocomplete_accept(
+        &mut self,
+        _: &crate::AutocompleteAccept,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Only the main composer owns the completion menu — picker filter
+        // inputs share the `Composer` key context but must never reach it.
+        if !self.input.read(cx).focus_handle(cx).is_focused(window) {
+            return;
+        }
+        self.commit_autocomplete_if_open(cx);
+    }
+
+    pub(super) fn on_send_click(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.commit_autocomplete_if_open(cx) {
+            return;
+        }
+        let text = self.input.read(cx).text();
+        self.submit(text, cx);
+    }
+
+    pub(super) fn on_abort(
+        &mut self,
+        _: &crate::AbortRun,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Escape backs out of the topmost surface: the image lightbox, the
+        // command palette (when focus somehow sits outside it), the
+        // autocomplete menu first, then settings, popovers, then a running
+        // agent.
+        if self.lightbox.take().is_some() {
+            cx.notify();
+            return;
+        }
+        if self.transcript_search.is_some() {
+            self.close_search(cx);
+            return;
+        }
+        if self.command_palette.take().is_some() {
+            self.input.read(cx).focus(window);
+            cx.notify();
+            return;
+        }
+        if self.workspace_picker.take().is_some() {
+            self.input.read(cx).focus(window);
+            cx.notify();
+            return;
+        }
+        // A pending access-guard approval is answered first: escape denies it.
+        if self.approval.is_some() {
+            self.respond_to_approval(None, window, cx);
+            return;
+        }
+        if self.autocomplete.borrow().open {
+            self.autocomplete_dismissed = true;
+            cx.notify();
+            return;
+        }
+        if self.add_menu_open {
+            self.close_add_menu(window, cx);
+            return;
+        }
+        if self.access_menu_open {
+            self.close_access_menu(window, cx);
+            return;
+        }
+        if self.git_open && self.git_panel.read(cx).has_modal() {
+            self.git_panel
+                .update(cx, |panel, cx| panel.dismiss_modal(cx));
+            return;
+        }
+        if self.git_open {
+            self.close_git(cx);
+            return;
+        }
+        if self.settings_open {
+            // Escape closes an open dropdown first, then leaves settings.
+            if self.settings_select.take().is_some() {
+                cx.notify();
+                return;
+            }
+            self.settings_open = false;
+            cx.notify();
+            return;
+        }
+        if self.model_selector.is_some() {
+            self.close_model_selector(window, cx);
+            return;
+        }
+        if self.open_in_menu_open {
+            self.open_in_menu_open = false;
+            cx.notify();
+            return;
+        }
+        if self.context_popup != ContextPopup::None {
+            self.context_popup = ContextPopup::None;
+            cx.notify();
+            return;
+        }
+        // The Review pane's source menu is closed by Escape before the key
+        // falls through to aborting a run.
+        if self.sidepane.read(cx).is_source_menu_open() {
+            self.sidepane
+                .update(cx, |pane, cx| pane.close_source_menu(cx));
+            return;
+        }
+        // Interactive Esc: drop the pending queue first so its text can be
+        // restored to the composer when the `clear_queue` response lands
+        // (docs), then abort the run.
+        if !self.queue.is_empty() {
+            self.restore_queue_on_clear = true;
+            self.send(CommandBody::ClearQueue, "clear_queue");
+        }
+        self.send(CommandBody::Abort, "abort");
+        cx.notify();
+    }
+
+    pub(super) fn on_abort_mouse(
+        &mut self,
+        _: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.on_abort(&crate::AbortRun, window, cx);
+    }
+
+    pub(super) fn on_new_session(
+        &mut self,
+        _: &crate::NewSession,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.send(CommandBody::NewSession, "new_session");
+        cx.notify();
+    }
+
+    /// Duplicate the open session as-is (`clone`). pi creates the copy and
+    /// switches the process onto it; the `clone` response handler reloads the
+    /// transcript and re-keys the session.
+    pub(super) fn clone_session(&mut self, cx: &mut Context<Self>) {
+        self.send(CommandBody::CloneSession, "clone");
+        cx.notify();
+    }
+
+    /// Plus on a workspace group: start a fresh session rooted at that cwd.
+    pub(super) fn on_new_session_in_workspace(
+        &mut self,
+        cwd: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.current_workspace.as_ref() == Some(&cwd) && self.client.is_some() {
+            self.send(CommandBody::NewSession, "new_session");
+            self.input.read(cx).focus(window);
+            cx.notify();
+            return;
+        }
+
+        // Leaving this session: cancel any open blocking dialog first, so a
+        // parked run never waits on a modal tied to the previous session.
+        self.cancel_open_dialog(cx);
+        self.park_active_session();
+
+        self.busy = false;
+        self.transcript.clear();
+        self.current_title = None;
+        self.current_session_path = None;
+        self.added = 0;
+        self.removed = 0;
+        self.context = None;
+        self.reset_turns();
+        self.reset_queue();
+        self.add_workspace(cwd.clone());
+        self.current_workspace = Some(cwd.clone());
+
+        match self.extensions.spawn(&cwd) {
+            Ok(client) => {
+                self.adopt_client(client);
+                self.send(CommandBody::NewSession, "new_session");
+                self.refresh_catalogs();
+                // Capability probes queue after the new-session request.
+                self.probe_auth();
+                self.set_status("New session");
+            }
+            Err(err) => {
+                let message = format!("pi spawn failed: {err}");
+                self.client = None;
+                self.runtime.error = Some(message.clone());
+                self.set_status(message);
+            }
+        }
+        self.input.read(cx).focus(window);
+        cx.notify();
+    }
+
+    /// Open the OS folder picker and start (or restart) the task in the
+    /// selected directory. Used from the new-task page and the status bar.
+    pub(super) fn on_pick_folder_click(
+        &mut self,
+        _: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.browse_for_folder(window, cx);
+    }
+
+    /// The native folder dialog — the workspace picker's "Choose folder…" row
+    /// and the status-bar chip both land here.
+    ///
+    /// The panel is opened *asynchronously*: GPUI holds a mutable borrow of this
+    /// entity for the duration of the event handler, and the blocking
+    /// `rfd::FileDialog::pick_folder` runs a nested main-thread modal loop that
+    /// re-enters the app. A task queued on that loop that touches this same
+    /// entity then panics with `already borrowed`. The async prompt returns
+    /// immediately (a sheet, not a nested `runModal`) and resolves once the
+    /// user answers, so the borrow is long gone.
+    pub(super) fn browse_for_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            let receiver = cx.update(|_window, app| {
+                app.prompt_for_paths(PathPromptOptions {
+                    files: false,
+                    directories: true,
+                    multiple: false,
+                    prompt: Some("Choose a folder for this task".into()),
+                })
+            });
+            let Ok(receiver) = receiver else {
+                return;
+            };
+            let folder = match receiver.await {
+                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                _ => None,
+            };
+            let Some(folder) = folder else {
+                return;
+            };
+            let _ = this.update_in(cx, |app, window, cx| {
+                app.start_task_in_folder(folder, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Switch the live session. With `push`, the visit is recorded in the
+    /// top-bar history (forward entries are dropped, like browser history).
+    ///
+    /// Each session gets its own pi process, so switching never interrupts a
+    /// run: the outgoing session is *parked* mid-run (its process and live
+    /// transcript keep going in the background — events drain every tick),
+    /// and a parked target resumes exactly where it left off. Idle sessions
+    /// are torn down and reload from disk when reopened.
+    pub(super) fn switch_to_session(
+        &mut self,
+        session: SessionInfo,
+        push: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.current_session_path.as_ref() == Some(&session.path) {
+            return;
+        }
+        // A blocking dialog belongs to the session being left; cancel it so
+        // the now-parked run can settle instead of waiting on an unseen modal.
+        self.cancel_open_dialog(cx);
+        // ── park the outgoing session (running or idle) ──
+        self.park_active_session();
+        self.busy = false;
+        self.added = 0;
+        self.removed = 0;
+        self.transcript = Transcript::new();
+        // The queue belongs to the session we just left; the target's state
+        // re-establishes it from `get_state`/`queue_update`.
+        self.reset_queue();
+
+        // ── activate the target ──
+        if let Some(parked) = self.lives.remove(&session.path) {
+            // Resume a background run. The parked transcript is already up
+            // to date (its events drain every tick); anything buffered in
+            // the process channel streams in from the next tick on.
+            self.adopt_client(parked.client);
+            self.transcript = parked.transcript;
+            self.busy = parked.busy;
+            self.added = parked.added;
+            self.removed = parked.removed;
+            self.send(CommandBody::GetState, "get_state");
+            self.refresh_context_stats();
+            // A warm process already reported capabilities; a cheap refresh
+            // keeps a long-parked session's auth/quota current.
+            self.probe_auth();
+        } else {
+            // Cold session (its process was torn down): paint the stored
+            // transcript from disk in the same frame so the switch never waits
+            // on pi boot. `get_messages` supersedes it moments later.
+            self.preview_session_transcript(session.path.clone(), cx);
+            // Spawn a dedicated pi process rooted at the session's workspace
+            // and point it at the session file.
+            let spawned = self.extensions.spawn(&session.cwd).or_else(|_| {
+                self.extensions
+                    .spawn(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+            });
+            match spawned {
+                Ok(client) => {
+                    self.adopt_client(client);
+                    self.send(
+                        CommandBody::SwitchSession {
+                            session_path: session.path.to_string_lossy().into_owned(),
+                        },
+                        "switch_session",
+                    );
+                    // `get_state` and the capability probes are sent from the
+                    // switch_session success handler: querying state eagerly
+                    // here races the switch (pi answers with the default
+                    // model), and the probes only get queued after the load
+                    // commands, so a slow auth/quota lookup can't delay the
+                    // transcript.
+                }
+                Err(err) => {
+                    let message = format!("pi spawn failed: {err}");
+                    self.client = None;
+                    self.runtime.error = Some(message.clone());
+                    self.set_status(message);
+                }
+            }
+        }
+        self.current_title = Some(session.title.clone());
+        // Opening a session keeps its folder in Orbit's own sidebar list.
+        self.add_workspace(session.cwd.clone());
+        self.current_workspace = Some(session.cwd.clone());
+        self.current_session_path = Some(session.path.clone());
+        if push {
+            self.session_history.truncate(self.history_index + 1);
+            let new_entry = self
+                .session_history
+                .last()
+                .map(|last| last.path != session.path)
+                .unwrap_or(true);
+            if new_entry {
+                self.session_history.push(session);
+            }
+            self.history_index = self.session_history.len().saturating_sub(1);
+        }
+        cx.notify();
+    }
+
+    /// Render a session's stored messages straight from disk, off the UI
+    /// thread, so reopening a cold session shows content immediately instead
+    /// of waiting for pi to boot and answer `switch_session` → `get_messages`.
+    /// The authoritative snapshot replaces this when it lands; a preview that
+    /// is already superseded (snapshot arrived, or the user switched again) is
+    /// dropped.
+    pub(super) fn preview_session_transcript(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let payload = cx
+                .background_executor()
+                .spawn({
+                    let path = path.clone();
+                    async move { sessions::read_messages_payload(&path) }
+                })
+                .await;
+            let Some(payload) = payload else {
+                return;
+            };
+            let _ = this.update(cx, |app, cx| {
+                let still_active = app.current_session_path.as_ref() == Some(&path);
+                if !still_active || !app.transcript.is_empty() {
+                    return;
+                }
+                app.apply_messages_snapshot(&payload);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub(super) fn on_open_session(&mut self, session: SessionInfo, cx: &mut Context<Self>) {
+        self.switch_to_session(session, true, cx);
+    }
+
+    pub(super) fn on_history_back(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.history_index > 0 {
+            self.history_index -= 1;
+            if let Some(session) = self.session_history.get(self.history_index).cloned() {
+                self.switch_to_session(session, false, cx);
+                return;
+            }
+        }
+        cx.notify();
+    }
+
+    pub(super) fn on_history_forward(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.history_index + 1 < self.session_history.len() {
+            self.history_index += 1;
+            if let Some(session) = self.session_history.get(self.history_index).cloned() {
+                self.switch_to_session(session, false, cx);
+                return;
+            }
+        }
+        cx.notify();
+    }
+
+    pub(super) fn on_info_click(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The open popover dismisses on this same click's mouse-down; without
+        // this guard the mouse-up would toggle it straight back open.
+        const GESTURE: Duration = Duration::from_millis(200);
+        if let Some(dismissed) = self.menu_dismissed_at.take() {
+            if dismissed.elapsed() < GESTURE {
+                return;
+            }
+        }
+        // The top-bar info affordance shows the active session's details.
+        self.session_details_open = !self.session_details_open;
+        // Only one top-bar popover is meaningful at a time.
+        if self.session_details_open {
+            self.quota_popup_open = false;
+        }
+        cx.notify();
+    }
+
+    /// Open the full-page Git panel (Changes / History / Graph) and load it.
+    pub(super) fn open_git(&mut self, cx: &mut Context<Self>) {
+        self.git_open = true;
+        // One main-area page at a time.
+        self.usage_open = false;
+        self.session_details_open = false;
+        self.git_panel.update(cx, |panel, cx| panel.show(cx));
+        cx.notify();
+    }
+
+    /// Top-bar GitHub affordance: same destination as the session-details
+    /// **Commit or push** row.
+    pub(super) fn on_open_git_click(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_git(cx);
+    }
+
+    /// Close the Git page and return to the chat.
+    pub(super) fn close_git(&mut self, cx: &mut Context<Self>) {
+        self.git_open = false;
+        self.git_panel.update(cx, |panel, cx| panel.hide(cx));
+        cx.notify();
+    }
+
+    /// Open the Usage page and let it load (or refresh) the session store.
+    pub(super) fn open_usage(&mut self, cx: &mut Context<Self>) {
+        self.usage_open = true;
+        self.git_open = false;
+        self.session_details_open = false;
+        self.usage.update(cx, |page, cx| page.open(cx));
+        cx.notify();
+    }
+
+    /// Leave the Usage page.
+    pub(super) fn close_usage(&mut self, cx: &mut Context<Self>) {
+        self.usage_open = false;
+        self.usage.update(cx, |page, cx| page.close(cx));
+        cx.notify();
+    }
+
+    /// Sidebar nav row: Usage is a destination, toggled like Settings.
+    pub(super) fn on_usage_nav_click(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.usage_open {
+            self.close_usage(cx);
+        } else {
+            self.open_usage(cx);
+        }
+    }
+
+    /// Open a session the Usage page named, by pi's session id (§29). The id
+    /// is resolved against the loaded session list; a session the sidebar has
+    /// not picked up yet forces one reload before giving up.
+    pub(super) fn open_session_by_id(&mut self, id: &str, _: &mut Window, cx: &mut Context<Self>) {
+        let mut target = self.sessions.iter().find(|s| s.id == id).cloned();
+        if target.is_none() {
+            self.sessions = sessions::load_sessions();
+            target = self.sessions.iter().find(|s| s.id == id).cloned();
+        }
+        if let Some(session) = target {
+            self.usage_open = false;
+            self.switch_to_session(session, true, cx);
+            cx.notify();
+        }
+    }
+
+    /// Open the session a clicked notification announced, by session-file
+    /// path. The banner may outlive its session (deleted, or the list is
+    /// stale); a missing target is a no-op rather than an error.
+    pub(super) fn activate_session_from_notification(
+        &mut self,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_window_pending = true;
+        let mut target = self.sessions.iter().find(|s| s.path == path).cloned();
+        if target.is_none() {
+            self.sessions = sessions::load_sessions();
+            target = self.sessions.iter().find(|s| s.path == path).cloned();
+        }
+        if let Some(session) = target {
+            self.switch_to_session(session, true, cx);
+        }
+        cx.notify();
+    }
+
+    /// The top-bar info popover: active session's environment + identifiers.
+    pub(super) fn render_session_details_popup(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if !self.session_details_open {
+            return None;
+        }
+        let theme = *theme::get(cx);
+        let this = cx.entity();
+        let title = self
+            .current_title
+            .clone()
+            .unwrap_or_else(|| "New task".into());
+        let session_id = self.session_id.clone().unwrap_or_default();
+        let session_file = self
+            .current_session_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let workspace = self
+            .current_workspace
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+        let model = self.model_label.clone();
+        let thinking = self.thinking_label.clone();
+
+        let popup = div()
+            .w(px(300.))
+            .font_family(theme::ui_font_family())
+            .rounded(px(8.))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.menu_bg)
+            .shadow(theme.popover_shadow())
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .occlude()
+            .on_mouse_down_out({
+                let this = this.clone();
+                move |_: &MouseDownEvent, _, cx: &mut App| {
+                    this.update(cx, |app, cx| {
+                        if app.session_details_open {
+                            // Arm the click-through guard so this same click's
+                            // mouse-up on the info button cannot reopen the
+                            // popover it just dismissed.
+                            app.menu_dismissed_at = Some(Instant::now());
+                            app.session_details_open = false;
+                            cx.notify();
+                        }
+                    });
+                }
+            })
+            .child(
+                div()
+                    .px(px(12.))
+                    .py(px(10.))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text_3)
+                            .child(if session_id.is_empty() {
+                                "No active session".to_string()
+                            } else {
+                                "Session details".to_string()
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .px(px(12.))
+                    .py(px(6.))
+                    .text_size(theme.ui_px(11.))
+                    .text_color(theme.text_3)
+                    .child("Environment"),
+            )
+            .child(
+                div()
+                    .id(ElementId::Name("sess-commit-push".into()))
+                    .px(px(12.))
+                    .py(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .on_click({
+                        let this = this.clone();
+                        move |_, _window, cx| {
+                            this.update(cx, |app, cx| {
+                                app.open_git(cx);
+                            });
+                        }
+                    })
+                    .child(icon("icons/branch.svg", 13., theme.text_2))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.text)
+                            .child("Commit or push"),
+                    )
+                    .child(icon("icons/chevron-right.svg", 11., theme.text_3)),
+            )
+            .child(
+                div()
+                    .id(ElementId::Name("sess-compare-branch".into()))
+                    .px(px(12.))
+                    .py(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .on_click({
+                        let this = this.clone();
+                        move |_, window, cx| {
+                            this.update(cx, |app, cx| {
+                                app.toggle_branch_picker(window, cx);
+                            });
+                        }
+                    })
+                    .child(icon("icons/file-diff.svg", 13., theme.text_2))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.text)
+                            .child("Compare branch"),
+                    )
+                    .child(icon("icons/chevron-right.svg", 11., theme.text_3)),
+            )
+            .child(self.session_detail_row(0, "Session ID", &session_id, theme))
+            .child(self.session_detail_row(1, "Session file", &session_file, theme))
+            .child(self.session_detail_row(2, "Workspace", &workspace, theme))
+            .child(self.session_detail_row(3, "Model", &model, theme))
+            .child(self.session_detail_row(4, "Thinking", &thinking, theme));
+
+        Some(
+            div()
+                .absolute()
+                .bottom_0()
+                .right_0()
+                .size(px(0.))
+                .child(
+                    anchored()
+                        .position_mode(AnchoredPositionMode::Local)
+                        .anchor(Corner::TopRight)
+                        .offset(point(px(0.), px(4.)))
+                        .snap_to_window()
+                        .child(deferred(popup)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The top-bar quota pill: the rolling 5-hour limit of the provider the
+    /// active model is using — provider mark, window label, percentage, and
+    /// a context-style ring gauge — falling back to that provider's
+    /// most-constrained window or balance, then to the account that will run
+    /// out first. It stays provider-independent: everything comes from the
+    /// normalized [`QuotaReport`] list, so a new adapter needs no UI change.
+    /// `None` (hidden) when pi lacks `quota.*` or nothing has been reported.
+    pub(super) fn render_quota_pill(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if self.quota.reports().is_empty() {
+            return None;
+        }
+        let theme = *theme::get(cx);
+
+        let mut pill = div()
+            .id("top-quota")
+            .relative()
+            .h(px(26.))
+            .px(px(8.))
+            .rounded_md()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.bg_hover))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_quota_click))
+            .children(self.render_quota_popup(cx));
+
+        // The provider mark and name anchor every headline: the meter is
+        // only truthful if the account it belongs to is named beside it.
+        let provider_head = |report: &QuotaReport| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(icon_dyn(provider_icon(&report.provider), 12., theme.text_3))
+                .child(
+                    div()
+                        .max_w(px(96.))
+                        .truncate()
+                        .text_size(theme.ui_px(11.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_2)
+                        .child(providers::provider_display_name(&report.provider)),
+                )
+        };
+
+        match self.quota.headline(&self.model_provider) {
+            QuotaHeadline::Window { report, window } => {
+                pill = pill.child(provider_head(report)).child(
+                    div()
+                        .max_w(px(72.))
+                        .truncate()
+                        .text_size(theme.ui_px(10.5))
+                        .text_color(theme.text_3)
+                        .child(if is_five_hour_window(window) {
+                            "5h".to_string()
+                        } else {
+                            window.label.clone()
+                        }),
+                );
+                if let Some(fraction) = window.fraction() {
+                    pill = pill
+                        .child(
+                            div()
+                                .text_size(theme.ui_px(11.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(format!("{}%", (fraction * 100.0).round() as i32)),
+                        )
+                        .child(context_ring(
+                            fraction,
+                            quota_tint(fraction, theme),
+                            theme.ring_track,
+                        ));
+                }
+            }
+            // A balance-only account (DeepSeek, OpenRouter) has no window to
+            // meter; the amount is the whole story.
+            QuotaHeadline::Balance { report, balance } => {
+                let text = if balance.currency.is_empty() {
+                    quota_amount(balance.amount)
+                } else {
+                    format!("{} {}", quota_amount(balance.amount), balance.currency)
+                };
+                pill = pill.child(provider_head(report)).child(
+                    div()
+                        .text_size(theme.ui_px(11.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(text),
+                );
+            }
+            // Nothing metered anywhere (notes, errors): a quiet label keeps
+            // the popover reachable.
+            QuotaHeadline::Quiet => {
+                pill = pill
+                    .child(icon("icons/spark.svg", 13., theme.text_2))
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(11.5))
+                            .text_color(theme.text_2)
+                            .child("Usage"),
+                    );
+            }
+        }
+
+        Some(pill.into_any_element())
+    }
+
+    /// The quota popover: every connected provider's windows and balances,
+    /// grouped by provider and read from the normalized model. Rendered only
+    /// while open; anchored under the pill.
+    pub(super) fn render_quota_popup(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if !self.quota_popup_open {
+            return None;
+        }
+        let theme = *theme::get(cx);
+        let this = cx.entity();
+
+        let reports = self.quota.reports();
+        let count = reports.len();
+        let header = div()
+            .flex_none()
+            .px(px(12.))
+            .py(px(10.))
+            .border_b_1()
+            .border_color(theme.border)
+            .flex()
+            .items_center()
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(theme.ui_px(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child("Provider usage"),
+            )
+            .child(
+                div()
+                    .text_size(theme.ui_px(11.))
+                    .text_color(theme.text_2)
+                    .child(if count == 1 {
+                        "1 provider".to_string()
+                    } else {
+                        format!("{count} providers")
+                    }),
+            );
+
+        // One card per provider, 8 px apart: the boundary between accounts
+        // is what tells a glance which numbers belong together.
+        let body = div().flex().flex_col().child(header).child(
+            div()
+                .id("quota-popup-body")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .p(px(8.))
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .children(
+                    reports
+                        .iter()
+                        .map(|report| quota_provider_card(self, report, theme)),
+                ),
+        );
+
+        let popup = div()
+            .w(px(320.))
+            .max_h(px(460.))
+            .font_family(theme::ui_font_family())
+            .rounded(px(12.))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.menu_bg)
+            .shadow(theme.popover_shadow())
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .occlude()
+            .on_mouse_down_out({
+                let this = this.clone();
+                move |_: &MouseDownEvent, _, cx: &mut App| {
+                    this.update(cx, |app, cx| {
+                        if app.quota_popup_open {
+                            // Arm the click-through guard so this same
+                            // click's mouse-up on the pill cannot
+                            // immediately re-open the popover.
+                            app.menu_dismissed_at = Some(Instant::now());
+                            app.quota_popup_open = false;
+                            cx.notify();
+                        }
+                    });
+                }
+            })
+            .child(body);
+
+        Some(
+            div()
+                .absolute()
+                .bottom_0()
+                .right_0()
+                .size(px(0.))
+                .child(
+                    anchored()
+                        .position_mode(AnchoredPositionMode::Local)
+                        .anchor(Corner::TopRight)
+                        .offset(point(px(0.), px(6.)))
+                        .snap_to_window()
+                        .child(deferred(popup)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Toggle the top-bar quota popover.
+    pub(super) fn on_quota_click(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A dismissal from this same click's mouse-down must not
+        // immediately re-open (see `toggle_session_menu`).
+        const GESTURE: Duration = Duration::from_millis(200);
+        if let Some(dismissed) = self.menu_dismissed_at.take() {
+            if dismissed.elapsed() < GESTURE {
+                return;
+            }
+        }
+        self.quota_popup_open = !self.quota_popup_open;
+        // The quota popover and the session-details popover share the top
+        // bar; only one is meaningful at a time.
+        if self.quota_popup_open {
+            self.session_details_open = false;
+        }
+        cx.notify();
+    }
+
+    /// A read-only identifier row in the session-details popover, with a copy
+    /// affordance that copies `value` to the clipboard.
+    pub(super) fn session_detail_row(
+        &self,
+        ix: usize,
+        label: &str,
+        value: &str,
+        theme: Theme,
+    ) -> impl IntoElement + use<> {
+        let label = label.to_string();
+        let value = value.to_string();
+        let v = value.clone();
+        div()
+            .px(px(12.))
+            .py(px(8.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text_3)
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.text)
+                            .truncate()
+                            .child(if value.is_empty() {
+                                "—".to_string()
+                            } else {
+                                value
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .id(("sess-copy", ix))
+                    .p_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .on_click(move |_, _window, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(v.clone()));
+                    })
+                    .child(icon("icons/copy.svg", 12., theme.text_3)),
+            )
+    }
+
+    pub(super) fn on_toggle_sidebar(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar_visible = !self.sidebar_visible;
+        cx.notify();
+    }
+
+    pub(super) fn on_toggle_side_pane(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidepane.update(cx, |pane, cx| pane.toggle(cx));
+        cx.notify();
+    }
+
+    /// The top-bar `+N -M` chip opens Review on the working tree's
+    /// **Uncommitted** changes.
+    pub(super) fn on_open_uncommitted_review(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidepane
+            .update(cx, |pane, cx| pane.show_uncommitted(cx));
+        cx.notify();
+    }
+
+    /// Hands the transcript's changed-files cards a way to open the side
+    /// pane's Review tab on that run's **Last Turn** git diff (the pane lives
+    /// in the app, the cards don't know that). Cheap to build per frame — an
+    /// `Rc` closure over the entity and the latest captured turn.
+    pub(super) fn review_opener(&self, _: &Context<Self>) -> crate::transcript_view::ReviewOpener {
+        let pane = self.sidepane.clone();
+        let latest = self.latest_turn;
+        Rc::new(move |_window, cx| {
+            pane.update(cx, |pane, cx| pane.show_review_turn(latest, cx));
+        })
+    }
+
+    /// Hands the transcript's attachment tiles a way to open the app's
+    /// full-window image lightbox (the tiles don't own that surface).
+    pub(super) fn image_opener(&self, cx: &Context<Self>) -> crate::transcript_view::ImageOpener {
+        let this = cx.weak_entity();
+        Rc::new(move |image, _window, cx| {
+            this.update(cx, |app, cx| {
+                app.lightbox = Some(image);
+                cx.notify();
+            })
+            .ok();
+        })
+    }
+
+    pub(super) fn on_composer_click(
+        &mut self,
+        _: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.input.read(cx).focus(window);
+    }
+
+    pub(super) fn on_refresh(
+        &mut self,
+        _: &crate::RefreshSessions,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sessions = sessions::load_sessions();
+        self.sync_session_menu(cx);
+        // ⌘R on the Usage page refreshes the analytics too.
+        if self.usage_open {
+            self.usage.update(cx, |page, cx| page.refresh(cx));
+        }
+        cx.notify();
+    }
+
+    /// `cmd-shift-c`: copy the newest assistant response — the keyboard
+    /// mirror of the message footer's copy button. Lights the same green
+    /// check in that row's footer.
+    pub(super) fn on_copy_last_response(
+        &mut self,
+        _: &crate::CopyLastResponse,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((ix, text)) = self.transcript.last_response_text() else {
+            self.set_status("No response to copy yet");
+            cx.notify();
+            return;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.transcript.mark_copied(ix);
+        self.set_status("Copied latest response");
+        cx.notify();
+    }
+
+    /// `cmd-up` / `cmd-down`: jump between user turns — the keyboard mirror
+    /// of the navigation rail. Jumping is also using the rail, so it
+    /// dismisses the one-time rail hint.
+    pub(super) fn on_prev_turn(
+        &mut self,
+        _: &crate::PrevTurn,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.transcript.jump_turn(-1);
+        self.transcript.dismiss_rail_hint();
+        cx.notify();
+    }
+
+    pub(super) fn on_next_turn(
+        &mut self,
+        _: &crate::NextTurn,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.transcript.jump_turn(1);
+        self.transcript.dismiss_rail_hint();
+        cx.notify();
+    }
+}
+
+/// Meter/accent color for a consumed fraction. Green → amber → red at the
+/// same thresholds the Settings quota meters use, so the two surfaces agree.
+fn quota_tint(fraction: f32, theme: Theme) -> Hsla {
+    if fraction >= 0.9 {
+        theme.crit
+    } else if fraction >= 0.75 {
+        theme.warn
+    } else {
+        theme.ok_green
+    }
+}
+
+/// Amount text for the quota surfaces: whole amounts drop the decimals so a
+/// balance reads `110 CNY`, not `110.00 CNY`.
+fn quota_amount(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.2}")
+    }
+}
+
+/// Countdown copy for a window reset in the top-bar popover: `resets in
+/// 3h 12m` is read at a glance where an absolute timestamp needs arithmetic.
+/// Past a week the countdown stops helping, and a timestamp in the past is
+/// stale, so both fall back to the absolute local time the Settings card
+/// shows. `now_ms` is injected to keep the label a pure function.
+fn quota_reset_hint(resets_at: i64, now_ms: i64) -> String {
+    const MINUTE: i64 = 60_000;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+    let remaining = resets_at.saturating_sub(now_ms);
+    let hint = if remaining <= 0 {
+        return format!("resets {}", format_epoch_ms(resets_at));
+    } else if remaining < MINUTE {
+        "in <1m".to_string()
+    } else if remaining < HOUR {
+        format!("in {}m", remaining / MINUTE)
+    } else if remaining < DAY {
+        let hours = remaining / HOUR;
+        let minutes = (remaining % HOUR) / MINUTE;
+        if minutes == 0 {
+            format!("in {hours}h")
+        } else {
+            format!("in {hours}h {minutes}m")
+        }
+    } else if remaining < 7 * DAY {
+        let days = remaining / DAY;
+        let hours = (remaining % DAY) / HOUR;
+        if hours == 0 {
+            format!("in {days}d")
+        } else {
+            format!("in {days}d {hours}h")
+        }
+    } else {
+        return format!("resets {}", format_epoch_ms(resets_at));
+    };
+    format!("resets {hint}")
+}
+
+/// One provider card in the top-bar quota popover: a raised block carrying
+/// the provider's mark, plan, windows, and balances, with the meter and its
+/// countdown beside every window. Provider-independent: it renders whatever
+/// the normalized report carries (windows, balances, note, error) and names
+/// the provider by id only, never a bespoke label.
+fn quota_provider_card(app: &OrbitApp, report: &QuotaReport, theme: Theme) -> AnyElement {
+    let name = providers::provider_display_name(&report.provider);
+    let amount = quota_amount;
+
+    let mut header = div()
+        .flex()
+        .items_center()
+        .gap(px(7.))
+        .child(icon_dyn(provider_icon(&report.provider), 13., theme.text_3))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_size(theme.ui_px(12.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child(name),
+        );
+    if let Some(plan) = &report.plan {
+        header =
+            header.child(app.provider_badge(plan, theme.accent, theme.accent.opacity(0.12), theme));
+    }
+
+    // The card fill is the ink wash rather than `bg_raised`: most palettes
+    // set `menu_bg == bg_raised`, where a raised fill would vanish inside
+    // the popup. The wash steps off any surface in every palette.
+    let mut block = div()
+        .w_full()
+        .rounded(px(8.))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.overlay)
+        .px(px(12.))
+        .py(px(10.))
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .child(header);
+
+    for window in &report.windows {
+        let value = if let Some(percent) = window.used_percent {
+            format!("{percent:.0}% used")
+        } else if let (Some(used), Some(limit)) = (window.used, window.limit) {
+            format!("{} / {}", amount(used), amount(limit))
+        } else if let Some(used) = window.used {
+            match &window.unit {
+                Some(unit) => format!("{} {unit}", amount(used)),
+                None => amount(used),
+            }
+        } else {
+            continue;
+        };
+
+        let mut row = div().w_full().flex().flex_col().gap(px(5.)).child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(theme.ui_px(11.))
+                        .text_color(theme.text_2)
+                        .child(window.label.clone()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(theme.ui_px(11.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(value),
+                ),
+        );
+
+        if let Some(fraction) = window.fraction() {
+            row = row.child(
+                div()
+                    .w_full()
+                    .h(px(5.))
+                    .rounded_full()
+                    .overflow_hidden()
+                    .bg(theme.trough)
+                    .child(
+                        div()
+                            .h_full()
+                            .rounded_full()
+                            .bg(quota_tint(fraction, theme))
+                            .w(relative(fraction)),
+                    ),
+            );
+        }
+        if let Some(resets_at) = window.resets_at {
+            row = row.child(
+                div()
+                    .text_size(theme.ui_px(10.5))
+                    .text_color(theme.text_2)
+                    .child(quota_reset_hint(
+                        resets_at,
+                        chrono::Local::now().timestamp_millis(),
+                    )),
+            );
+        }
+        block = block.child(row);
+    }
+
+    for balance in &report.balances {
+        let text = if balance.currency.is_empty() {
+            amount(balance.amount)
+        } else {
+            format!("{} {}", amount(balance.amount), balance.currency)
+        };
+        block = block.child(
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(theme.ui_px(11.))
+                        .text_color(theme.text_2)
+                        .child(balance.label.clone()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(theme.ui_px(11.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child(text),
+                ),
+        );
+    }
+
+    if let Some(error) = &report.error {
+        block = block.child(
+            div()
+                .text_size(theme.ui_px(10.5))
+                .text_color(theme.crit)
+                .child(error.clone()),
+        );
+    } else if !report.has_data() {
+        if let Some(note) = &report.note {
+            block = block.child(
+                div()
+                    .text_size(theme.ui_px(10.5))
+                    .text_color(theme.text_3)
+                    .child(note.clone()),
+            );
+        }
+    }
+
+    block.into_any_element()
+}
+
+#[cfg(test)]
+mod quota_reset_tests {
+    use super::*;
+
+    const MINUTE: i64 = 60_000;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+
+    #[test]
+    fn reset_hint_reads_as_a_short_countdown() {
+        let now = 1_000_000_000_000;
+        assert_eq!(quota_reset_hint(now + 30_000, now), "resets in <1m");
+        assert_eq!(quota_reset_hint(now + 42 * MINUTE, now), "resets in 42m");
+        assert_eq!(quota_reset_hint(now + 2 * HOUR, now), "resets in 2h");
+        assert_eq!(
+            quota_reset_hint(now + 3 * HOUR + 12 * MINUTE, now),
+            "resets in 3h 12m"
+        );
+        assert_eq!(quota_reset_hint(now + 3 * DAY, now), "resets in 3d");
+        assert_eq!(
+            quota_reset_hint(now + 2 * DAY + 4 * HOUR + 5 * MINUTE, now),
+            "resets in 2d 4h"
+        );
+    }
+
+    #[test]
+    fn reset_hint_falls_back_to_the_absolute_time() {
+        let now = 1_000_000_000_000;
+        // More than a week out: a countdown stops being useful.
+        let far = now + 8 * DAY;
+        assert_eq!(
+            quota_reset_hint(far, now),
+            format!("resets {}", format_epoch_ms(far))
+        );
+        // A stale report (reset time already passed) also stays absolute.
+        let past = now - DAY;
+        assert_eq!(
+            quota_reset_hint(past, now),
+            format!("resets {}", format_epoch_ms(past))
+        );
+    }
+}

@@ -4,31 +4,33 @@
 
 ## Platform
 
-web
+adaptive
+
+A native desktop surface (macOS first, Windows/Linux later) drawn with GPUI — Zed's GPU-composited, keyboard-first workbench language. No webview, no DOM. The `adaptive` value marks it as one cross-platform native codebase rather than a web app.
 
 ## Users
 
-Pi coding agent users — developers who already run the pi CLI and want a desktop GUI for their agent sessions. They arrive with existing agent knowledge (models, thinking effort, sessions, tool access); the UI can use pi's own terminology without teaching it. Released publicly, not a personal-only tool, so it cannot assume access to the author's machine, providers, or habits.
+Pi coding agent users — developers who already run the pi CLI and want a fast desktop GUI for their agent sessions. They arrive with existing agent knowledge (models, thinking effort, sessions, tool access); the UI can use pi's own terminology without teaching it. Released publicly, not a personal-only tool, so it cannot assume access to the author's machine, providers, or habits.
 
 ## Product Purpose
 
-Orbit is a desktop GUI client for the pi coding agent. It hosts chat-style agent sessions — prompt composer with model / thinking-effort / access controls, streaming responses, and persistent sessions grouped by project — in a Tauri app backed by the pi-coding-agent SDK running as a local sidecar daemon. Success: pi users reach for Orbit instead of (or alongside) the terminal for everyday agent work.
+Orbit is a native desktop GUI client for the pi coding agent — a chat-style workbench rendered entirely in Rust by GPUI, the same GPU-accelerated UI framework Zed is built on. Every pixel (transcript, markdown, diffs, charts, chrome) is drawn by the GPU: no browser, no webview, no Node daemon. The app speaks the pi CLI's native RPC protocol directly over stdio, so the agent runtime is the same `pi` binary users already know. Success: pi users reach for Orbit instead of (or alongside) the terminal — and feel the difference, from sub-frame scroll on 10k-message transcripts to zero web overhead.
 
 ## Positioning
 
-A native-feeling desktop workbench for pi, built directly on the official SDK and its session format (`~/.pi/agent/sessions/`) — sessions created in Orbit and in the CLI are the same sessions. It is not a generic chat frontend wrapping an API; the daemon, session persistence, model catalog, and thinking levels are pi's own.
+A native, Waku-style workbench for pi — all-Rust, GPU-first, pi's own data underneath. Sessions created in Orbit and in the CLI are the same sessions (`~/.pi/agent/sessions/`); the model catalog, thinking levels, and persistence are pi's own, presented through a pure-Rust client instead of the SDK daemon. Not a generic chat frontend wrapping an API; not an embedded browser.
 
 ## Operating Context
 
-Local-first developer machine use: the app talks to a pi agent daemon over WebSocket (`ws://localhost:8912` in dev), sessions persist per project working directory, and the agent runs with full local tool access (file edits, commands). Long-running streaming tasks are the norm, not the exception.
+Local-first, long-running desktop sessions. The app spawns the pi CLI as a child process and speaks its newline-delimited JSON RPC over stdio — one process per open session — with full local tool access (file edits, commands). Long streaming tasks are the norm: the rendering path is built for them (virtualized transcript, coalesced stream commits, paint-only streaming highlights).
 
 ## Capabilities and Constraints
 
-**Current:** single active session per app view; prompt/abort with streaming; session list grouped by project with reopen; model selection from the runtime's auth-checked catalog; thinking-effort selection from the model's supported levels. Access is always "full access" — the SDK exposes no permission mode, so the UI presents alternative modes as unavailable rather than fake.
+**Current:** one active session per view with up to six parked background sessions running concurrently; prompt / steer / follow-up / abort with streaming; session list grouped by an Orbit-owned project list (add a folder by working in it, remove it from the sidebar without touching pi's sessions), with reopen and clone; **in-transcript find** and an **image lightbox**; model selection from the pi runtime's catalog (`get_available_models`) with favorites shared across the picker and a dedicated **Models** page; thinking-effort selection from the model's supported levels (`get_available_thinking_levels`); tool, bash, and question activity rendered per-tool; **access modes** (Supervised / Auto-accept edits / Full access) enforced by a bundled pi extension that confirms mutating tool calls through pi's `extension_ui_request` dialog — a confirmation guard, not a sandbox (pi ships none), and no "Auto" AI-reviewer mode until pi exposes a reviewer API to extensions.
 
-**Roadmap (confirmed direction):** fuller workbench — diff review, file tree, terminal, multiple agents/sessions in parallel. Current single-session architecture is a waypoint, not the destination.
+**Roadmap (confirmed direction):** complete the all-Rust migration — P0 transport probe (verify pi CLI RPC covers tool-approval events so the Node daemon can retire), P1 shell/theme, P2 RPC client + session data, P3 chat/markdown/tools, P4 workbench, P5 mermaid/a11y, P6 tests/packaging — then grow toward the workbench: diff review, file tree, terminal, multiple agents/sessions in parallel. The single-session chat is a waypoint, not the destination.
 
-**Constraints:** pi-coding-agent SDK is Node-only and must stay behind the sidecar boundary; session truth lives in pi's session manager; released publicly, so nothing may hardcode the author's providers, models, or machine paths.
+**Constraints:** the pi CLI must be installed and authenticated — it is the only agent runtime (the Node daemon and SSE surface are removed). GPUI is pre-1.0: pin the crates.io release and expect deliberate, scheduled API upgrades rather than always-latest. Mermaid diagram rendering is not native to GPUI; until a renderer lands (fallback code block; graphviz or snapshot-based options under evaluation) diagrams are not presented natively. Session truth lives in pi's session files; released publicly, so nothing may hardcode the author's providers, models, or machine paths.
 
 **Terminology:** model, thinking effort, full access, session, project — as used in pi.
 
@@ -42,7 +44,7 @@ None in-repo beyond the product's own UI copy. The sidebar still carries Intent 
 
 ## Product Principles
 
-1. **Trust the agent's truth.** Every control and indicator reflects the real daemon/session state; nothing decorative that pretends to be functional.
+1. **Trust the agent's truth.** Every control and indicator reflects the real pi process/session state (RPC events, on-disk session files); nothing decorative that pretends to be functional.
 2. **Speak pi's language.** Users already know models, thinking levels, and sessions — no re-explaining, no renamed concepts.
-3. **Respect the operator.** This is a work tool for long sessions: scanability, density, and native expectations outrank expression.
+3. **Respect the operator.** This is a work tool for long sessions: scanability, density, and native expectations outrank expression. Rendering performance is a product requirement, not a follow-up.
 4. **Grow toward the workbench.** Decisions should leave room for parallel sessions, diff review, file tree, and terminal rather than baking in a single-chat assumption.

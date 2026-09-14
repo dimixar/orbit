@@ -1,0 +1,5871 @@
+use super::helpers::*;
+use super::*;
+
+/// A Plugins-page button action, dispatched through one entry point.
+#[derive(Clone)]
+pub(super) enum PluginAction {
+    Install,
+    Update { source: String },
+    Remove { source: String },
+    ConfirmRemove { source: String, project: bool },
+    CancelRemove,
+    SetScope { project: bool },
+    Refresh,
+}
+
+/// The operation a background plugin task runs.
+#[derive(Clone, Copy)]
+enum PluginOp {
+    Install,
+    Update,
+    Remove,
+}
+
+impl OrbitApp {
+    // ── settings surface ───────────────────────────────────────────
+    // Waku-style: left nav (Back + sections), right column of setting
+    // rows. Every control maps to real app state; read-only rows show
+    // real pi/runtime facts (PRODUCT.md: nothing decorative that
+    // pretends to be functional).
+
+    pub(super) fn render_settings(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let this = cx.entity();
+        let theme = *theme::get(cx);
+        let sections: [(SettingsSection, &'static str, &'static str); 9] = [
+            (SettingsSection::General, "icons/settings.svg", "General"),
+            (
+                SettingsSection::Runtime,
+                "icons/server-stack.svg",
+                "Runtime",
+            ),
+            (SettingsSection::Agent, "icons/spark.svg", "Agent"),
+            (SettingsSection::Skills, "icons/magic-wand.svg", "Skills"),
+            (SettingsSection::Plugins, "icons/extensions.svg", "Plugins"),
+            (SettingsSection::Models, "icons/tag-01.svg", "Models"),
+            (
+                SettingsSection::Appearance,
+                "icons/contrast.svg",
+                "Appearance",
+            ),
+            (SettingsSection::Providers, "icons/cloud.svg", "Providers"),
+            (SettingsSection::About, "icons/info.svg", "About"),
+        ];
+
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .relative()
+            .bg(theme.bg_main)
+            .font_family(theme::ui_font_family())
+            // ── nav column ──
+            .child(
+                div()
+                    .w(px(240.))
+                    .h_full()
+                    .flex_shrink_0()
+                    .bg(theme.bg_sidebar)
+                    .border_r_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .flex_col()
+                    // traffic-light strip (drag region)
+                    .child(
+                        div()
+                            .h(px(38.))
+                            .w_full()
+                            .window_control_area(WindowControlArea::Drag),
+                    )
+                    // Back — inset like the sessions nav, breathing room below
+                    .child(
+                        div().px_2().pt_1().pb_3().child(
+                            div()
+                                .w_full()
+                                .px_2()
+                                .py(px(5.))
+                                .rounded_md()
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .cursor_pointer()
+                                .hover(|s| s.bg(theme.bg_hover))
+                                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_settings_back))
+                                .child(icon("icons/arrow-left.svg", 14., theme.text_2))
+                                .child(
+                                    div()
+                                        .text_size(theme.ui_px(13.))
+                                        .text_color(theme.text_2)
+                                        .child("Back"),
+                                ),
+                        ),
+                    )
+                    // section rows — inset wrapper so hover/selected pills
+                    // don't bleed to the window edge (matches sessions nav)
+                    .child(
+                        div()
+                            .px_2()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .children(sections.map(|(section, section_icon, label)| {
+                                let this = this.clone();
+                                let selected = self.settings_section == section;
+                                div()
+                                    .w_full()
+                                    .px_2()
+                                    .py(px(5.))
+                                    .rounded_md()
+                                    .text_size(theme.ui_px(13.))
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .cursor_pointer()
+                                    .when(selected, |row| row.bg(theme.bg_raised))
+                                    .when(!selected, |row| row.hover(|s| s.bg(theme.bg_hover)))
+                                    .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                                        this.update(cx, |app, cx| {
+                                            app.set_settings_section(section, cx);
+                                        });
+                                    })
+                                    .child(icon(
+                                        section_icon,
+                                        15.,
+                                        if selected { theme.text } else { theme.text_3 },
+                                    ))
+                                    .child(
+                                        div()
+                                            .text_color(if selected {
+                                                theme.text
+                                            } else {
+                                                theme.text_2
+                                            })
+                                            .child(label.to_string()),
+                                    )
+                            })),
+                    ),
+            )
+            // ── content column ──
+            // Skills owns a full-bleed master-detail surface; every other
+            // section is a fixed header + a scrolling column of cards.
+            .child(if self.settings_section == SettingsSection::Skills {
+                self.render_skills_page(theme, this.clone(), cx)
+            } else {
+                self.settings_body(theme, this.clone(), cx)
+            })
+            // ── provider editor modals (models.json + API key) ──
+            .children(self.provider_editor_layer(theme, this.clone(), cx))
+            .children(self.provider_key_layer(theme, this, cx))
+    }
+
+    /// The standard settings content column: a pinned header (title +
+    /// section toolbar) over a scrolling body of cards.
+    fn settings_body(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            // The title (and, on Providers/Plugins, the toolbar) stay pinned;
+            // gpui has no sticky positioning, so they live outside the scroll
+            // container.
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(CONTENT_MAX_W))
+                    .mx_auto()
+                    .flex_shrink_0()
+                    .px(px(24.))
+                    .pt(px(44.))
+                    .pb(px(12.))
+                    .when(
+                        matches!(
+                            self.settings_section,
+                            SettingsSection::Providers | SettingsSection::Plugins
+                        ),
+                        |header| header.border_b_1().border_color(theme.border),
+                    )
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(self.settings_header(theme))
+                    .children(self.settings_toolbar(theme, this.clone(), cx)),
+            )
+            .child(
+                div()
+                    .id("settings-content")
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .max_w(px(CONTENT_MAX_W))
+                    .mx_auto()
+                    .overflow_y_scroll()
+                    .child(
+                        div()
+                            .w_full()
+                            .px(px(24.))
+                            .pb(px(12.))
+                            .flex()
+                            .flex_col()
+                            .gap(theme.space(12.))
+                            .children(self.error_banner(theme, cx))
+                            .children(self.settings_rows(&this, theme, cx)),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    pub(super) fn settings_header(&self, theme: Theme) -> impl IntoElement + use<> {
+        let (title, subtitle) = match self.settings_section {
+            SettingsSection::General => (
+                "General",
+                "App behavior, local data, and notifications.",
+            ),
+            SettingsSection::Runtime => (
+                "Runtime",
+                "The pi agent process Orbit spawns — stdio transport, no host or port.",
+            ),
+            SettingsSection::Agent => (
+                "Agent",
+                "How pi queues your messages, compacts context, and retries errors.",
+            ),
+            SettingsSection::Skills => (
+                "Skills",
+                "SKILL.md files pi can load, from this project and your global agent.",
+            ),
+            SettingsSection::Plugins => (
+                "Plugins",
+                "pi packages for this machine and this project. pi loads them at startup — restart pi to apply changes.",
+            ),
+            SettingsSection::Models => (
+                "Models",
+                "Every model the running pi reports, grouped by provider. Favorites are shared with the composer's model picker.",
+            ),
+            SettingsSection::Appearance => ("Appearance", "Window, layout, and color preferences."),
+            SettingsSection::Providers => (
+                "Providers",
+                "The live catalog plus custom providers from ~/.pi/agent/models.json.",
+            ),
+            SettingsSection::About => ("About", "Versions and the rendering stack."),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .pb_1()
+            .when(self.settings_section == SettingsSection::About, |header| {
+                header.child(embedded_image(crate::app_icon::ASSET, 72.))
+            })
+            .child(
+                div()
+                    .text_size(theme.ui_px(20.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(title.to_string()),
+            )
+            .child(
+                div()
+                    .text_size(theme.ui_px(12.5))
+                    .text_color(theme.text_2)
+                    .child(subtitle.to_string()),
+            )
+    }
+
+    /// The rows for the active section, as card elements. `this` rides
+    /// along for closures in interactive controls (rows themselves are
+    /// built read-only from app state).
+    pub(super) fn settings_rows(
+        &self,
+        this: &Entity<OrbitApp>,
+        theme: Theme,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        match self.settings_section {
+            SettingsSection::General => {
+                let mut rows = vec![
+                    self.card(
+                        theme,
+                        "pi agent",
+                        "Spawned as a child process — newline-delimited JSON over stdio.",
+                        Some(self.connection_status(theme)),
+                    ),
+                    self.card_with_path(
+                        theme,
+                        "Local by default",
+                        "Sessions live in pi's own store on this computer — no daemon, no cloud.",
+                        Some(&sessions::sessions_dir().to_string_lossy()),
+                        None,
+                    ),
+                    self.card_with_path(
+                        theme,
+                        "Workspace",
+                        "New tasks start in this directory.",
+                        Some(
+                            &self
+                                .current_workspace
+                                .clone()
+                                .or_else(|| std::env::current_dir().ok())
+                                .unwrap_or_default()
+                                .to_string_lossy(),
+                        ),
+                        None,
+                    ),
+                ];
+                rows.extend(self.updater_rows(theme, this.clone(), cx));
+                rows.push(self.notification_rows(theme, this.clone()));
+                rows
+            }
+            SettingsSection::Runtime => self.runtime_rows(theme, this.clone(), cx),
+            SettingsSection::Agent => self.agent_rows(theme, this.clone(), cx),
+            // Rendered by `skills_ui::render_skills_page`, not the card body.
+            SettingsSection::Skills => Vec::new(),
+            SettingsSection::Plugins => self.plugin_rows(theme, this.clone(), cx),
+            SettingsSection::Models => self.model_rows(theme, this.clone(), cx),
+            SettingsSection::Appearance => self.appearance_rows(theme, this.clone(), cx),
+            SettingsSection::Providers => self.provider_rows(theme, this.clone(), cx),
+            SettingsSection::About => vec![
+                self.card(
+                    theme,
+                    "Orbit Pi",
+                    "Native workbench for the pi coding agent.",
+                    Some(
+                        div()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.text_2)
+                            .child(format!("v{}", env!("CARGO_PKG_VERSION")))
+                            .into_any_element(),
+                    ),
+                ),
+                self.card(
+                    theme,
+                    "GPUI",
+                    "GPU-accelerated UI framework (pinned; runtime shaders).",
+                    Some(
+                        div()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.text_2)
+                            .child("0.2.2")
+                            .into_any_element(),
+                    ),
+                ),
+                self.card(
+                    theme,
+                    "pi CLI",
+                    "The only agent runtime — pi speaks its own RPC protocol over stdio.",
+                    Some(self.connection_status(theme)),
+                ),
+            ],
+        }
+    }
+
+    /// The pinned toolbar for the active section (Providers search + add,
+    /// Plugins install + refresh). `None` on sections without one.
+    pub(super) fn settings_toolbar(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        match self.settings_section {
+            SettingsSection::Providers => Some(self.provider_toolbar(theme, this, cx)),
+            SettingsSection::Plugins => Some(self.plugin_toolbar(theme, this, cx)),
+            SettingsSection::Models => Some(self.model_toolbar(theme, this, cx)),
+            _ => None,
+        }
+    }
+
+    // ── Settings → Models ──────────────────────────────────────────────
+
+    /// The sticky Models header: a search field plus a live count. The
+    /// catalog is pi's own (`get_available_models`), grouped by provider in
+    /// the body; favorites toggle the same store the composer picker reads.
+    pub(super) fn model_toolbar(
+        &self,
+        theme: Theme,
+        _this: Entity<OrbitApp>,
+        _cx: &Context<Self>,
+    ) -> AnyElement {
+        let search = div()
+            .w_full()
+            .h(px(34.))
+            .px(px(10.))
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_main)
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_size(theme.ui_px(13.))
+            .child(icon("icons/search.svg", 14., theme.text_3))
+            .child(self.models_filter.clone());
+
+        let count = self.available_models.len();
+        let favorites = crate::favorites::all();
+        let favorite_count = self
+            .available_models
+            .iter()
+            .filter(|model| favorites.contains(&model.provider, &model.id))
+            .count();
+
+        let toolbar = div().w_full().flex().items_center().gap_2().child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(theme.ui_px(12.))
+                .text_color(theme.text_3)
+                .child(if count == 0 {
+                    "No models reported by the runtime".to_string()
+                } else {
+                    format!("{count} models · {favorite_count} favorites")
+                }),
+        );
+
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(search)
+            .child(toolbar)
+            .into_any_element()
+    }
+
+    /// The Models page: the catalog grouped by provider, each row a real
+    /// `SetModel` action plus a favorite star.
+    pub(super) fn model_rows(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        if self.available_models.is_empty() {
+            return vec![self.empty_resource_card(
+                theme,
+                "icons/tag-01.svg",
+                "No models reported",
+                "The running pi has not returned a model catalog yet. Refresh from Settings → Providers, or start a session.",
+            )];
+        }
+        let needle = self.models_filter.read(cx).text().trim().to_lowercase();
+        let favorites = crate::favorites::all();
+
+        // Group in catalog order: a stable provider order with its models.
+        let mut providers: Vec<String> = Vec::new();
+        for model in &self.available_models {
+            if !providers.contains(&model.provider) {
+                providers.push(model.provider.clone());
+            }
+        }
+
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for provider in providers {
+            let models: Vec<&ModelEntry> = self
+                .available_models
+                .iter()
+                .filter(|model| model.provider == provider)
+                .filter(|model| {
+                    needle.is_empty()
+                        || model.name.to_lowercase().contains(&needle)
+                        || model.id.to_lowercase().contains(&needle)
+                        || provider.to_lowercase().contains(&needle)
+                })
+                .collect();
+            if models.is_empty() {
+                continue;
+            }
+            let mut group = div()
+                .id(ElementId::NamedInteger(
+                    "model-group".into(),
+                    rows.len() as u64,
+                ))
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .pb(px(4.))
+                        .child(icon_dyn(provider_icon(&provider), 14., theme.text_3))
+                        .child(
+                            div()
+                                .text_size(theme.ui_px(12.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text_2)
+                                .child(crate::providers::provider_display_name(&provider)),
+                        )
+                        .child(
+                            div()
+                                .text_size(theme.ui_px(11.))
+                                .text_color(theme.text_3)
+                                .child(models.len().to_string()),
+                        ),
+                );
+            for model in models {
+                let (id, model_provider) = (model.id.clone(), model.provider.clone());
+                let active = self.model_id == model.id && self.model_provider == model.provider;
+                let is_favorite = favorites.contains(&model.provider, &model.id);
+                let (star_provider, star_id) = (model.provider.clone(), model.id.clone());
+                let mut row = div()
+                    .id(ElementId::Name(
+                        format!("model-row-{model_provider}-{id}").into(),
+                    ))
+                    .w_full()
+                    .px(px(10.))
+                    .py(px(7.))
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(if active { theme.accent } else { theme.border })
+                    .bg(if active {
+                        theme.active
+                    } else {
+                        theme.bg_raised
+                    })
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .cursor_pointer()
+                    .when(!active, |row| row.hover(|s| s.bg(theme.bg_hover)))
+                    .on_mouse_up(MouseButton::Left, {
+                        let this = this.clone();
+                        let provider = model_provider.clone();
+                        let id = id.clone();
+                        move |_, _, cx| {
+                            this.update(cx, |app, cx| {
+                                app.set_model(id.clone(), provider.clone(), cx)
+                            });
+                        }
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(theme.ui_px(13.))
+                                    .font_weight(if active {
+                                        FontWeight::MEDIUM
+                                    } else {
+                                        FontWeight::NORMAL
+                                    })
+                                    .text_color(if active { theme.active_fg } else { theme.text })
+                                    .child(model.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .font_family(theme::code_font_family())
+                                    .text_size(theme.ui_px(11.))
+                                    .text_color(theme.text_3)
+                                    .child(model.id.clone()),
+                            ),
+                    );
+                if let Some(window) = model.context_window {
+                    row = row.child(
+                        div()
+                            .flex_none()
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text_3)
+                            .child(format!(
+                                "{} ctx",
+                                crate::context_meter::format_tokens(window)
+                            )),
+                    );
+                }
+                if active {
+                    row = row.child(icon("icons/check.svg", 13., theme.accent));
+                }
+                row = row.child(
+                    div()
+                        .id(ElementId::Name(
+                            format!("model-star-{star_provider}-{star_id}").into(),
+                        ))
+                        .size(px(24.))
+                        .flex_none()
+                        .rounded_md()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.overlay))
+                        .on_mouse_up(MouseButton::Left, {
+                            let this = this.clone();
+                            move |_, _, cx| {
+                                // Keep the star from bubbling to the row's
+                                // "set active model" handler.
+                                cx.stop_propagation();
+                                crate::favorites::toggle(&star_provider, &star_id);
+                                this.update(cx, |_, cx| cx.notify());
+                            }
+                        })
+                        .child(icon(
+                            "icons/star.svg",
+                            14.,
+                            if is_favorite {
+                                theme.accent
+                            } else {
+                                theme.text_3
+                            },
+                        )),
+                );
+                group = group.child(row);
+            }
+            rows.push(group.into_any_element());
+        }
+
+        if rows.is_empty() {
+            rows.push(self.empty_resource_card(
+                theme,
+                "icons/search.svg",
+                "No models match",
+                "Try a different search — the catalog itself is unchanged.",
+            ));
+        }
+        rows
+    }
+
+    // ── Settings → Plugins ─────────────────────────────────────────────
+
+    /// Installed pi packages plus the install field. Plugins are managed
+    /// through `pi install/remove/update`, so pi owns the network fetch and
+    /// the settings write.
+    pub(super) fn plugin_rows(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut rows: Vec<AnyElement> = Vec::new();
+        if let Some(error) = &self.plugins_error {
+            rows.push(self.provider_error_card(theme, "Settings could not be read", error));
+        }
+        if self.plugins.is_empty() {
+            rows.push(self.empty_resource_card(
+                theme,
+                "icons/extensions.svg",
+                "No plugins installed",
+                "Install an npm package, a git repo, or a local path above.",
+            ));
+            return rows;
+        }
+
+        let needle = self.plugins_filter.read(cx).text().trim().to_lowercase();
+        let visible: Vec<&PluginPackage> = self
+            .plugins
+            .iter()
+            .filter(|package| {
+                needle.is_empty()
+                    || package.source.to_lowercase().contains(&needle)
+                    || package
+                        .version
+                        .as_deref()
+                        .is_some_and(|version| version.to_lowercase().contains(&needle))
+            })
+            .collect();
+
+        let installed = self
+            .plugins
+            .iter()
+            .filter(|package| package.installed)
+            .count();
+        rows.push(
+            div()
+                .w_full()
+                .text_size(theme.ui_px(12.))
+                .text_color(theme.text_3)
+                .child(if visible.len() == self.plugins.len() {
+                    format!("{} of {} installed", installed, self.plugins.len())
+                } else {
+                    format!(
+                        "{} of {} shown · {} installed",
+                        visible.len(),
+                        self.plugins.len(),
+                        installed
+                    )
+                })
+                .into_any_element(),
+        );
+        if visible.is_empty() {
+            rows.push(self.empty_resource_card(
+                theme,
+                "icons/search.svg",
+                "No plugins match",
+                "Try a different search — installed packages are unchanged.",
+            ));
+            return rows;
+        }
+        for package in visible {
+            rows.push(self.plugin_card(package, theme, this.clone()));
+        }
+        rows
+    }
+
+    fn plugin_card(
+        &self,
+        package: &PluginPackage,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+    ) -> AnyElement {
+        let source = package.source.clone();
+        let project = package.scope == PackageScope::Project;
+        let confirming = self.plugin_remove_confirm.as_deref() == Some(source.as_str());
+
+        let mut badges = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_end()
+            .gap_1p5()
+            .child(self.provider_badge(
+                package.scope.label(),
+                if project { theme.accent } else { theme.text_3 },
+                if project {
+                    theme.accent.opacity(0.12)
+                } else {
+                    theme.overlay_strong
+                },
+                theme,
+            ))
+            .child(self.provider_badge(
+                package.kind.label(),
+                theme.text_3,
+                theme.overlay_strong,
+                theme,
+            ));
+        if let Some(version) = &package.version {
+            badges = badges.child(self.provider_badge(
+                &format!("v{version}"),
+                theme.text_3,
+                theme.overlay_strong,
+                theme,
+            ));
+        }
+        if !package.installed {
+            badges = badges.child(self.provider_badge(
+                "Not installed",
+                theme.crit,
+                theme.crit.opacity(0.12),
+                theme,
+            ));
+        }
+
+        let tile = div()
+            .size(px(38.))
+            .flex_none()
+            .rounded(px(10.))
+            .bg(theme.bg_raised)
+            .border_1()
+            .border_color(theme.border)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(icon("icons/extensions.svg", 18., theme.text_2));
+
+        let header = div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(tile)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(13.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .truncate()
+                            .child(package.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .font_family(theme::code_font_family())
+                            .text_size(theme.code_px(10.5))
+                            .text_color(theme.text_3)
+                            .truncate()
+                            .child(source.clone()),
+                    ),
+            )
+            .child(badges);
+
+        let actions: AnyElement = if confirming {
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(theme.ui_px(11.5))
+                        .text_color(theme.crit)
+                        .child("Remove this plugin?"),
+                )
+                .child(self.plugin_button(
+                    format!("plugin-remove-confirm-{source}"),
+                    "Remove",
+                    false,
+                    Some("icons/trash.svg"),
+                    theme,
+                    this.clone(),
+                    PluginAction::ConfirmRemove {
+                        source: source.clone(),
+                        project,
+                    },
+                ))
+                .child(self.plugin_button(
+                    format!("plugin-remove-cancel-{source}"),
+                    "Cancel",
+                    false,
+                    None,
+                    theme,
+                    this,
+                    PluginAction::CancelRemove,
+                ))
+                .into_any_element()
+        } else {
+            let mut actions = div().flex().items_center().gap_2();
+            if package.installed {
+                actions = actions.child(self.plugin_button(
+                    format!("plugin-update-{source}"),
+                    "Update",
+                    false,
+                    Some("icons/refresh.svg"),
+                    theme,
+                    this.clone(),
+                    PluginAction::Update {
+                        source: source.clone(),
+                    },
+                ));
+            }
+            actions = actions.child(self.plugin_button(
+                format!("plugin-remove-{source}"),
+                "Remove",
+                false,
+                Some("icons/trash.svg"),
+                theme,
+                this,
+                PluginAction::Remove { source },
+            ));
+            actions.into_any_element()
+        };
+
+        div()
+            .w_full()
+            .min_w_0()
+            .bg(theme.bg_composer)
+            .border_1()
+            .border_color(theme.border)
+            .rounded_lg()
+            .p(px(14.))
+            .flex()
+            .flex_col()
+            .gap_2p5()
+            .child(header)
+            .child(
+                div()
+                    .font_family(theme::code_font_family())
+                    .text_size(theme.code_px(10.5))
+                    .text_color(theme.text_3)
+                    .truncate()
+                    .child(package.install_path.to_string_lossy().into_owned()),
+            )
+            .child(div().h(px(1.)).w_full().bg(theme.border))
+            .child(actions)
+            .into_any_element()
+    }
+
+    /// The pinned Plugins toolbar: install field + scope target + Install,
+    /// then the count and Refresh.
+    pub(super) fn plugin_toolbar(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        _cx: &Context<Self>,
+    ) -> AnyElement {
+        let field = div()
+            .flex_1()
+            .min_w_0()
+            .h(px(34.))
+            .px(px(10.))
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_main)
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_size(theme.ui_px(13.))
+            .child(icon("icons/extensions.svg", 14., theme.text_3))
+            .child(self.plugin_source_input.clone());
+
+        let scope = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(self.plugin_scope_chip(
+                "Global",
+                !self.plugin_install_project,
+                false,
+                theme,
+                this.clone(),
+            ))
+            .child(self.plugin_scope_chip(
+                "Project",
+                self.plugin_install_project,
+                true,
+                theme,
+                this.clone(),
+            ));
+
+        let install = self.plugin_button(
+            "plugin-install".to_string(),
+            "Install",
+            true,
+            Some("icons/plus.svg"),
+            theme,
+            this.clone(),
+            PluginAction::Install,
+        );
+
+        let refresh = self.plugin_button(
+            "plugin-refresh".to_string(),
+            "Refresh",
+            false,
+            Some("icons/refresh.svg"),
+            theme,
+            this,
+            PluginAction::Refresh,
+        );
+
+        let plugin_spinner: AnyElement = if theme.ui.reduce_motion {
+            icon("icons/loader.svg", 13., theme.text_2).into_any_element()
+        } else {
+            gpui::svg()
+                .path("icons/loader.svg")
+                .flex_none()
+                .size(px(13.))
+                .text_color(theme.text_2)
+                .with_animation(
+                    "plugin-action-spin",
+                    Animation::new(Duration::from_millis(900)).repeat(),
+                    |svg, delta| {
+                        svg.with_transformation(Transformation::rotate(radians(
+                            delta * std::f32::consts::TAU,
+                        )))
+                    },
+                )
+                .into_any_element()
+        };
+        let status: AnyElement = match &self.plugin_action {
+            Some(action) => div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_size(theme.ui_px(12.))
+                .text_color(theme.text_2)
+                .child(plugin_spinner)
+                .child(action.clone())
+                .into_any_element(),
+            None => div()
+                .flex_1()
+                .min_w_0()
+                .text_size(theme.ui_px(12.))
+                .text_color(theme.text_3)
+                .child(format!(
+                    "{} package{} configured",
+                    self.plugins.len(),
+                    if self.plugins.len() == 1 { "" } else { "s" }
+                ))
+                .into_any_element(),
+        };
+
+        let search = div()
+            .w_full()
+            .h(px(34.))
+            .px(px(10.))
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_main)
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_size(theme.ui_px(13.))
+            .child(icon("icons/search.svg", 14., theme.text_3))
+            .child(self.plugins_filter.clone());
+
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(field)
+                    .child(scope)
+                    .child(install),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(status)
+                    .child(refresh),
+            )
+            .child(search)
+            .into_any_element()
+    }
+
+    fn plugin_scope_chip(
+        &self,
+        label: &str,
+        active: bool,
+        project: bool,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+    ) -> AnyElement {
+        let id = format!(
+            "plugin-scope-{}",
+            if project { "project" } else { "global" }
+        );
+        let mut chip = div()
+            .id(ElementId::Name(id.into()))
+            .h(px(28.))
+            .px(px(9.))
+            .rounded_md()
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .text_size(theme.ui_px(11.5))
+            .font_weight(FontWeight::MEDIUM);
+        chip = if active {
+            chip.bg(theme.active).text_color(theme.active_fg)
+        } else {
+            chip.border_1()
+                .border_color(theme.border)
+                .bg(theme.bg_raised)
+                .text_color(theme.text_3)
+                .hover(|style| style.bg(theme.bg_hover))
+        };
+        chip.on_mouse_up(MouseButton::Left, move |_, _, cx| {
+            this.update(cx, |app, cx| {
+                app.apply_plugin_action(PluginAction::SetScope { project }, cx)
+            });
+        })
+        .child(label.to_string())
+        .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn plugin_button(
+        &self,
+        id: String,
+        label: &str,
+        primary: bool,
+        icon_path: Option<&'static str>,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        action: PluginAction,
+    ) -> AnyElement {
+        let base = div()
+            .id(ElementId::Name(id.into()))
+            .h(px(28.))
+            .px(px(10.))
+            .rounded_md()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap_1p5()
+            .cursor_pointer()
+            .text_size(theme.ui_px(11.5))
+            .font_weight(FontWeight::MEDIUM);
+        let (button, icon_color) = if primary {
+            (
+                base.bg(theme.send_bg)
+                    .text_color(theme.send_fg)
+                    .hover(|style| style.bg(theme.send_bg_hover)),
+                theme.send_fg,
+            )
+        } else {
+            (
+                base.border_1()
+                    .border_color(theme.border)
+                    .bg(theme.bg_raised)
+                    .text_color(theme.text_2)
+                    .hover(|style| style.bg(theme.bg_hover)),
+                theme.text_2,
+            )
+        };
+        button
+            .when_some(icon_path, |button, path| {
+                button.child(icon(path, 12., icon_color))
+            })
+            .child(div().child(label.to_string()))
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                let action = action.clone();
+                this.update(cx, |app, cx| app.apply_plugin_action(action, cx));
+            })
+            .into_any_element()
+    }
+
+    fn empty_resource_card(
+        &self,
+        theme: Theme,
+        icon_path: &'static str,
+        title: &str,
+        body: &str,
+    ) -> AnyElement {
+        div()
+            .w_full()
+            .bg(theme.bg_composer)
+            .border_1()
+            .border_color(theme.border)
+            .rounded_lg()
+            .px(px(14.))
+            .py(px(40.))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_2()
+            .child(icon(icon_path, 26., theme.text_3))
+            .child(
+                div()
+                    .text_size(theme.ui_px(13.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(title.to_string()),
+            )
+            .child(
+                div()
+                    .max_w(px(420.))
+                    .text_size(theme.ui_px(12.))
+                    .text_color(theme.text_2)
+                    .child(body.to_string()),
+            )
+            .into_any_element()
+    }
+
+    /// The sticky provider header: the search field plus the
+    /// count / Refresh / Add toolbar. Rendered outside the scroll container
+    /// so it stays put while the grid scrolls (gpui 0.2.2 has no
+    /// `position: sticky`).
+    pub(super) fn provider_toolbar(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        _cx: &Context<Self>,
+    ) -> AnyElement {
+        let all = self.provider_views();
+        let active = all.iter().filter(|view| view.active).count();
+        let connected = all.iter().filter(|view| view.connected()).count();
+
+        let search = div()
+            .w_full()
+            .h(px(34.))
+            .px(px(10.))
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_main)
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_size(theme.ui_px(13.))
+            .child(icon("icons/search.svg", 14., theme.text_3))
+            .child(self.provider_filter.clone());
+
+        let refresh_icon: AnyElement = if self.providers_refreshing && !theme.ui.reduce_motion {
+            gpui::svg()
+                .path("icons/loader.svg")
+                .flex_none()
+                .size(px(13.))
+                .text_color(theme.text_2)
+                .with_animation(
+                    "providers-refresh-spin",
+                    Animation::new(Duration::from_millis(900)).repeat(),
+                    |svg, delta| {
+                        svg.with_transformation(Transformation::rotate(radians(
+                            delta * std::f32::consts::TAU,
+                        )))
+                    },
+                )
+                .into_any_element()
+        } else {
+            icon("icons/refresh.svg", 13., theme.text_2).into_any_element()
+        };
+        let refresh_button = div()
+            .id("providers-refresh")
+            .h(px(30.))
+            .px(px(12.))
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_raised)
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .cursor_pointer()
+            .when(self.providers_refreshing, |button| button.opacity(0.6))
+            .hover(|style| style.bg(theme.bg_hover))
+            .on_mouse_up(MouseButton::Left, {
+                let this = this.clone();
+                move |_, _, cx| {
+                    this.update(cx, |app, cx| app.provider_refresh(cx));
+                }
+            })
+            .child(refresh_icon)
+            .child(
+                div()
+                    .text_size(theme.ui_px(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_2)
+                    .child("Refresh"),
+            );
+
+        let add_button = div()
+            .id("providers-add")
+            .h(px(30.))
+            .px(px(12.))
+            .rounded_md()
+            .bg(theme.send_bg)
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.send_bg_hover))
+            .on_mouse_up(MouseButton::Left, {
+                let this = this.clone();
+                move |_, window, cx| {
+                    this.update(cx, |app, cx| app.provider_editor_open(None, window, cx));
+                }
+            })
+            .child(icon("icons/plus.svg", 13., theme.send_fg))
+            .child(
+                div()
+                    .text_size(theme.ui_px(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.send_fg)
+                    .child("Add provider"),
+            );
+
+        let toolbar = div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(theme.ui_px(12.))
+                    .text_color(theme.text_3)
+                    .child(format!(
+                        "{} providers · {} active · {} connected",
+                        all.len(),
+                        active,
+                        connected
+                    )),
+            )
+            .child(refresh_button)
+            .child(add_button);
+
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(search)
+            .child(toolbar)
+            .into_any_element()
+    }
+
+    /// The Providers page: every provider pi ships with (plus models.json-only
+    /// endpoints) as a 3-column grid, each with real auth status and actions.
+    pub(super) fn provider_rows(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let all = self.provider_views();
+        let needle = self.provider_filter.read(cx).text().trim().to_lowercase();
+
+        let mut views: Vec<&ProviderView> = all
+            .iter()
+            .filter(|view| {
+                needle.is_empty()
+                    || view.name.to_lowercase().contains(&needle)
+                    || view.id.to_lowercase().contains(&needle)
+                    || view
+                        .env_names
+                        .iter()
+                        .any(|name| name.to_lowercase().contains(&needle))
+            })
+            .collect();
+        let rank = |view: &ProviderView| -> u8 {
+            if view.active {
+                0
+            } else if view.connected() {
+                1
+            } else if view.custom {
+                2
+            } else {
+                3
+            }
+        };
+        views.sort_by(|a, b| {
+            rank(a)
+                .cmp(&rank(b))
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+
+        let mut rows: Vec<AnyElement> = Vec::new();
+
+        // ── credential-changed banner ──
+        if self.provider_auth_dirty {
+            rows.push(
+                div()
+                    .w_full()
+                    .bg(theme.accent.opacity(0.1))
+                    .border_1()
+                    .border_color(theme.accent.opacity(0.35))
+                    .rounded_lg()
+                    .px(px(14.))
+                    .py(px(10.))
+                    .flex()
+                    .items_center()
+                    .gap_2p5()
+                    .child(icon("icons/info.svg", 15., theme.accent))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_size(theme.ui_px(12.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .child("Credentials changed"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(theme.ui_px(11.5))
+                                    .text_color(theme.text_2)
+                                    .child(
+                                        "pi reads auth.json at startup — restart it to load the new credentials.",
+                                    ),
+                            ),
+                    )
+                    .child(self.provider_button(
+                        "providers-apply".into(),
+                        "Restart pi",
+                        ProviderButtonStyle::Primary,
+                        theme,
+                        this.clone(),
+                        ProviderAction::Restart,
+                    ))
+                    .into_any_element(),
+            );
+        }
+
+        if let Some(error) = &self.custom_providers_error {
+            rows.push(self.provider_error_card(theme, "models.json could not be read", error));
+        }
+        if let Some(error) = &self.provider_auth_error {
+            rows.push(self.provider_error_card(theme, "auth.json could not be read", error));
+        }
+
+        // ── grid ──
+        if views.is_empty() {
+            rows.push(
+                div()
+                    .w_full()
+                    .bg(theme.bg_composer)
+                    .border_1()
+                    .border_color(theme.border)
+                    .rounded_lg()
+                    .px(px(14.))
+                    .py(px(40.))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .child(icon("icons/search.svg", 26., theme.text_3))
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child("No providers match"),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.text_2)
+                            .child("Try a different search."),
+                    )
+                    .into_any_element(),
+            );
+        } else {
+            let cards: Vec<AnyElement> = views
+                .iter()
+                .map(|view| self.provider_card(view, theme, this.clone()))
+                .collect();
+            rows.push(
+                div()
+                    .w_full()
+                    .grid()
+                    .grid_cols(3)
+                    .gap_3()
+                    .children(cards)
+                    .into_any_element(),
+            );
+        }
+
+        rows
+    }
+
+    /// A red note card for a config read error.
+    pub(super) fn provider_error_card(&self, theme: Theme, title: &str, error: &str) -> AnyElement {
+        div()
+            .w_full()
+            .bg(theme.crit.opacity(0.08))
+            .border_1()
+            .border_color(theme.crit.opacity(0.35))
+            .rounded_lg()
+            .px(px(14.))
+            .py(px(12.))
+            .flex()
+            .items_start()
+            .gap_2p5()
+            .child(icon("icons/info.svg", 15., theme.crit))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(title.to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.text_2)
+                            .child(error.to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(11.5))
+                            .text_color(theme.text_3)
+                            .child("Fix or remove the file before editing providers here."),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// Every provider pi ships with, merged with the live catalog, models.json,
+    /// and auth.json. Built-ins come first so nothing is hidden behind auth.
+    pub(super) fn provider_views(&self) -> Vec<ProviderView> {
+        let mut views: Vec<ProviderView> = Vec::new();
+        // Prefer pi's own provider metadata (introspected from pi-ai). Fall
+        // back to the curated table when node/pi-ai aren't reachable.
+        if !self.provider_metadata.is_empty() {
+            for provider in &self.provider_metadata {
+                views.push(self.provider_view_for(
+                    &provider.id,
+                    Some(provider.name.clone()),
+                    provider.oauth,
+                    provider.api_key,
+                    &provider.env_vars,
+                    providers::provider_note(&provider.id),
+                    true,
+                ));
+            }
+        } else {
+            for builtin in providers::BUILTIN_PROVIDERS {
+                let env_vars: Vec<String> = if builtin.env_var.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![builtin.env_var.to_string()]
+                };
+                views.push(self.provider_view_for(
+                    builtin.id,
+                    Some(builtin.name.to_string()),
+                    builtin.oauth,
+                    builtin.api_key,
+                    &env_vars,
+                    builtin.note,
+                    true,
+                ));
+            }
+        }
+        // Providers pi ships but neither source knows yet — discovered from
+        // pi's bundled catalog data, so a new pi release lists its providers
+        // without an Orbit change.
+        for id in self.provider_catalog_counts.keys() {
+            if !views.iter().any(|view| &view.id == id) {
+                views.push(self.provider_view_for(
+                    id,
+                    None,
+                    false,
+                    true,
+                    &[],
+                    providers::provider_note(id),
+                    true,
+                ));
+            }
+        }
+        // Catalog providers that aren't built-ins (extension providers, or
+        // custom endpoints pi has already loaded).
+        for model in &self.available_models {
+            if !views.iter().any(|view| view.id == model.provider) {
+                views.push(self.provider_view_for(
+                    &model.provider,
+                    None,
+                    false,
+                    true,
+                    &[],
+                    "",
+                    false,
+                ));
+            }
+        }
+        // models.json providers pi hasn't loaded yet.
+        for provider in &self.custom_providers {
+            if !views.iter().any(|view| view.id == provider.id) {
+                views.push(self.provider_view_for(&provider.id, None, false, true, &[], "", false));
+            }
+        }
+        // Providers the running pi advertises through `auth.list` but no other
+        // source knows about still get a card and capability-driven buttons.
+        for capability in self.auth.providers() {
+            if !views.iter().any(|view| view.id == capability.id) {
+                views.push(self.provider_view_for(
+                    &capability.id,
+                    Some(capability.name.clone()),
+                    capability.supports_oauth(),
+                    capability.supports_api_key(),
+                    &[],
+                    providers::provider_note(&capability.id),
+                    true,
+                ));
+            }
+        }
+        views
+    }
+
+    /// Build one grid row from all sources.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn provider_view_for(
+        &self,
+        id: &str,
+        name: Option<String>,
+        oauth: bool,
+        api_key: bool,
+        env_names: &[String],
+        note: &'static str,
+        builtin: bool,
+    ) -> ProviderView {
+        let custom = self
+            .custom_providers
+            .iter()
+            .find(|provider| provider.id == id);
+        let live_count = self
+            .available_models
+            .iter()
+            .filter(|model| model.provider == id)
+            .count();
+        let catalog_count = self.provider_catalog_counts.get(id).copied().unwrap_or(0);
+        let custom_count = custom.map(|provider| provider.model_ids.len()).unwrap_or(0);
+        let env_hit = env_names
+            .iter()
+            .find(|name| std::env::var_os(name.as_str()).is_some())
+            .cloned();
+        ProviderView {
+            id: id.to_string(),
+            name: custom
+                .and_then(|provider| provider.name.clone())
+                .or(name)
+                .unwrap_or_else(|| providers::provider_display_name(id)),
+            active: live_count > 0,
+            model_count: if live_count > 0 {
+                live_count
+            } else if catalog_count > 0 {
+                catalog_count
+            } else {
+                custom_count
+            },
+            catalog_count,
+            custom: custom.is_some(),
+            has_api_key: custom.is_some_and(|provider| provider.has_api_key),
+            base_url: custom
+                .map(|provider| provider.base_url.clone())
+                .unwrap_or_default(),
+            api: custom
+                .map(|provider| provider.api.clone())
+                .unwrap_or_default(),
+            builtin,
+            oauth,
+            api_key,
+            env_names: env_names.to_vec(),
+            env_authed: env_hit.is_some(),
+            env_var: env_hit,
+            note,
+            auth: self.provider_auth.get(id).copied(),
+            live_status: self.auth.status(id).cloned(),
+            quota: self.quota.report(id).cloned(),
+        }
+    }
+
+    /// The live auth block shown on a card while a login is Connecting,
+    /// waiting on a device code, or showing a Success/Error/Cancelled result.
+    /// `None` means the provider has no session and the card renders its
+    /// normal Connect / Disconnect actions.
+    pub(super) fn provider_auth_section(
+        &self,
+        view: &ProviderView,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+    ) -> Option<AnyElement> {
+        let session = self.auth.login_for(&view.id)?;
+        let (headline, detail, tint) = match session.phase {
+            LoginPhase::Connecting => (
+                "Connecting…",
+                "Asking pi to start the sign-in flow.".to_string(),
+                theme.warn,
+            ),
+            LoginPhase::AwaitingBrowser => (
+                "Waiting for your browser…",
+                "Finish signing in there, then return to Orbit.".to_string(),
+                theme.accent,
+            ),
+            LoginPhase::AwaitingDeviceCode => (
+                "Enter this device code",
+                "Approve the request in your browser to continue.".to_string(),
+                theme.accent,
+            ),
+            LoginPhase::Succeeded => (
+                "Connected",
+                "pi saved the credential to auth.json.".to_string(),
+                theme.ok_green,
+            ),
+            LoginPhase::Error => (
+                "Sign-in failed",
+                session
+                    .error
+                    .as_ref()
+                    .map(|(_, message)| message.clone())
+                    .filter(|message| !message.is_empty())
+                    .unwrap_or_else(|| "The sign-in did not complete.".to_string()),
+                theme.crit,
+            ),
+            LoginPhase::Cancelled => (
+                "Cancelled",
+                session
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "The sign-in was cancelled.".to_string()),
+                theme.text_3,
+            ),
+        };
+
+        let mut body = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().size(px(7.)).rounded_full().bg(tint))
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(tint)
+                            .child(headline),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(theme.ui_px(11.5))
+                    .text_color(theme.text_2)
+                    .child(detail),
+            );
+
+        if let Some(device) = &session.device_code {
+            body = body.child(
+                div()
+                    .w_full()
+                    .px_3()
+                    .py_2p5()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.bg_main)
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(10.5))
+                            .text_color(theme.text_3)
+                            .child("Device code"),
+                    )
+                    .child(
+                        div()
+                            .font_family(theme::code_font_family())
+                            .text_size(theme.code_px(16.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child(device.user_code.clone()),
+                    )
+                    .child(
+                        div()
+                            .font_family(theme::code_font_family())
+                            .text_size(theme.code_px(10.5))
+                            .text_color(theme.text_3)
+                            .truncate()
+                            .child(device.verification_uri.clone()),
+                    ),
+            );
+        }
+        if session.device_code.is_none() {
+            if let Some(url) = &session.url {
+                body = body.child(
+                    div()
+                        .truncate()
+                        .font_family(theme::code_font_family())
+                        .text_size(theme.code_px(10.5))
+                        .text_color(theme.text_3)
+                        .child(url.clone()),
+                );
+            }
+        }
+
+        let id = view.id.clone();
+        let name = view.name.clone();
+        let method = session.method.clone();
+        let mut buttons = div().flex().flex_wrap().items_center().gap_2();
+        match session.phase {
+            LoginPhase::Connecting
+            | LoginPhase::AwaitingBrowser
+            | LoginPhase::AwaitingDeviceCode => {
+                if let Some(device) = &session.device_code {
+                    let open = device
+                        .verification_uri_complete
+                        .clone()
+                        .unwrap_or_else(|| device.verification_uri.clone());
+                    buttons = buttons
+                        .child(self.provider_button(
+                            format!("provider-auth-open-{}", view.id),
+                            "Open page",
+                            ProviderButtonStyle::Primary,
+                            theme,
+                            this.clone(),
+                            ProviderAction::AuthOpenUrl(open),
+                        ))
+                        .child(self.provider_button(
+                            format!("provider-auth-copy-{}", view.id),
+                            "Copy code",
+                            ProviderButtonStyle::Ghost,
+                            theme,
+                            this.clone(),
+                            ProviderAction::AuthCopy(device.user_code.clone()),
+                        ));
+                }
+                buttons = buttons.child(self.provider_button(
+                    format!("provider-auth-cancel-{}", view.id),
+                    "Cancel",
+                    ProviderButtonStyle::Ghost,
+                    theme,
+                    this.clone(),
+                    ProviderAction::AuthCancel,
+                ));
+            }
+            LoginPhase::Succeeded => {
+                buttons = buttons.child(self.provider_button(
+                    format!("provider-auth-done-{}", view.id),
+                    "Done",
+                    ProviderButtonStyle::Primary,
+                    theme,
+                    this.clone(),
+                    ProviderAction::AuthDismiss,
+                ));
+            }
+            LoginPhase::Error | LoginPhase::Cancelled => {
+                buttons = buttons
+                    .child(self.provider_button(
+                        format!("provider-auth-retry-{}", view.id),
+                        "Try again",
+                        ProviderButtonStyle::Primary,
+                        theme,
+                        this.clone(),
+                        ProviderAction::AuthStart {
+                            id: id.clone(),
+                            name: name.clone(),
+                            method: method.clone(),
+                        },
+                    ))
+                    .child(self.provider_button(
+                        format!("provider-auth-dismiss-{}", view.id),
+                        "Dismiss",
+                        ProviderButtonStyle::Ghost,
+                        theme,
+                        this.clone(),
+                        ProviderAction::AuthDismiss,
+                    ));
+            }
+        }
+        body = body.child(buttons);
+        Some(body.into_any_element())
+    }
+
+    /// Account quota/balance/spend for a connected provider, from the
+    /// `quota.*` RPC namespace. `None` when there is nothing to render, so a
+    /// provider with no usage surface adds no empty block to its card.
+    pub(super) fn provider_quota_section(
+        &self,
+        view: &ProviderView,
+        theme: Theme,
+    ) -> Option<AnyElement> {
+        let report = view.quota.as_ref()?;
+        if !report.has_data() && report.error.is_none() && report.note.is_none() {
+            return None;
+        }
+
+        let amount = |value: f64| -> String {
+            if value.fract() == 0.0 {
+                format!("{value:.0}")
+            } else {
+                format!("{value:.2}")
+            }
+        };
+        let reset_label = |ms: i64| format!("resets {}", format_epoch_ms(ms));
+
+        let mut head = div().flex().items_center().gap_2().child(
+            div()
+                .text_size(theme.ui_px(10.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.text_3)
+                .child("USAGE"),
+        );
+        if let Some(plan) = &report.plan {
+            head = head.child(self.provider_badge(
+                plan,
+                theme.accent,
+                theme.accent.opacity(0.12),
+                theme,
+            ));
+        }
+
+        let mut body = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .px_3()
+            .py_2p5()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_main)
+            .child(head);
+
+        for window in &report.windows {
+            let value = if let Some(percent) = window.used_percent {
+                format!("{percent:.0}% used")
+            } else if let (Some(used), Some(limit)) = (window.used, window.limit) {
+                format!("{} / {}", amount(used), amount(limit))
+            } else if let Some(used) = window.used {
+                match &window.unit {
+                    Some(unit) => format!("{} {unit}", amount(used)),
+                    None => amount(used),
+                }
+            } else {
+                continue;
+            };
+
+            let mut row = div().w_full().flex().flex_col().gap_1().child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text_2)
+                            .child(window.label.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text)
+                            .child(value),
+                    ),
+            );
+
+            if let Some(fraction) = window.fraction() {
+                let tint = if fraction >= 0.9 {
+                    theme.crit
+                } else if fraction >= 0.75 {
+                    theme.warn
+                } else {
+                    theme.ok_green
+                };
+                row = row.child(
+                    div()
+                        .w_full()
+                        .h(px(4.))
+                        .rounded_full()
+                        .overflow_hidden()
+                        .bg(theme.overlay_strong)
+                        .child(div().h_full().rounded_full().bg(tint).w(relative(fraction))),
+                );
+            }
+            if let Some(resets_at) = window.resets_at {
+                row = row.child(
+                    div()
+                        .text_size(theme.ui_px(10.))
+                        .text_color(theme.text_3)
+                        .child(reset_label(resets_at)),
+                );
+            }
+            body = body.child(row);
+        }
+
+        for balance in &report.balances {
+            let text = if balance.currency.is_empty() {
+                amount(balance.amount)
+            } else {
+                format!("{} {}", amount(balance.amount), balance.currency)
+            };
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text_2)
+                            .child(balance.label.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text)
+                            .child(text),
+                    ),
+            );
+        }
+
+        if let Some(error) = &report.error {
+            body = body.child(
+                div()
+                    .text_size(theme.ui_px(10.5))
+                    .text_color(theme.crit)
+                    .child(error.to_string()),
+            );
+        } else if !report.has_data() {
+            if let Some(note) = &report.note {
+                body = body.child(
+                    div()
+                        .text_size(theme.ui_px(10.5))
+                        .text_color(theme.text_3)
+                        .child(note.to_string()),
+                );
+            }
+        }
+
+        Some(body.into_any_element())
+    }
+
+    /// One large provider card: huge brand mark, status, auth facts, actions.
+    pub(super) fn provider_card(
+        &self,
+        view: &ProviderView,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+    ) -> AnyElement {
+        let confirming = self.provider_remove_confirm.as_deref() == Some(view.id.as_str());
+        let session = self.auth.login_for(&view.id);
+        let (status_label, status_color) = if let Some(session) = session {
+            match session.phase {
+                LoginPhase::Connecting => ("Connecting", theme.warn),
+                LoginPhase::AwaitingBrowser | LoginPhase::AwaitingDeviceCode => {
+                    ("Connecting", theme.accent)
+                }
+                LoginPhase::Succeeded => ("Connected", theme.ok_green),
+                LoginPhase::Error => ("Sign-in failed", theme.crit),
+                LoginPhase::Cancelled => ("Cancelled", theme.text_3),
+            }
+        } else if view.active {
+            ("Active", theme.ok_green)
+        } else if view.connected() {
+            ("Connected", theme.accent)
+        } else if view.custom {
+            ("Not loaded", theme.warn)
+        } else {
+            ("Not configured", theme.text_3)
+        };
+
+        let tile = div()
+            .size(px(52.))
+            .flex_none()
+            .rounded(px(14.))
+            .bg(theme.bg_raised)
+            .border_1()
+            .border_color(theme.border)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(icon_dyn(
+                provider_icon(&view.id),
+                30.,
+                if view.active || view.connected() {
+                    theme.text
+                } else {
+                    theme.text_2
+                },
+            ));
+
+        let status_pill = div()
+            .h(px(22.))
+            .px(px(8.))
+            .rounded_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .bg(status_color.opacity(0.12))
+            .child(div().size(px(6.)).rounded_full().bg(status_color))
+            .child(
+                div()
+                    .text_size(theme.ui_px(11.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(status_color)
+                    .child(status_label),
+            );
+
+        let header = div().flex().items_start().gap_3().child(tile).child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(theme.ui_px(14.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .truncate()
+                        .child(view.name.clone()),
+                )
+                .child(
+                    div()
+                        .font_family(theme::code_font_family())
+                        .text_size(theme.code_px(10.5))
+                        .text_color(theme.text_3)
+                        .truncate()
+                        .child(view.id.clone()),
+                ),
+        );
+
+        // Status and source badges share a row under the name so the name
+        // column keeps the card's full width (a right-aligned pill in the
+        // header squeezes it on narrow columns).
+        let mut badges = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_1p5()
+            .child(status_pill);
+        if view.oauth {
+            badges = badges.child(self.provider_badge(
+                "OAuth",
+                theme.accent,
+                theme.accent.opacity(0.12),
+                theme,
+            ));
+        }
+        if view.api_key {
+            badges = badges.child(self.provider_badge(
+                "API key",
+                theme.text_3,
+                theme.overlay_strong,
+                theme,
+            ));
+        }
+        badges = badges.child(self.provider_badge(
+            if view.custom {
+                "Custom"
+            } else if view.builtin {
+                "Built-in"
+            } else {
+                "Provider"
+            },
+            if view.custom {
+                theme.accent
+            } else {
+                theme.text_3
+            },
+            if view.custom {
+                theme.accent.opacity(0.12)
+            } else {
+                theme.overlay_strong
+            },
+            theme,
+        ));
+
+        // Active providers show what pi is serving; unconfigured built-ins show
+        // their full built-in catalog size (pi's RPC never reports those).
+        let count_label = if !view.active && view.catalog_count > 0 {
+            format!("{} in catalog", view.catalog_count)
+        } else {
+            format!(
+                "{} model{}",
+                view.model_count,
+                if view.model_count == 1 { "" } else { "s" }
+            )
+        };
+        let mut facts = div()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .text_size(theme.ui_px(11.5))
+            .text_color(theme.text_3)
+            .child(count_label);
+        if let Some(kind) = view.credential_kind() {
+            facts = facts
+                .child(div().size(px(3.)).rounded_full().bg(theme.text_3))
+                .child(match kind {
+                    "oauth" => "OAuth (auth.json)".to_string(),
+                    "api_key" => "API key (auth.json)".to_string(),
+                    "session" => "Usage session (auth.json)".to_string(),
+                    other => other.to_string(),
+                });
+            if let Some(status) = &view.live_status {
+                if let Some(account) = &status.account {
+                    facts = facts
+                        .child(div().size(px(3.)).rounded_full().bg(theme.text_3))
+                        .child(account.clone());
+                }
+                if let Some(expires_at) = status.expires_at {
+                    facts = facts
+                        .child(div().size(px(3.)).rounded_full().bg(theme.text_3))
+                        .child(format!("expires {}", format_epoch_ms(expires_at)));
+                }
+            }
+        } else if let Some(env_var) = &view.env_var {
+            facts = facts
+                .child(div().size(px(3.)).rounded_full().bg(theme.text_3))
+                .child(format!("via {env_var}"));
+        }
+        if view.has_api_key {
+            facts = facts
+                .child(div().size(px(3.)).rounded_full().bg(theme.text_3))
+                .child("models.json key");
+        }
+
+        let endpoint = if view.base_url.is_empty() {
+            if view.note.is_empty() {
+                "pi default endpoint".to_string()
+            } else {
+                view.note.to_string()
+            }
+        } else if view.api.is_empty() {
+            view.base_url.clone()
+        } else {
+            format!("{} · {}", view.base_url, view.api)
+        };
+        let base_url = div()
+            .truncate()
+            .font_family(theme::code_font_family())
+            .text_size(theme.code_px(10.5))
+            .text_color(theme.text_3)
+            .child(endpoint);
+
+        let actions: AnyElement = if confirming {
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(theme.ui_px(11.5))
+                        .text_color(theme.crit)
+                        .child("Remove this provider?"),
+                )
+                .child(self.provider_button(
+                    format!("provider-remove-confirm-{}", view.id),
+                    "Remove",
+                    ProviderButtonStyle::Danger,
+                    theme,
+                    this.clone(),
+                    ProviderAction::ConfirmRemove {
+                        id: view.id.clone(),
+                    },
+                ))
+                .child(self.provider_button(
+                    format!("provider-remove-cancel-{}", view.id),
+                    "Cancel",
+                    ProviderButtonStyle::Ghost,
+                    theme,
+                    this.clone(),
+                    ProviderAction::CancelRemove,
+                ))
+                .into_any_element()
+        } else if let Some(section) = self.provider_auth_section(view, theme, this.clone()) {
+            section
+        } else {
+            // Methods come from pi's `auth.list` capability discovery — the
+            // UI never hardcodes provider ids or assumes a login flow.
+            let capability = if self.auth.support() == AuthSupport::Supported {
+                self.auth.provider(&view.id)
+            } else {
+                None
+            };
+            let mut primary = div().flex().flex_wrap().items_center().gap_2();
+            if let Some(capability) = capability {
+                for method in &capability.methods {
+                    if method.id == "api_key" {
+                        let update = view.credential_kind() == Some("api_key");
+                        primary = primary.child(self.provider_button(
+                            format!("provider-key-{}", view.id),
+                            if update { "Update key" } else { "Add API key" },
+                            ProviderButtonStyle::Ghost,
+                            theme,
+                            this.clone(),
+                            ProviderAction::EditKey {
+                                id: view.id.clone(),
+                                name: view.name.clone(),
+                                oauth: view.oauth,
+                                note: view.note,
+                            },
+                        ));
+                    } else {
+                        let label = method_label(&method.id, &method.label, view.connected());
+                        primary = primary.child(self.provider_button(
+                            format!("provider-auth-{}-{}", method.id, view.id),
+                            &label,
+                            ProviderButtonStyle::Primary,
+                            theme,
+                            this.clone(),
+                            ProviderAction::AuthStart {
+                                id: view.id.clone(),
+                                name: view.name.clone(),
+                                method: method.id.clone(),
+                            },
+                        ));
+                    }
+                }
+                if capability.methods.is_empty() {
+                    primary = primary.child(
+                        div()
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text_3)
+                            .child("No sign-in methods available"),
+                    );
+                }
+            } else {
+                // File-based fallback for a pi without the auth RPC.
+                if view.oauth {
+                    let reconnect = view.credential_kind() == Some("oauth");
+                    primary = primary.child(self.provider_button(
+                        format!("provider-signin-{}", view.id),
+                        if reconnect { "Reconnect" } else { "Sign in" },
+                        ProviderButtonStyle::Primary,
+                        theme,
+                        this.clone(),
+                        ProviderAction::SignIn {
+                            id: view.id.clone(),
+                            name: view.name.clone(),
+                        },
+                    ));
+                }
+                if view.api_key {
+                    let update = view.credential_kind() == Some("api_key");
+                    primary = primary.child(self.provider_button(
+                        format!("provider-key-{}", view.id),
+                        if update { "Update key" } else { "Add API key" },
+                        if view.oauth && !view.connected() {
+                            ProviderButtonStyle::Ghost
+                        } else {
+                            ProviderButtonStyle::Primary
+                        },
+                        theme,
+                        this.clone(),
+                        ProviderAction::EditKey {
+                            id: view.id.clone(),
+                            name: view.name.clone(),
+                            oauth: view.oauth,
+                            note: view.note,
+                        },
+                    ));
+                }
+            }
+            // Ollama Cloud usage is separate from the local endpoint's API key:
+            // current accounts use a real cloud key (monthly credits); legacy
+            // accounts expose session/weekly usage only behind a signed-in
+            // settings page, which needs the user's own session cookie. Offer
+            // the session editor explicitly so neither is auto-scraped.
+            if view.id == "ollama" {
+                primary = primary.child(self.provider_button(
+                    "provider-ollama-session".to_string(),
+                    "Usage session",
+                    ProviderButtonStyle::Ghost,
+                    theme,
+                    this.clone(),
+                    ProviderAction::EditOllamaSession {
+                        name: view.name.clone(),
+                    },
+                ));
+            }
+            let connected = view.auth.is_some()
+                || view
+                    .live_status
+                    .as_ref()
+                    .is_some_and(|status| status.authenticated);
+            // Secondary actions: Configure/Remove only exist when there is a
+            // models.json entry to edit; Sign out only when a credential is
+            // stored. Built-ins with neither show just the auth button.
+            let mut secondary = div().flex().flex_wrap().items_center().gap_1p5();
+            if view.custom {
+                secondary = secondary.child(self.provider_button(
+                    format!("provider-configure-{}", view.id),
+                    "Configure",
+                    ProviderButtonStyle::Ghost,
+                    theme,
+                    this.clone(),
+                    ProviderAction::Configure {
+                        id: view.id.clone(),
+                    },
+                ));
+            }
+            if connected {
+                secondary = secondary.child(self.provider_button(
+                    format!("provider-signout-{}", view.id),
+                    "Disconnect",
+                    ProviderButtonStyle::Ghost,
+                    theme,
+                    this.clone(),
+                    ProviderAction::SignOut {
+                        id: view.id.clone(),
+                    },
+                ));
+            }
+            if view.custom {
+                secondary = secondary.child(self.provider_button(
+                    format!("provider-remove-{}", view.id),
+                    "Remove",
+                    ProviderButtonStyle::Danger,
+                    theme,
+                    this.clone(),
+                    ProviderAction::Remove {
+                        id: view.id.clone(),
+                    },
+                ));
+            }
+            let mut actions = div().w_full().flex().flex_col().gap_2().child(primary);
+            if view.custom || connected {
+                actions = actions.child(secondary);
+            }
+            actions.into_any_element()
+        };
+
+        div()
+            .w_full()
+            .min_w_0()
+            .bg(theme.bg_composer)
+            .border_1()
+            .border_color(theme.border)
+            .rounded_lg()
+            .p(px(14.))
+            .flex()
+            .flex_col()
+            .gap_2p5()
+            .child(header)
+            .child(badges)
+            .child(facts)
+            .when_some(self.provider_quota_section(view, theme), |card, section| {
+                card.child(section)
+            })
+            .child(base_url)
+            .child(div().h(px(1.)).w_full().bg(theme.border))
+            .child(actions)
+            .into_any_element()
+    }
+
+    /// A small status/source pill on a provider card.
+    pub(super) fn provider_badge(
+        &self,
+        label: &str,
+        fg: Hsla,
+        bg: Hsla,
+        theme: Theme,
+    ) -> AnyElement {
+        div()
+            .h(px(20.))
+            .px(px(7.))
+            .rounded(px(6.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .bg(bg)
+            .child(
+                div()
+                    .text_size(theme.ui_px(10.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(fg)
+                    .child(label.to_string()),
+            )
+            .into_any_element()
+    }
+
+    /// A provider-card action button. One closure per card would be a lot of
+    /// near-identical code, so every button routes through
+    /// [`Self::apply_provider_action`]. The glyph is derived from the action.
+    pub(super) fn provider_button(
+        &self,
+        id: String,
+        label: &str,
+        style: ProviderButtonStyle,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        action: ProviderAction,
+    ) -> AnyElement {
+        let icon_path = Self::provider_action_icon(&action);
+        let mut button = div()
+            .id(ElementId::Name(id.into()))
+            .h(px(28.))
+            .px(px(10.))
+            .rounded_md()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap_1p5()
+            .cursor_pointer()
+            .text_size(theme.ui_px(11.5))
+            .font_weight(FontWeight::MEDIUM);
+        button = match style {
+            ProviderButtonStyle::Primary => button
+                .bg(theme.send_bg)
+                .text_color(theme.send_fg)
+                .hover(|style| style.bg(theme.send_bg_hover)),
+            ProviderButtonStyle::Ghost => button
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.bg_raised)
+                .text_color(theme.text_2)
+                .hover(|style| style.bg(theme.bg_hover)),
+            ProviderButtonStyle::Danger => button
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.bg_raised)
+                .text_color(theme.crit)
+                .hover(|style| {
+                    style
+                        .border_color(theme.crit.opacity(0.6))
+                        .bg(theme.crit.opacity(0.08))
+                }),
+        };
+        let icon_color = match style {
+            ProviderButtonStyle::Primary => theme.send_fg,
+            ProviderButtonStyle::Danger => theme.crit,
+            ProviderButtonStyle::Ghost => theme.text_2,
+        };
+        button
+            .when_some(icon_path, |button, path| {
+                button.child(icon(path, 12., icon_color))
+            })
+            .child(div().child(label.to_string()))
+            .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                let action = action.clone();
+                this.update(cx, |app, cx| app.apply_provider_action(action, window, cx));
+            })
+            .into_any_element()
+    }
+
+    /// The glyph for a provider action (none for plain text buttons).
+    pub(super) fn provider_action_icon(action: &ProviderAction) -> Option<&'static str> {
+        match action {
+            ProviderAction::SignIn { .. } | ProviderAction::AuthStart { .. } => {
+                Some("icons/lock.svg")
+            }
+            ProviderAction::AuthOpenUrl(_) => Some("icons/arrow-up-right.svg"),
+            ProviderAction::AuthCopy(_) => Some("icons/copy.svg"),
+            ProviderAction::AuthCancel => Some("icons/x.svg"),
+            ProviderAction::AuthDismiss => Some("icons/check.svg"),
+            ProviderAction::EditKey { .. } => Some("icons/at-sign.svg"),
+            ProviderAction::EditOllamaSession { .. } => Some("icons/clock.svg"),
+            ProviderAction::SignOut { .. } => Some("icons/stop.svg"),
+            ProviderAction::Configure { .. } => Some("icons/settings.svg"),
+            ProviderAction::Remove { .. } | ProviderAction::ConfirmRemove { .. } => {
+                Some("icons/trash.svg")
+            }
+            ProviderAction::Restart => Some("icons/refresh.svg"),
+            ProviderAction::CancelRemove | ProviderAction::SaveKey => None,
+        }
+    }
+
+    /// Single dispatch point for every provider-card button.
+    pub(super) fn apply_provider_action(
+        &mut self,
+        action: ProviderAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            ProviderAction::SignIn { id, name } => {
+                // Signing in from the key modal replaces it.
+                self.provider_key_editor = None;
+                self.provider_oauth_login(id, name, cx);
+            }
+            ProviderAction::AuthStart { id, name, method } => {
+                self.provider_key_editor = None;
+                self.auth_start_login(id, name, method, cx);
+            }
+            ProviderAction::AuthCancel => self.auth_cancel_login(cx),
+            ProviderAction::AuthDismiss => {
+                self.auth.dismiss_result();
+                cx.notify();
+            }
+            ProviderAction::AuthOpenUrl(url) => {
+                if let Err(err) = platform::open_url(&url) {
+                    self.set_status(format!("Could not open the browser: {err}"));
+                }
+            }
+            ProviderAction::AuthCopy(value) => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(value));
+                self.set_status("Copied to clipboard");
+            }
+            ProviderAction::EditKey {
+                id,
+                name,
+                oauth,
+                note,
+            } => self.provider_key_open(id, name, oauth, note, window, cx),
+            ProviderAction::EditOllamaSession { name } => self.provider_credential_open(
+                "ollama".to_string(),
+                name,
+                false,
+                "",
+                ProviderKeyKind::OllamaCloudSession,
+                window,
+                cx,
+            ),
+            ProviderAction::SignOut { id } => self.provider_sign_out(id, cx),
+            ProviderAction::Configure { id } => self.provider_editor_open(Some(id), window, cx),
+            ProviderAction::Remove { id } => {
+                self.provider_remove_confirm = Some(id);
+                cx.notify();
+            }
+            ProviderAction::ConfirmRemove { id } => self.provider_remove(id, cx),
+            ProviderAction::CancelRemove => {
+                self.provider_remove_confirm = None;
+                cx.notify();
+            }
+            ProviderAction::SaveKey => self.provider_key_save(window, cx),
+            ProviderAction::Restart => self.provider_apply_credentials(cx),
+        }
+    }
+
+    /// The API-key modal, or `None` when closed.
+    pub(super) fn provider_key_layer(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let editor = self.provider_key_editor.as_ref()?;
+
+        let (field_label, hint) = match editor.kind {
+            ProviderKeyKind::ApiKey => (
+                "API key",
+                "A literal key, `$ENV_VAR`, or `!command` — stored in auth.json (0600).",
+            ),
+            ProviderKeyKind::OllamaCloudSession => (
+                "Session cookie",
+                "Paste the Cookie header from ollama.com/settings (e.g. `__Secure-session=…`). Stored in auth.json (0600); only sent to ollama.com.",
+            ),
+        };
+
+        let mut body = div().w_full().flex().flex_col().gap_3().child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1p5()
+                .child(
+                    div()
+                        .text_size(theme.ui_px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_2)
+                        .child(field_label),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .px_2p5()
+                        .py_1p5()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.bg_main)
+                        .text_size(theme.ui_px(13.))
+                        .child(editor.key.clone()),
+                )
+                .child(
+                    div()
+                        .text_size(theme.ui_px(11.))
+                        .text_color(theme.text_3)
+                        .child(hint),
+                ),
+        );
+        if !editor.note.is_empty() {
+            body = body.child(
+                div()
+                    .text_size(theme.ui_px(11.))
+                    .text_color(theme.text_3)
+                    .child(editor.note.to_string()),
+            );
+        }
+        if editor.oauth && editor.kind == ProviderKeyKind::ApiKey {
+            let id = editor.provider_id.clone();
+            let name = editor.provider_name.clone();
+            let this_signin = this.clone();
+            body = body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(theme.ui_px(11.))
+                            .text_color(theme.text_3)
+                            .child("Prefer a subscription? Sign in with OAuth instead."),
+                    )
+                    .child(self.provider_button(
+                        format!("provider-key-signin-{id}"),
+                        "Sign in",
+                        ProviderButtonStyle::Ghost,
+                        theme,
+                        this_signin,
+                        ProviderAction::SignIn { id, name },
+                    )),
+            );
+        }
+        if let Some(error) = &editor.error {
+            body = body.child(
+                div()
+                    .px(px(10.))
+                    .py(px(8.))
+                    .rounded_md()
+                    .bg(theme.crit.opacity(0.1))
+                    .text_size(theme.ui_px(11.5))
+                    .text_color(theme.crit)
+                    .child(error.clone()),
+            );
+        }
+
+        let cancel = div()
+            .id("provider-key-close")
+            .h(px(32.))
+            .px(px(14.))
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_raised)
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.bg_hover))
+            .on_mouse_up(MouseButton::Left, {
+                let this = this.clone();
+                move |_, _, cx| {
+                    this.update(cx, |app, cx| {
+                        app.provider_key_editor = None;
+                        cx.notify();
+                    });
+                }
+            })
+            .child(
+                div()
+                    .text_size(theme.ui_px(12.))
+                    .text_color(theme.text_2)
+                    .child("Cancel"),
+            );
+        let save = self.provider_button(
+            "provider-key-save".into(),
+            "Save key",
+            ProviderButtonStyle::Primary,
+            theme,
+            this.clone(),
+            ProviderAction::SaveKey,
+        );
+
+        let card = div()
+            .w_full()
+            .max_w(px(460.))
+            .max_h(relative(1.))
+            .rounded(px(14.))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.menu_bg)
+            .shadow(theme.popover_shadow())
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .occlude()
+            .font_family(theme::ui_font_family())
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_action(cx.listener(Self::provider_editor_cancel))
+            .on_action(cx.listener(Self::provider_editor_confirm))
+            .child(
+                div()
+                    .px(px(18.))
+                    .py(px(14.))
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(15.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(format!("API key — {}", editor.provider_name)),
+                    )
+                    .child(
+                        div()
+                            .font_family(theme::code_font_family())
+                            .text_size(theme.code_px(11.))
+                            .text_color(theme.text_3)
+                            .child(editor.provider_id.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .id("provider-key-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(px(18.))
+                    .py(px(16.))
+                    .child(body),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(18.))
+                    .py(px(12.))
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap_2()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(cancel)
+                    .child(save),
+            );
+
+        let scrim = match theme.mode {
+            ThemeMode::Dark => Hsla {
+                h: 0.,
+                s: 0.,
+                l: 0.,
+                a: 0.42,
+            },
+            ThemeMode::Light => Hsla {
+                h: 0.,
+                s: 0.,
+                l: 0.,
+                a: 0.22,
+            },
+        };
+        Some(
+            div()
+                .id("provider-key-layer")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .bg(scrim)
+                .p(px(24.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_mouse_down(MouseButton::Left, cx.listener(Self::provider_editor_scrim))
+                .child(card)
+                .into_any_element(),
+        )
+    }
+
+    /// The provider editor modal (add / configure), or `None` when closed.
+    pub(super) fn provider_editor_layer(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let editor = self.provider_editor.as_ref()?;
+        let editing = editor.original_id.is_some();
+        let is_custom_entry = editor.original_id.as_ref().is_some_and(|id| {
+            self.custom_providers
+                .iter()
+                .any(|provider| &provider.id == id)
+        });
+        let subtitle = if editing && editor.in_catalog && !is_custom_entry {
+            "Built-in provider — entries here override pi's defaults. Sign in with `pi /login`."
+        } else {
+            "Saved to ~/.pi/agent/models.json — shared with the pi CLI."
+        };
+
+        let field = |label: &str, hint: Option<&str>, input: Entity<ComposerInput>| -> AnyElement {
+            let mut column = div()
+                .flex()
+                .flex_col()
+                .gap_1p5()
+                .child(
+                    div()
+                        .text_size(theme.ui_px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_2)
+                        .child(label.to_string()),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .px_2p5()
+                        .py_1p5()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.bg_main)
+                        .text_size(theme.ui_px(13.))
+                        .child(input),
+                );
+            if let Some(hint) = hint {
+                column = column.child(
+                    div()
+                        .text_size(theme.ui_px(11.))
+                        .text_color(theme.text_3)
+                        .child(hint.to_string()),
+                );
+            }
+            column.into_any_element()
+        };
+
+        // API family chips.
+        let mut api_chips = div().flex().flex_wrap().gap_1p5();
+        for api in PROVIDER_APIS {
+            let selected = editor.api == api;
+            let this = this.clone();
+            api_chips = api_chips.child(
+                div()
+                    .id(ElementId::Name(format!("provider-api-{api}").into()))
+                    .px(px(8.))
+                    .py(px(3.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(if selected {
+                        theme.accent.opacity(0.5)
+                    } else {
+                        theme.border
+                    })
+                    .bg(if selected {
+                        theme.accent.opacity(0.12)
+                    } else {
+                        theme.bg_raised
+                    })
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.bg_hover))
+                    .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                        this.update(cx, |app, cx| {
+                            if let Some(editor) = app.provider_editor.as_mut() {
+                                editor.api = api.to_string();
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .child(
+                        div()
+                            .font_family(theme::code_font_family())
+                            .text_size(theme.code_px(10.5))
+                            .text_color(if selected { theme.accent } else { theme.text_3 })
+                            .child(api),
+                    ),
+            );
+        }
+
+        // Identity: editable only when adding.
+        let identity: AnyElement = if editing {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1p5()
+                .child(
+                    div()
+                        .text_size(theme.ui_px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_2)
+                        .child("Provider id"),
+                )
+                .child(
+                    div()
+                        .font_family(theme::code_font_family())
+                        .text_size(theme.code_px(12.))
+                        .text_color(theme.text)
+                        .child(editor.original_id.clone().unwrap_or_default()),
+                )
+                .into_any_element()
+        } else {
+            field(
+                "Provider id",
+                Some("The key pi addresses the provider by — models become <id>/<model>."),
+                editor.id.clone(),
+            )
+        };
+
+        let api_key_hint = if editor.had_api_key {
+            "A key is stored in models.json — leave blank to keep it."
+        } else {
+            "Optional. `$ENV_VAR`, `!command`, or a literal key."
+        };
+
+        let body = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_3p5()
+            .child(identity)
+            .child(field(
+                "Display name",
+                Some("Optional."),
+                editor.name.clone(),
+            ))
+            .child(field(
+                "Base URL",
+                Some("Required for custom endpoints. Empty keeps pi's default."),
+                editor.base_url.clone(),
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1p5()
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text_2)
+                            .child("API type"),
+                    )
+                    .child(api_chips),
+            )
+            .child(field("API key", Some(api_key_hint), editor.api_key.clone()))
+            .child(field(
+                "Models",
+                Some(if editor.in_catalog {
+                    "Comma-separated ids. Empty keeps pi's built-in models for this provider."
+                } else {
+                    "Comma-separated ids. At least one is required for a custom provider."
+                }),
+                editor.models.clone(),
+            ));
+
+        let mut card = div()
+            .w_full()
+            .max_w(px(520.))
+            .max_h(px(560.))
+            .rounded(px(14.))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.menu_bg)
+            .shadow(theme.popover_shadow())
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .occlude()
+            .font_family(theme::ui_font_family())
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_action(cx.listener(Self::provider_editor_cancel))
+            .on_action(cx.listener(Self::provider_editor_confirm))
+            .child(
+                div()
+                    .px(px(18.))
+                    .py(px(14.))
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(15.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(if editing {
+                                "Configure provider"
+                            } else {
+                                "Add provider"
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(11.5))
+                            .text_color(theme.text_3)
+                            .child(subtitle),
+                    ),
+            )
+            .child(
+                div()
+                    .id("provider-editor-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(px(18.))
+                    .py(px(16.))
+                    .child(body),
+            );
+
+        if let Some(error) = &editor.error {
+            card = card.child(
+                div()
+                    .mx(px(18.))
+                    .mb(px(4.))
+                    .px(px(10.))
+                    .py(px(8.))
+                    .rounded_md()
+                    .bg(theme.crit.opacity(0.1))
+                    .text_size(theme.ui_px(11.5))
+                    .text_color(theme.crit)
+                    .child(error.clone()),
+            );
+        }
+
+        let cancel = {
+            let this = this.clone();
+            div()
+                .id("provider-editor-cancel")
+                .h(px(32.))
+                .px(px(14.))
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.bg_raised)
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg_hover))
+                .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                    this.update(cx, |app, cx| {
+                        app.provider_editor = None;
+                        cx.notify();
+                    });
+                })
+                .child(
+                    div()
+                        .text_size(theme.ui_px(12.))
+                        .text_color(theme.text_2)
+                        .child("Cancel"),
+                )
+        };
+        let save = {
+            let this = this.clone();
+            div()
+                .id("provider-editor-save")
+                .h(px(32.))
+                .px(px(16.))
+                .rounded_md()
+                .bg(theme.send_bg)
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.send_bg_hover))
+                .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                    this.update(cx, |app, cx| app.provider_save(window, cx));
+                })
+                .child(
+                    div()
+                        .text_size(theme.ui_px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.send_fg)
+                        .child(if editing {
+                            "Save changes"
+                        } else {
+                            "Add provider"
+                        }),
+                )
+        };
+        card = card.child(
+            div()
+                .flex_none()
+                .px(px(18.))
+                .py(px(12.))
+                .flex()
+                .items_center()
+                .justify_end()
+                .gap_2()
+                .border_t_1()
+                .border_color(theme.border)
+                .child(cancel)
+                .child(save),
+        );
+
+        let scrim = match theme.mode {
+            ThemeMode::Dark => Hsla {
+                h: 0.,
+                s: 0.,
+                l: 0.,
+                a: 0.42,
+            },
+            ThemeMode::Light => Hsla {
+                h: 0.,
+                s: 0.,
+                l: 0.,
+                a: 0.22,
+            },
+        };
+        Some(
+            div()
+                .id("provider-editor-layer")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .bg(scrim)
+                .px(px(24.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_mouse_down(MouseButton::Left, cx.listener(Self::provider_editor_scrim))
+                .child(card)
+                .into_any_element(),
+        )
+    }
+
+    /// A setting card: title + description on the left, optional control on
+    /// the right.
+    pub(super) fn card(
+        &self,
+        theme: Theme,
+        title: &str,
+        desc: &str,
+        control: Option<AnyElement>,
+    ) -> AnyElement {
+        self.card_with_path(theme, title, desc, None, control)
+    }
+
+    /// Same as [`card`] with an optional dimmed third line (paths).
+    pub(super) fn card_with_path(
+        &self,
+        theme: Theme,
+        title: &str,
+        desc: &str,
+        path: Option<&str>,
+        control: Option<AnyElement>,
+    ) -> AnyElement {
+        div()
+            .bg(theme.bg_composer)
+            .border_1()
+            .border_color(theme.border)
+            .rounded_lg()
+            .px(theme.space(14.))
+            .py(theme.space(12.))
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(title.to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.text_2)
+                            .child(desc.to_string()),
+                    )
+                    .children(path.map(|p| {
+                        div()
+                            .text_size(theme.ui_px(11.5))
+                            .text_color(theme.text_3)
+                            .truncate()
+                            .child(p.to_string())
+                    })),
+            )
+            .children(control)
+            .into_any_element()
+    }
+
+    /// A settings section: an 11px uppercase label over one grouped board.
+    /// The label sits closer to its board than to the section above it.
+    pub(super) fn settings_section(
+        &self,
+        theme: Theme,
+        label: &str,
+        rows: Vec<AnyElement>,
+    ) -> AnyElement {
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(theme.space(8.))
+            .child(
+                div()
+                    .px(theme.space(4.))
+                    .text_size(theme.ui_px(10.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_3)
+                    .child(label.to_uppercase()),
+            )
+            .child(self.settings_group(theme, rows))
+            .into_any_element()
+    }
+
+    /// One bordered board whose rows are divided by inset 1px hairlines —
+    /// the grouped-surface pattern from DESIGN.md, never a stack of cards.
+    /// No `overflow_hidden`: select popups anchor inside these rows and
+    /// must escape the board's rounded box.
+    pub(super) fn settings_group(&self, theme: Theme, rows: Vec<AnyElement>) -> AnyElement {
+        let last = rows.len().saturating_sub(1);
+        let mut board = div()
+            .w_full()
+            .bg(theme.bg_composer)
+            .border_1()
+            .border_color(theme.border)
+            .rounded_lg()
+            .flex()
+            .flex_col();
+        for (i, row) in rows.into_iter().enumerate() {
+            board = board.child(row);
+            if i != last {
+                board = board.child(
+                    div()
+                        .h(px(1.))
+                        .flex_none()
+                        .mx(theme.space(16.))
+                        .bg(theme.border),
+                );
+            }
+        }
+        board.into_any_element()
+    }
+
+    /// A row inside a settings board: title (and optional description or
+    /// dimmed path) on the left, an optional control on the right. Every
+    /// control shares one right-aligned axis down the board.
+    pub(super) fn setting_row(
+        &self,
+        theme: Theme,
+        title: &str,
+        desc: Option<&str>,
+        meta: Option<&str>,
+        control: Option<AnyElement>,
+    ) -> AnyElement {
+        div()
+            .w_full()
+            .px(theme.space(16.))
+            .py(theme.space(12.))
+            .flex()
+            .items_center()
+            .gap(theme.space(16.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(theme.space(3.))
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(title.to_string()),
+                    )
+                    .children(desc.map(|d| {
+                        div()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.text_2)
+                            .child(d.to_string())
+                    }))
+                    .children(meta.map(|m| {
+                        div()
+                            .text_size(theme.ui_px(11.5))
+                            .text_color(theme.text_3)
+                            .truncate()
+                            .child(m.to_string())
+                    })),
+            )
+            .children(control.map(|c| div().flex_none().child(c)))
+            .into_any_element()
+    }
+
+    /// Connection state: green dot + "Connected" / red dot + "Not running".
+    pub(super) fn connection_status(&self, theme: Theme) -> AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .child(
+                div()
+                    .size(px(7.))
+                    .rounded_full()
+                    .bg(if self.client.is_some() {
+                        theme.ok_green
+                    } else {
+                        theme.stop_red
+                    }),
+            )
+            .child(
+                div()
+                    .text_size(theme.ui_px(12.))
+                    .text_color(theme.text_2)
+                    .child(if self.client.is_some() {
+                        "Connected"
+                    } else {
+                        "Not running"
+                    }),
+            )
+            .into_any_element()
+    }
+
+    // ── Settings → General: notifications ──────────────────────────────
+
+    /// The notification board: two real channels plus the honest system
+    /// state when macOS is blocking banners or the build is unbundled. A
+    /// switch the OS ignores must not look like it is working.
+    pub(super) fn notification_rows(&self, theme: Theme, this: Entity<OrbitApp>) -> AnyElement {
+        let mut rows = vec![
+            self.setting_row(
+                theme,
+                "Desktop notifications",
+                Some(
+                    "Show a system banner when a run finishes while Orbit is in the background, or when pi is waiting for your answer.",
+                ),
+                None,
+                Some(self.settings_toggle(
+                    "notification-desktop-toggle",
+                    self.notification_prefs.desktop,
+                    theme,
+                    this.clone(),
+                    Self::toggle_desktop_notifications,
+                )),
+            ),
+            self.setting_row(
+                theme,
+                "Notification sound",
+                Some("Play the system alert sound when a background run finishes or pi is waiting for your answer."),
+                None,
+                Some(self.settings_toggle(
+                    "notification-sound-toggle",
+                    self.notification_prefs.sound,
+                    theme,
+                    this.clone(),
+                    Self::toggle_notification_sound,
+                )),
+            ),
+        ];
+        if self.notification_prefs.desktop {
+            match self.notification_auth {
+                notifications::DesktopAuth::Denied => rows.push(self.setting_row(
+                    theme,
+                    "Blocked in System Settings",
+                    Some("macOS is not allowing Orbit Pi to post notifications."),
+                    None,
+                    Some(self.runtime_button(
+                        "notification-open-settings",
+                        "Open System Settings",
+                        false,
+                        theme,
+                        this,
+                        |_, _| {
+                            let _ = platform::open_notification_settings();
+                        },
+                    )),
+                )),
+                notifications::DesktopAuth::Unbundled => rows.push(self.setting_row(
+                    theme,
+                    "Developer build",
+                    Some(
+                        "Orbit is running from a bare binary, so banners are posted as Script Editor and clicks cannot open their session. The packaged app posts them as Orbit Pi.",
+                    ),
+                    None,
+                    None,
+                )),
+                notifications::DesktopAuth::Granted | notifications::DesktopAuth::Unknown => {}
+            }
+        }
+        self.settings_section(theme, "Notifications", rows)
+    }
+
+    /// Flip the desktop channel, ask for permission on the way on, and
+    /// re-read the OS state so the board never shows a stale state.
+    pub(super) fn toggle_desktop_notifications(&mut self, cx: &mut Context<Self>) {
+        self.notification_prefs.desktop = !self.notification_prefs.desktop;
+        notifications::Prefs::persist(self.notification_prefs);
+        if self.notification_prefs.desktop {
+            notifications::request_permission();
+            self.refresh_notification_auth(cx);
+        } else {
+            self.notification_auth = notifications::DesktopAuth::Unknown;
+        }
+        cx.notify();
+    }
+
+    /// Flip the sound channel; turning it on previews the sound so the
+    /// switch is heard before it matters.
+    pub(super) fn toggle_notification_sound(&mut self, cx: &mut Context<Self>) {
+        self.notification_prefs.sound = !self.notification_prefs.sound;
+        notifications::Prefs::persist(self.notification_prefs);
+        if self.notification_prefs.sound {
+            notifications::play_sound();
+        }
+        cx.notify();
+    }
+
+    /// Read macOS's banner permission without blocking the UI. Called when
+    /// General opens and after the desktop switch flips on.
+    pub(super) fn refresh_notification_auth(&mut self, cx: &mut Context<Self>) {
+        if self.notification_auth_pending || !self.notification_prefs.desktop {
+            return;
+        }
+        self.notification_auth_pending = true;
+        cx.spawn(async move |this, cx| {
+            // The framework answers on a background queue; the blocking read
+            // runs off the UI thread.
+            let auth = cx
+                .background_executor()
+                .spawn(async { notifications::permission() })
+                .await;
+            this.update(cx, |app, cx| {
+                app.notification_auth = auth;
+                app.notification_auth_pending = false;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    // ── Settings → Runtime ─────────────────────────────────────────────
+
+    /// The Runtime section: the live pi process, its details, and
+    /// start/stop/restart controls. Orbit has no socket server — the
+    /// transport is stdio, so there is no host or port to report.
+    pub(super) fn runtime_rows(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        _cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let state = self.runtime_state();
+        let (state_label, state_color) = match state {
+            RuntimeState::Running => ("Running", theme.ok_green),
+            RuntimeState::Exited => ("Exited", theme.crit),
+            RuntimeState::Stopped => ("Stopped", theme.text_3),
+            RuntimeState::Failed => ("Failed to start", theme.crit),
+        };
+        let running = state == RuntimeState::Running;
+        let has_client = self.client.is_some();
+
+        let description = match state {
+            RuntimeState::Running => {
+                "Spawned as a child process — newline-delimited JSON over stdio."
+            }
+            RuntimeState::Exited => "The process exited on its own. Restart to reconnect.",
+            RuntimeState::Stopped => "No pi process is running — start it to use the agent.",
+            RuntimeState::Failed => "The last start failed. See the error below.",
+        };
+
+        let mut controls = div().flex().items_center().gap_2();
+        if has_client {
+            controls = controls
+                .child(self.runtime_button(
+                    "runtime-restart",
+                    "Restart",
+                    false,
+                    theme,
+                    this.clone(),
+                    OrbitApp::runtime_restart,
+                ))
+                .child(self.runtime_button(
+                    "runtime-stop",
+                    "Stop",
+                    false,
+                    theme,
+                    this.clone(),
+                    OrbitApp::runtime_stop,
+                ));
+        } else {
+            controls = controls.child(self.runtime_button(
+                "runtime-start",
+                "Start",
+                true,
+                theme,
+                this.clone(),
+                OrbitApp::runtime_start,
+            ));
+        }
+
+        let mut rows = vec![self.card(
+            theme,
+            "Active process",
+            description,
+            Some(controls.into_any_element()),
+        )];
+
+        let pid = self
+            .client
+            .as_ref()
+            .map(|client| client.child_pid().to_string())
+            .unwrap_or_else(|| "—".to_string());
+        let uptime = if running {
+            self.runtime
+                .started_at
+                .map(|started| format_uptime(started.elapsed()))
+                .unwrap_or_else(|| "—".to_string())
+        } else {
+            "—".to_string()
+        };
+        let workspace = self
+            .current_workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+
+        let status = div()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .child(div().size(px(7.)).rounded_full().bg(state_color))
+            .child(
+                div()
+                    .text_size(theme.ui_px(12.5))
+                    .text_color(theme.text)
+                    .child(state_label),
+            )
+            .into_any_element();
+
+        let mut details = div()
+            .bg(theme.bg_composer)
+            .border_1()
+            .border_color(theme.border)
+            .rounded_lg()
+            .px(px(14.))
+            .py(px(12.))
+            .flex()
+            .flex_col()
+            .gap(px(9.))
+            .child(self.runtime_detail(theme, "Status", status))
+            .child(self.runtime_detail(theme, "Process ID", runtime_text(theme, pid)))
+            .child(self.runtime_detail(
+                theme,
+                "Binary",
+                runtime_path(theme, orbit_rpc::pi_binary()),
+            ))
+            .child(self.runtime_detail(theme, "Uptime", runtime_text(theme, uptime)))
+            .child(self.runtime_detail(
+                theme,
+                "Transport",
+                runtime_text(
+                    theme,
+                    "stdio — newline-delimited JSON (no host or port)".to_string(),
+                ),
+            ))
+            .child(self.runtime_detail(theme, "Workspace", runtime_path(theme, workspace)))
+            .child(self.runtime_detail(
+                theme,
+                "Session store",
+                runtime_path(
+                    theme,
+                    sessions::sessions_dir().to_string_lossy().into_owned(),
+                ),
+            ));
+        if let Some(error) = &self.runtime.error {
+            details = details.child(self.runtime_detail(
+                theme,
+                "Last error",
+                runtime_error(theme, error.clone()),
+            ));
+        }
+        rows.push(details.into_any_element());
+
+        // Background sessions — each owns its own pi process.
+        if !self.lives.is_empty() {
+            let count = self.lives.len();
+            let noun = if count == 1 { "session" } else { "sessions" };
+            let mut card = div()
+                .bg(theme.bg_composer)
+                .border_1()
+                .border_color(theme.border)
+                .rounded_lg()
+                .px(px(14.))
+                .py(px(12.))
+                .flex()
+                .flex_col()
+                .gap(px(9.))
+                .child(
+                    div()
+                        .text_size(theme.ui_px(12.))
+                        .text_color(theme.text_2)
+                        .child(format!(
+                            "{count} background {noun} running in their own pi processes"
+                        )),
+                );
+            for (path, parked) in &self.lives {
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.to_string_lossy().into_owned());
+                card = card.child(self.runtime_detail(
+                    theme,
+                    &name,
+                    runtime_text(
+                        theme,
+                        format!(
+                            "pid {} · {}",
+                            parked.client.child_pid(),
+                            if parked.busy { "busy" } else { "idle" }
+                        ),
+                    ),
+                ));
+            }
+            rows.push(card.into_any_element());
+        }
+
+        // Recent stderr — visible failures for "if any issue, show status".
+        let stderr = self
+            .client
+            .as_ref()
+            .map(|client| client.recent_stderr(8))
+            .unwrap_or_default();
+        let body: AnyElement = if stderr.is_empty() {
+            div()
+                .text_size(theme.ui_px(12.))
+                .text_color(theme.text_3)
+                .child("No output from the pi process.")
+                .into_any_element()
+        } else {
+            let mut block = div().flex().flex_col().gap(px(2.));
+            for line in &stderr {
+                block = block.child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .font_family(theme::code_font_family())
+                        .text_size(theme.code_px(11.5))
+                        .text_color(theme.code_text)
+                        .child(line.clone()),
+                );
+            }
+            div()
+                .bg(theme.code_bg)
+                .border_1()
+                .border_color(theme.border)
+                .rounded_md()
+                .px(px(10.))
+                .py(px(8.))
+                .child(block)
+                .into_any_element()
+        };
+        rows.push(
+            div()
+                .bg(theme.bg_composer)
+                .border_1()
+                .border_color(theme.border)
+                .rounded_lg()
+                .px(px(14.))
+                .py(px(12.))
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .text_size(theme.ui_px(13.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child("Recent stderr"),
+                )
+                .child(body)
+                .into_any_element(),
+        );
+
+        rows
+    }
+
+    // ── Settings → Agent ───────────────────────────────────────────────
+
+    /// The Agent section: queue delivery modes, auto-compaction, auto-retry,
+    /// manual compaction, and the session name. Every control sends a real pi
+    /// RPC command.
+    pub(super) fn agent_rows(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        _cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let name_control = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .w(px(200.))
+                    .h(px(28.))
+                    .px(px(8.))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.bg_raised)
+                    .flex()
+                    .items_center()
+                    .child(self.session_name_input.clone()),
+            )
+            .child(self.runtime_button(
+                "session-rename-save",
+                "Rename",
+                false,
+                theme,
+                this.clone(),
+                Self::rename_session,
+            ))
+            .into_any_element();
+
+        let mut rows = vec![
+            self.card(
+                theme,
+                "Follow-up messages",
+                "Messages sent while the agent is running wait in the queue above the composer and are delivered once the current task finishes. All delivers the whole queue at once; One at a time delivers one per run.",
+                Some(self.follow_up_mode_toggle(theme, this.clone())),
+            ),
+            self.card(
+                theme,
+                "Auto-compaction",
+                "Compact conversation context automatically when it nears the model's window.",
+                Some(self.settings_toggle(
+                    "auto-compaction-toggle",
+                    self.auto_compaction,
+                    theme,
+                    this.clone(),
+                    Self::toggle_auto_compaction,
+                )),
+            ),
+            self.card(
+                theme,
+                "Auto-retry",
+                "Retry automatically on transient errors (overloaded, rate limit, 5xx). pi does not report this setting back, so the switch reflects the last value Orbit sent.",
+                Some(self.settings_toggle(
+                    "auto-retry-toggle",
+                    self.auto_retry,
+                    theme,
+                    this.clone(),
+                    Self::toggle_auto_retry,
+                )),
+            ),
+            self.card(
+                theme,
+                "Compact now",
+                if self.is_compacting {
+                    "pi is compacting this session's context…"
+                } else {
+                    "Manually compact the conversation to free up context window."
+                },
+                Some(self.runtime_button(
+                    "compact-now",
+                    if self.is_compacting {
+                        "Compacting…"
+                    } else {
+                        "Compact"
+                    },
+                    false,
+                    theme,
+                    this.clone(),
+                    Self::compact_now,
+                )),
+            ),
+            self.card(
+                theme,
+                "Session name",
+                "The display name pi stores with this session; shown in session listings.",
+                Some(name_control),
+            ),
+        ];
+
+        if self.retrying {
+            rows.insert(
+                0,
+                self.card(
+                    theme,
+                    "Retrying",
+                    "pi is waiting out a transient provider error before retrying.",
+                    Some(self.runtime_button(
+                        "abort-retry",
+                        "Abort retry",
+                        false,
+                        theme,
+                        this.clone(),
+                        Self::abort_retry,
+                    )),
+                ),
+            );
+        }
+
+        if self.client.is_none() {
+            rows.insert(
+                0,
+                self.card(
+                    theme,
+                    "pi is not connected",
+                    "Start the runtime from Settings → Runtime to change agent behavior.",
+                    None,
+                ),
+            );
+        }
+        rows
+    }
+
+    /// Two-button segmented control for the follow-up delivery mode.
+    pub(super) fn follow_up_mode_toggle(&self, theme: Theme, this: Entity<OrbitApp>) -> AnyElement {
+        let all = self.follow_up_mode == "all";
+        let (one_id, all_id) = ("follow-up-mode-one", "follow-up-mode-all");
+        let button =
+            |label: &'static str, value_all: bool, id: &'static str, this: Entity<OrbitApp>| {
+                let active = all == value_all;
+                div()
+                    .id(id)
+                    .h(px(28.))
+                    .px(px(10.))
+                    .rounded_md()
+                    .flex()
+                    .items_center()
+                    .text_size(theme.ui_px(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .cursor_pointer()
+                    .when(active, |b| b.bg(theme.send_bg).text_color(theme.send_fg))
+                    .when(!active, |b| {
+                        b.border_1()
+                            .border_color(theme.border)
+                            .bg(theme.bg_raised)
+                            .text_color(theme.text_2)
+                            .hover(|s| s.bg(theme.bg_hover))
+                    })
+                    .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                        this.update(cx, |app, cx| app.set_follow_up_mode(value_all, cx));
+                    })
+                    .child(label)
+            };
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(button("One at a time", false, one_id, this.clone()))
+            .child(button("All", true, all_id, this))
+            .into_any_element()
+    }
+
+    /// Update the follow-up mode locally and push it to pi.
+    pub(super) fn set_follow_up_mode(&mut self, all: bool, cx: &mut Context<Self>) {
+        let mode = if all { "all" } else { "one-at-a-time" }.to_string();
+        self.follow_up_mode = mode.clone();
+        self.send(CommandBody::SetFollowUpMode { mode }, "set_follow_up_mode");
+        cx.notify();
+    }
+
+    /// A real toggle switch (accent when on), parameterized by its action.
+    pub(super) fn settings_toggle(
+        &self,
+        id: &'static str,
+        on: bool,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        action: fn(&mut OrbitApp, &mut Context<OrbitApp>),
+    ) -> AnyElement {
+        div()
+            .id(id)
+            .w(px(36.))
+            .h(px(20.))
+            .rounded_full()
+            .p(px(2.))
+            .border_1()
+            .border_color(theme.border)
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .when(on, |t| t.bg(theme.accent).justify_end())
+            .when(!on, |t| t.bg(theme.bg_raised).justify_start())
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                this.update(cx, |app, cx| action(app, cx));
+            })
+            .child(div().size(px(14.)).rounded_full().bg(theme.text))
+            .into_any_element()
+    }
+
+    pub(super) fn toggle_auto_compaction(&mut self, cx: &mut Context<Self>) {
+        self.auto_compaction = !self.auto_compaction;
+        self.send(
+            CommandBody::SetAutoCompaction {
+                enabled: self.auto_compaction,
+            },
+            "set_auto_compaction",
+        );
+        self.set_status(if self.auto_compaction {
+            "Auto-compaction on"
+        } else {
+            "Auto-compaction off"
+        });
+        cx.notify();
+    }
+
+    pub(super) fn toggle_auto_retry(&mut self, cx: &mut Context<Self>) {
+        self.auto_retry = !self.auto_retry;
+        self.send(
+            CommandBody::SetAutoRetry {
+                enabled: self.auto_retry,
+            },
+            "set_auto_retry",
+        );
+        self.set_status(if self.auto_retry {
+            "Auto-retry on"
+        } else {
+            "Auto-retry off"
+        });
+        cx.notify();
+    }
+
+    /// Appearance → Reduce motion: persist the preference; every paint site
+    /// reads it through `Theme.ui`, so the change is live.
+    pub(super) fn toggle_reduce_motion(&mut self, cx: &mut Context<Self>) {
+        let mut ui = theme::get(cx).ui;
+        ui.reduce_motion = !ui.reduce_motion;
+        theme::set_ui_prefs(cx, ui);
+        self.set_status(if ui.reduce_motion {
+            "Reduce motion on"
+        } else {
+            "Reduce motion off"
+        });
+        cx.notify();
+    }
+
+    pub(super) fn compact_now(&mut self, cx: &mut Context<Self>) {
+        if self.is_compacting {
+            return;
+        }
+        self.is_compacting = true;
+        // The run-status strip shows the in-progress state.
+        if !self.send(
+            CommandBody::Compact {
+                custom_instructions: None,
+            },
+            "compact",
+        ) {
+            self.is_compacting = false;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn abort_retry(&mut self, cx: &mut Context<Self>) {
+        self.send(CommandBody::AbortRetry, "abort_retry");
+        self.retrying = false;
+        self.retry_detail = None;
+        self.set_status("Retry aborted");
+        cx.notify();
+    }
+
+    pub(super) fn rename_session(&mut self, cx: &mut Context<Self>) {
+        let name = self.session_name_input.read(cx).text().trim().to_string();
+        if name.is_empty() {
+            self.set_status("Enter a session name first");
+            cx.notify();
+            return;
+        }
+        self.session_name = Some(name.clone());
+        self.send(CommandBody::SetSessionName { name }, "set_session_name");
+        self.set_status("Session renamed");
+        cx.notify();
+    }
+
+    /// One label/value row inside a Runtime card.
+    pub(super) fn runtime_detail(
+        &self,
+        theme: Theme,
+        label: &str,
+        value: AnyElement,
+    ) -> AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(
+                div()
+                    .w(px(110.))
+                    .flex_none()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(theme.ui_px(12.))
+                    .text_color(theme.text_3)
+                    .child(label.to_string()),
+            )
+            .child(div().flex_1().min_w_0().child(value))
+            .into_any_element()
+    }
+
+    /// A Runtime action button (Start / Stop / Restart).
+    pub(super) fn runtime_button(
+        &self,
+        id: &'static str,
+        label: &str,
+        primary: bool,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        action: fn(&mut OrbitApp, &mut Context<OrbitApp>),
+    ) -> AnyElement {
+        let mut button = div()
+            .id(id)
+            .h(px(28.))
+            .px(px(12.))
+            .rounded_md()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap(px(6.))
+            .cursor_pointer()
+            .text_size(theme.ui_px(12.))
+            .font_weight(FontWeight::MEDIUM);
+        if primary {
+            button = button
+                .bg(theme.send_bg)
+                .text_color(theme.send_fg)
+                .hover(|s| s.bg(theme.send_bg_hover));
+        } else {
+            button = button
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.bg_raised)
+                .text_color(theme.text_2)
+                .hover(|s| s.bg(theme.bg_hover));
+        }
+        button
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                this.update(cx, |app, cx| action(app, cx));
+            })
+            .child(label.to_string())
+            .into_any_element()
+    }
+
+    // ── Appearance ─────────────────────────────────────────────────────
+
+    /// The Appearance section: theme, background, type & density, and
+    /// layout. Three grouped boards with hairline-separated rows, each
+    /// section led by a live preview so a change is legible on the page
+    /// before you leave it.
+    pub(super) fn appearance_rows(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> Vec<AnyElement> {
+        let background = crate::dither::configured_label();
+        vec![
+            self.settings_section(
+                theme,
+                "Theme & background",
+                vec![
+                    self.setting_row(
+                        theme,
+                        "Theme",
+                        Some("Pick a Zed-compatible palette for the workbench."),
+                        None,
+                        Some(self.theme_control(theme, this.clone(), cx)),
+                    ),
+                    self.setting_row(
+                        theme,
+                        "Background image",
+                        Some("A dithered image behind the new-task and chat pages."),
+                        background.as_deref(),
+                        Some(self.background_controls(theme, this.clone())),
+                    ),
+                    self.setting_row(
+                        theme,
+                        "Language",
+                        Some("Choose the language used throughout Orbit."),
+                        None,
+                        Some(self.language_select(theme, this.clone(), cx)),
+                    ),
+                ],
+            ),
+            self.settings_section(
+                theme,
+                "Type & density",
+                vec![
+                    self.type_preview(theme),
+                    self.setting_row(
+                        theme,
+                        "Interface font",
+                        None,
+                        None,
+                        Some(self.font_family_select(
+                            SettingsSelect::UiFontFamily,
+                            theme,
+                            this.clone(),
+                            cx,
+                        )),
+                    ),
+                    self.setting_row(
+                        theme,
+                        "Code font",
+                        None,
+                        None,
+                        Some(self.font_family_select(
+                            SettingsSelect::CodeFontFamily,
+                            theme,
+                            this.clone(),
+                            cx,
+                        )),
+                    ),
+                    self.setting_row(
+                        theme,
+                        "UI font size",
+                        None,
+                        None,
+                        Some(self.preset_select(
+                            SettingsSelect::UiFontSize,
+                            theme,
+                            this.clone(),
+                            cx,
+                        )),
+                    ),
+                    self.setting_row(
+                        theme,
+                        "Terminal size",
+                        None,
+                        None,
+                        Some(self.preset_select(
+                            SettingsSelect::TerminalFont,
+                            theme,
+                            this.clone(),
+                            cx,
+                        )),
+                    ),
+                    self.setting_row(
+                        theme,
+                        "Editor size",
+                        None,
+                        None,
+                        Some(self.preset_select(
+                            SettingsSelect::EditorFont,
+                            theme,
+                            this.clone(),
+                            cx,
+                        )),
+                    ),
+                    self.setting_row(
+                        theme,
+                        "Spacing density",
+                        None,
+                        None,
+                        Some(self.preset_select(
+                            SettingsSelect::SpacingDensity,
+                            theme,
+                            this.clone(),
+                            cx,
+                        )),
+                    ),
+                ],
+            ),
+            self.settings_section(
+                theme,
+                "Layout",
+                vec![
+                    self.setting_row(
+                        theme,
+                        "Show sidebar",
+                        Some("Show the sessions sidebar. Also toggleable from the top bar."),
+                        None,
+                        Some(self.sidebar_toggle(theme, this.clone())),
+                    ),
+                    self.setting_row(
+                        theme,
+                        "GPU-rendered streaming",
+                        Some("Stream commits are coalesced (~8 Hz) and highlighting is paint-only, so long tasks never reflow the transcript."),
+                        None,
+                        None,
+                    ),
+                    self.setting_row(
+                        theme,
+                        "Reduce motion",
+                        Some("Stop looping animations — spinners and the running-session shimmer render static."),
+                        None,
+                        Some(self.settings_toggle(
+                            "reduce-motion",
+                            theme.ui.reduce_motion,
+                            theme,
+                            this.clone(),
+                            Self::toggle_reduce_motion,
+                        )),
+                    ),
+                ],
+            ),
+        ]
+    }
+
+    /// The Theme row's control: a live palette strip (canvas, chrome,
+    /// raised, tertiary ink, ink, accent) before the palette dropdown, so
+    /// the active colors are legible without opening the menu.
+    pub(super) fn theme_control(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let swatch = |color: Hsla| {
+            div()
+                .size(px(16.))
+                .rounded(px(4.))
+                .bg(color)
+                .border_1()
+                .border_color(theme.border_strong)
+                .flex_none()
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(theme.space(12.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .child(swatch(theme.bg_main))
+                    .child(swatch(theme.bg_sidebar))
+                    .child(swatch(theme.bg_raised))
+                    .child(swatch(theme.text_3))
+                    .child(swatch(theme.text))
+                    .child(swatch(theme.accent)),
+            )
+            .child(self.theme_select(theme, this, cx))
+            .into_any_element()
+    }
+
+    /// Live previews of the chosen faces at their current sizes: the
+    /// interface sample on the left, a mock terminal (chrome + prompt) on
+    /// the right so the code/terminal font is legible at a glance without
+    /// opening a session. Each is labelled as a preview.
+    pub(super) fn type_preview(&self, theme: Theme) -> AnyElement {
+        let column = |label: &str, body: AnyElement| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(theme.space(6.))
+                .child(
+                    div()
+                        .text_size(theme.ui_px(10.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_3)
+                        .child(label.to_uppercase()),
+                )
+                .child(body)
+                .into_any_element()
+        };
+
+        // ── interface sample ──
+        let interface = div()
+            .w_full()
+            .flex_1()
+            .px(theme.space(14.))
+            .py(theme.space(12.))
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_main)
+            .flex()
+            .flex_col()
+            .justify_center()
+            .gap(theme.space(6.))
+            .child(
+                div()
+                    .font_family(theme::ui_font_family())
+                    .text_size(theme.ui_px(15.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child("New task"),
+            )
+            .child(
+                div()
+                    .font_family(theme::ui_font_family())
+                    .text_size(theme.ui_px(12.5))
+                    .text_color(theme.text_2)
+                    .child("The quick brown fox jumps over the lazy dog."),
+            );
+
+        // ── terminal sample ──
+        let prompt = |command: &str, cursor: bool| {
+            let mut row = div()
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .font_family(theme::code_font_family())
+                .text_size(theme.term_px(12.5))
+                .child(div().text_color(theme.ok_green).child("$"))
+                .child(div().text_color(theme.code_text).child(command.to_string()));
+            if cursor {
+                row = row.child(
+                    div()
+                        .w(theme.term_px(7.))
+                        .h(theme.term_px(14.))
+                        .rounded(px(1.))
+                        .bg(theme.text_2),
+                );
+            }
+            row
+        };
+        let terminal = div()
+            .w_full()
+            .flex_1()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.code_bg)
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex_none()
+                    .h(px(26.))
+                    .px(theme.space(10.))
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .bg(theme.bg_sidebar)
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .children(
+                        [theme.stop_red, theme.warn, theme.ok_green]
+                            .map(|color| div().size(px(7.)).rounded_full().bg(color)),
+                    )
+                    .child(
+                        div()
+                            .ml_1p5()
+                            .font_family(theme::code_font_family())
+                            .text_size(theme.term_px(10.5))
+                            .text_color(theme.text_3)
+                            .child("orbit — pi"),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex_1()
+                    .px(theme.space(12.))
+                    .py(theme.space(10.))
+                    .flex()
+                    .flex_col()
+                    .gap(theme.space(3.))
+                    .child(prompt("orbit-pi --session", false))
+                    .child(
+                        div()
+                            .font_family(theme::code_font_family())
+                            .text_size(theme.term_px(12.5))
+                            .text_color(theme.text_2)
+                            .child("pi agent ready · anthropic/claude"),
+                    )
+                    .child(prompt("", true)),
+            );
+
+        div()
+            .w_full()
+            .px(theme.space(16.))
+            .py(theme.space(12.))
+            .flex()
+            .gap(theme.space(16.))
+            .child(column("Interface preview", interface.into_any_element()))
+            .child(column("Terminal preview", terminal.into_any_element()))
+            .into_any_element()
+    }
+
+    /// Appearance → "Background image": pick an image for the dithered
+    /// page backdrop, or reset to the dot grid.
+    pub(super) fn background_controls(&self, theme: Theme, this: Entity<OrbitApp>) -> AnyElement {
+        let label = crate::dither::configured_label();
+        let mut controls = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(self.runtime_button(
+                "background-choose",
+                if label.is_some() {
+                    "Replace…"
+                } else {
+                    "Choose image…"
+                },
+                false,
+                theme,
+                this.clone(),
+                OrbitApp::background_choose,
+            ));
+        if label.is_some() {
+            controls = controls.child(self.runtime_button(
+                "background-reset",
+                "Reset",
+                false,
+                theme,
+                this,
+                OrbitApp::background_reset,
+            ));
+        }
+        controls.into_any_element()
+    }
+
+    /// Pick the background image (native dialog), copy + process it, and
+    /// warm the dither cache so the first paint of the new-task page is
+    /// costless.
+    pub(super) fn background_choose(&mut self, cx: &mut Context<Self>) {
+        // Async panel only: see `OrbitApp::browse_for_folder` for why a
+        // blocking native dialog on the main thread aborts the app.
+        let dialog = rfd::AsyncFileDialog::new()
+            .set_title("Choose a background image")
+            .add_filter(
+                "Images",
+                &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff"],
+            );
+        cx.spawn(async move |this, cx| {
+            let Some(handle) = dialog.pick_file().await else {
+                return;
+            };
+            let path = handle.path().to_path_buf();
+            let _ = this.update(cx, |app, cx| {
+                match crate::dither::choose_file(&path) {
+                    Ok(label) => {
+                        crate::dither::background();
+                        app.set_status(format!("Background set to {label}"));
+                    }
+                    Err(err) => app.set_status(err),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Drop the background (the dot grid returns) and forget the cache.
+    pub(super) fn background_reset(&mut self, cx: &mut Context<Self>) {
+        crate::dither::clear_all();
+        crate::dither::background();
+        self.set_status("Background reset");
+        cx.notify();
+    }
+
+    /// The real sidebar toggle, wired to the same state as the top bar.
+    pub(super) fn sidebar_toggle(&self, theme: Theme, this: Entity<OrbitApp>) -> AnyElement {
+        let on = self.sidebar_visible;
+        div()
+            .id("settings-sidebar-toggle")
+            .w(px(36.))
+            .h(px(20.))
+            .rounded_full()
+            .p(px(2.))
+            .border_1()
+            .border_color(theme.border)
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .when(on, |t| t.bg(theme.accent).justify_end())
+            .when(!on, |t| t.bg(theme.bg_raised).justify_start())
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                this.update(cx, |app, cx| {
+                    app.sidebar_visible = !app.sidebar_visible;
+                    cx.notify();
+                });
+            })
+            .child(div().size(px(14.)).rounded_full().bg(theme.text))
+            .into_any_element()
+    }
+
+    /// Theme dropdown on Appearance — lists every selectable palette.
+    pub(super) fn theme_select(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let all = ThemeId::ALL;
+        let selected = all.iter().position(|id| *id == theme.theme_id).unwrap_or(0);
+        self.select_control(
+            "theme-select",
+            SettingsSelect::Theme,
+            theme.theme_id.label().to_string(),
+            all.iter().map(|id| id.label().to_string()).collect(),
+            selected,
+            theme,
+            this,
+            cx,
+        )
+    }
+
+    // ── Waku General-settings selects (language / font sizes) ──────────
+
+    /// The Language dropdown (System / English).
+    pub(super) fn language_select(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let selected = match theme.ui.language {
+            crate::theme::Language::System => 0,
+            crate::theme::Language::English => 1,
+        };
+        self.select_control(
+            "language-select",
+            SettingsSelect::Language,
+            theme.ui.language.label().to_string(),
+            vec!["System".to_string(), "English".to_string()],
+            selected,
+            theme,
+            this,
+            cx,
+        )
+    }
+
+    /// The percentage / px preset dropdowns in the type & density board.
+    pub(super) fn preset_select(
+        &self,
+        kind: SettingsSelect,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        use crate::theme::{FONT_SIZES, SPACING_DENSITIES};
+        let (values, current, suffix): (Vec<f32>, f32, &str) = match kind {
+            SettingsSelect::UiFontSize => (FONT_SIZES.to_vec(), theme.ui.ui_font_size, "px"),
+            SettingsSelect::TerminalFont => {
+                (FONT_SIZES.to_vec(), theme.ui.terminal_font_size, "px")
+            }
+            SettingsSelect::EditorFont => (FONT_SIZES.to_vec(), theme.ui.editor_font_size, "px"),
+            SettingsSelect::SpacingDensity => (
+                SPACING_DENSITIES.iter().map(|v| *v as f32).collect(),
+                theme.ui.spacing_density as f32,
+                "%",
+            ),
+            SettingsSelect::Language
+            | SettingsSelect::Theme
+            | SettingsSelect::UiFontFamily
+            | SettingsSelect::CodeFontFamily => unreachable!(),
+        };
+        let selected = values
+            .iter()
+            .position(|v| (*v - current).abs() < 0.01)
+            .unwrap_or(0);
+        self.select_control(
+            match kind {
+                SettingsSelect::UiFontSize => "ui-font-size-select",
+                SettingsSelect::TerminalFont => "terminal-font-select",
+                SettingsSelect::EditorFont => "editor-font-select",
+                SettingsSelect::SpacingDensity => "spacing-density-select",
+                _ => "settings-select",
+            },
+            kind,
+            format!("{} {}", current as u32, suffix),
+            values
+                .iter()
+                .map(|v| format!("{} {}", *v as u32, suffix))
+                .collect(),
+            selected,
+            theme,
+            this,
+            cx,
+        )
+    }
+
+    /// The Interface / Code font-family dropdowns — Orbit's curated catalog.
+    pub(super) fn font_family_select(
+        &self,
+        kind: SettingsSelect,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        use crate::theme::{FontChoice, CODE_FONTS, UI_FONTS};
+        let prefs = theme::font_prefs();
+        let (id, current, choices): (&'static str, SharedString, &[FontChoice]) = match kind {
+            SettingsSelect::UiFontFamily => (
+                "ui-font-family-select",
+                prefs.ui_font_family.clone(),
+                &UI_FONTS,
+            ),
+            SettingsSelect::CodeFontFamily => (
+                "code-font-family-select",
+                prefs.code_font_family.clone(),
+                &CODE_FONTS,
+            ),
+            _ => unreachable!(),
+        };
+        let selected = choices
+            .iter()
+            .position(|f| f.family == current.as_ref())
+            .unwrap_or(0);
+        self.select_control(
+            id,
+            kind,
+            theme::font_choice_label(current.as_ref()),
+            choices.iter().map(|f| f.label.to_string()).collect(),
+            selected,
+            theme,
+            this,
+            cx,
+        )
+    }
+
+    /// A Waku-style select: value chip + caret, dropdown below when open.
+    pub(super) fn select_control(
+        &self,
+        id: &'static str,
+        kind: SettingsSelect,
+        label: String,
+        options: Vec<String>,
+        selected: usize,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let open = self.settings_select == Some(kind);
+        let chip_this = this.clone();
+        div()
+            .flex()
+            .flex_col()
+            .items_end()
+            // dropdown anchored below the chip when open
+            .children(self.settings_select_popup(kind, options, selected, theme, &this, cx))
+            .child(
+                div()
+                    .id(ElementId::Name(id.into()))
+                    .h(px(26.))
+                    .px(px(10.))
+                    .rounded(px(7.))
+                    .border_1()
+                    .border_color(if open {
+                        theme.border_strong
+                    } else {
+                        theme.border
+                    })
+                    .bg(if open { theme.overlay } else { theme.bg_raised })
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .cursor_pointer()
+                    .text_size(theme.ui_px(12.))
+                    .text_color(theme.text_2)
+                    .hover(|s| s.bg(theme.overlay))
+                    .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                        chip_this.update(cx, |app, cx| {
+                            // A dismissal from this same click's mouse-down
+                            // must not immediately re-open (see
+                            // `toggle_session_menu`).
+                            const GESTURE: Duration = Duration::from_millis(200);
+                            if let Some(dismissed) = app.menu_dismissed_at.take() {
+                                if dismissed.elapsed() < GESTURE {
+                                    return;
+                                }
+                            }
+                            if app.settings_select == Some(kind) {
+                                app.settings_select = None;
+                            } else {
+                                app.settings_select = Some(kind);
+                                // Open with the cursor on the chosen option,
+                                // scrolled into view in the list below.
+                                app.settings_select_highlight = Some(selected);
+                                app.settings_select_scroll
+                                    .scroll_to_item(selected, ScrollStrategy::Center);
+                                app.settings_filter
+                                    .update(cx, |filter, cx| filter.clear(cx));
+                                let handle = app.settings_filter.read(cx).focus_handle(cx);
+                                window.focus(&handle);
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .child(label)
+                    .child(icon("icons/chevron-down.svg", 10., theme.text_3)),
+            )
+            .into_any_element()
+    }
+
+    /// The open dropdown's option list, anchored below its chip.
+    pub(super) fn settings_select_popup(
+        &self,
+        kind: SettingsSelect,
+        options: Vec<String>,
+        selected: usize,
+        theme: Theme,
+        this: &Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.settings_select != Some(kind) {
+            return None;
+        }
+        // Filter options, keeping the original index for click dispatch.
+        // The cursor shares `settings_select_visible`, so the painted rows
+        // and the keyboard cursor can never disagree about the query.
+        let rows: Vec<(usize, String)> = self
+            .settings_select_visible(&options, cx)
+            .into_iter()
+            .map(|ix| (ix, options[ix].clone()))
+            .collect();
+        let empty = rows.is_empty();
+        let highlight = self.settings_select_highlight;
+        // Virtualized list — only the visible rows are laid out and painted.
+        // The font-family dropdowns can have a thousand+ entries, and the
+        // whole app re-renders on every scroll tick, so rendering every row
+        // per frame is what made the theme/font selectors lag while scrolling.
+        //
+        // `uniform_list`'s Infer sizing reads the *available* height, and this
+        // popup lives inside a 0×0 anchor div, so the available height is 0 and
+        // the list collapses to nothing. Give it an explicit height computed
+        // from the row count instead (30 px stride + 8 px vertical padding,
+        // capped at the old 220 px max) — same visual, real viewport.
+        let list_h = (rows.len() as f32 * 30. + 8.).min(220.);
+        let list: AnyElement = if empty {
+            div()
+                .w_full()
+                .px(px(4.))
+                .py(px(4.))
+                .child(
+                    div()
+                        .h(px(28.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(theme.ui_px(12.))
+                        .text_color(theme.text_3)
+                        .child("No matches"),
+                )
+                .into_any_element()
+        } else {
+            let this = this.clone();
+            uniform_list(
+                "settings-select-list",
+                rows.len(),
+                move |range, _window, _cx| {
+                    let mut children = Vec::new();
+                    for ix in range {
+                        let (orig_ix, option) = &rows[ix];
+                        let orig_ix = *orig_ix;
+                        let selected_row = orig_ix == selected;
+                        let highlighted_row = highlight == Some(orig_ix);
+                        let this = this.clone();
+                        // 30 px stride = 28 px row + the 2 px gap the old
+                        // flex list had between rows (uniform_list has no
+                        // gap support, so the gap rides on the row shell).
+                        children.push(
+                            div().h(px(30.)).w_full().child(
+                                div()
+                                    .id(ElementId::NamedInteger(
+                                        "settings-select-row".into(),
+                                        orig_ix as u64,
+                                    ))
+                                    .h(px(28.))
+                                    .w_full()
+                                    .px(px(10.))
+                                    .rounded(px(6.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(10.))
+                                    .cursor_pointer()
+                                    // The keyboard cursor is a wash; the
+                                    // chosen option keeps the fill.
+                                    .when(highlighted_row, |row| row.bg(theme.overlay_strong))
+                                    .when(!highlighted_row && selected_row, |row| {
+                                        row.bg(theme.active)
+                                    })
+                                    .when(!highlighted_row && !selected_row, |row| {
+                                        row.hover(|style| style.bg(theme.overlay))
+                                    })
+                                    .text_size(theme.ui_px(12.))
+                                    .text_color(if selected_row {
+                                        theme.active_fg
+                                    } else if highlighted_row {
+                                        theme.text
+                                    } else {
+                                        theme.text_2
+                                    })
+                                    .child(option.clone())
+                                    .when(selected_row, |row| {
+                                        row.child(icon("icons/check.svg", 11., theme.accent))
+                                    })
+                                    .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                                        this.update(cx, |app, cx| {
+                                            app.apply_settings_select(kind, orig_ix, cx);
+                                            app.settings_select = None;
+                                            cx.notify();
+                                        });
+                                    }),
+                            ),
+                        );
+                    }
+                    children
+                },
+            )
+            .w_full()
+            .h(px(list_h))
+            .track_scroll(self.settings_select_scroll.clone())
+            .px(px(4.))
+            .py(px(4.))
+            .into_any_element()
+        };
+        let popup = div()
+            .min_w(px(360.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.menu_bg)
+            .shadow(theme.popover_shadow())
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .occlude()
+            .on_mouse_down_out({
+                let this = this.clone();
+                move |_: &MouseDownEvent, _, cx: &mut App| {
+                    this.update(cx, |app, cx| {
+                        if app.settings_select.take().is_some() {
+                            // Arm the click-through guard so this same click's
+                            // mouse-up on the chip cannot immediately re-open
+                            // the dropdown.
+                            app.menu_dismissed_at = Some(Instant::now());
+                            cx.notify();
+                        }
+                    });
+                }
+            })
+            // The filter input carries the `Picker` context, so these ride
+            // the same dispatch node as the model picker's: arrows move the
+            // cursor, Enter chooses it, Escape (global) closes.
+            .on_action({
+                let this = this.clone();
+                let options = options.clone();
+                move |_: &crate::PickerSelectPrev, _, cx: &mut App| {
+                    this.update(cx, |app, cx| app.settings_select_step(&options, -1, cx));
+                }
+            })
+            .on_action({
+                let this = this.clone();
+                let options = options.clone();
+                move |_: &crate::PickerSelectNext, _, cx: &mut App| {
+                    this.update(cx, |app, cx| app.settings_select_step(&options, 1, cx));
+                }
+            })
+            .on_action({
+                let this = this.clone();
+                let options = options.clone();
+                move |_: &crate::PickerConfirm, _, cx: &mut App| {
+                    this.update(cx, |app, cx| app.settings_select_confirm(&options, cx));
+                }
+            })
+            // Search field — filters the options below.
+            .child(
+                div()
+                    .h(px(34.))
+                    .px(px(10.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .text_size(theme.ui_px(12.))
+                    .child(icon("icons/search.svg", 13., theme.text_3))
+                    .child(self.settings_filter.clone()),
+            )
+            .child(list);
+        // Anchor to the chip's top-right corner (via a zero-size point) and
+        // drop the popup 4 px below the 26 px chip, right-aligned. `Window`
+        // position mode (not `Local`) is deliberate: `anchored`'s switch-anchor
+        // fit then flips the popup above the chip when the viewport bottom is
+        // closer than the list is tall, instead of sliding it down over its own
+        // chip (which made a second click land inside the popup). The
+        // post-switch snap still clamps at the window edges as a backstop.
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .right_0()
+                .size(px(0.))
+                .child(
+                    anchored()
+                        .position_mode(AnchoredPositionMode::Window)
+                        .anchor(Corner::TopRight)
+                        .offset(point(px(0.), px(30.)))
+                        .child(deferred(popup)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Move the settings dropdown's keyboard cursor one visible option,
+    /// clamped at the ends like the model picker. A query owns the list, so
+    /// a cursor the filter dropped lands on the first (or last) match rather
+    /// than doing nothing, and the list keeps it in view.
+    pub(super) fn settings_select_step(
+        &mut self,
+        options: &[String],
+        dir: isize,
+        cx: &mut Context<Self>,
+    ) {
+        let visible = self.settings_select_visible(options, cx);
+        let Some(next) = stepped_visible_position(&visible, self.settings_select_highlight, dir)
+        else {
+            return;
+        };
+        self.settings_select_highlight = Some(visible[next]);
+        self.settings_select_scroll
+            .scroll_to_item(next, ScrollStrategy::Center);
+        cx.notify();
+    }
+
+    /// Choose the option under the settings dropdown's keyboard cursor (or
+    /// the first match when the query filtered the cursor away) and close
+    /// the popup.
+    pub(super) fn settings_select_confirm(&mut self, options: &[String], cx: &mut Context<Self>) {
+        let Some(kind) = self.settings_select else {
+            return;
+        };
+        let visible = self.settings_select_visible(options, cx);
+        let ix = self
+            .settings_select_highlight
+            .filter(|ix| visible.contains(ix))
+            .or_else(|| visible.first().copied());
+        let Some(ix) = ix else {
+            return;
+        };
+        self.apply_settings_select(kind, ix, cx);
+        self.settings_select = None;
+        cx.notify();
+    }
+
+    /// The original indices of `options` that survive the filter — the rows
+    /// the popup actually paints, in display order.
+    fn settings_select_visible(&self, options: &[String], cx: &Context<Self>) -> Vec<usize> {
+        let needle = self.settings_filter.read(cx).text().to_lowercase();
+        options
+            .iter()
+            .enumerate()
+            .filter(|(_, option)| needle.is_empty() || option.to_lowercase().contains(&needle))
+            .map(|(ix, _)| ix)
+            .collect()
+    }
+
+    /// Apply a dropdown choice to the persisted UI customization.
+    pub(super) fn apply_settings_select(
+        &mut self,
+        kind: SettingsSelect,
+        ix: usize,
+        cx: &mut Context<Self>,
+    ) {
+        match kind {
+            SettingsSelect::Theme => {
+                let id = ThemeId::ALL.get(ix).copied().unwrap_or(ThemeId::Orbit);
+                theme::set_theme(cx, id);
+                return;
+            }
+            SettingsSelect::UiFontFamily | SettingsSelect::CodeFontFamily => {
+                use crate::theme::{CODE_FONTS, UI_FONTS};
+                let choices = match kind {
+                    SettingsSelect::UiFontFamily => &UI_FONTS[..],
+                    SettingsSelect::CodeFontFamily => &CODE_FONTS[..],
+                    _ => unreachable!(),
+                };
+                let Some(choice) = choices.get(ix) else {
+                    return;
+                };
+                let mut prefs = theme::font_prefs();
+                match kind {
+                    SettingsSelect::UiFontFamily => prefs.ui_font_family = choice.family.into(),
+                    SettingsSelect::CodeFontFamily => prefs.code_font_family = choice.family.into(),
+                    _ => unreachable!(),
+                }
+                theme::set_font_prefs(prefs);
+                return;
+            }
+            _ => {}
+        }
+        use crate::theme::{Language, FONT_SIZES, SPACING_DENSITIES};
+        let mut ui = theme::get(cx).ui;
+        match kind {
+            SettingsSelect::Language => {
+                ui.language = if ix == 1 {
+                    Language::English
+                } else {
+                    Language::System
+                };
+            }
+            SettingsSelect::UiFontSize => {
+                ui.ui_font_size = FONT_SIZES.get(ix).copied().unwrap_or(14.);
+            }
+            SettingsSelect::TerminalFont => {
+                ui.terminal_font_size = FONT_SIZES.get(ix).copied().unwrap_or(13.);
+            }
+            SettingsSelect::EditorFont => {
+                ui.editor_font_size = FONT_SIZES.get(ix).copied().unwrap_or(13.);
+            }
+            SettingsSelect::SpacingDensity => {
+                ui.spacing_density = SPACING_DENSITIES.get(ix).copied().unwrap_or(100);
+            }
+            SettingsSelect::Theme
+            | SettingsSelect::UiFontFamily
+            | SettingsSelect::CodeFontFamily => unreachable!(),
+        }
+        theme::set_ui_prefs(cx, ui);
+    }
+}
+
+// ── controller ────────────────────────────────────────────────────
+impl OrbitApp {
+    pub(super) fn open_settings(&mut self, cx: &mut Context<Self>) {
+        self.refresh_updater(cx);
+        self.settings_open = true;
+        self.set_settings_section(SettingsSection::General, cx);
+    }
+
+    pub(super) fn on_open_settings(
+        &mut self,
+        _: &crate::OpenSettings,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings(cx);
+    }
+
+    pub(super) fn on_settings_gear_click(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Toggle: the gear sits in the sessions sidebar, which stays visible
+        // while settings is open, so clicking it again should go back.
+        if self.settings_open {
+            self.settings_open = false;
+            self.provider_editor = None;
+            self.provider_key_editor = None;
+        } else {
+            self.open_settings(cx);
+            return;
+        }
+        cx.notify();
+    }
+
+    pub(super) fn on_settings_back(
+        &mut self,
+        _: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings_open = false;
+        self.provider_editor = None;
+        self.provider_key_editor = None;
+        self.input.read(cx).focus(window);
+        cx.notify();
+    }
+
+    /// Switch sections, reloading the on-disk facts each page reads so CLI
+    /// edits appear without a restart.
+    pub(super) fn set_settings_section(
+        &mut self,
+        section: SettingsSection,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings_section = section;
+        self.provider_remove_confirm = None;
+        self.provider_editor = None;
+        self.provider_key_editor = None;
+        self.plugin_remove_confirm = None;
+        match section {
+            SettingsSection::General => self.refresh_notification_auth(cx),
+            SettingsSection::Providers => {
+                // Paint from cached state now; the file re-read (models.json,
+                // auth.json) lands after this frame.
+                self.reload_custom_providers_later(cx);
+                self.refresh_auth();
+            }
+            SettingsSection::Skills => self.refresh_skills(cx),
+            SettingsSection::Plugins => self.refresh_plugins(cx),
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    /// The directory new tasks and discovery use — the workspace when one is
+    /// selected, else the process cwd.
+    pub(super) fn workspace_dir(&self) -> PathBuf {
+        self.current_workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default()
+    }
+
+    /// Re-read the user and project settings `packages` arrays.
+    pub(super) fn refresh_plugins(&mut self, cx: &mut Context<Self>) {
+        let (packages, error) = crate::plugins::discover(&self.workspace_dir());
+        self.plugins = packages;
+        self.plugins_error = error;
+        cx.notify();
+    }
+
+    /// Install the source currently in the toolbar field.
+    pub(super) fn plugin_install(&mut self, cx: &mut Context<Self>) {
+        if self.plugin_action.is_some() {
+            return;
+        }
+        let source = self.plugin_source_input.read(cx).text().trim().to_string();
+        if source.is_empty() {
+            self.set_status("Enter a package source to install");
+            cx.notify();
+            return;
+        }
+        self.plugin_run(PluginOp::Install, source, self.plugin_install_project, cx);
+    }
+
+    /// Run a plugin operation off the UI thread, then reload the list.
+    fn plugin_run(&mut self, op: PluginOp, source: String, project: bool, cx: &mut Context<Self>) {
+        if self.plugin_action.is_some() {
+            return;
+        }
+        let verb = match op {
+            PluginOp::Install => "Installing",
+            PluginOp::Update => "Updating",
+            PluginOp::Remove => "Removing",
+        };
+        self.plugin_action = Some(format!("{verb} {source}…"));
+        let done = format!("{verb} {source}");
+        let workspace = self.workspace_dir();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    match op {
+                        PluginOp::Install => crate::plugins::install(&source, project, &workspace),
+                        PluginOp::Update => crate::plugins::update(&source, &workspace),
+                        PluginOp::Remove => crate::plugins::remove(&source, project, &workspace),
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                app.plugin_action = None;
+                match result {
+                    Ok(output) => {
+                        let last = output
+                            .lines()
+                            .rev()
+                            .find(|line| !line.trim().is_empty())
+                            .map(str::to_string);
+                        app.set_status(last.unwrap_or_else(|| format!("{done} — done")));
+                        app.refresh_plugins(cx);
+                    }
+                    Err(err) => app.set_error(err),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Single dispatch point for every Plugins-page control.
+    pub(super) fn apply_plugin_action(&mut self, action: PluginAction, cx: &mut Context<Self>) {
+        match action {
+            PluginAction::Install => self.plugin_install(cx),
+            PluginAction::Update { source } => {
+                self.plugin_run(PluginOp::Update, source, false, cx);
+            }
+            PluginAction::Remove { source } => {
+                self.plugin_remove_confirm = Some(source);
+                cx.notify();
+            }
+            PluginAction::ConfirmRemove { source, project } => {
+                self.plugin_remove_confirm = None;
+                self.plugin_run(PluginOp::Remove, source, project, cx);
+            }
+            PluginAction::CancelRemove => {
+                self.plugin_remove_confirm = None;
+                cx.notify();
+            }
+            PluginAction::SetScope { project } => {
+                self.plugin_install_project = project;
+                cx.notify();
+            }
+            PluginAction::Refresh => {
+                self.refresh_plugins(cx);
+                self.set_status("Reloaded installed plugins");
+                cx.notify();
+            }
+        }
+    }
+
+    /// Apply the result of reading both provider files to state. Read errors
+    /// are kept, not fatal, so a broken file can be seen and fixed rather than
+    /// overwritten.
+    fn apply_provider_reads(
+        &mut self,
+        custom: Result<Vec<CustomProvider>, String>,
+        auth: Result<HashMap<String, providers::ProviderAuth>, String>,
+    ) {
+        match custom {
+            Ok(list) => {
+                self.custom_providers = list;
+                self.custom_providers_error = None;
+            }
+            Err(err) => {
+                self.custom_providers = Vec::new();
+                self.custom_providers_error = Some(err);
+            }
+        }
+        match auth {
+            Ok(auth) => {
+                self.provider_auth = auth;
+                self.provider_auth_error = None;
+            }
+            Err(err) => {
+                self.provider_auth = HashMap::new();
+                self.provider_auth_error = Some(err);
+            }
+        }
+    }
+
+    /// Re-read `~/.pi/agent/models.json` and `~/.pi/agent/auth.json` on the
+    /// calling thread. Used by explicit actions (Refresh, save/remove,
+    /// credential load) where the result gates the next step.
+    pub(super) fn reload_custom_providers(&mut self, cx: &mut Context<Self>) {
+        let custom = providers::read_custom();
+        let auth = providers::read_auth();
+        self.apply_provider_reads(custom, auth);
+        self.ensure_provider_metadata(cx);
+        cx.notify();
+    }
+
+    /// The same re-read, but off the UI thread: the Providers page paints from
+    /// cached state first and the fresh files land a frame later, so clicking
+    /// the nav row never blocks on disk (Waku's no-blink page switch).
+    pub(super) fn reload_custom_providers_later(&mut self, cx: &mut Context<Self>) {
+        // Idempotent, already off-thread; kick it now so a first visit still
+        // has metadata as soon as it arrives.
+        self.ensure_provider_metadata(cx);
+        cx.spawn(async move |this, cx| {
+            let (custom, auth) = cx
+                .background_executor()
+                .spawn(async { (providers::read_custom(), providers::read_auth()) })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                app.apply_provider_reads(custom, auth);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Load pi's built-in catalog sizes and authoritative provider metadata
+    /// once, off the UI thread (node introspection + ~600 KB of JSON parsing
+    /// would otherwise hitch the first Providers render).
+    pub(super) fn ensure_provider_metadata(&mut self, cx: &mut Context<Self>) {
+        if self.provider_metadata_loaded {
+            return;
+        }
+        self.provider_metadata_loaded = true;
+        cx.spawn(async move |this, cx| {
+            let (counts, metadata) = cx
+                .background_executor()
+                .spawn(async {
+                    let counts = providers::builtin_catalog_counts().clone();
+                    let metadata = providers::dynamic_providers()
+                        .map(<[providers::DynamicProvider]>::to_vec)
+                        .unwrap_or_default();
+                    (counts, metadata)
+                })
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                app.provider_catalog_counts = counts;
+                app.provider_metadata = metadata;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Refresh: re-query the running agent's catalog and re-read both files.
+    pub(super) fn provider_refresh(&mut self, cx: &mut Context<Self>) {
+        self.providers_refreshing = true;
+        self.refresh_catalogs();
+        self.reload_custom_providers(cx);
+        self.refresh_auth();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(700))
+                .await;
+            let _ = this.update(cx, |app, cx| {
+                app.providers_refreshing = false;
+                cx.notify();
+            });
+        })
+        .detach();
+        self.set_status("Refreshed provider catalog");
+        cx.notify();
+    }
+
+    /// Restart pi so a newly written credential is loaded. pi reads
+    /// `auth.json` only at startup, so this is the "use it" step. Resumes the
+    /// active session on the fresh process when one exists.
+    pub(super) fn provider_apply_credentials(&mut self, cx: &mut Context<Self>) {
+        // Never yank the process out from under a live turn.
+        if self.busy || self.transcript.is_streaming() {
+            self.set_status("Finish the current turn, then Restart pi to load credentials");
+            cx.notify();
+            return;
+        }
+        let resume = self
+            .current_session_path
+            .clone()
+            .and_then(|path| self.sessions.iter().find(|s| s.path == path).cloned());
+        self.drop_client();
+        self.current_session_path = None;
+        if let Some(session) = resume {
+            self.switch_to_session(session, false, cx);
+        } else {
+            self.runtime_start(cx);
+        }
+        self.provider_auth_dirty = false;
+        self.reload_custom_providers(cx);
+        self.set_status("pi restarted — credentials loaded");
+        cx.notify();
+    }
+
+    /// Open the API-key editor for a provider.
+    pub(super) fn provider_key_open(
+        &mut self,
+        provider_id: String,
+        provider_name: String,
+        oauth: bool,
+        note: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.provider_credential_open(
+            provider_id,
+            provider_name,
+            oauth,
+            note,
+            ProviderKeyKind::ApiKey,
+            window,
+            cx,
+        );
+    }
+
+    /// Open the credential editor for `kind` (API key or an Ollama Cloud
+    /// session). One modal handles both; the field, hint, and save path differ.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn provider_credential_open(
+        &mut self,
+        provider_id: String,
+        provider_name: String,
+        oauth: bool,
+        note: &'static str,
+        kind: ProviderKeyKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let placeholder = match kind {
+            ProviderKeyKind::ApiKey => "sk-…",
+            ProviderKeyKind::OllamaCloudSession => "__Secure-session=…",
+        };
+        let key = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("provider-key-input")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+                .with_placeholder(placeholder)
+        });
+        let focus = key.read(cx).focus_handle(cx);
+        window.focus(&focus);
+        self.provider_key_editor = Some(ProviderKeyEditor {
+            provider_id,
+            provider_name,
+            oauth,
+            note,
+            kind,
+            key,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    /// Save the API key, then flag that pi needs a restart to load it.
+    pub(super) fn provider_key_save(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.provider_key_editor.as_ref() else {
+            return;
+        };
+        let id = editor.provider_id.clone();
+        let name = editor.provider_name.clone();
+        let kind = editor.kind;
+        let key = editor.key.read(cx).text();
+        let result = match kind {
+            ProviderKeyKind::ApiKey => providers::write_api_key(&id, &key),
+            ProviderKeyKind::OllamaCloudSession => providers::write_ollama_cloud_session(&key),
+        };
+        match result {
+            Ok(()) => {
+                self.provider_key_editor = None;
+                self.provider_auth_dirty = true;
+                self.reload_custom_providers(cx);
+                let what = match kind {
+                    ProviderKeyKind::ApiKey => "API key",
+                    ProviderKeyKind::OllamaCloudSession => "Ollama Cloud session",
+                };
+                self.set_status(format!("{what} saved for {name} — Restart pi to use it"));
+            }
+            Err(err) => {
+                if let Some(editor) = self.provider_key_editor.as_mut() {
+                    editor.error = Some(err);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Sign in with OAuth by handing `pi /login <id>` to the user's terminal.
+    pub(super) fn provider_oauth_login(
+        &mut self,
+        id: String,
+        name: String,
+        cx: &mut Context<Self>,
+    ) {
+        // The id reaches a shell script; only builtin ids are ever passed, but
+        // validate anyway so a hand-edited file can never inject a command.
+        if !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        {
+            self.set_status(format!(
+                "Refusing to run login for invalid provider id {id}"
+            ));
+            cx.notify();
+            return;
+        }
+        let command = format!("pi /login {id}");
+        match platform::open_terminal_command(&command) {
+            Ok(()) => {
+                self.provider_auth_dirty = true;
+                self.set_status(format!(
+                    "Finish signing in to {name} in Terminal, then Restart pi"
+                ));
+            }
+            Err(err) => {
+                self.set_status(format!("Could not open Terminal: {err} — run `{command}`"));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Sign out. With auth RPC available pi owns the credential store and
+    /// removes it live; otherwise fall back to dropping the auth.json entry
+    /// (env credentials are outside Orbit's reach and left alone).
+    pub(super) fn provider_sign_out(&mut self, id: String, cx: &mut Context<Self>) {
+        // The Ollama Cloud session lives under its own auth.json key, which
+        // pi's provider logout does not know about; clear it so Disconnect
+        // drops the whole credential.
+        if id == "ollama" {
+            if let Err(err) = providers::remove_ollama_session() {
+                self.provider_auth_error = Some(err);
+            }
+        }
+        if self.auth.support() == AuthSupport::Supported {
+            self.auth.on_logout_response(true, &id);
+            self.send(
+                CommandBody::AuthLogout {
+                    provider: id.clone(),
+                },
+                "auth.logout",
+            );
+            self.set_status(format!("Signing out of {id}…"));
+            cx.notify();
+            return;
+        }
+        match providers::remove_auth(&id) {
+            Ok(()) => {
+                self.provider_auth_dirty = true;
+                self.reload_custom_providers(cx);
+                self.set_status(format!("Signed out of {id} — Restart pi to apply"));
+            }
+            Err(err) => {
+                self.provider_auth_error = Some(err);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Open the editor for an existing provider id, or a blank add form.
+    pub(super) fn provider_editor_open(
+        &mut self,
+        provider_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let existing = provider_id.as_ref().and_then(|id| {
+            self.custom_providers
+                .iter()
+                .find(|provider| &provider.id == id)
+        });
+        let in_catalog = provider_id.as_ref().is_some_and(|id| {
+            self.available_models
+                .iter()
+                .any(|model| &model.provider == id)
+        });
+        let id_text = provider_id.clone().unwrap_or_default();
+        let name_text = existing
+            .and_then(|provider| provider.name.clone())
+            .unwrap_or_default();
+        let base_url_text = existing
+            .map(|provider| provider.base_url.clone())
+            .unwrap_or_default();
+        let api = existing
+            .map(|provider| provider.api.clone())
+            .filter(|api| !api.is_empty())
+            .unwrap_or_else(|| {
+                if in_catalog {
+                    // Built-in: no override unless the user picks one.
+                    String::new()
+                } else {
+                    "openai-completions".to_string()
+                }
+            });
+        let models_text = existing
+            .map(|provider| provider.model_ids.join(", "))
+            .unwrap_or_default();
+        let had_api_key = existing.is_some_and(|provider| provider.has_api_key);
+
+        let id_input = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("provider-editor-id")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+                .with_placeholder("my-gateway")
+                .with_text(id_text)
+        });
+        let name_input = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("provider-editor-name")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+                .with_placeholder("Optional display name")
+                .with_text(name_text)
+        });
+        let base_url_input = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("provider-editor-base-url")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+                .with_placeholder("https://api.example.com/v1")
+                .with_text(base_url_text)
+        });
+        let api_key_input = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("provider-editor-api-key")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+                .with_placeholder(if had_api_key {
+                    "••••••••"
+                } else {
+                    "sk-…"
+                })
+        });
+        let models_input = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("provider-editor-models")
+                .with_key_context("Composer Picker")
+                .with_max_lines(4)
+                .with_placeholder("model-id, model-id-2")
+                .with_text(models_text)
+        });
+
+        let focus = if provider_id.is_some() {
+            name_input.read(cx).focus_handle(cx)
+        } else {
+            id_input.read(cx).focus_handle(cx)
+        };
+        window.focus(&focus);
+        self.provider_editor = Some(ProviderEditor {
+            original_id: provider_id,
+            in_catalog,
+            id: id_input,
+            name: name_input,
+            base_url: base_url_input,
+            api_key: api_key_input,
+            models: models_input,
+            api,
+            had_api_key,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    pub(super) fn provider_editor_cancel(
+        &mut self,
+        _: &crate::PickerCancel,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let closed =
+            self.provider_editor.take().is_some() | self.provider_key_editor.take().is_some();
+        if closed {
+            cx.notify();
+        }
+    }
+
+    pub(super) fn provider_editor_confirm(
+        &mut self,
+        _: &crate::PickerConfirm,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.provider_key_editor.is_some() {
+            self.provider_key_save(window, cx);
+        } else {
+            self.provider_save(window, cx);
+        }
+    }
+
+    /// Dismiss when the scrim (outside the card) is pressed.
+    pub(super) fn provider_editor_scrim(
+        &mut self,
+        _: &MouseDownEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let closed =
+            self.provider_editor.take().is_some() | self.provider_key_editor.take().is_some();
+        if closed {
+            cx.notify();
+        }
+    }
+
+    /// Validate and write the editor's values to models.json.
+    pub(super) fn provider_save(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.provider_editor.as_ref() else {
+            return;
+        };
+        let id = editor.id.read(cx).text().trim().to_string();
+        let name = editor.name.read(cx).text().trim().to_string();
+        let base_url = editor.base_url.read(cx).text().trim().to_string();
+        let api_key = editor.api_key.read(cx).text();
+        let api = editor.api.clone();
+        let in_catalog = editor.in_catalog;
+        let models: Vec<String> = editor
+            .models
+            .read(cx)
+            .text()
+            .split(['\n', ','])
+            .map(|model| model.trim().to_string())
+            .filter(|model| !model.is_empty())
+            .collect();
+
+        let error = if id.is_empty() {
+            Some("Provider id is required.".to_string())
+        } else if !id
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphanumeric())
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        {
+            Some(
+                "Id must start with a letter or number — letters, numbers, dots, dashes and underscores only."
+                    .to_string(),
+            )
+        } else if !(base_url.is_empty()
+            || base_url.starts_with("http://")
+            || base_url.starts_with("https://"))
+        {
+            Some("Base URL must start with http:// or https://.".to_string())
+        } else if base_url.is_empty() && !in_catalog {
+            Some("Base URL is required for a custom provider.".to_string())
+        } else if models.is_empty() && !in_catalog {
+            Some("Add at least one model id.".to_string())
+        } else {
+            None
+        };
+
+        if let Some(error) = error {
+            if let Some(editor) = self.provider_editor.as_mut() {
+                editor.error = Some(error);
+            }
+            cx.notify();
+            return;
+        }
+
+        let key = (!api_key.trim().is_empty()).then_some(api_key.trim());
+        match providers::write_provider(
+            &id,
+            (!name.is_empty()).then_some(name.as_str()),
+            &base_url,
+            &api,
+            key,
+            &models,
+        ) {
+            Ok(()) => {
+                self.provider_editor = None;
+                self.reload_custom_providers(cx);
+                self.refresh_catalogs();
+                self.set_status(format!(
+                    "Saved {id} — restart pi if it doesn't appear in the catalog"
+                ));
+            }
+            Err(err) => {
+                if let Some(editor) = self.provider_editor.as_mut() {
+                    editor.error = Some(err);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Remove a provider entry from models.json.
+    pub(super) fn provider_remove(&mut self, id: String, cx: &mut Context<Self>) {
+        match providers::remove_provider(&id) {
+            Ok(()) => {
+                self.provider_remove_confirm = None;
+                self.reload_custom_providers(cx);
+                self.refresh_catalogs();
+                self.set_status(format!("Removed provider {id}"));
+            }
+            Err(err) => {
+                self.custom_providers_error = Some(err);
+            }
+        }
+        cx.notify();
+    }
+}
+
+/// The position among `visible` that `dir` moves the settings dropdown's
+/// keyboard cursor to: the current position ± 1, clamped at the ends. A
+/// highlight the query filtered away lands on the first match going down,
+/// the last going up. `None` when nothing is visible.
+fn stepped_visible_position(
+    visible: &[usize],
+    highlight: Option<usize>,
+    dir: isize,
+) -> Option<usize> {
+    if visible.is_empty() {
+        return None;
+    }
+    Some(
+        match highlight.and_then(|ix| visible.iter().position(|visible| *visible == ix)) {
+            Some(pos) => (pos as isize + dir).clamp(0, visible.len() as isize - 1) as usize,
+            None if dir >= 0 => 0,
+            None => visible.len() - 1,
+        },
+    )
+}
+
+#[cfg(test)]
+mod settings_select_tests {
+    use super::stepped_visible_position;
+
+    /// The cursor is an original option index; `visible` holds the indices
+    /// the current query left in the list, in display order.
+    #[test]
+    fn stepping_starts_at_the_first_and_last_match() {
+        let visible = [0, 3, 7];
+        assert_eq!(stepped_visible_position(&visible, None, 1), Some(0));
+        assert_eq!(stepped_visible_position(&visible, None, -1), Some(2));
+    }
+
+    #[test]
+    fn stepping_clamps_at_the_ends() {
+        let visible = [0, 3, 7];
+        assert_eq!(stepped_visible_position(&visible, Some(0), -1), Some(0));
+        assert_eq!(stepped_visible_position(&visible, Some(3), 1), Some(2));
+        assert_eq!(stepped_visible_position(&visible, Some(7), 1), Some(2));
+    }
+
+    #[test]
+    fn stepping_recovers_when_the_query_filtered_the_cursor_away() {
+        let visible = [2, 5];
+        assert_eq!(stepped_visible_position(&visible, Some(4), 1), Some(0));
+        assert_eq!(stepped_visible_position(&visible, Some(4), -1), Some(1));
+    }
+
+    #[test]
+    fn stepping_an_empty_list_stays_put() {
+        assert_eq!(stepped_visible_position(&[], Some(0), 1), None);
+        assert_eq!(stepped_visible_position(&[], None, -1), None);
+    }
+}

@@ -1,0 +1,1579 @@
+//! Model selector popup — a searchable picker popover anchored above the
+//! composer chips.
+//!
+//! Follows the same GPUI conventions as the command palette and the branch
+//! picker:
+//!
+//! - compact raised surface (`menu_bg`, strong border, layered shadow)
+//! - inset search field, then a horizontally scrollable scope row (`All`,
+//!   `Favorites` when any exist, and each provider), then the list
+//! - models are grouped under provider headers (name + count), with
+//!   favorited models pinned under a `Favorites` section at the top; a
+//!   thinking list is flat, one icon-chip row per reasoning level
+//! - every model row carries a star: an accent star at rest for favorites,
+//!   revealed on hover for the rest, so any model can be pinned
+//! - keyboard highlight uses `overlay_strong`; the current choice keeps the
+//!   `active` fill plus an accent check, so "highlighted" and "chosen" never
+//!   read as the same state
+//! - a quiet footer names the keys once, like the command palette
+//! - keyboard navigation: `up`/`down`/`enter`/`escape` are bound to the
+//!   `Picker` key context on the filter input
+
+use gpui::{
+    div, point, prelude::*, px, AnyElement, App, Context, ElementId, Entity, FocusHandle,
+    Focusable, FontWeight, IntoElement, MouseButton, MouseDownEvent, ParentElement, Render,
+    ScrollHandle, SharedString, Styled, Window,
+};
+use std::time::{Duration, Instant};
+
+use crate::app::{icon, icon_dyn, ModelEntry};
+use crate::composer::ComposerInput;
+use crate::context_meter::format_tokens;
+use crate::favorites::Favorites;
+use crate::model_selector_match::is_model_selected;
+use crate::providers::provider_display_name;
+use crate::theme::{self, Theme};
+
+/// Model popover width — room for a scope row, provider header, and two-line
+/// rows.
+const MODEL_POPOVER_W: f32 = 360.;
+/// Thinking popover width — level rows are short, so it hugs tighter than the
+/// model catalog while still fitting the footer legend on one line.
+const THINKING_POPOVER_W: f32 = 300.;
+/// Tight line boxes for a row's two lines (name over context/id), so the
+/// stacked label reads as one block rather than two spaced lines.
+const LABEL_LINE_H: f32 = 16.;
+const SUB_LINE_H: f32 = 14.;
+/// Vertical padding above and below an option row's content.
+const ROW_PAD_V: f32 = 8.;
+/// Uniform option-row height: the two text lines plus the vertical padding,
+/// so the row is taller than its content and breathes on both sides.
+const ROW_H: f32 = LABEL_LINE_H + SUB_LINE_H + 2. * ROW_PAD_V;
+/// Air between list children. Two option rows are separated by `ROW_GAP`
+/// above and below a 1px hairline, so sibling models get `2 * ROW_GAP + 1`
+/// of breathing room while a header hugs its first row.
+const ROW_GAP: f32 = 5.;
+/// Hairline separator drawn between sibling option rows.
+const SEP_H: f32 = 1.;
+/// Provider group header height inside the list.
+const HEADER_H: f32 = 26.;
+/// Largest list height before it scrolls (≈ 6 visible option rows).
+const LIST_MAX_H: f32 = 6. * (ROW_H + ROW_GAP + SEP_H);
+/// Popup shell radius — the popover register (composer is the larger 16).
+const SHELL_RADIUS: f32 = 12.;
+
+/// Which single-section dropdown a picker popup shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerKind {
+    /// Model catalog from `get_available_models`.
+    Model,
+    /// Thinking levels from `get_available_thinking_levels`.
+    Thinking,
+}
+
+/// What the model list is currently scoped to.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum Scope {
+    /// The full catalog, grouped by provider.
+    #[default]
+    All,
+    /// Only favorited models, pinned under a Favorites section.
+    Favorites,
+    /// A single provider, listed flat.
+    Provider(String),
+}
+
+/// One child of the picker list.
+#[derive(Clone)]
+enum Row {
+    /// A group header (`count` option rows follow it). `favorites` marks the
+    /// pinned Favorites section at the top of the model list.
+    Header {
+        provider: String,
+        count: usize,
+        favorites: bool,
+    },
+    /// A thinking level (`level` is the raw pi value; display only).
+    Level { level: String, selected: bool },
+    /// `model_ix` indexes into the full model catalog, so selection survives
+    /// while the filtered set is recomputed every frame.
+    Model { model_ix: usize, selected: bool },
+}
+
+impl Row {
+    fn is_header(&self) -> bool {
+        matches!(self, Row::Header { .. })
+    }
+
+    /// Laid-out height; headers are shorter than option rows.
+    fn height(&self) -> f32 {
+        if self.is_header() {
+            HEADER_H
+        } else {
+            ROW_H
+        }
+    }
+}
+
+/// A single-section model/thinking dropdown. Created by `OrbitApp` when one
+/// of the composer chips is clicked; it talks back exclusively through the
+/// callbacks it was built with, so it never borrows app state.
+pub struct ModelSelector {
+    kind: PickerKind,
+    models: Vec<ModelEntry>,
+    levels: Vec<String>,
+    current_model: String,
+    current_model_id: String,
+    current_model_provider: String,
+    current_level: String,
+    filter: Entity<ComposerInput>,
+    /// The model list scope. Provider scopes drop the group headers (the chip
+    /// already states the provider); Favorites pins its section at the top.
+    scope: Scope,
+    /// Scroll position of the popup's list (keyboard navigation keeps the
+    /// highlighted row in view via this handle).
+    list_scroll: ScrollHandle,
+    highlighted: usize,
+    /// Catalog index of the active model (stable match key).
+    selected_catalog_ix: Option<usize>,
+    /// Ignore hover-driven highlight briefly so opening under the cursor
+    /// doesn't snap back to row 0.
+    suppress_hover_until: Option<Instant>,
+    /// Deferred popovers need a follow-up scroll after layout settles.
+    needs_scroll: bool,
+    last_filter: String,
+    on_select_model: Box<dyn Fn(&str, &str, &mut Window, &mut App)>,
+    on_select_level: Box<dyn Fn(&str, &mut Window, &mut App)>,
+    /// `bool` = dismissed by an outside mouse-down (vs. escape), so the
+    /// owner can suppress the trigger chip's click-through.
+    on_dismiss: Box<dyn Fn(bool, &mut Window, &mut App)>,
+}
+
+impl ModelSelector {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        kind: PickerKind,
+        models: Vec<ModelEntry>,
+        levels: Vec<String>,
+        current_model: String,
+        current_model_id: String,
+        current_model_provider: String,
+        current_level: String,
+        on_select_model: Box<dyn Fn(&str, &str, &mut Window, &mut App)>,
+        on_select_level: Box<dyn Fn(&str, &mut Window, &mut App)>,
+        on_dismiss: Box<dyn Fn(bool, &mut Window, &mut App)>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // The filter input carries both the `Composer` context (so backspace,
+        // paste, etc. keep working) and the `Picker` flag (so the picker's
+        // enter/escape/arrows take precedence at the same dispatch depth).
+        let placeholder = match kind {
+            PickerKind::Model => "Search models…",
+            PickerKind::Thinking => "Search levels…",
+        };
+        let filter = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("picker-filter")
+                .with_placeholder(placeholder)
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+        });
+        let selected_catalog_ix = Self::resolve_selected_catalog_ix(
+            kind,
+            &models,
+            &levels,
+            &current_model,
+            &current_model_id,
+            &current_model_provider,
+            &current_level,
+        );
+        let rows = Self::rows_for(
+            kind,
+            &models,
+            &levels,
+            &current_level,
+            selected_catalog_ix,
+            &Scope::All,
+            &Favorites::default(),
+            "",
+        );
+        let mut list_scroll = ScrollHandle::new();
+        if let Some(ix) = Self::selected_row_index(&rows) {
+            Self::apply_scroll_to_row(&mut list_scroll, &rows, ix);
+        }
+        let highlighted = Self::first_selectable(&rows).unwrap_or(0);
+        Self {
+            kind,
+            models,
+            levels,
+            current_model,
+            current_model_id,
+            current_model_provider,
+            current_level,
+            filter,
+            scope: Scope::All,
+            list_scroll,
+            highlighted,
+            selected_catalog_ix,
+            suppress_hover_until: Some(Instant::now() + Duration::from_millis(400)),
+            needs_scroll: true,
+            last_filter: String::new(),
+            on_select_model,
+            on_select_level,
+            on_dismiss,
+        }
+    }
+
+    fn resolve_selected_catalog_ix(
+        kind: PickerKind,
+        models: &[ModelEntry],
+        levels: &[String],
+        current_model: &str,
+        current_model_id: &str,
+        current_model_provider: &str,
+        current_level: &str,
+    ) -> Option<usize> {
+        match kind {
+            PickerKind::Model => models.iter().position(|model| {
+                is_model_selected(
+                    model,
+                    current_model,
+                    current_model_id,
+                    current_model_provider,
+                )
+            }),
+            PickerKind::Thinking => levels
+                .iter()
+                .position(|level| level.eq_ignore_ascii_case(current_level)),
+        }
+    }
+
+    fn refresh_selected_catalog_ix(&mut self) {
+        self.selected_catalog_ix = Self::resolve_selected_catalog_ix(
+            self.kind,
+            &self.models,
+            &self.levels,
+            &self.current_model,
+            &self.current_model_id,
+            &self.current_model_provider,
+            &self.current_level,
+        );
+    }
+
+    /// The visible list children for `needle`, scoped to `scoped_provider`.
+    /// Unscoped, model rows group under a provider header (providers in
+    /// first-appearance order, catalog order within a provider); scoped, the
+    /// list is flat because the chip already states the provider. Thinking
+    /// levels are always flat. Filtering is a case-insensitive substring
+    /// match on name/id/provider/level.
+    fn rows_for(
+        kind: PickerKind,
+        models: &[ModelEntry],
+        levels: &[String],
+        current_level: &str,
+        selected_catalog_ix: Option<usize>,
+        scope: &Scope,
+        favorites: &Favorites,
+        needle: &str,
+    ) -> Vec<Row> {
+        let matches = |text: &str| needle.is_empty() || text.to_lowercase().contains(needle);
+        let mut rows = Vec::new();
+
+        if kind == PickerKind::Thinking {
+            for level in levels.iter().filter(|level| {
+                matches(level) || matches(&thinking_display(level)) || matches(thinking_hint(level))
+            }) {
+                rows.push(Row::Level {
+                    level: level.clone(),
+                    selected: level.eq_ignore_ascii_case(current_level),
+                });
+            }
+            return rows;
+        }
+
+        let in_scope = |model: &ModelEntry| -> bool {
+            match scope {
+                Scope::All => true,
+                Scope::Favorites => favorites.contains(&model.provider, &model.id),
+                Scope::Provider(provider) => &model.provider == provider,
+            }
+        };
+        // Scope and text filter are independent: the Favorites scope still
+        // honors the search box.
+        let included = |model: &ModelEntry| -> bool {
+            in_scope(model)
+                && (matches(&model.name) || matches(&model.id) || matches(&model.provider))
+        };
+
+        // In the All scope, favorite models are pinned under their own header
+        // at the top of the list, and their provider group skips them so no
+        // model appears twice.
+        let mut pinned: Vec<usize> = Vec::new();
+        if *scope == Scope::All && !favorites.is_empty() {
+            pinned = models
+                .iter()
+                .enumerate()
+                .filter(|(_, model)| {
+                    favorites.contains(&model.provider, &model.id) && included(model)
+                })
+                .map(|(ix, _)| ix)
+                .collect();
+            if !pinned.is_empty() {
+                rows.push(Row::Header {
+                    provider: String::new(),
+                    count: pinned.len(),
+                    favorites: true,
+                });
+                for ix in &pinned {
+                    rows.push(Row::Model {
+                        model_ix: *ix,
+                        selected: selected_catalog_ix == Some(*ix),
+                    });
+                }
+            }
+        }
+        let is_pinned = |ix: usize| pinned.contains(&ix);
+
+        let mut providers: Vec<String> = Vec::new();
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for (ix, model) in models.iter().enumerate() {
+            if !included(model) || is_pinned(ix) {
+                continue;
+            }
+            match providers.iter().position(|p| p == &model.provider) {
+                Some(pos) => groups[pos].push(ix),
+                None => {
+                    providers.push(model.provider.clone());
+                    groups.push(vec![ix]);
+                }
+            }
+        }
+        for (provider, group) in providers.iter().zip(groups) {
+            // A provider scope and the Favorites scope are stated by the
+            // chip, so only the All scope needs group headers.
+            if *scope == Scope::All {
+                rows.push(Row::Header {
+                    provider: provider.clone(),
+                    count: group.len(),
+                    favorites: false,
+                });
+            }
+            for ix in group {
+                rows.push(Row::Model {
+                    model_ix: ix,
+                    selected: selected_catalog_ix == Some(ix),
+                });
+            }
+        }
+        rows
+    }
+
+    fn rows(&self, needle: &str) -> Vec<Row> {
+        Self::rows_for(
+            self.kind,
+            &self.models,
+            &self.levels,
+            &self.current_level,
+            self.selected_catalog_ix,
+            &self.scope,
+            &crate::favorites::all(),
+            needle,
+        )
+    }
+
+    /// Distinct providers in catalog (first-appearance) order, for the scope
+    /// chips.
+    fn providers(&self) -> Vec<String> {
+        let mut providers: Vec<String> = Vec::new();
+        for model in &self.models {
+            if !providers.contains(&model.provider) {
+                providers.push(model.provider.clone());
+            }
+        }
+        providers
+    }
+
+    /// Apply a scope from the chip row. Keeps the text filter, resets the
+    /// scroll, and re-pins the highlight to the chosen model when it falls
+    /// in scope.
+    fn set_scope(&mut self, scope: Scope, cx: &mut Context<Self>) {
+        if self.scope == scope {
+            return;
+        }
+        self.scope = scope;
+        self.list_scroll.set_offset(point(px(0.), px(0.)));
+        self.block_hover_highlight();
+        self.needs_scroll = true;
+        cx.notify();
+    }
+
+    /// Toggle a model as a favorite; the list and its pinned section refresh.
+    fn toggle_favorite(&mut self, model_ix: usize, cx: &mut Context<Self>) {
+        let Some(model) = self.models.get(model_ix) else {
+            return;
+        };
+        let (provider, id) = (model.provider.clone(), model.id.clone());
+        crate::favorites::toggle(&provider, &id);
+        self.block_hover_highlight();
+        self.needs_scroll = true;
+        cx.notify();
+    }
+
+    /// Scope chips: `All`, a `Favorites` star when any exist, then each
+    /// catalog provider — one horizontally scrollable row.
+    fn scope_row(&self, theme: Theme, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let this = cx.weak_entity();
+        let favorites = crate::favorites::all();
+        let mut entries: Vec<(String, Scope, &'static str)> =
+            vec![("All".to_string(), Scope::All, "icons/extensions.svg")];
+        if !favorites.is_empty() {
+            entries.push(("Favorites".to_string(), Scope::Favorites, "icons/star.svg"));
+        }
+        entries.extend(self.providers().into_iter().map(|provider| {
+            (
+                provider_display_name(&provider),
+                Scope::Provider(provider),
+                "",
+            )
+        }));
+
+        let mut row = div()
+            .id("picker-scope")
+            .w_full()
+            .h(px(40.))
+            .flex_none()
+            .px(px(14.))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .border_b_1()
+            .border_color(theme.border)
+            .overflow_x_scroll();
+        for (ix, (label, scope, static_icon)) in entries.into_iter().enumerate() {
+            let active = self.scope == scope;
+            let brand = if active {
+                theme.active_fg
+            } else {
+                theme.text_3
+            };
+            // `All`/`Favorites` carry a static glyph; each provider chip
+            // carries its own brand mark.
+            let lead = match &scope {
+                Scope::Provider(provider) => {
+                    icon_dyn(provider_icon(provider), 13., brand).into_any_element()
+                }
+                _ => icon(static_icon, 13., brand).into_any_element(),
+            };
+            let chip_id = ElementId::NamedInteger("scope-chip".into(), ix as u64);
+            let this = this.clone();
+            row = row.child(scope_chip(
+                chip_id,
+                label,
+                lead,
+                active,
+                theme,
+                move |_, cx| {
+                    this.update(cx, |selector, cx| selector.set_scope(scope.clone(), cx))
+                        .ok();
+                },
+            ));
+        }
+
+        // Favorites are always reachable: a trailing "+" chip pins the
+        // currently active model when it isn't favorited yet.
+        if favorites.is_empty() {
+            if let Some(ix) = self.selected_catalog_ix {
+                if let Some(model) = self.models.get(ix) {
+                    let id = format!("favorite-current-{}", model.id);
+                    let this = this.clone();
+                    row = row.child(scope_chip(
+                        ElementId::Name(id.into()),
+                        "Favorite current".to_string(),
+                        icon("icons/star.svg", 13., theme.text_3).into_any_element(),
+                        false,
+                        theme,
+                        move |_, cx| {
+                            this.update(cx, |selector, cx| selector.toggle_favorite(ix, cx))
+                                .ok();
+                        },
+                    ));
+                }
+            }
+        }
+        row
+    }
+
+    fn selected_row_index(rows: &[Row]) -> Option<usize> {
+        rows.iter().position(|row| match row {
+            Row::Model { selected, .. } | Row::Level { selected, .. } => *selected,
+            Row::Header { .. } => false,
+        })
+    }
+
+    fn first_selectable(rows: &[Row]) -> Option<usize> {
+        rows.iter().position(|row| !row.is_header())
+    }
+
+    /// Whether a hairline separator follows row `ix` — only between two
+    /// sibling option rows (headers carry their own separation).
+    fn separator_after(rows: &[Row], ix: usize) -> bool {
+        ix + 1 < rows.len() && !rows[ix].is_header() && !rows[ix + 1].is_header()
+    }
+
+    fn content_height(rows: &[Row]) -> f32 {
+        if rows.is_empty() {
+            return 0.;
+        }
+        let rows_h: f32 = rows.iter().map(Row::height).sum();
+        let seps = (0..rows.len())
+            .filter(|&ix| Self::separator_after(rows, ix))
+            .count();
+        let children = rows.len() + seps;
+        rows_h + seps as f32 * SEP_H + (children - 1) as f32 * ROW_GAP
+    }
+
+    /// Pixel offset of a row's top edge, accounting for the separators and
+    /// gaps interleaved between list children.
+    fn row_top(rows: &[Row], ix: usize) -> f32 {
+        let mut y = 0.;
+        for i in 0..ix {
+            y += rows[i].height() + ROW_GAP;
+            if Self::separator_after(rows, i) {
+                y += SEP_H + ROW_GAP;
+            }
+        }
+        y
+    }
+
+    fn apply_scroll_to_row(list_scroll: &mut ScrollHandle, rows: &[Row], ix: usize) {
+        if ix >= rows.len() {
+            return;
+        }
+        let content_h = Self::content_height(rows);
+        let viewport_h = content_h.min(LIST_MAX_H);
+        let row_top = Self::row_top(rows, ix);
+        let row_h = rows[ix].height();
+        let max_offset = (content_h - viewport_h).max(0.);
+        let centered = row_top - (viewport_h - row_h) / 2.0;
+        let offset = centered.clamp(0., max_offset);
+        list_scroll.set_offset(point(px(0.), px(-offset)));
+    }
+
+    fn hover_highlight_blocked(&self) -> bool {
+        self.suppress_hover_until
+            .is_some_and(|until| Instant::now() < until)
+    }
+
+    fn block_hover_highlight(&mut self) {
+        self.suppress_hover_until = Some(Instant::now() + Duration::from_millis(400));
+    }
+
+    /// Live catalog refresh while the popup is open (pi re-reports these
+    /// after `set_model`, session switches, etc.).
+    pub fn set_catalog(
+        &mut self,
+        models: Vec<ModelEntry>,
+        levels: Vec<String>,
+        current_model: String,
+        current_model_id: String,
+        current_model_provider: String,
+        current_level: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.models = models;
+        self.levels = levels;
+        self.current_model = current_model;
+        self.current_model_id = current_model_id;
+        self.current_model_provider = current_model_provider;
+        self.current_level = current_level;
+        self.refresh_selected_catalog_ix();
+        // Drop a provider scope whose provider left the catalog, and fall
+        // back from Favorites when the last one was removed.
+        match &self.scope {
+            Scope::Provider(provider)
+                if !self.models.iter().any(|model| &model.provider == provider) =>
+            {
+                self.scope = Scope::All;
+            }
+            Scope::Favorites if crate::favorites::all().is_empty() => {
+                self.scope = Scope::All;
+            }
+            _ => {}
+        }
+        let rows = self.rows("");
+        if let Some(ix) = Self::selected_row_index(&rows) {
+            Self::apply_scroll_to_row(&mut self.list_scroll, &rows, ix);
+        }
+        self.block_hover_highlight();
+        self.needs_scroll = true;
+        cx.notify();
+    }
+
+    // ── actions (Picker key context) ──────────────────────────────────────
+
+    fn on_cancel(&mut self, _: &crate::PickerCancel, window: &mut Window, cx: &mut Context<Self>) {
+        (self.on_dismiss)(false, window, cx);
+    }
+
+    fn on_confirm(
+        &mut self,
+        _: &crate::PickerConfirm,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rows = self.rows(&self.last_filter);
+        self.activate(self.highlighted, &rows, window, cx);
+    }
+
+    fn on_next(&mut self, _: &crate::PickerSelectNext, _: &mut Window, cx: &mut Context<Self>) {
+        self.step(1, cx);
+    }
+
+    fn on_prev(&mut self, _: &crate::PickerSelectPrev, _: &mut Window, cx: &mut Context<Self>) {
+        self.step(-1, cx);
+    }
+
+    /// Outside mouse-down anywhere dismisses the popup.
+    fn on_outside_down(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        (self.on_dismiss)(true, window, cx);
+    }
+
+    // ── internals ─────────────────────────────────────────────────────────
+
+    fn defer_scroll(&self, ix: usize, rows: Vec<Row>, cx: &mut Context<Self>) {
+        for delay in [16_u64, 50, 120, 250] {
+            let this = cx.weak_entity();
+            let rows = rows.clone();
+            cx.spawn(async move |_, cx| {
+                gpui::Timer::after(Duration::from_millis(delay)).await;
+                this.update(cx, |selector, cx| {
+                    selector.scroll_to_row(ix, &rows);
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    fn scroll_to_row(&mut self, ix: usize, rows: &[Row]) {
+        Self::apply_scroll_to_row(&mut self.list_scroll, rows, ix);
+    }
+
+    /// Move the highlight one option, skipping provider headers so the
+    /// keyboard cursor never lands on a label. Clamps at the ends.
+    fn step(&mut self, dir: isize, cx: &mut Context<Self>) {
+        let rows = self.rows(&self.last_filter);
+        if rows.is_empty() {
+            return;
+        }
+        let mut next = self.highlighted.min(rows.len() - 1);
+        loop {
+            let candidate = next as isize + dir;
+            if candidate < 0 || candidate >= rows.len() as isize {
+                break;
+            }
+            next = candidate as usize;
+            if !rows[next].is_header() {
+                break;
+            }
+        }
+        self.highlighted = next;
+        self.scroll_to_row(next, &rows);
+        cx.notify();
+    }
+
+    fn activate(&mut self, ix: usize, rows: &[Row], window: &mut Window, cx: &mut Context<Self>) {
+        match rows.get(ix) {
+            Some(Row::Model { model_ix, .. }) => {
+                let (id, provider) = {
+                    let model = &self.models[*model_ix];
+                    (model.id.clone(), model.provider.clone())
+                };
+                (self.on_select_model)(&id, &provider, window, cx);
+            }
+            Some(Row::Level { level, .. }) => {
+                let level = level.clone();
+                (self.on_select_level)(&level, window, cx);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Focusable for ModelSelector {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.filter.read(cx).focus_handle(cx)
+    }
+}
+
+impl Render for ModelSelector {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let needle = self.filter.read(cx).text().to_lowercase();
+        let rows = self.rows(&needle);
+        if needle != self.last_filter {
+            self.last_filter = needle.clone();
+            self.list_scroll.set_offset(point(px(0.), px(0.)));
+            if needle.is_empty() {
+                self.block_hover_highlight();
+                self.needs_scroll = true;
+            } else if let Some(ix) = Self::first_selectable(&rows) {
+                self.highlighted = ix;
+            }
+        }
+
+        // Pin the highlight to the active model on open and after async
+        // catalog refresh; a typed query owns the highlight instead, so it
+        // lands on the first match rather than snapping back to the choice.
+        let pin_to_selection =
+            self.needs_scroll || (self.hover_highlight_blocked() && needle.is_empty());
+        if pin_to_selection {
+            if let Some(ix) = Self::selected_row_index(&rows) {
+                self.highlighted = ix;
+                self.scroll_to_row(ix, &rows);
+                if self.needs_scroll {
+                    self.defer_scroll(ix, rows.clone(), cx);
+                }
+            } else if let Some(ix) = Self::first_selectable(&rows) {
+                self.highlighted = ix;
+            }
+            self.needs_scroll = false;
+        } else if !rows.is_empty() {
+            self.highlighted = self.highlighted.min(rows.len() - 1);
+            if rows[self.highlighted].is_header() {
+                if let Some(ix) = Self::first_selectable(&rows) {
+                    self.highlighted = ix;
+                }
+            }
+        }
+
+        let this = cx.entity();
+        let theme = *theme::get(cx);
+        let width = match self.kind {
+            PickerKind::Model => MODEL_POPOVER_W,
+            PickerKind::Thinking => THINKING_POPOVER_W,
+        };
+        let option_count = rows.iter().filter(|row| !row.is_header()).count();
+        let count_label = match self.kind {
+            PickerKind::Thinking => format!("{option_count} levels"),
+            PickerKind::Model => match self.scope {
+                Scope::Favorites => format!("{option_count} favorites"),
+                _ => format!("{option_count} models"),
+            },
+        };
+
+        // Plain scrollable list — the same shape Zed's `ContextMenu` uses for
+        // menu bodies. Rows are ordinary children, so nothing depends on
+        // measured-layout sizing inside the deferred popover.
+        let mut list = div()
+            .id("picker-list")
+            .w_full()
+            .max_h(px(LIST_MAX_H))
+            .overflow_y_scroll()
+            .track_scroll(&self.list_scroll)
+            .px(px(4.))
+            .pt(px(4.))
+            .pb(px(8.))
+            .flex()
+            .flex_col()
+            .gap(px(ROW_GAP));
+        for ix in 0..rows.len() {
+            list = list.child(render_row(
+                &rows,
+                &self.models,
+                ix,
+                ix == self.highlighted,
+                &this,
+                theme,
+            ));
+            if Self::separator_after(&rows, ix) {
+                list = list.child(separator(theme));
+            }
+        }
+
+        div()
+            .w(px(width))
+            .font_family(theme::ui_font_family())
+            .rounded(px(SHELL_RADIUS))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.menu_bg)
+            .shadow(theme.popover_shadow())
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .occlude()
+            // any mouse-down outside the popup dismisses it
+            .on_mouse_down_out(cx.listener(Self::on_outside_down))
+            .on_action(cx.listener(Self::on_cancel))
+            .on_action(cx.listener(Self::on_confirm))
+            .on_action(cx.listener(Self::on_next))
+            .on_action(cx.listener(Self::on_prev))
+            // search field — grouped above the list with a divider
+            .child(
+                div()
+                    .h(px(40.))
+                    .flex_none()
+                    .px(px(14.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .text_size(theme.ui_px(13.))
+                    .child(icon("icons/search.svg", 14., theme.text_3))
+                    .child(self.filter.clone()),
+            )
+            // provider scope chips (models only) — one row, horizontally
+            // scrollable, so the popover never grows from a wrapped chip row
+            .children((self.kind == PickerKind::Model).then(|| self.scope_row(theme, cx)))
+            .child(if rows.is_empty() {
+                empty_state(self.kind, theme).into_any_element()
+            } else {
+                list.into_any_element()
+            })
+            .child(footer(count_label, theme))
+    }
+}
+
+/// Icon + tint for a pi thinking level (HugeIcons stroke set in
+/// `assets/icons/`). Mapping: idea-01 (off/none), idea (low/minimal), brain
+/// (medium), brain-02 (high), ai-brain-02 (xhigh/ultra), ai-brain-03 (max),
+/// sparkles (auto). Unknown levels fall back to the plain spark.
+pub(crate) fn thinking_icon(level: &str, theme: &Theme) -> (&'static str, gpui::Hsla) {
+    match level.to_ascii_lowercase().as_str() {
+        "off" | "none" => ("icons/thinking-none.svg", theme.text_3),
+        "minimal" | "low" => ("icons/thinking-low.svg", theme.accent),
+        "medium" => ("icons/thinking-medium.svg", theme.accent),
+        "high" => ("icons/thinking-high.svg", theme.accent),
+        "xhigh" | "ultra" => ("icons/thinking-xhigh.svg", theme.accent),
+        "max" => ("icons/thinking-max.svg", theme.accent),
+        "auto" => ("icons/thinking-auto.svg", theme.accent),
+        _ => ("icons/spark.svg", theme.accent),
+    }
+}
+
+/// Brand glyph for a pi provider — mono SVGs from [theSVG.org]
+/// (https://thesvg.org), embedded under `assets/icons/providers/` and named
+/// by provider id. Every pi built-in provider has a mark; unknown or
+/// user-defined providers (custom `models.json` entries) fall back to a
+/// neutral cloud glyph.
+pub(crate) fn provider_icon(provider: &str) -> SharedString {
+    const KNOWN: &[&str] = &[
+        "amazon-bedrock",
+        "ant-ling",
+        "anthropic",
+        "azure-openai-responses",
+        "baseten",
+        "cerebras",
+        "cloudflare-ai-gateway",
+        "cloudflare-workers-ai",
+        "deepseek",
+        "fireworks",
+        "github-copilot",
+        "google",
+        "google-vertex",
+        "groq",
+        "huggingface",
+        "kimi-coding",
+        "minimax",
+        "minimax-cn",
+        "mistral",
+        "moonshotai",
+        "moonshotai-cn",
+        "nvidia",
+        "ollama",
+        "openai",
+        "openai-codex",
+        "opencode",
+        "opencode-go",
+        "openrouter",
+        "qwen-token-plan",
+        "qwen-token-plan-cn",
+        "qwen-token-plan-individual",
+        "together",
+        "vercel-ai-gateway",
+        "xai",
+        "xiaomi",
+        "xiaomi-token-plan-ams",
+        "xiaomi-token-plan-cn",
+        "xiaomi-token-plan-sgp",
+        "zai",
+        "zai-coding-cn",
+    ];
+    if KNOWN.contains(&provider) {
+        format!("icons/providers/{provider}.svg").into()
+    } else {
+        "icons/cloud.svg".into()
+    }
+}
+
+/// Display form of a pi thinking level: `high` → `High` (capitalization is
+/// presentational; the value stays pi's).
+pub(crate) fn thinking_display(level: &str) -> String {
+    let mut chars = level.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Short hint shown under the thinking level label in the picker.
+fn thinking_hint(level: &str) -> &'static str {
+    match level.to_ascii_lowercase().as_str() {
+        "off" | "none" => "No reasoning",
+        "minimal" | "low" => "Fast reasoning",
+        "medium" => "Balanced reasoning",
+        "high" => "Deeper reasoning",
+        "xhigh" | "ultra" => "Extensive reasoning",
+        "max" => "Maximum reasoning",
+        "auto" => "Model chooses depth",
+        _ => "Custom reasoning level",
+    }
+}
+
+/// Icon chip in the thinking picker rows — sized like sidebar session chips
+/// so HugeIcons glyphs read clearly (some levels use small artwork in the
+/// 24×24 viewBox, e.g. minimal’s dot).
+const THINKING_CHIP: f32 = 28.;
+const THINKING_ICON: f32 = 15.;
+
+fn trailing_check(selected: bool, theme: Theme) -> impl IntoElement + use<> {
+    div()
+        .w(px(14.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(if selected {
+            icon("icons/check.svg", 12., theme.accent).into_any_element()
+        } else {
+            div().into_any_element()
+        })
+}
+
+fn thinking_chip(level: &str, selected: bool, theme: Theme) -> impl IntoElement + use<> {
+    let (path, color) = thinking_icon(level, &theme);
+    let is_off = level.eq_ignore_ascii_case("off");
+    div()
+        .size(px(THINKING_CHIP))
+        .flex_none()
+        .rounded(px(7.))
+        .bg(if selected && !is_off {
+            theme.accent.opacity(0.14)
+        } else {
+            theme.bg_raised
+        })
+        .border_1()
+        .border_color(if selected && !is_off {
+            theme.accent.opacity(0.35)
+        } else {
+            theme.border
+        })
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(icon(path, THINKING_ICON, color))
+}
+
+/// Brand-mark chip leading a model row — the same 28px raised square as the
+/// thinking rows, so both pickers share one leading-mark rhythm.
+fn provider_chip(provider: &str, selected: bool, theme: Theme) -> impl IntoElement + use<> {
+    div()
+        .size(px(THINKING_CHIP))
+        .flex_none()
+        .rounded(px(7.))
+        .bg(theme.bg_raised)
+        .border_1()
+        .border_color(theme.border)
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(icon_dyn(
+            provider_icon(provider),
+            THINKING_ICON,
+            if selected { theme.text } else { theme.text_2 },
+        ))
+}
+
+/// Hairline separator between sibling option rows, inset to align with the
+/// row content rather than the popover edge.
+fn separator(theme: Theme) -> impl IntoElement + use<> {
+    div().h(px(SEP_H)).flex_none().mx(px(10.)).bg(theme.border)
+}
+
+/// A scope chip in the picker's top row: optional leading glyph, label, and
+/// the active fill. Shared by `All`, `Favorites`, and every provider chip.
+fn scope_chip(
+    id: ElementId,
+    label: String,
+    lead: AnyElement,
+    active: bool,
+    theme: Theme,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> gpui::AnyElement {
+    div()
+        .id(id)
+        .h(px(28.))
+        .px(px(9.))
+        .flex_none()
+        .rounded(px(7.))
+        .border_1()
+        .border_color(if active {
+            theme.border_strong
+        } else {
+            theme.border
+        })
+        .bg(if active {
+            theme.active
+        } else {
+            theme.bg_raised
+        })
+        .text_size(theme.ui_px(12.))
+        .text_color(if active {
+            theme.active_fg
+        } else {
+            theme.text_2
+        })
+        .cursor_pointer()
+        .when(!active, |chip| chip.hover(|s| s.bg(theme.bg_hover)))
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .on_click(move |_, window, cx| on_click(window, cx))
+        .child(lead)
+        .child(label)
+        .into_any_element()
+}
+
+/// Row action that toggles a model's favorite state. A favorited model keeps
+/// its accent star visible at rest; a hovered row reveals the control for
+/// every model, so any of them can be pinned.
+fn favorite_button(
+    favorited: bool,
+    theme: Theme,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> gpui::AnyElement {
+    div()
+        .size(px(24.))
+        .flex_none()
+        .rounded(px(6.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .group_hover("picker-row", |s| s.opacity(1.))
+        .when(!favorited, |button| button.opacity(0.))
+        .hover(|s| s.bg(theme.overlay))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            // Keep the row's own click (model selection) from also firing.
+            cx.stop_propagation();
+            on_click(window, cx);
+        })
+        .child(icon(
+            "icons/star.svg",
+            13.,
+            if favorited {
+                theme.accent
+            } else {
+                theme.text_3
+            },
+        ))
+        .into_any_element()
+}
+
+/// Group header: an optional leading glyph, an uppercase label, and the
+/// group count pushed right. Used for both provider groups and the pinned
+/// Favorites section, so the two read as the same register.
+fn group_header(
+    label: &str,
+    glyph: Option<&'static str>,
+    count: usize,
+    theme: Theme,
+) -> impl IntoElement + use<> {
+    div()
+        .h(px(HEADER_H))
+        .px(px(10.))
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .children(glyph.map(|path| icon(path, 12., theme.text_3)))
+        .child(
+            div()
+                .text_size(theme.ui_px(10.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text_3)
+                .child(label.to_string()),
+        )
+        .child(div().flex_1())
+        .child(
+            div()
+                .text_size(theme.ui_px(10.5))
+                .text_color(theme.text_3)
+                .child(count.to_string()),
+        )
+}
+
+fn empty_state(kind: PickerKind, theme: Theme) -> impl IntoElement + use<> {
+    let (title, hint) = match kind {
+        PickerKind::Model => ("No matching models", "Try a provider, model, or id"),
+        PickerKind::Thinking => ("No matching levels", "Try a reasoning level"),
+    };
+    div()
+        .h(px(120.))
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(6.))
+        .child(icon("icons/search.svg", 18., theme.text_3))
+        .child(
+            div()
+                .text_size(theme.ui_px(13.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text_2)
+                .child(title),
+        )
+        .child(
+            div()
+                .text_size(theme.ui_px(12.))
+                .text_color(theme.text_3)
+                .child(hint),
+        )
+}
+
+/// Footer: the live option count on the left, a quiet keyboard legend on the
+/// right (the palette names its keys once, so the pickers do too).
+fn footer(count_label: String, theme: Theme) -> impl IntoElement + use<> {
+    div()
+        .h(px(30.))
+        .flex_none()
+        .px(px(14.))
+        .flex()
+        .items_center()
+        .gap(px(12.))
+        .border_t_1()
+        .border_color(theme.border)
+        .text_size(theme.ui_px(11.))
+        .text_color(theme.text_3)
+        .child(count_label)
+        .child(div().flex_1())
+        .child("↑↓ Navigate")
+        .child("⏎ Select")
+        .child("Esc Close")
+}
+
+fn label_column<P: IntoElement, S: IntoElement>(
+    primary: P,
+    secondary: S,
+    selected: bool,
+    secondary_mono: bool,
+    theme: Theme,
+) -> impl IntoElement + use<P, S> {
+    let secondary_text = div()
+        .w_full()
+        .truncate()
+        .text_size(theme.ui_px(11.))
+        .line_height(theme.ui_px(SUB_LINE_H))
+        .text_color(theme.text_3)
+        .child(secondary);
+    let secondary_text = if secondary_mono {
+        secondary_text.font_family(theme::code_font_family())
+    } else {
+        secondary_text
+    };
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .justify_center()
+        .child(
+            div()
+                .w_full()
+                .truncate()
+                .text_size(theme.ui_px(13.))
+                .line_height(theme.ui_px(LABEL_LINE_H))
+                .font_weight(if selected {
+                    FontWeight::MEDIUM
+                } else {
+                    FontWeight::NORMAL
+                })
+                .text_color(if selected {
+                    theme.active_fg
+                } else {
+                    theme.text_2
+                })
+                .child(primary),
+        )
+        .child(secondary_text)
+}
+
+fn render_row(
+    rows: &[Row],
+    models: &[ModelEntry],
+    ix: usize,
+    highlighted: bool,
+    this: &Entity<ModelSelector>,
+    theme: Theme,
+) -> gpui::AnyElement {
+    let row = &rows[ix];
+
+    if let Row::Header {
+        provider,
+        count,
+        favorites,
+    } = row
+    {
+        // The Favorites section leads the model list; render it with the star
+        // glyph and the same uppercase/metrics register as a provider header.
+        return if *favorites {
+            group_header("FAVORITES", Some("icons/star.svg"), *count, theme).into_any_element()
+        } else {
+            group_header(
+                &provider_display_name(provider).to_uppercase(),
+                None,
+                *count,
+                theme,
+            )
+            .into_any_element()
+        };
+    }
+
+    let selected = match row {
+        Row::Level { selected, .. } | Row::Model { selected, .. } => *selected,
+        Row::Header { .. } => false,
+    };
+    let is_favorite = match row {
+        Row::Model { model_ix, .. } => {
+            let model = &models[*model_ix];
+            crate::favorites::contains(&model.provider, &model.id)
+        }
+        _ => false,
+    };
+    let this = this.clone();
+
+    let row_shell = |content: gpui::Div| {
+        content
+            .id(ElementId::NamedInteger("picker-row".into(), ix as u64))
+            .group("picker-row")
+            .min_h(px(ROW_H))
+            .py(px(ROW_PAD_V))
+            .px(px(10.))
+            .rounded(px(8.))
+            .cursor_pointer()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .on_hover({
+                let this = this.clone();
+                move |hovering, _, cx| {
+                    if *hovering {
+                        this.update(cx, |selector, cx| {
+                            if selector.hover_highlight_blocked() {
+                                return;
+                            }
+                            if selector.highlighted != ix {
+                                selector.highlighted = ix;
+                                cx.notify();
+                            }
+                        });
+                    }
+                }
+            })
+            .on_click({
+                let this = this.clone();
+                move |_, window, cx| {
+                    this.update(cx, |selector, cx| {
+                        let rows = selector.rows(&selector.last_filter);
+                        selector.activate(ix, &rows, window, cx);
+                    });
+                }
+            })
+            // Keyboard/hover cursor and the chosen option are separate
+            // states: the cursor is a wash, the choice keeps the fill.
+            .when(highlighted, |row| row.bg(theme.overlay_strong))
+            .when(!highlighted && selected, |row| row.bg(theme.active))
+            .when(!highlighted && !selected, |row| {
+                row.hover(|style| style.bg(theme.overlay))
+            })
+    };
+
+    match row {
+        Row::Level { level, .. } => row_shell(div())
+            .child(thinking_chip(level, selected, theme))
+            .child(label_column(
+                thinking_display(level),
+                thinking_hint(level),
+                selected,
+                false,
+                theme,
+            ))
+            .child(trailing_check(selected, theme))
+            .into_any_element(),
+        Row::Model { model_ix, .. } => {
+            let model = &models[*model_ix];
+            // Secondary line: the context window is the decision-relevant
+            // fact when pi reports it; otherwise the machine id (mono), then
+            // the provider name as a last resort.
+            let (secondary, mono) = match model.context_window {
+                Some(tokens) => (format!("{} context window", format_tokens(tokens)), false),
+                None => {
+                    let id = model.id.trim();
+                    if id.is_empty() {
+                        (provider_display_name(&model.provider), false)
+                    } else {
+                        (model.id.clone(), true)
+                    }
+                }
+            };
+            let model_ix = *model_ix;
+            let this_fav = this.clone();
+            row_shell(div())
+                .child(provider_chip(&model.provider, selected, theme))
+                .child(label_column(
+                    model.name.clone(),
+                    secondary,
+                    selected,
+                    mono,
+                    theme,
+                ))
+                .child(favorite_button(is_favorite, theme, move |_, cx| {
+                    this_fav.update(cx, |selector, cx| {
+                        selector.toggle_favorite(model_ix, cx);
+                    });
+                }))
+                .child(trailing_check(selected, theme))
+                .into_any_element()
+        }
+        Row::Header { .. } => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn model_rows(n: usize) -> Vec<Row> {
+        (0..n)
+            .map(|model_ix| Row::Model {
+                model_ix,
+                selected: false,
+            })
+            .collect()
+    }
+
+    fn offset_for(ix: usize, row_count: usize) -> f32 {
+        let rows = model_rows(row_count);
+        let mut scroll = ScrollHandle::new();
+        ModelSelector::apply_scroll_to_row(&mut scroll, &rows, ix);
+        scroll.offset().y.into()
+    }
+
+    #[test]
+    fn scroll_offset_is_negative_when_scrolled_down() {
+        // gpui's `set_offset` is a negative value for a scrolled-down list
+        // (clamped to [-max, 0]); a positive value would be clamped to 0.
+        assert!(offset_for(20, 30) < 0.);
+    }
+
+    #[test]
+    fn scroll_offset_zero_at_top() {
+        assert_eq!(offset_for(0, 30), 0.);
+    }
+
+    #[test]
+    fn scroll_offset_centers_selected_row() {
+        let offset = offset_for(20, 30);
+        // Row 20's top sits below the centered 6-row viewport; the scrolled
+        // offset places the row fully within it.
+        let row_top = ModelSelector::row_top(&model_rows(30), 20);
+        let viewport_h = LIST_MAX_H;
+        assert!(row_top + offset >= 0.);
+        assert!(row_top + offset <= viewport_h - ROW_H + 0.5);
+    }
+
+    #[test]
+    fn headers_shift_scroll_math() {
+        let mut rows = vec![Row::Header {
+            provider: "openai".into(),
+            count: 2,
+            favorites: false,
+        }];
+        rows.extend(model_rows(5));
+        // Two hairlines sit between the three leading children.
+        let top = ModelSelector::row_top(&rows, 3);
+        assert_eq!(top, HEADER_H + 2. * ROW_H + 5. * ROW_GAP + 2. * SEP_H);
+    }
+
+    #[test]
+    fn separators_add_breathing_room_between_rows() {
+        let rows = model_rows(3);
+        assert_eq!(
+            ModelSelector::row_top(&rows, 1),
+            ROW_H + SEP_H + 2. * ROW_GAP
+        );
+        assert_eq!(
+            ModelSelector::row_top(&rows, 2),
+            2. * ROW_H + 2. * SEP_H + 4. * ROW_GAP
+        );
+        // Content height counts the two interleaved hairlines and four gaps.
+        assert_eq!(
+            ModelSelector::content_height(&rows),
+            3. * ROW_H + 2. * SEP_H + 4. * ROW_GAP
+        );
+    }
+
+    fn entry(id: &str, name: &str, provider: &str, context_window: Option<u64>) -> ModelEntry {
+        ModelEntry {
+            id: id.into(),
+            name: name.into(),
+            provider: provider.into(),
+            context_window,
+        }
+    }
+
+    fn providers(rows: &[Row]) -> Vec<&str> {
+        rows.iter()
+            .filter_map(|row| match row {
+                Row::Header { provider, .. } => Some(provider.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn no_favorites() -> Favorites {
+        Favorites::default()
+    }
+
+    #[test]
+    fn models_group_by_provider_with_headers() {
+        let models = vec![
+            entry("a", "A", "openai", None),
+            entry("b", "B", "openai", None),
+            entry("c", "C", "anthropic", None),
+        ];
+        let favs = no_favorites();
+        let rows = ModelSelector::rows_for(
+            PickerKind::Model,
+            &models,
+            &[],
+            "low",
+            Some(2),
+            &Scope::All,
+            &favs,
+            "",
+        );
+        assert_eq!(providers(&rows), vec!["openai", "anthropic"]);
+        assert!(matches!(rows[0], Row::Header { .. }));
+        assert!(matches!(rows[1], Row::Model { model_ix: 0, .. }));
+        // The selected model (catalog ix 2) is the third model, row 4.
+        assert_eq!(ModelSelector::selected_row_index(&rows), Some(4));
+        assert_eq!(ModelSelector::first_selectable(&rows), Some(1));
+    }
+
+    #[test]
+    fn scoped_provider_flattens_the_list() {
+        let models = vec![
+            entry("a", "A", "openai", None),
+            entry("b", "B", "openai", None),
+            entry("c", "C", "anthropic", None),
+        ];
+        let favs = no_favorites();
+        let rows = ModelSelector::rows_for(
+            PickerKind::Model,
+            &models,
+            &[],
+            "low",
+            None,
+            &Scope::Provider("openai".into()),
+            &favs,
+            "",
+        );
+        // The chip states the provider, so no header repeats it, and only
+        // that provider's models remain.
+        assert!(providers(&rows).is_empty());
+        assert_eq!(rows.len(), 2);
+        assert_eq!(ModelSelector::first_selectable(&rows), Some(0));
+    }
+
+    #[test]
+    fn favorites_pin_a_section_above_providers() {
+        let models = vec![
+            entry("a", "A", "openai", None),
+            entry("b", "B", "anthropic", None),
+            entry("c", "C", "google", None),
+        ];
+        let favs = Favorites::from_pairs(&[("google", "c")]);
+        let rows = ModelSelector::rows_for(
+            PickerKind::Model,
+            &models,
+            &[],
+            "low",
+            None,
+            &Scope::All,
+            &favs,
+            "",
+        );
+        // Favorites header first, then its model, then the provider groups.
+        assert!(matches!(
+            rows[0],
+            Row::Header {
+                favorites: true,
+                ..
+            }
+        ));
+        assert!(matches!(rows[1], Row::Model { model_ix: 2, .. }));
+        // The favorited model is not repeated under its provider group.
+        let model_ixs: Vec<usize> = rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Model { model_ix, .. } => Some(*model_ix),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(model_ixs, vec![2, 0, 1]);
+    }
+
+    #[test]
+    fn favorites_scope_shows_only_favorites() {
+        let models = vec![
+            entry("a", "A", "openai", None),
+            entry("b", "B", "anthropic", None),
+        ];
+        let favs = Favorites::from_pairs(&[("anthropic", "b")]);
+        let rows = ModelSelector::rows_for(
+            PickerKind::Model,
+            &models,
+            &[],
+            "low",
+            None,
+            &Scope::Favorites,
+            &favs,
+            "",
+        );
+        assert!(providers(&rows).is_empty());
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(rows[0], Row::Model { model_ix: 1, .. }));
+    }
+
+    #[test]
+    fn filter_drops_empty_providers() {
+        let models = vec![
+            entry("a", "Alpha", "openai", None),
+            entry("b", "Beta", "anthropic", None),
+        ];
+        let favs = no_favorites();
+        let rows = ModelSelector::rows_for(
+            PickerKind::Model,
+            &models,
+            &[],
+            "low",
+            None,
+            &Scope::All,
+            &favs,
+            "alpha",
+        );
+        assert_eq!(providers(&rows), vec!["openai"]);
+    }
+}

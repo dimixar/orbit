@@ -1,11 +1,11 @@
 {
   "version": 1,
   "skills": {
-    "intentui": {
-      "source": "intentui/skills",
+    "rust-best-practices": {
+      "source": "apollographql/skills",
       "sourceType": "github",
-      "skillPath": "intentui/SKILL.md",
-      "computedHash": "6c39bc40759cb59e2280d936fb09761db676b8a2df6f25819f02a3bd1ec5b5f4"
+      "skillPath": "skills/rust-best-practices/SKILL.md",
+      "computedHash": "0ac6606adb27e64a31bdc8c1ed34e446ae0c14bff1c7648867c46e106adc048f"
     }
   }
 }

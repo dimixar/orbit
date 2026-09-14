@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "redesign/**"]
+  pull_request:
+
+# The GPUI app links Metal and macOS APIs, so the build/tests run on macOS.
+# Windows/Linux support is out of scope until the macOS app ships (INTENT.md D5).
+jobs:
+  check:
+    name: build · test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Zero warnings from `cargo build` is a stated project invariant
+      # (AGENT.md → Verification).
+      - name: Build
+        run: cargo build --workspace
+
+      # Live pi tests skip when `pi` is absent; the remainder are unit tests.
+      - name: Test
+        run: cargo test --workspace
+
+      # Informational: the repo carries pre-existing clippy lints, so this
+      # step reports rather than gates.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets

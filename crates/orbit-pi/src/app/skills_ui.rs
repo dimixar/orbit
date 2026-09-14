@@ -1,0 +1,779 @@
+//! Settings → Skills: a master-detail manager.
+//!
+//! The left column lists discovered skills (searchable, grouped by scope);
+//! the right column shows the selected skill's facts, actions, and rendered
+//! `SKILL.md`. Enabling/disabling writes pi's own `-<path>` override; deleting
+//! removes the skill directory. Discovery and file I/O live in
+//! [`crate::skills`].
+
+use super::helpers::*;
+use super::*;
+use crate::skills::{self, Skill, SkillScope};
+
+/// A Skills-page control, dispatched through one entry point.
+#[derive(Clone)]
+pub(super) enum SkillAction {
+    Toggle,
+    Open,
+    Reveal,
+    CopyPath,
+    /// The Delete button: show the inline confirmation.
+    AskDelete,
+    /// The confirmation's Delete: actually remove the skill.
+    ConfirmDelete,
+    CancelDelete,
+}
+
+impl OrbitApp {
+    // ── page ────────────────────────────────────────────────────────
+
+    /// The full-bleed Skills surface: list column + detail column.
+    pub(super) fn render_skills_page(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .bg(theme.bg_main)
+            .font_family(theme::ui_font_family())
+            .child(self.skills_list(theme, this.clone(), cx))
+            .child(self.skill_detail(theme, this))
+            .into_any_element()
+    }
+
+    // ── list column ─────────────────────────────────────────────────
+
+    fn skills_list(&self, theme: Theme, this: Entity<OrbitApp>, cx: &Context<Self>) -> AnyElement {
+        let needle = self.skills_filter.read(cx).text().trim().to_lowercase();
+        let matches = |skill: &&Skill| {
+            needle.is_empty()
+                || skill.name.to_lowercase().contains(&needle)
+                || skill.description.to_lowercase().contains(&needle)
+        };
+        let filtered: Vec<&Skill> = self.skills.iter().filter(matches).collect();
+
+        let search = div()
+            .mx(px(12.))
+            .mt(px(14.))
+            .mb(px(10.))
+            .h(px(32.))
+            .px(px(10.))
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_main)
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_size(theme.ui_px(12.5))
+            .child(icon("icons/search.svg", 14., theme.text_3))
+            .child(self.skills_filter.clone());
+
+        let all_row = div()
+            .mx(px(12.))
+            .mb(px(10.))
+            .h(px(30.))
+            .px(px(8.))
+            .rounded_md()
+            .bg(theme.bg_raised)
+            .border_1()
+            .border_color(theme.border)
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(icon("icons/magic-wand.svg", 13., theme.text_2))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(theme.ui_px(12.5))
+                    .text_color(theme.text_2)
+                    .child("All skills"),
+            )
+            .child(
+                div()
+                    .text_size(theme.ui_px(11.5))
+                    .text_color(theme.text_3)
+                    .child(self.skills.len().to_string()),
+            );
+
+        let mut list = div()
+            .id("skills-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .pb(px(8.));
+
+        // Project first — the most local, then global agent, then user.
+        for scope in [SkillScope::Project, SkillScope::Agent, SkillScope::User] {
+            let group: Vec<&Skill> = filtered
+                .iter()
+                .copied()
+                .filter(|skill| skill.scope == scope)
+                .collect();
+            if group.is_empty() {
+                continue;
+            }
+            list = list.child(self.skill_group_label(scope, group.len(), theme));
+            for skill in group {
+                list = list.child(self.skill_row(skill, theme, this.clone()));
+            }
+        }
+
+        if filtered.is_empty() {
+            list = list.child(
+                div()
+                    .px(px(16.))
+                    .py(px(28.))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .child(icon("icons/search.svg", 22., theme.text_3))
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.text_2)
+                            .child("No skills match"),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        let footer = div()
+            .px(px(14.))
+            .py(px(8.))
+            .border_t_1()
+            .border_color(theme.border)
+            .text_size(theme.ui_px(11.5))
+            .text_color(theme.text_3)
+            .child(format!(
+                "{} skill{}",
+                filtered.len(),
+                if filtered.len() == 1 { "" } else { "s" }
+            ));
+
+        div()
+            .w(px(320.))
+            .h_full()
+            .flex_shrink_0()
+            .bg(theme.bg_sidebar)
+            .border_r_1()
+            .border_color(theme.border)
+            .flex()
+            .flex_col()
+            .child(search)
+            .child(all_row)
+            .child(list)
+            .child(footer)
+            .into_any_element()
+    }
+
+    fn skill_group_label(&self, scope: SkillScope, count: usize, theme: Theme) -> AnyElement {
+        div()
+            .px(px(16.))
+            .pt(px(10.))
+            .pb(px(4.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .text_size(theme.ui_px(10.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_3)
+                    .child(scope.label().to_uppercase()),
+            )
+            .child(
+                div()
+                    .text_size(theme.ui_px(10.5))
+                    .text_color(theme.text_3)
+                    .child(count.to_string()),
+            )
+            .into_any_element()
+    }
+
+    fn skill_row(&self, skill: &Skill, theme: Theme, this: Entity<OrbitApp>) -> AnyElement {
+        let selected = self.selected_skill.as_deref() == Some(skill.file.as_path());
+        let file = skill.file.clone();
+        let description = if skill.description.trim().is_empty() {
+            "No description".to_string()
+        } else {
+            skill.description.clone()
+        };
+        div()
+            .id(ElementId::Name(format!("skill-row-{}", skill.name).into()))
+            .mx(px(10.))
+            .px(px(8.))
+            .py(px(7.))
+            .rounded_md()
+            .flex()
+            .items_start()
+            .gap_2p5()
+            .cursor_pointer()
+            .when(selected, |row| row.bg(theme.active))
+            .when(!selected, |row| row.hover(|style| style.bg(theme.bg_hover)))
+            .when(!skill.enabled, |row| row.opacity(0.55))
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                this.update(cx, |app, cx| app.select_skill(file.clone(), cx));
+            })
+            .child(self.skill_tile(skill, selected, theme))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(if selected {
+                                theme.active_fg
+                            } else {
+                                theme.text
+                            })
+                            .truncate()
+                            .child(skill.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(11.5))
+                            .text_color(theme.text_3)
+                            .truncate()
+                            .child(description),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn skill_tile(&self, skill: &Skill, selected: bool, theme: Theme) -> AnyElement {
+        let color = if selected {
+            theme.active_fg
+        } else if skill.enabled {
+            theme.text_2
+        } else {
+            theme.text_3
+        };
+        div()
+            .size(px(26.))
+            .flex_none()
+            .rounded(px(7.))
+            .bg(theme.bg_raised)
+            .border_1()
+            .border_color(theme.border)
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(icon("icons/magic-wand.svg", 14., color))
+            .into_any_element()
+    }
+
+    // ── detail column ───────────────────────────────────────────────
+
+    fn skill_detail(&self, theme: Theme, this: Entity<OrbitApp>) -> AnyElement {
+        let selected = self
+            .selected_skill
+            .as_ref()
+            .and_then(|path| self.skills.iter().find(|skill| &skill.file == path))
+            .cloned();
+
+        let Some(skill) = selected else {
+            return div()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(icon("icons/magic-wand.svg", 30., theme.text_3))
+                .child(
+                    div()
+                        .text_size(theme.ui_px(13.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text)
+                        .child("Select a skill"),
+                )
+                .child(
+                    div()
+                        .text_size(theme.ui_px(12.))
+                        .text_color(theme.text_2)
+                        .child("Pick one from the list to see its details and SKILL.md."),
+                )
+                .into_any_element();
+        };
+
+        let header = div()
+            .flex()
+            .items_start()
+            .gap_3()
+            .child(
+                div()
+                    .size(px(40.))
+                    .flex_none()
+                    .rounded(px(10.))
+                    .bg(theme.bg_raised)
+                    .border_1()
+                    .border_color(theme.border)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon("icons/magic-wand.svg", 20., theme.text_2)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(17.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .truncate()
+                            .child(skill.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.text_3)
+                            .truncate()
+                            .child(self.skill_subtitle(&skill)),
+                    ),
+            )
+            .child(self.skill_toggle(&skill, theme, this.clone()));
+
+        let description = if skill.description.trim().is_empty() {
+            "No description in frontmatter — pi will skip this skill.".to_string()
+        } else {
+            skill.description.clone()
+        };
+        let description_color = if skill.is_valid() {
+            theme.text_2
+        } else {
+            theme.crit
+        };
+
+        let facts = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(9.))
+            .child(self.skill_fact(
+                theme,
+                "Invoke",
+                self.skill_value(theme, &skill.invoke_command()),
+            ))
+            .child(self.skill_fact(
+                theme,
+                "Location",
+                self.skill_value(
+                    theme,
+                    &skills::display_path(skill.dir().unwrap_or(&skill.file)),
+                ),
+            ))
+            .child(self.skill_fact(
+                theme,
+                "Contents",
+                self.skill_value(theme, &skills::format_size(skill.size_bytes)),
+            ))
+            .child(self.skill_fact(
+                theme,
+                "Updated",
+                self.skill_value(theme, &skill_age(&skill)),
+            ));
+
+        let actions = self.skill_actions(&skill, theme, this.clone());
+
+        let content: AnyElement = match &self.skill_content {
+            Some(body) if !body.trim().is_empty() => div()
+                .id("skill-content")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(div().w_full().max_w(px(760.)).child(
+                    crate::transcript_view::render_markdown_document(body, theme),
+                ))
+                .into_any_element(),
+            _ => div()
+                .flex_1()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .text_size(theme.ui_px(12.))
+                        .text_color(theme.text_3)
+                        .child("SKILL.md is empty."),
+                )
+                .into_any_element(),
+        };
+
+        div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .px(px(24.))
+            .pt(px(18.))
+            .pb(px(12.))
+            .gap_3()
+            .child(header)
+            .child(
+                div()
+                    .max_w(px(760.))
+                    .text_size(theme.ui_px(12.5))
+                    .text_color(description_color)
+                    .child(description),
+            )
+            .child(facts)
+            .child(actions)
+            .child(div().w_full().h(px(1.)).bg(theme.border))
+            .child(
+                div()
+                    .text_size(theme.ui_px(10.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_3)
+                    .child("SKILL.MD"),
+            )
+            .child(content)
+            .into_any_element()
+    }
+
+    fn skill_subtitle(&self, skill: &Skill) -> String {
+        let scope = match skill.scope {
+            SkillScope::Project => {
+                let workspace = self.workspace_dir();
+                format!("Project · {}", skills::display_path(&workspace))
+            }
+            SkillScope::Agent => "Global · pi agent".to_string(),
+            SkillScope::User => "User · agents".to_string(),
+        };
+        if skill.manual_only {
+            format!("{scope} · manual only")
+        } else {
+            scope
+        }
+    }
+
+    fn skill_fact(&self, theme: Theme, label: &str, value: AnyElement) -> AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(
+                div()
+                    .w(px(84.))
+                    .flex_none()
+                    .text_size(theme.ui_px(12.))
+                    .text_color(theme.text_3)
+                    .child(label.to_string()),
+            )
+            .child(div().flex_1().min_w_0().child(value))
+            .into_any_element()
+    }
+
+    fn skill_value(&self, theme: Theme, value: &str) -> AnyElement {
+        div()
+            .min_w_0()
+            .truncate()
+            .text_size(theme.ui_px(12.))
+            .text_color(theme.text)
+            .child(value.to_string())
+            .into_any_element()
+    }
+
+    fn skill_toggle(&self, skill: &Skill, theme: Theme, this: Entity<OrbitApp>) -> AnyElement {
+        let on = skill.enabled;
+        div()
+            .id("skill-toggle")
+            .w(px(36.))
+            .h(px(20.))
+            .rounded_full()
+            .p(px(2.))
+            .border_1()
+            .border_color(theme.border)
+            .flex()
+            .items_center()
+            .cursor_pointer()
+            .when(on, |track| track.bg(theme.accent).justify_end())
+            .when(!on, |track| track.bg(theme.bg_raised).justify_start())
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                this.update(cx, |app, cx| {
+                    app.apply_skill_action(SkillAction::Toggle, cx)
+                });
+            })
+            .child(div().size(px(14.)).rounded_full().bg(theme.text))
+            .into_any_element()
+    }
+
+    fn skill_actions(&self, skill: &Skill, theme: Theme, this: Entity<OrbitApp>) -> AnyElement {
+        let confirming = self
+            .skill_delete_confirm
+            .as_deref()
+            .is_some_and(|dir| Some(dir) == skill.dir());
+
+        if confirming {
+            return div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(theme.ui_px(11.5))
+                        .text_color(theme.crit)
+                        .child(format!(
+                            "Delete {}? This removes its directory.",
+                            skills::display_path(skill.dir().unwrap_or(&skill.file))
+                        )),
+                )
+                .child(self.skill_button(
+                    "skill-delete-confirm".into(),
+                    "Delete",
+                    true,
+                    Some("icons/trash.svg"),
+                    theme,
+                    this.clone(),
+                    SkillAction::ConfirmDelete,
+                ))
+                .child(self.skill_button(
+                    "skill-delete-cancel".into(),
+                    "Cancel",
+                    false,
+                    None,
+                    theme,
+                    this,
+                    SkillAction::CancelDelete,
+                ))
+                .into_any_element();
+        }
+
+        div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(self.skill_button(
+                "skill-open".into(),
+                "Open SKILL.md",
+                false,
+                Some("icons/file.svg"),
+                theme,
+                this.clone(),
+                SkillAction::Open,
+            ))
+            .child(self.skill_button(
+                "skill-reveal".into(),
+                "Show in File Manager",
+                false,
+                Some("icons/folder.svg"),
+                theme,
+                this.clone(),
+                SkillAction::Reveal,
+            ))
+            .child(self.skill_button(
+                "skill-copy-path".into(),
+                "Copy Path",
+                false,
+                Some("icons/copy.svg"),
+                theme,
+                this.clone(),
+                SkillAction::CopyPath,
+            ))
+            .child(div().flex_1())
+            .child(self.skill_button(
+                "skill-delete".into(),
+                "Delete",
+                false,
+                Some("icons/trash.svg"),
+                theme,
+                this,
+                SkillAction::AskDelete,
+            ))
+            .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn skill_button(
+        &self,
+        id: String,
+        label: &str,
+        danger: bool,
+        icon_path: Option<&'static str>,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        action: SkillAction,
+    ) -> AnyElement {
+        let base = div()
+            .id(ElementId::Name(id.into()))
+            .h(px(28.))
+            .px(px(10.))
+            .rounded_md()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap_1p5()
+            .cursor_pointer()
+            .text_size(theme.ui_px(11.5))
+            .font_weight(FontWeight::MEDIUM);
+        let (button, icon_color) = if danger {
+            (
+                base.border_1()
+                    .border_color(theme.border)
+                    .bg(theme.bg_raised)
+                    .text_color(theme.crit)
+                    .hover(|style| {
+                        style
+                            .border_color(theme.crit.opacity(0.6))
+                            .bg(theme.crit.opacity(0.08))
+                    }),
+                theme.crit,
+            )
+        } else {
+            (
+                base.border_1()
+                    .border_color(theme.border)
+                    .bg(theme.bg_raised)
+                    .text_color(theme.text_2)
+                    .hover(|style| style.bg(theme.bg_hover)),
+                theme.text_2,
+            )
+        };
+        button
+            .when_some(icon_path, |button, path| {
+                button.child(icon(path, 12., icon_color))
+            })
+            .child(div().child(label.to_string()))
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                let action = action.clone();
+                this.update(cx, |app, cx| app.apply_skill_action(action, cx));
+            })
+            .into_any_element()
+    }
+
+    // ── controller ──────────────────────────────────────────────────
+
+    /// Re-scan every skill root and reload the selected skill's body.
+    pub(super) fn refresh_skills(&mut self, cx: &mut Context<Self>) {
+        self.skills = skills::discover(&self.workspace_dir());
+        let still_there = self
+            .selected_skill
+            .as_ref()
+            .is_some_and(|path| self.skills.iter().any(|skill| &skill.file == path));
+        if !still_there {
+            self.selected_skill = self.skills.first().map(|skill| skill.file.clone());
+        }
+        self.skill_delete_confirm = None;
+        self.load_selected_skill();
+        cx.notify();
+    }
+
+    /// Select a skill and cache its rendered body.
+    pub(super) fn select_skill(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        self.selected_skill = Some(path);
+        self.skill_delete_confirm = None;
+        self.load_selected_skill();
+        cx.notify();
+    }
+
+    fn load_selected_skill(&mut self) {
+        self.skill_content = self
+            .selected_skill
+            .as_ref()
+            .and_then(|path| skills::read_body(path).ok());
+    }
+
+    /// Single dispatch point for every Skills-page control.
+    pub(super) fn apply_skill_action(&mut self, action: SkillAction, cx: &mut Context<Self>) {
+        let selected = self.selected_skill.clone();
+        match action {
+            SkillAction::Toggle => {
+                let Some(path) = selected else { return };
+                let Some(skill) = self.skills.iter().find(|skill| skill.file == path).cloned()
+                else {
+                    return;
+                };
+                match skills::set_enabled(&skill, &self.workspace_dir(), !skill.enabled) {
+                    Ok(()) => {
+                        self.set_status(if skill.enabled {
+                            format!("Disabled {}", skill.name)
+                        } else {
+                            format!("Enabled {}", skill.name)
+                        });
+                        self.refresh_skills(cx);
+                    }
+                    Err(err) => self.set_error(err),
+                }
+            }
+            SkillAction::Open => {
+                if let Some(path) = selected {
+                    platform::open_path_default(&path);
+                }
+            }
+            SkillAction::Reveal => {
+                if let Some(path) = selected {
+                    platform::reveal_in_file_manager(&path);
+                }
+            }
+            SkillAction::CopyPath => {
+                if let Some(path) = selected {
+                    let text = skills::display_path(&path);
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+                    self.set_status(format!("Copied {text}"));
+                }
+            }
+            SkillAction::AskDelete => {
+                if let Some(path) = selected {
+                    self.skill_delete_confirm = path.parent().map(Path::to_path_buf);
+                }
+            }
+            SkillAction::ConfirmDelete => self.delete_selected_skill(cx),
+            SkillAction::CancelDelete => self.skill_delete_confirm = None,
+        }
+        cx.notify();
+    }
+
+    /// Remove the selected skill's directory, then reload the list.
+    fn delete_selected_skill(&mut self, cx: &mut Context<Self>) {
+        let Some(skill) = self
+            .selected_skill
+            .clone()
+            .and_then(|path| self.skills.iter().find(|skill| skill.file == path).cloned())
+        else {
+            return;
+        };
+        match skills::delete(&skill, &self.workspace_dir()) {
+            Ok(()) => {
+                self.selected_skill = None;
+                self.set_status(format!("Deleted skill {}", skill.name));
+                self.refresh_skills(cx);
+            }
+            Err(err) => self.set_error(err),
+        }
+    }
+}
+
+/// "48d ago" for the skill's `SKILL.md`.
+fn skill_age(skill: &Skill) -> String {
+    match skill.modified {
+        Some(modified) => format!("{} ago", sessions::relative_time(modified)),
+        None => "Unknown".to_string(),
+    }
+}
