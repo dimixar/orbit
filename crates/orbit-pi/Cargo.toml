@@ -1,6 +1,6 @@
 [package]
 name = "orbit-pi"
-version = "0.1.0"
+version = "0.0.1"
 description = "Native GPUI workbench for the pi coding agent"
 edition.workspace = true
 license.workspace = true
@@ -9,7 +9,12 @@ repository.workspace = true
 [package.metadata.bundle]
 name = "Orbit Pi"
 identifier = "dev.orbit.pi"
-icon = ["../../assets/icons/icon.icns"]
+# One icon per platform variant: .icns (macOS), .ico (Windows), .png (Linux).
+icon = [
+    "../../assets/icons/icon.icns",
+    "../../assets/icons/icon.ico",
+    "../../assets/icons/icon.png",
+]
 osx_minimum_system_version = "13.0"
 
 [dependencies]
