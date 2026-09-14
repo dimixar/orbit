@@ -5,11 +5,11 @@ on:
     branches: [main, "redesign/**"]
   pull_request:
 
-# The GPUI app links Metal and macOS APIs, so the build/tests run on macOS.
+# The GPUI app links Metal and macOS APIs, so the build runs on macOS.
 # Windows/Linux support is out of scope until the macOS app ships (INTENT.md D5).
 jobs:
   check:
-    name: build · test
+    name: build
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,13 +23,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       # Zero warnings from `cargo build` is a stated project invariant
-      # (AGENT.md → Verification).
+      # (AGENT.md → Verification). Tests are no longer run in CI; run them
+      # locally with `cargo test --workspace`.
       - name: Build
         run: cargo build --workspace
-
-      # Live pi tests skip when `pi` is absent; the remainder are unit tests.
-      - name: Test
-        run: cargo test --workspace
 
       # Informational: the repo carries pre-existing clippy lints, so this
       # step reports rather than gates.

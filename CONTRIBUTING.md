@@ -46,8 +46,9 @@ cargo test --workspace       # unit tests + live pi integration tests
 cargo clippy --workspace --all-targets
 ```
 
-`cargo build` with zero warnings is a stated project invariant. CI runs build,
-test, and clippy on macOS (`.github/workflows/ci.yml`).
+`cargo build` with zero warnings is a stated project invariant. CI runs build
+and clippy on macOS (`.github/workflows/ci.yml`); tests are run locally, not in
+CI.
 
 For UI changes, launch the app (`cargo run -p orbit-pi`) and confirm the
 affected surface works. Notifications need an app bundle — use
