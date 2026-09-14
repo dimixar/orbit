@@ -5,29 +5,6 @@ use gpui::point;
 
 use crate::shimmer::ShimmerText;
 
-/// A non-interactive pill used for static meta in the composer row. Ghost
-/// style: it states a fact (the access mode), so it carries no border or
-/// fill and sits quieter than the interactive chips.
-pub(crate) fn pill_static(
-    icon_path: &'static str,
-    label: &str,
-    theme: Theme,
-) -> impl IntoElement + use<> {
-    div()
-        .flex()
-        .items_center()
-        .gap_1p5()
-        .px(px(7.))
-        // Fixed height so the pill aligns exactly with the 24px chips and
-        // the attach button in the composer row.
-        .h(px(24.))
-        .rounded_md()
-        .text_size(theme.ui_px(12.))
-        .text_color(theme.text_3)
-        .child(icon(icon_path, 12., theme.text_3))
-        .child(label.to_string())
-}
-
 /// Whether a workspace group is collapsed in the sidebar. The active
 /// workspace is expanded by default; all others are collapsed unless the
 /// user has toggled them.
@@ -134,35 +111,42 @@ pub(crate) fn sessions_with_placeholder(
     rows
 }
 
-/// Build the grouped sidebar session list. Each workspace shows at most
-/// [`SIDEBAR_GROUP_SESSIONS_VISIBLE`] sessions until expanded. Workspaces in
-/// `hidden` are pulled out of the main list into the "Hidden" disclosure at
-/// the foot; their sessions stay in the list passed to the ⌘P selector.
+/// Build the grouped sidebar session list from Orbit's own project list. A
+/// workspace appears because the user added it, not because pi happens to
+/// have sessions there; sessions in unlisted folders are omitted entirely
+/// (they stay on disk). Each group shows at most
+/// [`SIDEBAR_GROUP_SESSIONS_VISIBLE`] sessions until expanded.
 pub(crate) fn build_sidebar_rows(
     sessions: &[SessionInfo],
+    workspaces: &[PathBuf],
     working_label: &str,
     collapsed_workspaces: &HashSet<String>,
     expanded_workspace_groups: &HashSet<String>,
     expanded_session_groups: &HashSet<String>,
     active_path: &Option<PathBuf>,
-    hidden: &HashSet<String>,
-    hidden_expanded: bool,
 ) -> Vec<SideRow> {
     let mut side_rows: Vec<SideRow> = Vec::new();
-    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
-    for (ix, session) in sessions.iter().enumerate() {
-        let label = sessions::workspace_label(&session.cwd);
-        match groups.iter_mut().find(|(l, _)| *l == label) {
-            Some((_, ixs)) => ixs.push(ix),
-            None => groups.push((label, vec![ix])),
-        }
-    }
-    let mut hidden_groups: Vec<(String, Vec<usize>)> = Vec::new();
-    for (label, ixs) in groups {
-        if hidden.contains(&label) {
-            hidden_groups.push((label, ixs));
+    // One group per listed project, in the order the user added them — an
+    // empty project still gets a header (and its `+`) so a task can start
+    // there. Groups are keyed by label, so two paths with the same basename
+    // share one header (the first listed path wins).
+    let mut groups: Vec<(String, PathBuf, Vec<usize>)> = Vec::new();
+    for ws in workspaces {
+        let label = sessions::workspace_label(ws);
+        if groups.iter().any(|(l, _, _)| *l == label) {
             continue;
         }
+        groups.push((label, ws.clone(), Vec::new()));
+    }
+    // Attach each session to its project; a folder that is not listed simply
+    // finds no group and stays out of the sidebar.
+    for (ix, session) in sessions.iter().enumerate() {
+        let label = sessions::workspace_label(&session.cwd);
+        if let Some((_, _, ixs)) = groups.iter_mut().find(|(l, _, _)| *l == label) {
+            ixs.push(ix);
+        }
+    }
+    for (label, cwd, ixs) in groups {
         let collapsed = is_workspace_group_collapsed(
             &label,
             working_label,
@@ -173,7 +157,7 @@ pub(crate) fn build_sidebar_rows(
             label: label.clone(),
             count: ixs.len(),
             collapsed,
-            cwd: sessions[ixs[0]].cwd.clone(),
+            cwd,
         });
         if collapsed {
             // A collapsed group hides its sessions — except the open one,
@@ -203,21 +187,6 @@ pub(crate) fn build_sidebar_rows(
                 side_rows.push(SideRow::ShowMore {
                     label,
                     count: hidden_count,
-                });
-            }
-        }
-    }
-
-    if !hidden_groups.is_empty() {
-        side_rows.push(SideRow::HiddenHeader {
-            count: hidden_groups.len(),
-            expanded: hidden_expanded,
-        });
-        if hidden_expanded {
-            for (label, ixs) in hidden_groups {
-                side_rows.push(SideRow::HiddenWorkspace {
-                    label,
-                    count: ixs.len(),
                 });
             }
         }
@@ -312,8 +281,8 @@ pub(crate) fn render_side_row(
                                 .text_color(theme.text_2)
                                 .child(label.clone()),
                         )
-                        // Row actions, revealed on hover: a `…` menu (hide /
-                        // copy path) beside the direct new-task `+`.
+                        // Row actions, revealed on hover: a `…` menu
+                        // (remove / copy path) beside the direct new-task `+`.
                         .child(workspace_menu_button(
                             label.clone(),
                             cwd.clone(),
@@ -544,117 +513,6 @@ pub(crate) fn render_side_row(
             );
             row = row.child(card);
             row.into_any_element()
-        }
-        SideRow::HiddenHeader { count, expanded } => {
-            let this = this.clone();
-            div()
-                .w_full()
-                .px_2()
-                .pt(px(12.))
-                .pb(px(2.))
-                .child(
-                    div()
-                        .id("hidden-workspaces")
-                        .w_full()
-                        .h(px(24.))
-                        .px(px(6.))
-                        .rounded_md()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.bg_hover))
-                        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-                            this.update(cx, |app, cx| app.toggle_hidden_sidebar(cx));
-                        })
-                        .child(icon(
-                            if *expanded {
-                                "icons/chevron-down.svg"
-                            } else {
-                                "icons/chevron-right.svg"
-                            },
-                            10.,
-                            theme.text_3,
-                        ))
-                        .child(icon("icons/eye-off.svg", 13., theme.text_3))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(theme.ui_px(11.5))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.text_3)
-                                .child("Hidden"),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_size(theme.ui_px(10.5))
-                                .text_color(theme.text_3)
-                                .child(format!("{count}")),
-                        ),
-                )
-                .into_any_element()
-        }
-        SideRow::HiddenWorkspace { label, count, .. } => {
-            let this = this.clone();
-            let label_for_show = label.clone();
-            let label_text = label.clone();
-            div()
-                .w_full()
-                .px_2()
-                .child(
-                    div()
-                        .id(ElementId::Name(format!("hidden-workspace-{label}").into()))
-                        .w_full()
-                        .h(px(26.))
-                        .pl(px(22.))
-                        .pr(px(6.))
-                        .rounded_md()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .hover(|s| s.bg(theme.bg_hover))
-                        .child(icon("icons/folder.svg", 13., theme.text_3))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(theme.ui_px(11.5))
-                                .text_color(theme.text_3)
-                                .child(label_text),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_size(theme.ui_px(10.5))
-                                .text_color(theme.text_3)
-                                .child(format!("{count}")),
-                        )
-                        .child(
-                            div()
-                                .id(ElementId::Name(
-                                    format!("hidden-workspace-show-{label}").into(),
-                                ))
-                                .flex_none()
-                                .size(px(20.))
-                                .rounded(px(5.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .hover(|s| s.bg(theme.overlay))
-                                .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-                                    cx.stop_propagation();
-                                    let label = label_for_show.clone();
-                                    this.update(cx, |app, cx| app.on_workspace_show(label, cx));
-                                })
-                                .child(icon("icons/eye.svg", 14., theme.text_2)),
-                        ),
-                )
-                .into_any_element()
         }
     }
 }
@@ -1026,9 +884,9 @@ pub(crate) fn workspace_menu_button(
         }))
 }
 
-/// The actions popup anchored to a workspace header: Copy path / Hide from
-/// sidebar. Painted with the same deferred + anchored convention as the
-/// session row menu, dismissed by any outside mouse-down.
+/// The actions popup anchored to a workspace header: Copy path / Remove
+/// from sidebar. Painted with the same deferred + anchored convention as
+/// the session row menu, dismissed by any outside mouse-down.
 pub(crate) fn workspace_menu_popup(this: Entity<OrbitApp>, theme: Theme) -> AnyElement {
     let popup = div()
         .w(px(200.))
@@ -1065,13 +923,13 @@ pub(crate) fn workspace_menu_popup(this: Entity<OrbitApp>, theme: Theme) -> AnyE
         ))
         .child(div().h(px(1.)).w_full().bg(theme.border).my(px(4.)))
         .child(menu_item(
-            "wm-hide",
-            "icons/eye-off.svg",
-            "Hide from sidebar",
+            "wm-remove",
+            "icons/minus.svg",
+            "Remove from sidebar",
             theme,
             this.clone(),
             false,
-            |app, cx| app.on_workspace_hide(cx),
+            |app, cx| app.on_workspace_remove(cx),
         ));
 
     anchored()
@@ -1164,28 +1022,14 @@ pub(crate) fn empty_sessions_state(theme: Theme) -> impl IntoElement + use<> {
                 .text_size(theme.ui_px(12.5))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.text_2)
-                .child("No sessions yet"),
+                .child("No projects yet"),
         )
         .child(
             div()
                 .text_size(theme.ui_px(11.5))
                 .text_color(theme.text_3)
                 .text_align(TextAlign::Center)
-                .child("Start a task and it will show up here."),
-        )
-        .child(
-            div()
-                .mt(px(6.))
-                .px(px(6.))
-                .h(px(18.))
-                .flex()
-                .items_center()
-                .rounded(px(4.))
-                .border_1()
-                .border_color(theme.border)
-                .text_size(theme.ui_px(10.5))
-                .text_color(theme.text_3)
-                .child("\u{2318}N"),
+                .child("Pick a folder to start your first task."),
         )
 }
 
@@ -1323,31 +1167,19 @@ impl OrbitApp {
         cx.notify();
     }
 
-    /// Hide the workspace the open header menu belongs to. Its sessions stay
-    /// on disk and in the ⌘P selector; only the sidebar drops the group.
-    pub(super) fn on_workspace_hide(&mut self, cx: &mut Context<Self>) {
+    /// Remove the workspace the open header menu belongs to from Orbit's own
+    /// project list. pi's session files are never touched — the folder can be
+    /// added again by picking it to work in.
+    pub(super) fn on_workspace_remove(&mut self, cx: &mut Context<Self>) {
         let Some(menu) = self.workspace_menu.take() else {
             return;
         };
-        if self.hidden_workspaces.insert(menu.label.clone()) {
-            persist_hidden_workspaces(&self.hidden_workspaces);
-            self.set_status(format!("Hid {} from the sidebar", menu.label));
-        }
-        cx.notify();
-    }
-
-    /// Restore a hidden workspace to the sidebar (from the Hidden section).
-    pub(super) fn on_workspace_show(&mut self, label: String, cx: &mut Context<Self>) {
-        if self.hidden_workspaces.remove(&label) {
-            persist_hidden_workspaces(&self.hidden_workspaces);
-            self.set_status(format!("Showed {label} in the sidebar"));
-        }
-        cx.notify();
-    }
-
-    /// Toggle the "Hidden" disclosure at the foot of the sidebar.
-    pub(super) fn toggle_hidden_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.hidden_sidebar_expanded = !self.hidden_sidebar_expanded;
+        self.remove_workspace(&menu.cwd);
+        // Forget the dropped group's view state so re-adding it starts fresh.
+        self.collapsed_workspaces.remove(&menu.label);
+        self.expanded_workspace_groups.remove(&menu.label);
+        self.expanded_session_groups.remove(&menu.label);
+        self.set_status(format!("Removed {} from the sidebar", menu.label));
         cx.notify();
     }
 

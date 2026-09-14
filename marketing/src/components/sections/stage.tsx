@@ -1,4 +1,4 @@
-import { OrbitMark } from "@/components/brand";
+import { OrbitIcon } from "@/components/brand";
 import { Band, Shell } from "@/components/ui";
 import { Shot } from "@/components/shot";
 
@@ -6,9 +6,10 @@ export function Stage() {
   return (
     <Shell>
       <Band dashed className="relative overflow-hidden bg-well py-11 sm:py-14">
-        <OrbitMark
+        <OrbitIcon
           aria-hidden="true"
-          className="watermark left-1/2 top-1/2 h-[520px] w-[520px] max-w-none -translate-x-1/2 -translate-y-1/2"
+          alt=""
+          className="watermark left-1/2 top-1/2 h-[520px] w-[520px] max-w-none -translate-x-1/2 -translate-y-1/2 opacity-[0.05]"
         />
         <div
           aria-hidden="true"

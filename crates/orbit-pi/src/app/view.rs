@@ -23,13 +23,12 @@ impl Render for OrbitApp {
         let sidebar_sessions = self.sidebar_sessions();
         let side_rows = Rc::new(build_sidebar_rows(
             &sidebar_sessions,
+            &self.workspaces,
             &working_label,
             &self.collapsed_workspaces,
             &self.expanded_workspace_groups,
             &self.expanded_session_groups,
             &self.current_session_path,
-            &self.hidden_workspaces,
-            self.hidden_sidebar_expanded,
         ));
         let old = self.sidebar_list.item_count();
         if old != side_rows.len() {
@@ -351,7 +350,7 @@ impl Render for OrbitApp {
                     )
                     // session list (scrolls), grouped by workspace — or the
                     // empty state when pi's store has no sessions yet
-                    .child(if sessions_data.is_empty() {
+                    .child(if side_rows.is_empty() {
                         empty_sessions_state(theme).into_any_element()
                     } else {
                         div()
@@ -367,7 +366,7 @@ impl Render for OrbitApp {
                                     .text_size(theme.ui_px(11.))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.text_3)
-                                    .child("Sessions"),
+                                    .child("Projects"),
                             )
                             .child(
                                 div()
@@ -733,8 +732,8 @@ impl Render for OrbitApp {
 
 impl OrbitApp {
     /// Bottom row inside the composer: the "+" add menu and the access-mode
-    /// fact on the left; model / thinking chips and the round send button on
-    /// the right. `compact` (narrow window) drops the access pill and clamps
+    /// chip on the left; model / thinking chips and the round send button on
+    /// the right. `compact` (narrow window) drops the access chip and clamps
     /// the model label so Send always stays reachable.
     pub(super) fn composer_row(
         &self,
@@ -746,21 +745,162 @@ impl OrbitApp {
             .items_center()
             .gap_2()
             .child(self.add_menu_button(cx))
-            // access mode (pi runs with full tool access) — a fact, not a
-            // control; first thing to yield when the row gets narrow.
-            .when(!compact, |row| {
-                row.child(pill_static(
-                    "icons/lock.svg",
-                    "Full access",
-                    *theme::get(cx),
-                ))
-            })
+            // Access mode: a real control now — it selects the guard policy
+            // the bundled extension enforces. First thing to yield when the
+            // row gets narrow.
+            .when(!compact, |row| row.child(self.access_chip(cx)))
             .child(div().flex_1())
             .child(self.model_chip(compact, cx))
             .child(self.thinking_chip(cx))
             .children(self.steer_button(cx))
             .child(self.send_button(cx))
     }
+
+    /// The access-mode chip: a lock glyph, the active mode's label, and a
+    /// caret. Ghost style until hovered/open, matching the model chip.
+    pub(super) fn access_chip(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let theme = *theme::get(cx);
+        div()
+            .flex()
+            .flex_col()
+            .items_start()
+            .children(self.access_popup(cx))
+            .child(
+                div()
+                    .id("access-chip")
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .px(px(7.))
+                    .h(px(24.))
+                    .rounded_md()
+                    .text_size(theme.ui_px(12.))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.overlay))
+                    .when(self.access_menu_open, |chip| {
+                        chip.bg(theme.active).text_color(theme.active_fg)
+                    })
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_access_trigger_click))
+                    .child(icon(self.access_mode.icon(), 12., theme.text_3))
+                    .child(div().text_color(theme.text_2).child(self.access_mode.label()))
+                    .child(icon("icons/chevron-down.svg", 11., theme.text_3)),
+            )
+    }
+
+    /// The access-mode picker popup, while open. Three rows: icon, label, and
+    /// a one-line description; the active mode carries an accent check. The
+    /// popup owns the keyboard via the `AccessMenu` key context.
+    pub(super) fn access_popup(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if !self.access_menu_open {
+            return None;
+        }
+        let theme = *theme::get(cx);
+        let this = cx.weak_entity();
+        let mut list = div().w_full().p(px(4.)).flex().flex_col().gap(px(2.));
+        for (ix, mode) in AccessMode::ALL.iter().enumerate() {
+            let mode = *mode;
+            let highlighted = ix == self.access_menu_highlight;
+            let selected = mode == self.access_mode;
+            let this = this.clone();
+            list = list.child(
+                div()
+                    .id(ElementId::NamedInteger("access-row".into(), ix as u64))
+                    .w_full()
+                    .px(px(8.))
+                    .py(px(7.))
+                    .rounded(px(6.))
+                    .flex()
+                    .items_start()
+                    .gap(px(10.))
+                    .cursor_pointer()
+                    .when(highlighted, |row| row.bg(theme.active))
+                    .hover(|style| style.bg(theme.overlay))
+                    .on_hover(move |hovered, _, cx| {
+                        if *hovered {
+                            this.update(cx, |app, cx| {
+                                if app.access_menu_highlight != ix {
+                                    app.access_menu_highlight = ix;
+                                    cx.notify();
+                                }
+                            })
+                            .ok();
+                        }
+                    })
+                    .on_mouse_up(MouseButton::Left, {
+                        let this = cx.weak_entity();
+                        move |_, window, cx| {
+                            this.update(cx, |app, cx| app.run_access_menu_item(ix, window, cx))
+                                .ok();
+                        }
+                    })
+                    .child(icon(mode.icon(), 14., theme.text_3))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(theme.ui_px(12.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(if selected {
+                                        theme.text
+                                    } else {
+                                        theme.text_2
+                                    })
+                                    .child(mode.label()),
+                            )
+                            .child(
+                                div()
+                                    .mt(px(2.))
+                                    .whitespace_normal()
+                                    .text_size(theme.ui_px(11.))
+                                    .text_color(theme.text_3)
+                                    .child(mode.description()),
+                            ),
+                    )
+                    .when(selected, |row| {
+                        row.child(icon("icons/check.svg", 13., theme.accent))
+                    }),
+            );
+        }
+
+        let popup = div()
+            .w(px(320.))
+            .font_family(theme::ui_font_family())
+            .rounded(px(10.))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.menu_bg)
+            .shadow(theme.popover_shadow())
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .occlude()
+            .key_context("AccessMenu")
+            .track_focus(&self.access_menu_focus)
+            .on_action(cx.listener(Self::on_access_menu_next))
+            .on_action(cx.listener(Self::on_access_menu_prev))
+            .on_action(cx.listener(Self::on_access_menu_confirm))
+            .on_action(cx.listener(Self::on_access_menu_close))
+            .on_mouse_down_out(cx.listener(|app, _, window, cx| {
+                app.menu_dismissed_at = Some(Instant::now());
+                app.close_access_menu(window, cx);
+            }))
+            .child(list);
+
+        Some(
+            anchored()
+                .position_mode(AnchoredPositionMode::Local)
+                .anchor(Corner::BottomLeft)
+                .offset(point(px(0.), px(-4.)))
+                .snap_to_window()
+                .child(deferred(popup))
+                .into_any_element(),
+        )
+    }
+
 
     /// While a run is in flight and the composer holds something to send, a
     /// quiet steer control sits beside Stop: it injects the text into the live
@@ -1346,7 +1486,7 @@ impl OrbitApp {
                         .clone()
                         .or_else(|| std::env::current_dir().ok())
                         .unwrap_or_else(|| PathBuf::from("."));
-                    match app.quota_bridge.spawn(&workspace) {
+                    match app.extensions.spawn(&workspace) {
                         Ok(client) => {
                             app.client = Some(client);
                             app.send(CommandBody::GetState, "get_state");

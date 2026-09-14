@@ -1,4 +1,6 @@
 import type { ReactNode } from "react";
+import { buttonVariants } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 
 export function Shell({
   children,
@@ -31,16 +33,12 @@ export function Band({
   );
 }
 
-const base =
-  "inline-flex items-center justify-center gap-[9px] whitespace-nowrap rounded-[5px] border border-transparent text-[12px] font-[550] no-underline transition-[background-color,border-color,box-shadow] duration-100 ease-out";
-
-const variants = {
-  primary:
-    "min-h-10 bg-ink px-[18px] text-page border-white/60 hover:bg-white hover:border-white active:bg-[#e5e5e7]",
-  secondary:
-    "min-h-10 border-hair text-ink hover:bg-slab hover:border-white/20 active:bg-[#191a1e]",
-  nav: "rounded-full bg-ink px-[15px] py-[7px] text-[13.5px] font-medium text-page hover:bg-white",
-  text: "border-transparent px-0 text-[13px] text-ink-2 hover:text-ink",
+/** Orbit's button intents mapped onto shadcn's `buttonVariants`. */
+const buttonIntents = {
+  primary: "default",
+  secondary: "outline",
+  nav: "default",
+  text: "ghost",
 } as const;
 
 export function ButtonLink({
@@ -52,14 +50,25 @@ export function ButtonLink({
 }: {
   href: string;
   children: ReactNode;
-  variant?: keyof typeof variants;
+  variant?: keyof typeof buttonIntents;
   className?: string;
   external?: boolean;
 }) {
   return (
     <a
       href={href}
-      className={`${base} ${variants[variant]} ${className}`}
+      className={cn(
+        buttonVariants({
+          variant: buttonIntents[variant],
+          size: variant === "nav" ? "sm" : "lg",
+        }),
+        variant === "primary" && "min-h-10 gap-[9px] px-[18px] text-[12px]",
+        variant === "secondary" && "min-h-10 gap-[9px] px-[18px] text-[12px]",
+        variant === "nav" && "rounded-full px-[15px] text-[13.5px]",
+        variant === "text" &&
+          "px-0 text-[13px] text-ink-2 hover:bg-transparent hover:text-ink",
+        className,
+      )}
       {...(external ? { target: "_blank", rel: "noreferrer" } : {})}
     >
       {children}
@@ -78,7 +87,7 @@ export function SectionLabel({
     <p
       className={`flex items-center gap-[9px] font-mono text-[10px] uppercase leading-[1.4] tracking-[0.065em] text-ink-2 ${className}`}
     >
-      <i className="pulse-dot size-[5px] shrink-0 rounded-full bg-accent" />
+      <i className="pulse-dot size-[5px] shrink-0 rounded-full bg-brand" />
       {children}
     </p>
   );

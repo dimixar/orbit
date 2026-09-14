@@ -144,7 +144,7 @@ impl OrbitApp {
     /// once per [`QUOTA_ENTRY_POLL_INTERVAL`]. The bridge appends a snapshot
     /// only when the numbers change, so a quiet account returns no entries.
     pub(super) fn poll_quota_entries(&mut self) {
-        if self.quota_bridge.extension().is_none() {
+        if self.extensions.quota().is_none() {
             return;
         }
         if self.quota_entries_inflight || self.quota_entries_next_poll > Instant::now() {
@@ -311,7 +311,7 @@ impl OrbitApp {
             .clone()
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
-        match self.quota_bridge.spawn(&cwd) {
+        match self.extensions.spawn(&cwd) {
             Ok(client) => {
                 self.adopt_client(client);
                 self.send(CommandBody::GetState, "get_state");

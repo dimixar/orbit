@@ -1,4 +1,8 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
 
 /*
  * Palette and layout scale mirror the warm.run reference landing:
@@ -8,14 +12,13 @@
   --color-page: #141518;
   --color-well: #0f1012;
   --color-missions: #0b0c0f;
-  --color-card: #1c1d21;
   --color-slab: #242529;
   --color-ink: #f4f4f5;
   --color-ink-2: #a2a5ab;
   --color-ink-3: #6f7278;
   --color-hair: #ffffff14;
   --color-dash: #ffffff1c;
-  --color-accent: #5b9dff;
+  --color-brand: #5b9dff;
   --color-window: #17181b;
   --color-winbar: #1d1e22;
   --color-side: #131417;
@@ -25,6 +28,92 @@
 
   --shadow-window: 0 0 0 1px #ffffff17, 0 24px 60px #0000008c;
   --shadow-pop: 0 0 0 1px #ffffff14, 0 12px 30px #00000073;
+}
+
+/*
+ * shadcn/ui token bridge. Every semantic token resolves to an Orbit colour so
+ * components inherit the workbench surfaces instead of shipping a second,
+ * light theme. The site is dark-only, so the values live on `:root`.
+ */
+@theme inline {
+  --font-heading: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+  --radius: 0.375rem;
+
+  --background: #141518;
+  --foreground: #f4f4f5;
+  --card: #1c1d21;
+  --card-foreground: #f4f4f5;
+  --popover: #17181b;
+  --popover-foreground: #f4f4f5;
+  --primary: #f4f4f5;
+  --primary-foreground: #141518;
+  --secondary: #242529;
+  --secondary-foreground: #f4f4f5;
+  --muted: #242529;
+  --muted-foreground: #a2a5ab;
+  --accent: #242529;
+  --accent-foreground: #f4f4f5;
+  --destructive: #e5484d;
+  --border: #ffffff14;
+  --input: #ffffff1f;
+  --ring: #5b9dff;
+
+  --chart-1: #5b9dff;
+  --chart-2: #8fb6ff;
+  --chart-3: #a2a5ab;
+  --chart-4: #6f7278;
+  --chart-5: #3a3b40;
+
+  --sidebar: #131417;
+  --sidebar-foreground: #f4f4f5;
+  --sidebar-primary: #5b9dff;
+  --sidebar-primary-foreground: #141518;
+  --sidebar-accent: #242529;
+  --sidebar-accent-foreground: #f4f4f5;
+  --sidebar-border: #ffffff14;
+  --sidebar-ring: #5b9dff;
 }
 
 html {
@@ -51,7 +140,7 @@ body {
 }
 
 :focus-visible {
-  outline: 2px solid var(--color-accent);
+  outline: 2px solid var(--color-brand);
   outline-offset: 2px;
   border-radius: 2px;
 }
@@ -205,5 +294,17 @@ body {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
   }
 }

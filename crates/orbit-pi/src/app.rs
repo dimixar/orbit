@@ -43,8 +43,10 @@ use orbit_rpc::{
 };
 use serde_json::Value;
 
+use crate::access::AccessMode;
 use crate::auth::{AuthEffect, AuthManager, AuthSupport, LoginPhase, ProviderStatus};
 use crate::branch_picker::BranchPicker;
+use crate::bundled_extensions::BundledExtensions;
 use crate::checkpoint;
 use crate::command_palette::{self, CommandPalette, PaletteCommand, PaletteSnapshot};
 use crate::composer::ComposerInput;
@@ -61,7 +63,6 @@ use crate::platform::{self, ExternalApp};
 use crate::plugins::{PackageScope, PluginPackage};
 use crate::providers::{self, CustomProvider};
 use crate::quota::{QuotaManager, QuotaSupport};
-use crate::quota_bridge::QuotaBridge;
 use crate::sessions::{self, SessionInfo};
 use crate::sidepane::{SidePane, SidePaneResize};
 use crate::skills::Skill;
@@ -310,13 +311,12 @@ pub struct OrbitApp {
     /// Workspace groups whose session list is expanded past
     /// [`SIDEBAR_GROUP_SESSIONS_VISIBLE`] (Show more).
     expanded_session_groups: HashSet<String>,
-    /// Workspaces hidden from the sidebar, keyed by their group label. Their
-    /// sessions stay on disk and in the ⌘P selector — only the sidebar omits
-    /// them. Persisted to `~/.orbit-pi/sidebar.json`.
-    hidden_workspaces: HashSet<String>,
-    /// The sidebar's "Hidden" disclosure is expanded, revealing the hidden
-    /// workspace list with per-row restore.
-    hidden_sidebar_expanded: bool,
+    /// The projects Orbit lists in its sidebar — its own, user-curated folder
+    /// list. pi owns the session files; this only records which folders the
+    /// user added, persisted to `~/.orbit-pi/workspaces.json`. A workspace is
+    /// added when the user picks it to work in; removing one drops only this
+    /// entry and never touches pi.
+    workspaces: Vec<PathBuf>,
     /// Open row-actions menu on a workspace group header (which workspace's
     /// label + cwd). Mutually exclusive with `session_menu`.
     workspace_menu: Option<WorkspaceMenu>,
@@ -422,9 +422,19 @@ pub struct OrbitApp {
     /// `quota.*` RPC namespace and the bundled bridge extension's session
     /// entries. Empty when nothing has been reported yet.
     quota: QuotaManager,
-    /// The bundled pi extension that fetches quota and appends snapshots to
-    /// each session; spawned with `--extension` on every session process.
-    quota_bridge: QuotaBridge,
+    /// The bundled pi extensions (quota bridge + access guard), spawned with
+    /// `--extension` on every session process.
+    extensions: BundledExtensions,
+    /// The active access mode. Persisted to `~/.orbit-pi/access.json`, which
+    /// the guard extension reads fresh on every tool call.
+    access_mode: AccessMode,
+    /// Whether the composer's access-mode picker popover is open.
+    access_menu_open: bool,
+    /// Highlighted row in the access-mode picker (arrow keys + hover move it).
+    access_menu_highlight: usize,
+    /// Focus handle that carries the `AccessMenu` key context while the picker
+    /// is open (focus moves here so ↑/↓/Enter/Escape hit it).
+    access_menu_focus: FocusHandle,
     /// `get_entries` cursor for the bridge's quota snapshots. Entry ids are
     /// per-session, so this resets when the active session changes.
     quota_entries_cursor: Option<String>,
@@ -656,8 +666,12 @@ impl OrbitApp {
         // Spawn pi rooted at the repo; sessions live in the real
         // ~/.pi/agent/sessions so they are shared with the CLI.
         let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let quota_bridge = QuotaBridge::install();
-        let (client, connect_error) = match quota_bridge.spawn(&workspace) {
+        let extensions = BundledExtensions::install();
+        // Load the access mode and write it back so the guard extension finds
+        // the file on the very first tool call of the session.
+        let access_mode = AccessMode::load();
+        access_mode.persist();
+        let (client, connect_error) = match extensions.spawn(&workspace) {
             Ok(client) => (Some(client), String::new()),
             Err(err) => (None, format!("pi spawn failed: {err}")),
         };
@@ -756,8 +770,7 @@ impl OrbitApp {
             collapsed_workspaces: HashSet::new(),
             expanded_workspace_groups: HashSet::new(),
             expanded_session_groups: HashSet::new(),
-            hidden_workspaces: load_hidden_workspaces(),
-            hidden_sidebar_expanded: false,
+            workspaces: load_workspaces(),
             workspace_menu: None,
             current_session_path: None,
             menu_dismissed_at: None,
@@ -803,7 +816,11 @@ impl OrbitApp {
             provider_auth_error: None,
             auth: AuthManager::new(),
             quota: QuotaManager::new(),
-            quota_bridge,
+            extensions,
+            access_mode,
+            access_menu_open: false,
+            access_menu_highlight: 0,
+            access_menu_focus: cx.focus_handle(),
             quota_entries_cursor: None,
             quota_entries_inflight: false,
             quota_entries_bootstrap: QUOTA_ENTRY_BOOTSTRAP_POLLS,
@@ -935,9 +952,21 @@ impl OrbitApp {
     /// first prompt lands in the transcript the placeholder shows it
     /// instantly at the top, and it disappears once the real row loads
     /// (same path ⇒ no duplicate).
+    ///
+    /// Only sessions inside Orbit's own project list reach the sidebar (and
+    /// the ⌘P palette); everything else pi has on disk is left where it is.
     pub(super) fn sidebar_sessions(&self) -> Vec<SessionInfo> {
+        let listed: Vec<SessionInfo> = self
+            .sessions
+            .iter()
+            .filter(|session| {
+                let cwd = normalize_workspace_path(&session.cwd.to_string_lossy());
+                self.workspaces.contains(&cwd)
+            })
+            .cloned()
+            .collect();
         sessions_with_placeholder(
-            &self.sessions,
+            &listed,
             self.current_session_path.as_deref(),
             self.current_title.as_deref(),
             self.current_workspace.as_deref(),
@@ -955,6 +984,28 @@ impl OrbitApp {
                     .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
                     .unwrap_or_else(|| "workspace".into())
             })
+    }
+
+    /// Add `cwd` to Orbit's project list if it isn't already there. Called
+    /// whenever the user picks a folder to work in — starting a task there,
+    /// browsing for one, or opening one of its sessions. Never writes to pi.
+    pub(super) fn add_workspace(&mut self, cwd: PathBuf) {
+        let cwd = normalize_workspace_path(&cwd.to_string_lossy());
+        if self.workspaces.iter().any(|w| w == &cwd) {
+            return;
+        }
+        self.workspaces.push(cwd);
+        persist_workspaces(&self.workspaces);
+    }
+
+    /// Drop a project from Orbit's sidebar. pi's session files stay exactly
+    /// where they are — only Orbit's own list changes.
+    pub(super) fn remove_workspace(&mut self, cwd: &Path) {
+        let before = self.workspaces.len();
+        self.workspaces.retain(|w| w.as_path() != cwd);
+        if self.workspaces.len() != before {
+            persist_workspaces(&self.workspaces);
+        }
     }
 
     /// Refetch the status bar's branch chip off-thread: branch name plus
@@ -1031,52 +1082,62 @@ enum SideRow {
     ShowMore { label: String, count: usize },
     /// Collapse a workspace group back to the truncated list.
     ShowLess { label: String },
-    /// The "Hidden" disclosure at the foot of the sidebar. Expanding it
-    /// reveals the hidden workspaces so they can be restored.
-    HiddenHeader { count: usize, expanded: bool },
-    /// A workspace hidden from the sidebar: group label and session count.
-    HiddenWorkspace { label: String, count: usize },
 }
 
-/// `~/.orbit-pi/sidebar.json` — sidebar view preferences that outlive a run
-/// but never touch pi's session store: today, the workspaces the user hid.
-fn sidebar_prefs_path() -> PathBuf {
+/// `~/.orbit-pi/workspaces.json` — the folders Orbit lists in its sidebar.
+/// Orbit-owned: pi owns the session files, this only records which projects
+/// the user added. Removing a workspace here never touches pi.
+fn workspaces_path() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".orbit-pi")
-        .join("sidebar.json")
+        .join("workspaces.json")
 }
 
-fn load_hidden_workspaces() -> HashSet<String> {
-    let Ok(raw) = fs::read_to_string(sidebar_prefs_path()) else {
-        return HashSet::new();
+fn load_workspaces() -> Vec<PathBuf> {
+    let Ok(raw) = fs::read_to_string(workspaces_path()) else {
+        return Vec::new();
     };
     let Ok(value) = serde_json::from_str::<Value>(&raw) else {
-        return HashSet::new();
+        return Vec::new();
     };
     value
-        .get("hidden_workspaces")
+        .get("workspaces")
         .and_then(Value::as_array)
         .map(|entries| {
             entries
                 .iter()
                 .filter_map(Value::as_str)
-                .map(str::to_string)
+                .map(normalize_workspace_path)
                 .collect()
         })
         .unwrap_or_default()
 }
 
-fn persist_hidden_workspaces(hidden: &HashSet<String>) {
-    let path = sidebar_prefs_path();
+fn persist_workspaces(workspaces: &[PathBuf]) {
+    let path = workspaces_path();
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let mut labels: Vec<&String> = hidden.iter().collect();
-    labels.sort();
-    let payload = serde_json::json!({ "hidden_workspaces": labels });
+    let paths: Vec<String> = workspaces
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    let payload = serde_json::json!({ "workspaces": paths });
     let _ = fs::write(path, payload.to_string());
+}
+
+/// A workspace path without a trailing separator, so it compares equal to
+/// pi's `cwd` values (which never carry one). An empty remainder (`/`) is
+/// kept as-is.
+fn normalize_workspace_path(raw: &str) -> PathBuf {
+    let trimmed = raw.trim_end_matches(std::path::MAIN_SEPARATOR);
+    if trimmed.is_empty() {
+        PathBuf::from(raw)
+    } else {
+        PathBuf::from(trimmed)
+    }
 }
 
 /// State of the row-actions popup in the sessions sidebar: which session

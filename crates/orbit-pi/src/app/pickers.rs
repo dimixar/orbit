@@ -121,6 +121,8 @@ impl OrbitApp {
         self.drop_client();
         self.transcript.clear();
         self.current_title = None;
+        // Picking a folder to work in adds it to Orbit's own sidebar list.
+        self.add_workspace(folder.clone());
         self.current_workspace = Some(folder);
         self.current_session_path = None;
         self.added = 0;
@@ -130,7 +132,7 @@ impl OrbitApp {
         self.reset_turns();
         self.reset_queue();
         match self
-            .quota_bridge
+            .extensions
             .spawn(self.current_workspace.as_ref().unwrap())
         {
             Ok(client) => {
@@ -188,6 +190,7 @@ impl OrbitApp {
         // Mutually exclusive with the composer's add menu and the new-task
         // page's workspace picker.
         self.add_menu_open = false;
+        self.access_menu_open = false;
         self.workspace_picker = None;
 
         // The popup talks back exclusively through these callbacks; it never

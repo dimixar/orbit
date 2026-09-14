@@ -30,9 +30,12 @@ JSONL events on stdout. Retire `agent/` (pi-coding-agent SDK daemon) and the SSE
 - removes Node as a runtime, the bundled `pi-sse.mjs` sidecar, and localhost port management
 
 **Residual risk:** per-tool *permission* requests in RPC mode are unverified (pi's permission
-system is TUI/launch-flag territory; Waku sidesteps with `--approve`). **Decided:** finish the P0
-probe. If they don't surface, launch with `--approve` and note the permission UI as
-blocked-on-protocol — never fake it. The Node daemon is removed and is not a fallback.
+system is TUI/launch-flag territory; Waku sidesteps with `--approve`). **Resolved:** pi core has no
+per-tool permission surface in RPC mode and no sandbox, but an extension's `tool_call` hook can
+block/confirm and `ctx.ui.confirm` *does* surface over RPC as `extension_ui_request`. Orbit ships
+`contrib/orbit-guard-extension/` for its Supervised / Auto-accept edits / Full access modes rather
+than faking a pi-native mode. `--approve` is project trust (a separate concern). The Node daemon is
+removed and is not a fallback.
 
 ### D2 — Mermaid diagrams
 **Choice:** code-block fallback first; no diagram rendering in the P0–P3 core. Later, evaluate
@@ -105,9 +108,9 @@ legacy app today:
 
 ### Implementation status (living)
 
-Done: streaming transcript + virtualization; markdown + highlighting; composer with steering, follow-ups, cancel, autocomplete, attachments; extension dialogs; diff/Review + Git page; sessions (list/switch/new/delete/clone/cross-workspace/hidden) with a **warm process pool** so re-opening a recent session is a resume, not a Node spawn; usage, skills, plugins, models, providers, settings pages; transcript find; image lightbox; theming + reduce-motion; signed/notarizable packaging; CI.
+Done: streaming transcript + virtualization; markdown + highlighting; composer with steering, follow-ups, cancel, autocomplete, attachments; extension dialogs; diff/Review + Git page; sessions (list/switch/new/delete/clone/cross-workspace) over an Orbit-owned project list (only folders the user added; removing one never touches pi) with a **warm process pool** so re-opening a recent session is a resume, not a Node spawn; usage, skills, plugins, models, providers, settings pages; transcript find; image lightbox; theming + reduce-motion; signed/notarizable packaging; CI.
 
-Open: per-tool **permission** dialogs (blocked on the RPC probe, D1); conversation **fork/rewind** (clone exists; rewind needs entry ids); on-device scroll-perf measurement.
+Open: conversation **fork/rewind** (clone exists; rewind needs entry ids); on-device scroll-perf measurement. Access modes ship as a real `tool_call` confirmation guard (not a sandbox); an "Auto" AI reviewer awaits a pi reviewer API.
 
 ## Non-goals (explicitly out of scope)
 
@@ -138,7 +141,7 @@ wall-clock roughly in half.
 
 1. **P3 scope** — 25–40 days. Mitigate: Waku pattern map (AGENT.md), one-StyledText-per-block
    markdown from day one, tool renderers by spec from `agent-elements/`.
-2. **Tool approval protocol gap (D1 residual)** — 2-day probe in P0; fallback launch flag is cheap.
+2. **Tool approval protocol gap (D1 residual)** — resolved: pi exposes no native per-tool permission in RPC mode, so Orbit enforces access modes through a bundled `tool_call` extension that confirms via `ctx.ui.confirm` (rendered natively). An "Auto" AI reviewer stays open until pi exposes a reviewer API to extensions.
 3. **Composer editor** — a good multi-line markdown-aware input is the hardest single control in
    GPUI 0.2.2 (could blow P3's composer sub-item to 10–12 d). Mitigate: single-line field first,
    multi-line as a deliberate follow-up; never ship a broken input.

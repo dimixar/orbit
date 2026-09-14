@@ -505,6 +505,7 @@ impl OrbitApp {
         // Mutually exclusive with the other composer popovers.
         self.model_selector = None;
         self.context_popup = ContextPopup::None;
+        self.access_menu_open = false;
         self.autocomplete_dismissed = true;
         self.autocomplete.borrow_mut().open = false;
         self.add_menu_open = true;
@@ -637,6 +638,125 @@ impl OrbitApp {
             CommandBody::SetThinkingLevel { level },
             "set_thinking_level",
         );
+        cx.notify();
+    }
+
+    // ── access mode (the guard extension's policy) ──────────────────────
+
+    /// Mouse-up on the access chip. Swallows the toggle if the menu was just
+    /// dismissed by this click's mouse-down (outside-click dismissal).
+    pub(super) fn on_access_trigger_click(
+        &mut self,
+        _: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        const GESTURE: Duration = Duration::from_millis(200);
+        if let Some(dismissed) = self.menu_dismissed_at.take() {
+            if dismissed.elapsed() < GESTURE {
+                return;
+            }
+        }
+        self.toggle_access_menu(window, cx);
+    }
+
+    pub(super) fn toggle_access_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.access_menu_open {
+            self.close_access_menu(window, cx);
+            return;
+        }
+        // Mutually exclusive with the other composer popovers.
+        self.model_selector = None;
+        self.context_popup = ContextPopup::None;
+        self.add_menu_open = false;
+        self.autocomplete_dismissed = true;
+        self.autocomplete.borrow_mut().open = false;
+        self.access_menu_open = true;
+        self.access_menu_highlight = AccessMode::ALL
+            .iter()
+            .position(|mode| *mode == self.access_mode)
+            .unwrap_or(0);
+        // Focus the menu so ↑/↓/Enter/Escape dispatch to it.
+        window.focus(&self.access_menu_focus);
+        cx.notify();
+    }
+
+    /// Close the access menu and hand focus back to the composer input.
+    pub(super) fn close_access_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.access_menu_open {
+            self.access_menu_open = false;
+            self.input.read(cx).focus(window);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn on_access_menu_next(
+        &mut self,
+        _: &crate::AccessMenuNext,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.access_menu_highlight = (self.access_menu_highlight + 1) % AccessMode::ALL.len();
+        cx.notify();
+    }
+
+    pub(super) fn on_access_menu_prev(
+        &mut self,
+        _: &crate::AccessMenuPrev,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.access_menu_highlight =
+            (self.access_menu_highlight + AccessMode::ALL.len() - 1) % AccessMode::ALL.len();
+        cx.notify();
+    }
+
+    pub(super) fn on_access_menu_confirm(
+        &mut self,
+        _: &crate::AccessMenuConfirm,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.run_access_menu_item(self.access_menu_highlight, window, cx);
+    }
+
+    pub(super) fn on_access_menu_close(
+        &mut self,
+        _: &crate::AccessMenuClose,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_access_menu(window, cx);
+    }
+
+    /// Select access mode `ix` (see [`AccessMode::ALL`]) and close the menu.
+    pub(super) fn run_access_menu_item(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(mode) = AccessMode::ALL.get(ix).copied() {
+            self.set_access_mode(mode, cx);
+        }
+        self.close_access_menu(window, cx);
+    }
+
+    /// Apply an access mode: persist it (the guard extension reads the file
+    /// on every tool call, so this re-arms live sessions) and report it. When
+    /// the guard extension could not be installed the mode has no effect, and
+    /// the status line says so rather than implying it took.
+    pub(super) fn set_access_mode(&mut self, mode: AccessMode, cx: &mut Context<Self>) {
+        self.access_mode = mode;
+        mode.persist();
+        if self.extensions.guard().is_none() {
+            self.set_status(format!(
+                "Access mode set to {}, but the guard extension is unavailable",
+                mode.label()
+            ));
+        } else {
+            self.set_status(format!("Access mode: {}", mode.label()));
+        }
         cx.notify();
     }
 }

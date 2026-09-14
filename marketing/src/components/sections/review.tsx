@@ -5,7 +5,7 @@ import { Band, SectionLabel, Shell } from "@/components/ui";
 const points = [
   "A live git diff HEAD of the workspace, in a right-hand panel.",
   "Refreshed automatically when a run settles — no manual reload.",
-  "Toggle it from the top bar; the transcript stays put.",
+  "Open it from the transcript's changed-files card, the Git page, or ⌘P; the transcript stays put.",
 ];
 
 export function Review() {

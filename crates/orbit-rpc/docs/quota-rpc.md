@@ -15,8 +15,8 @@ handlers are injected by `contrib/pi-quota-rpc/apply.mjs`.
 
 Orbit does not require the `quota.*` namespace. It ships a pi extension
 (`contrib/orbit-quota-extension/`, materialized under
-`~/.orbit-pi/quota-extension/` by `crates/orbit-pi/src/quota_bridge.rs`) and
-loads it on every session process with `pi --extension <index.js>`. The
+`~/.orbit-pi/quota-extension/` by `crates/orbit-pi/src/bundled_extensions.rs`)
+and loads it on every session process with `pi --extension <index.js>`. The
 extension resolves credentials through pi's own `ctx.modelRegistry`, queries
 the same provider endpoints, and appends one normalized snapshot as a custom
 session entry:

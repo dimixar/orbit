@@ -104,7 +104,16 @@ impl OrbitApp {
             cx.notify();
             return;
         }
-        // Not running: a normal prompt starts a new turn.
+        // Not running: a normal prompt starts a new turn. Sending it commits
+        // the user to a folder, so make sure it is in Orbit's own sidebar
+        // list — the launch-cwd path never picked one explicitly.
+        if let Some(cwd) = self
+            .current_workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+        {
+            self.add_workspace(cwd);
+        }
         let body = CommandBody::Prompt {
             message: text.clone(),
             images: Self::prompt_images(&attachments),
@@ -356,6 +365,10 @@ impl OrbitApp {
             self.close_add_menu(window, cx);
             return;
         }
+        if self.access_menu_open {
+            self.close_access_menu(window, cx);
+            return;
+        }
         if self.git_open && self.git_panel.read(cx).has_modal() {
             self.git_panel
                 .update(cx, |panel, cx| panel.dismiss_modal(cx));
@@ -462,9 +475,10 @@ impl OrbitApp {
         self.context = None;
         self.reset_turns();
         self.reset_queue();
+        self.add_workspace(cwd.clone());
         self.current_workspace = Some(cwd.clone());
 
-        match self.quota_bridge.spawn(&cwd) {
+        match self.extensions.spawn(&cwd) {
             Ok(client) => {
                 self.adopt_client(client);
                 self.send(CommandBody::NewSession, "new_session");
@@ -584,8 +598,8 @@ impl OrbitApp {
             self.preview_session_transcript(session.path.clone(), cx);
             // Spawn a dedicated pi process rooted at the session's workspace
             // and point it at the session file.
-            let spawned = self.quota_bridge.spawn(&session.cwd).or_else(|_| {
-                self.quota_bridge
+            let spawned = self.extensions.spawn(&session.cwd).or_else(|_| {
+                self.extensions
                     .spawn(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
             });
             match spawned {
@@ -613,6 +627,8 @@ impl OrbitApp {
             }
         }
         self.current_title = Some(session.title.clone());
+        // Opening a session keeps its folder in Orbit's own sidebar list.
+        self.add_workspace(session.cwd.clone());
         self.current_workspace = Some(session.cwd.clone());
         self.current_session_path = Some(session.path.clone());
         if push {

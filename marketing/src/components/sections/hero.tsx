@@ -4,9 +4,11 @@ import {
   GithubLogo,
   Terminal,
   Desktop,
+  GitDiff,
+  Plugs,
   WindowsLogo,
 } from "@phosphor-icons/react/dist/ssr";
-import { OrbitMark } from "@/components/brand";
+import { OrbitIcon } from "@/components/brand";
 import { Band, ButtonLink, SectionLabel, Shell } from "@/components/ui";
 
 const platforms = [
@@ -19,23 +21,23 @@ const surfaces = [
   {
     Icon: Desktop,
     name: "Desktop",
-    line: "A native GPUI workbench",
+    line: "A native workbench for pi",
     link: "Download for macOS",
     href: "#install",
   },
   {
-    Icon: Terminal,
-    name: "Terminal",
-    line: "The same pi sessions",
-    link: "pi coding agent",
-    href: "https://github.com/earendil-works/pi",
+    Icon: Plugs,
+    name: "Providers",
+    line: "Ollama, Anthropic, Bedrock",
+    link: "See providers",
+    href: "#workbench",
   },
   {
-    Icon: GithubLogo,
-    name: "Source",
-    line: "All Rust, three commands",
-    link: "View on GitHub",
-    href: "https://github.com/rajeshwar-hyphun/orbit",
+    Icon: GitDiff,
+    name: "Git",
+    line: "Review, commit, and push",
+    link: "See the flow",
+    href: "#gallery",
   },
 ];
 
@@ -44,18 +46,18 @@ export function Hero() {
     <Shell>
       <Band dashed className="pb-7 pt-14">
         <div className="flex flex-col gap-9">
-          <SectionLabel>Native · Rust · GPU-drawn</SectionLabel>
+          <SectionLabel>Sessions · Providers · Git</SectionLabel>
 
           <div className="flex flex-col items-start gap-6">
             <h1 className="flex flex-col items-start text-[clamp(36px,4.2vw,52px)] font-[250] leading-[1.16] tracking-[-0.022em] text-ink">
               <span className="rise flex flex-wrap items-center gap-x-[0.23em] gap-y-[0.12em]">
                 Get
-                <OrbitMark className="block h-[0.82em] w-auto shrink-0 text-ink-3" />
+                <OrbitIcon className="block h-[0.95em] w-auto shrink-0" alt="" />
                 <span className="sr-only">Orbit</span>
                 and run pi
               </span>
               <span className="rise" style={{ animationDelay: "90ms" }}>
-                on <strong className="font-[450]">desktop, terminal, and GPU.</strong>
+                on <strong className="font-[450]">desktop, terminal, and every workspace.</strong>
               </span>
             </h1>
 
@@ -71,7 +73,7 @@ export function Hero() {
                 variant="primary"
                 className="min-w-[184px]"
               >
-                <DownloadSimple className="size-[15px]" weight="bold" />
+                <DownloadSimple data-icon="inline-start" weight="bold" />
                 Download for macOS
               </ButtonLink>
               <ButtonLink
@@ -79,7 +81,7 @@ export function Hero() {
                 variant="secondary"
                 external
               >
-                <GithubLogo className="size-[15px]" />
+                <GithubLogo data-icon="inline-start" />
                 View on GitHub
               </ButtonLink>
             </div>

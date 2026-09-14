@@ -2,6 +2,7 @@
 
 import { Check, CopySimple } from "@phosphor-icons/react/dist/ssr";
 import { useState } from "react";
+import { Button } from "@/components/ui/button";
 
 export function CopyButton({
   value,
@@ -23,18 +24,20 @@ export function CopyButton({
   }
 
   return (
-    <button
+    <Button
       type="button"
+      variant="outline"
+      size="xs"
       onClick={copy}
-      className="inline-flex items-center gap-1.5 rounded-md border border-hairline bg-raised px-2 py-1 font-mono text-[10.5px] text-ink-2 transition-colors hover:border-[#3a3a3a] hover:text-ink"
       aria-live="polite"
+      className="font-mono text-[10.5px]"
     >
       {copied ? (
-        <Check className="size-3 text-success" />
+        <Check data-icon="inline-start" />
       ) : (
-        <CopySimple className="size-3" />
+        <CopySimple data-icon="inline-start" />
       )}
       {copied ? "Copied" : label}
-    </button>
+    </Button>
   );
 }

@@ -136,9 +136,11 @@ impl PiClient {
         extensions: &[PathBuf],
     ) -> Result<Self> {
         let mut command = std::process::Command::new(bin);
-        // Waku parity: `--approve` auto-approves tool calls so the RPC
-        // session never stalls on an approval dialog it cannot render, and
-        // the version check is noise for a child we just spawned.
+        // `--approve` grants *project trust* (load project-local settings,
+        // extensions, and skills) — it is not tool-call approval. This is the
+        // isolated transport seam used by tests and callers that don't pass
+        // extensions; the app spawns through `BundledExtensions`, which loads
+        // the access guard that confirms tool calls per the active mode.
         command
             .args(["--mode", "rpc", "--approve"])
             .env("PI_SKIP_VERSION_CHECK", "1")

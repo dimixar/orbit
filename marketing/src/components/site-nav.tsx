@@ -1,26 +1,25 @@
-import { OrbitMark } from "@/components/brand";
+import { OrbitWordmark } from "@/components/brand";
 import { Band, ButtonLink, Shell } from "@/components/ui";
 
 const links = [
   { label: "Features", href: "#features" },
   { label: "Workbench", href: "#workbench" },
-  { label: "Architecture", href: "#architecture" },
-  { label: "Install", href: "#install" },
+  { label: "Gallery", href: "#gallery" },
+  { label: "Get started", href: "#install" },
 ];
 
 export function SiteNav() {
   return (
-    <header>
+    <header className="sticky top-0 z-50 bg-page/80 backdrop-blur-md">
       <Shell>
         <Band dashed>
           <nav className="flex h-16 items-center justify-between">
             <a
               href="#top"
               aria-label="Orbit home"
-              className="inline-flex items-center gap-[10px] text-[15px] font-medium text-ink no-underline"
+              className="inline-flex items-center no-underline"
             >
-              <OrbitMark className="h-[25px] w-auto" />
-              Orbit
+              <OrbitWordmark className="h-[30px] w-auto" alt="" priority />
             </a>
 
             <div className="hidden items-center gap-[26px] text-[13.5px] md:flex">

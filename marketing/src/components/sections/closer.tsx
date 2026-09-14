@@ -14,7 +14,7 @@ export function Closer() {
         </p>
         <div className="flex flex-wrap items-center justify-center gap-3.5">
           <ButtonLink href="#install" variant="primary" className="min-w-[184px]">
-            <DownloadSimple className="size-[15px]" weight="bold" />
+            <DownloadSimple data-icon="inline-start" weight="bold" />
             Download for macOS
           </ButtonLink>
           <ButtonLink
@@ -22,7 +22,7 @@ export function Closer() {
             variant="secondary"
             external
           >
-            <GithubLogo className="size-[15px]" />
+            <GithubLogo data-icon="inline-start" />
             View on GitHub
           </ButtonLink>
         </div>

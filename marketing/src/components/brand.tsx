@@ -1,20 +1,51 @@
-import type { SVGProps } from "react";
+import Image from "next/image";
 
-export function OrbitMark(props: SVGProps<SVGSVGElement>) {
+/**
+ * The Orbit Pi wordmark — white ink for dark surfaces. Mirrors
+ * `assets/icons/logo.png` in the desktop app.
+ */
+export function OrbitWordmark({
+  className = "",
+  alt = "Orbit Pi",
+  priority = false,
+}: {
+  className?: string;
+  alt?: string;
+  priority?: boolean;
+}) {
   return (
-    <svg viewBox="0 0 32 32" fill="none" aria-hidden="true" {...props}>
-      <circle cx="16" cy="16" r="6.25" stroke="currentColor" strokeWidth="2" />
-      <ellipse
-        cx="16"
-        cy="16"
-        rx="14"
-        ry="7.25"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        opacity="0.5"
-        transform="rotate(-28 16 16)"
-      />
-      <circle cx="27.4" cy="9.6" r="2.4" fill="currentColor" />
-    </svg>
+    <Image
+      src="/logo.png"
+      alt={alt}
+      width={2172}
+      height={724}
+      priority={priority}
+      className={className}
+    />
+  );
+}
+
+/**
+ * The Orbit Pi app mark — a rounded tile with the bold `P`. Mirrors
+ * `assets/icons/logo-icon.png` in the desktop app.
+ */
+export function OrbitIcon({
+  className = "",
+  alt = "Orbit Pi",
+  priority = false,
+}: {
+  className?: string;
+  alt?: string;
+  priority?: boolean;
+}) {
+  return (
+    <Image
+      src="/logo-icon.png"
+      alt={alt}
+      width={1254}
+      height={1254}
+      priority={priority}
+      className={className}
+    />
   );
 }

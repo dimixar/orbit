@@ -10,10 +10,11 @@ Same product philosophy as [Waku](https://github.com/egoist/waku): the UI layer 
 - **GPU-rendered transcript** — virtualized message list whose cost is independent of message count; stick-to-latest streaming with coalesced commits (a 10k-message harness guards the model layer)
 - **In-transcript find** — ⌘F search with matches, counts, and previous/next jump
 - **Image lightbox** — click any attachment image for a full-window view
-- **Sessions grouped by project** — persistent sessions organized per working directory, with reopen support, cross-workspace sessions, hidden workspaces, and **clone session**
+- **Sessions grouped by project** — persistent sessions organized per working directory, with reopen support, cross-workspace sessions, an Orbit-owned project list (remove a workspace from the sidebar without deleting pi's sessions), and **clone session**
 - **Model catalog** — model selection from the pi runtime's own list (`get_available_models`), with favorites shared between the composer picker and a dedicated **Models** page
 - **Thinking effort** — level selection derived from each model's supported levels (`get_available_thinking_levels`)
-- **Tool activity** — bash, thinking, edit, and other tool rows rendered natively; tool rows expand into Arguments/Output detail cards with per-section copy. Per-tool *permission* dialogs are pending the RPC protocol (see below) and are not faked
+- **Tool activity** — bash, thinking, edit, and other tool rows rendered natively; tool rows expand into Arguments/Output detail cards with per-section copy
+- **Access modes** — a composer chip selects Supervised / Auto-accept edits / Full access; a bundled pi extension (`tool_call` guard) confirms mutating calls the mode does not auto-approve, rendered as a native dialog. It is a guard, not a sandbox (pi ships no sandbox)
 - **Git diff panel** — review what the agent changed without leaving the app
 - **Side pane** — right-hand **Review** panel with a live `git diff HEAD` of the workspace, refreshed when a run settles; toggle from the top bar
 - **Workbench pages** — usage, skills, plugins, models, providers, and settings views backed by pi's on-disk data
@@ -48,7 +49,7 @@ The app spawns the `pi` CLI as a child process and speaks its RPC protocol: JSON
 The v0.1 web app (React 19 + Vite + Tauri 2 + pi SDK daemon) has been **removed**; the GPUI app is the only app. What works today:
 
 - **Working now** — real pi process integration (`crates/orbit-rpc`), sessions sidebar grouped by project, live streaming transcript over the RPC, composer with enter-to-send, steering, follow-up queueing, model/thinking cycling, transcript find, image lightbox, virtualized rendering, markdown, diff/Review, Git page, and the workbench pages (usage, skills, plugins, models, providers, settings)
-- **Pending the protocol** — per-tool *permission* dialogs: pi's permission system has not been confirmed to surface over RPC mode, so Orbit launches with full access rather than faking an approval UI
+- **Access guard** — the Supervised / Auto-accept edits / Full access modes are enforced by a bundled pi extension that hooks `tool_call` and asks through `ctx.ui.confirm` (rendered natively). pi core has no per-tool permission surface and no sandbox, so this is a confirmation guard, not isolation; an "Auto" AI-reviewer mode is not shipped because the installed pi exposes no reviewer API for extensions
 - **Still open** — conversation fork/rewind (clone is available; rewinding to an earlier turn needs entry-id plumbing), and on-device scroll-perf measurement
 
 Feature work is tracked in `INTENT.md` (decisions + phase plan) and `AGENT.md` (conventions + protocol notes). Live behavior is covered by integration tests that spawn a real pi process (they skip cleanly when `pi` is not installed).
@@ -303,7 +304,7 @@ AGENT.md             Conventions for agents/humans working on this repo
 
 ## Roadmap
 
-Orbit is growing toward a full workbench: a file tree, terminal, and conversation fork/rewind. Parallel sessions already run (up to six parked processes); the view is single-active. A per-tool permission UI lands if and when the RPC protocol confirms the surface — it is not faked in the meantime.
+Orbit is growing toward a full workbench: a file tree, terminal, and conversation fork/rewind. Parallel sessions already run (up to six parked processes); the view is single-active. Access modes ship as a real confirmation guard (a bundled `tool_call` extension), not a sandbox.
 
 ## Contributing
 

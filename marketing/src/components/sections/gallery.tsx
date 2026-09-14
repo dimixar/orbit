@@ -12,14 +12,14 @@ const shots = [
   {
     src: "/screens/git.png",
     kicker: "Git",
-    caption: "Stage, review, and commit without leaving Orbit.",
+    caption: "Stage, review, and commit — with History and Graph.",
     alt: "Orbit's Git page listing staged and changed files with line counts and a commit box.",
     wide: false,
   },
   {
     src: "/screens/providers.png",
     kicker: "Providers",
-    caption: "pi's live catalog plus custom providers, with usage.",
+    caption: "pi's live catalog plus custom providers, with login and usage.",
     alt: "Orbit's Providers page showing provider cards for Ollama, OpenCode Go, Bedrock, and Anthropic with usage meters.",
     wide: false,
   },
@@ -33,7 +33,7 @@ const shots = [
   {
     src: "/screens/appearance.png",
     kicker: "Appearance",
-    caption: "Theme, background, fonts, and spacing density.",
+    caption: "Themes, background, fonts, sizes, and spacing density.",
     alt: "Orbit's Appearance settings with theme swatches, type and density previews, and font pickers.",
     wide: false,
   },
@@ -42,14 +42,14 @@ const shots = [
 export function Gallery() {
   return (
     <Shell>
-      <Band dashed className="py-16 sm:py-[88px]">
+      <Band id="gallery" dashed className="scroll-mt-20 py-16 sm:py-[88px]">
         <Eyebrow className="mb-3.5">Surfaces</Eyebrow>
         <h2 className="mb-4 max-w-[22ch] text-[clamp(28px,3.2vw,38px)] font-[300] leading-[1.2] tracking-[-0.015em] text-ink">
-          Every surface, drawn natively.
+          Every surface, one window.
         </h2>
         <p className="mb-10 max-w-[52ch] text-[14.5px] leading-[1.7] text-ink-2">
-          Not a web view wearing a window frame. Sessions, Git, providers,
-          plugins, and settings render through GPUI on the GPU.
+          Sessions, Git, providers, plugins, and settings live in the same app —
+          no context switching, no web views.
         </p>
 
         <div className="grid grid-cols-1 gap-5 md:grid-cols-2">

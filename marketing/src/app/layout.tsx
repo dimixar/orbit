@@ -17,20 +17,21 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Orbit — a native workbench for the pi coding agent",
   description:
-    "Orbit is a Rust desktop client for the pi coding agent. Chat sessions, tools, diffs, and usage drawn by GPUI on the GPU. No browser, no webview, no Node.",
+    "Orbit is a desktop client for the pi coding agent. Sessions, providers, Git, and usage — chat, review, and commit in one native app.",
   keywords: [
     "Orbit",
     "pi coding agent",
-    "GPUI",
-    "Rust",
-    "native desktop",
     "coding agent",
+    "desktop app",
     "workbench",
+    "AI coding",
+    "providers",
+    "git",
   ],
   openGraph: {
     title: "Orbit — a native workbench for the pi coding agent",
     description:
-      "A Rust desktop client for the pi coding agent. No browser, no webview, no Node.",
+      "A desktop client for the pi coding agent — chat, review, and commit in one window.",
     type: "website",
     siteName: "Orbit",
   },
@@ -44,7 +45,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
     <html
       lang="en"
       data-scroll-behavior="smooth"
-      className={`${inter.variable} ${geistMono.variable} h-full`}
+      className={`dark ${inter.variable} ${geistMono.variable} h-full`}
     >
       <body className="min-h-full flex flex-col bg-page text-ink">
         {children}

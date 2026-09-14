@@ -5,9 +5,11 @@
 
 mod app;
 mod app_icon;
+mod access;
 mod assets;
 mod auth;
 mod branch_picker;
+mod bundled_extensions;
 mod checkpoint;
 mod command_palette;
 mod commit_message;
@@ -30,7 +32,6 @@ mod platform;
 mod plugins;
 mod providers;
 mod quota;
-mod quota_bridge;
 mod review;
 mod sessions;
 mod shimmer;
@@ -120,6 +121,13 @@ actions!(
     [AddMenuNext, AddMenuPrev, AddMenuConfirm, AddMenuClose]
 );
 
+// Access-mode picker actions (bound to the `AccessMenu` context, which rides
+// on the open popup's focus handle).
+actions!(
+    access_menu_keys,
+    [AccessMenuNext, AccessMenuPrev, AccessMenuConfirm, AccessMenuClose]
+);
+
 // Extension-dialog actions (bound to the `DialogSelect` context on the option
 // card and `DialogInput` on its text field).
 actions!(
@@ -187,6 +195,12 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", AddMenuConfirm, Some("AddMenu")),
         KeyBinding::new("up", AddMenuPrev, Some("AddMenu")),
         KeyBinding::new("down", AddMenuNext, Some("AddMenu")),
+        // Access-mode picker keys — same shape as the add menu: the
+        // `AccessMenu` context rides the popup's own focus handle.
+        KeyBinding::new("escape", AccessMenuClose, Some("AccessMenu")),
+        KeyBinding::new("enter", AccessMenuConfirm, Some("AccessMenu")),
+        KeyBinding::new("up", AccessMenuPrev, Some("AccessMenu")),
+        KeyBinding::new("down", AccessMenuNext, Some("AccessMenu")),
         // Extension-dialog keys. `DialogSelect` rides the option card;
         // `DialogInput` rides the dialog's text field (which also carries
         // `Composer`, so caret/clipboard keys stay live). Registered after
