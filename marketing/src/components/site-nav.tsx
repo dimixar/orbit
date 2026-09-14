@@ -4,6 +4,7 @@ import { Band, ButtonLink, Shell } from "@/components/ui";
 const links = [
   { label: "Features", href: "#features" },
   { label: "Workbench", href: "#workbench" },
+  { label: "Safeguards", href: "#guard" },
   { label: "Gallery", href: "#gallery" },
   { label: "Get started", href: "#install" },
 ];

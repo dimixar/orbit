@@ -1,10 +1,11 @@
 //! App icon — dock mark on macOS, PNG for in-app chrome.
 //!
-//! Source of truth: workspace `assets/icons/Icon-macOS-Default-1024x1024@1x.png`.
-//! It follows the macOS icon grid — 824px of artwork centered on a 1024px
-//! canvas with a transparent margin — so Dock/Finder render it at the same
-//! visual size as native apps. The 512px copy in this crate is what the
-//! running binary embeds.
+//! Source of truth: workspace `assets/icons/logo-icon.png`. The derived icons
+//! (`icon.icns`, `icon.ico`, `icon.png`, the Windows tiles, and the 512px copy
+//! in this crate) compose the mark on the macOS icon grid — 824px of artwork
+//! centered on a 1024px canvas with a transparent margin — so Dock/Finder
+//! render it at the same visual size as native apps. The 512px copy in this
+//! crate is what the running binary embeds.
 
 /// 512×512 PNG used by the dock (macOS) and Settings → About.
 pub const PNG: &[u8] = include_bytes!("../assets/app-icon.png");

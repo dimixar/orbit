@@ -6,9 +6,11 @@ import {
   ChartBar,
   Check,
   Cpu,
+  Keyboard,
   ListPlus,
   LockSimple,
   MagnifyingGlass,
+  ShieldCheck,
   Sparkle,
 } from "@phosphor-icons/react/dist/ssr";
 
@@ -164,6 +166,52 @@ export function FindMock() {
       <div className="flex items-center gap-2 text-ink-3">
         <Sparkle className="size-3.5" />
         <span className="font-mono text-[10.5px]">image · click to expand</span>
+      </div>
+    </div>
+  );
+}
+
+export function ApprovalMock() {
+  return (
+    <div className="flex flex-col gap-3 text-[11.5px]">
+      <p className="self-end max-w-[80%] rounded-[9px] bg-slab px-3 py-1.5 text-ink">
+        Refactor the parser, then run the suite.
+      </p>
+
+      <div className="rounded-xl bg-[#ffffff0a] p-3 shadow-[inset_0_0_0_1px_#ffffff12]">
+        <div className="flex flex-wrap items-center gap-2 text-[11.5px] text-ink-2">
+          <ShieldCheck className="size-3.5 text-brand" />
+          <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-ink-3">
+            orbit-guard
+          </span>
+          <span className="text-ink">Agent wants to run</span>
+          <code className="rounded bg-[#ffffff0f] px-1.5 py-px font-mono text-[10.5px] text-ink">
+            bun test
+          </code>
+        </div>
+        <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+          <span className="rounded-md bg-ink px-2.5 py-1 text-[10.5px] font-medium text-page">
+            Allow once
+          </span>
+          <span className="rounded-md bg-[#ffffff0f] px-2.5 py-1 text-[10.5px] text-ink-2 shadow-[inset_0_0_0_1px_#ffffff12]">
+            Always allow this tool
+          </span>
+          <span className="rounded-md bg-[#ffffff0f] px-2.5 py-1 text-[10.5px] text-ink-2 shadow-[inset_0_0_0_1px_#ffffff12]">
+            Deny
+          </span>
+          <span className="ml-auto inline-flex items-center gap-1 font-mono text-[9.5px] text-ink-3">
+            <Keyboard className="size-3" />
+            ↑↓ ⏎ esc
+          </span>
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2 text-[10.5px] text-ink-3">
+        <LockSimple className="size-3.5" />
+        <span>access mode</span>
+        <span className="rounded-md bg-[#ffffff0a] px-2 py-0.5 font-mono text-ink-2 shadow-[inset_0_0_0_1px_#ffffff0f]">
+          Supervised
+        </span>
       </div>
     </div>
   );

@@ -71,7 +71,7 @@ crates/orbit-pi/        GPUI app — window, shell, chat, settings
   src/commit_message.rs one-shot, tool-free `pi -p` conventional-commit generation
   assets/icons/         HugeIcons SVGs (MIT) + provider brand marks
   assets/fonts/         SymbolsNerdFont-Regular.ttf
-  assets/app-icon.png   512px app mark (from the 1024 macOS source)
+  assets/app-icon.png   512px app mark (from assets/icons/logo-icon.png)
 crates/orbit-rpc/       pi CLI process + JSONL protocol
   src/client.rs         spawn, writer/reader/stderr threads, kill-on-drop
   src/types.rs          CommandBody / Event (permissive serde) + auth.* / quota.* wire types
@@ -101,7 +101,7 @@ contrib/orbit-guard-extension/  Orbit's bundled pi extension (loaded with
                         tool / Deny. policy.js holds the decision table and
                         the `~/.orbit-pi/access-allow.json` allowlist;
                         policy.test.mjs / index.test.mjs are `node --test`
-assets/icons/           app icon source (1024 PNG) + icon.icns / icon.png
+assets/icons/           logo-icon.png app-icon source + icon.icns / icon.ico / icon.png
 PRODUCT.md  INTENT.md  README.md  AGENT.md
 ```
 
@@ -167,7 +167,7 @@ These compiled and ran against the pinned version. When in doubt, check
   });
   ```
   Size the window from `cx.primary_display()` (a hardcoded 1240×840 gets clamped top-left on small/scaled screens). `open_window`'s callback is `FnOnce(&mut Window, &mut App) -> Entity<V>`; create entities with `cx.new(|cx| …)`.
-- **App icon:** source is `assets/icons/Icon-macOS-Default-1024x1024@1x.png`. `icon.icns` is for bundled `.app`s (`package.metadata.bundle`). `cargo run` has no bundle, so `app_icon::set_dock_icon()` calls AppKit `setApplicationIconImage` with the embedded 512 PNG. Settings → About paints the same PNG via `img("app-icon.png")`.
+- **App icon:** source is `assets/icons/logo-icon.png`. `icon.icns` is for bundled `.app`s (`package.metadata.bundle`). `cargo run` has no bundle, so `app_icon::set_dock_icon()` calls AppKit `setApplicationIconImage` with the embedded 512 PNG. Settings → About paints the same PNG via `img("app-icon.png")`.
 - **macOS chrome:** `appears_transparent` + `traffic_light_position` — no objc2. Drag regions: `.window_control_area(WindowControlArea::Drag)` on the sidebar strip and the top-bar spacer. When the sidebar is hidden, pad the top bar so controls clear the traffic lights (`pl` ≈ 76 px).
 - **Virtualized lists** (transcript **and** sidebar):
   - Transcript uses `message_scroller.rs` (`ListAlignment::Bottom`, 400px overdraw) — 0.2.2 has no `FollowMode::Tail`, so a past-the-end `scroll_to` is the equivalent. Append while following sticks to the live edge; `remeasure_items` grows the streaming row; scroll away shows **Jump to latest**.

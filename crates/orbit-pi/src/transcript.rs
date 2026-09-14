@@ -352,6 +352,20 @@ struct StepMark {
     tools: usize,
 }
 
+/// Drop a `message_start` seed when the first delta replays it. If the content
+/// accumulated since `mark` starts with `delta`, the snapshot had already
+/// captured that chunk, so clear back to `mark` before the delta is appended;
+/// otherwise leave the seed in place. Only the first delta of a streamed block
+/// passes `seeded = true`.
+fn drop_seed(target: &mut String, mark: usize, delta: &str, seeded: bool) {
+    if !seeded || delta.is_empty() {
+        return;
+    }
+    if target.get(mark..).is_some_and(|t| t.starts_with(delta)) {
+        target.truncate(mark);
+    }
+}
+
 /// Merge one assistant step into its run's message: each step appends as
 /// its own sequence entry, so the page can interleave thought/tool groups
 /// with the texts between them.
@@ -630,6 +644,12 @@ pub struct Transcript {
     rail_autoscroll: Rc<Cell<Option<usize>>>,
     /// Where the streaming step began in its (merged) message.
     step_mark: Rc<Cell<Option<StepMark>>>,
+    /// Whether the current `message_start` snapshot already carries the first
+    /// content chunk. Some providers buffer one delta and put it in the start
+    /// message, then re-send that same chunk as the first delta; these flags
+    /// let the first delta drop the seed instead of doubling the text.
+    seed_text: Rc<Cell<bool>>,
+    seed_thinking: Rc<Cell<bool>>,
     /// Whether the list currently carries the end-of-task summary row (an
     /// extra slot after the last message). Spliced in when a run settles
     /// with file edits; removed when a new turn begins.
@@ -660,6 +680,8 @@ impl Transcript {
             rail_scroll: ScrollHandle::new(),
             rail_autoscroll: Rc::new(Cell::new(None)),
             step_mark: Rc::new(Cell::new(None)),
+            seed_text: Rc::new(Cell::new(false)),
+            seed_thinking: Rc::new(Cell::new(false)),
             tail_summary: Rc::new(Cell::new(false)),
         }
     }
@@ -696,6 +718,8 @@ impl Transcript {
         *self.messages.borrow_mut() = parsed;
         self.scroller.reset(count);
         self.streaming.set(None);
+        self.seed_text.set(false);
+        self.seed_thinking.set(false);
         self.stream_started.set(None);
         self.expanded_turns.borrow_mut().clear();
         self.expanded_files.borrow_mut().clear();
@@ -722,6 +746,8 @@ impl Transcript {
         *self.messages.borrow_mut() = Vec::new();
         self.scroller.reset(0);
         self.streaming.set(None);
+        self.seed_text.set(false);
+        self.seed_thinking.set(false);
         self.stream_started.set(None);
         self.expanded_turns.borrow_mut().clear();
         self.expanded_files.borrow_mut().clear();
@@ -804,6 +830,15 @@ impl Transcript {
         // Assistant message starts. A turn's steps stream into ONE row
         // (Waku): when the previous row is an assistant message, this step
         // continues it instead of stacking another "Worked" fold.
+        //
+        // The start snapshot may already hold the first content chunk (some
+        // providers buffer one delta before emitting it); the matching first
+        // delta then re-sends it. Flag the seed so that delta can drop it.
+        let seed = message.steps.last();
+        self.seed_text
+            .set(seed.is_some_and(|s| !s.text.is_empty()));
+        self.seed_thinking
+            .set(seed.is_some_and(|s| !s.thinking.is_empty()));
         let continues_run = messages.last().map(|m| !m.user).unwrap_or(false);
         if continues_run {
             let ix = messages.len() - 1;
@@ -838,10 +873,22 @@ impl Transcript {
         };
         let (changed, created) = match assistant {
             Am::TextDelta { delta } => {
-                self.with_streaming(|m| m.steps.last_mut().expect("step").text.push_str(delta))
+                let seeded = self.seed_text.replace(false);
+                let mark = self.step_mark.get().map(|k| k.text).unwrap_or(0);
+                self.with_streaming(move |m| {
+                    let step = m.steps.last_mut().expect("step");
+                    drop_seed(&mut step.text, mark, delta, seeded);
+                    step.text.push_str(delta);
+                })
             }
             Am::ThinkingDelta { delta } => {
-                self.with_streaming(|m| m.steps.last_mut().expect("step").thinking.push_str(delta))
+                let seeded = self.seed_thinking.replace(false);
+                let mark = self.step_mark.get().map(|k| k.thinking).unwrap_or(0);
+                self.with_streaming(move |m| {
+                    let step = m.steps.last_mut().expect("step");
+                    drop_seed(&mut step.thinking, mark, delta, seeded);
+                    step.thinking.push_str(delta);
+                })
             }
             Am::ToolcallStart { value } => {
                 let name = value
@@ -2050,6 +2097,72 @@ mod tests {
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[2].text(), "second");
         assert!(!messages[2].has_hidden_work());
+    }
+
+    #[test]
+    fn seeded_message_start_does_not_double_the_first_think_chunk() {
+        // Some providers buffer the first chunk and put it in `message_start`,
+        // then re-send that same chunk as the first `thinking_delta`. The
+        // transcript must drop the seed rather than render "TheThe".
+        let mut t = Transcript::new();
+        t.apply_event(&Event::MessageStart {
+            value: json!({
+                "role": "assistant",
+                "content": [{"type": "thinking", "thinking": "The", "thinkingSignature": "reasoning"}],
+            }),
+        });
+        for delta in ["The", " user", " asks"] {
+            t.apply_event(&Event::MessageUpdate {
+                usage: None,
+                assistant: Some(AssistantMessageEvent::ThinkingDelta {
+                    delta: delta.into(),
+                }),
+            });
+        }
+        assert_eq!(t.messages.borrow()[0].steps[0].thinking, "The user asks");
+
+        // The settled message replaces the step with the authoritative text.
+        t.apply_event(&Event::MessageEnd {
+            value: json!({
+                "role": "assistant",
+                "content": [{"type": "thinking", "thinking": "The user asks", "thinkingSignature": "reasoning"}],
+            }),
+        });
+        assert_eq!(t.messages.borrow()[0].steps[0].thinking, "The user asks");
+    }
+
+    #[test]
+    fn seeded_message_start_does_not_double_the_first_text_chunk() {
+        let mut t = Transcript::new();
+        t.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": [{"type": "text", "text": "A"}]}),
+        });
+        for delta in ["A", " code"] {
+            t.apply_event(&Event::MessageUpdate {
+                usage: None,
+                assistant: Some(AssistantMessageEvent::TextDelta {
+                    delta: delta.into(),
+                }),
+            });
+        }
+        assert_eq!(t.messages.borrow()[0].steps[0].text, "A code");
+    }
+
+    #[test]
+    fn repeated_identical_deltas_are_not_collapsed() {
+        // A seeded start must not make the seed logic eat genuinely repeated
+        // chunks ("aa" from two "a" deltas).
+        let mut t = Transcript::new();
+        t.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": ""}),
+        });
+        for _ in 0..2 {
+            t.apply_event(&Event::MessageUpdate {
+                usage: None,
+                assistant: Some(AssistantMessageEvent::TextDelta { delta: "a".into() }),
+            });
+        }
+        assert_eq!(t.messages.borrow()[0].steps[0].text, "aa");
     }
 
     #[test]

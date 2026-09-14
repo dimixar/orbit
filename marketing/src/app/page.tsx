@@ -1,6 +1,7 @@
 import { Closer } from "@/components/sections/closer";
 import { Features } from "@/components/sections/features";
 import { Gallery } from "@/components/sections/gallery";
+import { Guard } from "@/components/sections/guard";
 import { Hero } from "@/components/sections/hero";
 import { Review } from "@/components/sections/review";
 import { Stage } from "@/components/sections/stage";
@@ -19,6 +20,7 @@ export default function Home() {
         <Steps />
         <Workbench />
         <Features />
+        <Guard />
         <Review />
         <Gallery />
         <Closer />

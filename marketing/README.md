@@ -25,7 +25,7 @@ src/app/globals.css         reference palette + shell/band/dash utilities
 src/app/page.tsx            section order
 src/components/             nav, footer, ui primitives, screenshot frame
 src/components/sections/    hero, stage, steps, workbench, features,
-                            review, gallery, closer
+                            guard, review, gallery, closer
 src/components/ui/          shadcn primitives (button, card)
 public/screens/             real app screenshots (window-cropped)
 ```
