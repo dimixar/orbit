@@ -598,6 +598,16 @@ impl OrbitApp {
         push: bool,
         cx: &mut Context<Self>,
     ) {
+        // Opening a session means viewing the chat: leave whichever full-page
+        // surface (GitHub / Usage) was covering the main area. Without this
+        // the switch happens out of sight and the page stays up, so clicking
+        // a session reads as a no-op.
+        if self.git_open {
+            self.close_git(cx);
+        }
+        if self.usage_open {
+            self.close_usage(cx);
+        }
         if self.current_session_path.as_ref() == Some(&session.path) {
             return;
         }
@@ -841,7 +851,7 @@ impl OrbitApp {
             target = self.sessions.iter().find(|s| s.id == id).cloned();
         }
         if let Some(session) = target {
-            self.usage_open = false;
+            self.close_usage(cx);
             self.switch_to_session(session, true, cx);
             cx.notify();
         }
