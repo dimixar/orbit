@@ -810,7 +810,7 @@ impl UsageSnapshot {
             }
             errors.rows.push(row.clone());
         }
-        errors.rows.sort_by(|a, b| b.ts_ms.cmp(&a.ts_ms));
+        errors.rows.sort_by_key(|a| std::cmp::Reverse(a.ts_ms));
         errors.provider = errors
             .rows
             .iter()
@@ -859,7 +859,7 @@ impl UsageSnapshot {
                     session,
                     id: entry.id.clone(),
                     title: if entry.title.is_empty() {
-                        format!("Session {}", &entry.id.chars().take(8).collect::<String>())
+                        format!("Session {}", entry.id.chars().take(8).collect::<String>())
                     } else {
                         entry.title.clone()
                     },
@@ -963,7 +963,7 @@ impl UsageSnapshot {
             })
             .collect();
         // Newest first: a daily table reads like a log.
-        table_rows.sort_by(|a, b| b.start_ms.cmp(&a.start_ms));
+        table_rows.sort_by_key(|a| std::cmp::Reverse(a.start_ms));
 
         let previous = filter
             .range

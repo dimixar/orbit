@@ -963,7 +963,7 @@ impl UsagePage {
                 session_title: {
                     let entry = index.session(row.session);
                     if entry.title.is_empty() {
-                        format!("Session {}", &entry.id.chars().take(8).collect::<String>())
+                        format!("Session {}", entry.id.chars().take(8).collect::<String>())
                     } else {
                         entry.title.clone()
                     }

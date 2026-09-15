@@ -335,7 +335,7 @@ fn cached(dir: &Path) -> Option<Arc<RenderImage>> {
         let dithered = dither(prepared.as_ref(), tuning.cell);
         // GPUI's sprite atlas samples BGRA, not RGBA.
         let mut bgra = dithered;
-        for pixel in bgra.chunks_exact_mut(4) {
+        for pixel in bgra.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
         }
         Arc::new(RenderImage::new(vec![Frame::new(bgra)]))

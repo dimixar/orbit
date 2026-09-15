@@ -127,21 +127,24 @@ the release. Notes come from `CHANGELOG.md`.
    push. Editing the version in `crates/orbit-pi/Cargo.toml` and pushing by hand
    works the same way.
 
-3. `.github/workflows/auto-tag.yml` sees the new version on `main`, creates the
-   annotated tag `v0.0.2` if it does not already exist, and starts the Release
-   build for it. (Pushing a tag yourself, `git tag v0.0.2 && git push origin
-   v0.0.2`, triggers the same build.)
+3. `.github/workflows/release.yml` sees the new version on `main` and builds
+   every platform. Tags are never hand-cut: once the builds finish, the
+   workflow creates the annotated tag `v0.0.2` at the commit it built, so every
+   tag points at a commit whose artifacts exist. Running the workflow by hand
+   (Actions → Release → Run workflow) rebuilds a leftover draft; a published
+   release is never rebuilt.
 
-4. `.github/workflows/release.yml` then:
+4. The workflow then:
 
-   - resolves the version and rejects a tag that disagrees with `Cargo.toml`;
+   - resolves the version from `crates/orbit-pi/Cargo.toml` (the source of truth);
    - **macOS** — builds the universal `.app`, signs it with your Developer ID,
      notarizes and staples the `.app` and DMG, and emits the updater `.tar.gz`
      (`scripts/make-dmg.sh`);
    - **Linux** — builds `orbit-pi` and packages a tarball (`scripts/bundle-linux.sh`);
    - **Windows** — builds `orbit-pi.exe` and packages a zip (`scripts/bundle-windows.ps1`);
-   - **drafts** a GitHub Release with notes pulled from `CHANGELOG.md`
-     (`scripts/release-notes.py`).
+   - **drafts** a GitHub Release on tag `v0.0.2` whose notes are the `[0.0.2]`
+     section of `CHANGELOG.md` (`scripts/release-notes.py`). The same notes
+     ship as an `Orbit-Pi-0.0.2.md` release asset.
 
    Review the draft and publish it. macOS signing needs the Apple secrets listed
    at the top of the workflow file; without them the macOS job builds an

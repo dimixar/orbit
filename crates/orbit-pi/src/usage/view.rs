@@ -4154,7 +4154,7 @@ fn toggle(list: &mut Vec<u16>, value: u16) {
 
 fn session_title(entry: &super::model::SessionEntry) -> String {
     if entry.title.is_empty() {
-        format!("Session {}", &entry.id.chars().take(8).collect::<String>())
+        format!("Session {}", entry.id.chars().take(8).collect::<String>())
     } else {
         entry.title.clone()
     }

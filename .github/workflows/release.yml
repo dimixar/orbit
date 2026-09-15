@@ -1,16 +1,19 @@
 name: Release
 
-# Build, sign, notarize, and bundle every platform, then draft a GitHub Release
-# whose notes come from CHANGELOG.md. Adapted from the reference Waku app's
-# release pipeline (`.github/workflows/release.yml` + `scripts/changelog.ts`).
+# Build, sign, notarize, and bundle every platform, create the version's tag,
+# then draft a GitHub Release on that tag whose notes come from CHANGELOG.md.
+# Adapted from the reference Waku app's release pipeline
+# (`.github/workflows/release.yml` + `scripts/changelog.ts`).
 #
-# Trigger: push a version tag (cut one with `./scripts/bump-version.sh x.y.z`)
-# or run it by hand from the Actions tab (workflow_dispatch).
-#
-# The version is read from crates/orbit-pi/Cargo.toml; a tag push must agree
-# with it. macOS produces a signed + notarized DMG when the signing secrets
-# exist, and an unsigned one otherwise. Windows and Linux are best-effort
-# (continue-on-error) until those platforms are validated.
+# Trigger: the version in crates/orbit-pi/Cargo.toml changing on main (push a
+# bump with `./scripts/bump-version.sh x.y.z`), or a manual run from the
+# Actions tab (workflow_dispatch). Cargo.toml is the single source of truth:
+# the workflow creates the annotated tag `v<version>` at the commit it built,
+# so tags are never hand-cut. A manual run rebuilds a draft left by an earlier
+# run; a published release is never rebuilt. macOS produces a signed +
+# notarized DMG when the signing secrets exist, and an unsigned one otherwise.
+# Windows and Linux are best-effort (continue-on-error) until those platforms
+# are validated.
 #
 # Secrets (Settings → Secrets and variables → Actions):
 #   APPLE_CERTIFICATE_P12        base64 Developer ID Application .p12
@@ -24,7 +27,9 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+    paths:
+      - crates/orbit-pi/Cargo.toml
   workflow_dispatch:
 
 permissions:
@@ -42,7 +47,7 @@ jobs:
     outputs:
       version: ${{ steps.resolve.outputs.version }}
       tag: ${{ steps.resolve.outputs.tag }}
-      published: ${{ steps.published.outputs.published }}
+      skip: ${{ steps.skip.outputs.skip }}
     steps:
       - uses: actions/checkout@v4
 
@@ -55,23 +60,16 @@ jobs:
             echo "::error::no version found in crates/orbit-pi/Cargo.toml"
             exit 1
           fi
-          # Cargo.toml is the source of truth. A tag push must agree with it; a
-          # manual run has no tag and releases whatever Cargo.toml says.
-          if [ "$GITHUB_EVENT_NAME" = push ]; then
-            tag="${GITHUB_REF_NAME#v}"
-            if [ "$tag" != "$version" ]; then
-              echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
-              exit 1
-            fi
-          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
           echo "Releasing $version as v$version"
 
-      # A published release is the finished product; a leftover draft is this
-      # workflow's own output and gets rebuilt.
-      - name: Look for an existing published release
-        id: published
+      # Decide whether there is anything to build. A published release is the
+      # finished product, so it is never rebuilt; a leftover draft is this
+      # workflow's own output and only a manual run may rebuild it. On a push,
+      # an existing tag means this version already went through CI.
+      - name: Decide whether to build
+        id: skip
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.resolve.outputs.tag }}
@@ -80,16 +78,22 @@ jobs:
           draft="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
             --json isDraft --jq .isDraft 2>/dev/null || echo missing)"
           if [ "$draft" = "false" ]; then
-            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::notice::$TAG is already published; skipping this run"
-          else
-            echo "published=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          if [ "$GITHUB_EVENT_NAME" = push ] \
+            && gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$TAG already exists; skipping this run"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
 
   macos:
     name: macOS (signed + notarized DMG)
     needs: version
-    if: needs.version.outputs.published != 'true'
+    if: needs.version.outputs.skip != 'true'
     runs-on: macos-latest
     # A universal (two-arch) release build, then notarizing the .app and the
     # DMG, legitimately runs long; the reference pipeline allows 90 minutes
@@ -171,7 +175,15 @@ jobs:
         if: env.SIGNING == '1'
         run: |
           set -euo pipefail
-          for dmg in dist/*.dmg; do
+          # Only this run's artifacts: a stale file left in dist/ must not be
+          # swept into verification, checksums, or the release.
+          shopt -s nullglob
+          dmgs=(dist/*"${VERSION}"*.dmg)
+          if [ "${#dmgs[@]}" -eq 0 ]; then
+            echo "::error::no DMG for $VERSION was produced"
+            exit 1
+          fi
+          for dmg in "${dmgs[@]}"; do
             echo "::group::$dmg"
             spctl -a -t open --context context:primary-signature -v "$dmg" || true
             xcrun stapler validate "$dmg"
@@ -179,15 +191,15 @@ jobs:
           done
 
       - name: Checksums
-        run: shasum -a 256 dist/*.dmg dist/*.tar.gz > dist/SHA256SUMS-macos.txt
+        run: shasum -a 256 dist/*"${VERSION}"*.dmg dist/*"${VERSION}"*.tar.gz > dist/SHA256SUMS-macos.txt
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
           name: macos
           path: |
-            dist/*.dmg
-            dist/*.tar.gz
+            dist/*${{ needs.version.outputs.version }}*.dmg
+            dist/*${{ needs.version.outputs.version }}*.tar.gz
             dist/SHA256SUMS-macos.txt
           if-no-files-found: error
 
@@ -198,7 +210,7 @@ jobs:
   linux:
     name: Linux x86_64
     needs: version
-    if: needs.version.outputs.published != 'true'
+    if: needs.version.outputs.skip != 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     continue-on-error: true
@@ -236,7 +248,7 @@ jobs:
   windows:
     name: Windows x86_64
     needs: version
-    if: needs.version.outputs.published != 'true'
+    if: needs.version.outputs.skip != 'true'
     runs-on: windows-latest
     timeout-minutes: 60
     continue-on-error: true
@@ -271,7 +283,7 @@ jobs:
     if: >-
       always()
       && needs.version.result == 'success'
-      && needs.version.outputs.published != 'true'
+      && needs.version.outputs.skip != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -287,16 +299,45 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      # The tag is cut from the app version, not by hand, and only once every
+      # build has had its chance, so it always points at a commit whose
+      # artifacts exist.
+      - name: Create the version tag
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          built=(artifacts/*.dmg artifacts/*.tar.gz artifacts/*.zip)
+          if [ "${#built[@]}" -eq 0 ]; then
+            echo "::error::no platform produced an artifact; not tagging"
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "$TAG already exists"
+            exit 0
+          fi
+          # Annotated tags need a committer identity, which hosted runners lack.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "$TAG" "$GITHUB_SHA"
+          git push origin "$TAG"
+          echo "Created $TAG at $GITHUB_SHA"
+
+      # Waku-style: the release body is this version's CHANGELOG.md section,
+      # and the same notes ship as an asset so they can be linked directly.
       - name: Write release notes from CHANGELOG.md
         env:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
+          mkdir -p artifacts
           if python3 scripts/release-notes.py CHANGELOG.md "$VERSION" > release-notes.md 2>/dev/null; then
             echo "Notes for $VERSION taken from CHANGELOG.md"
           else
             echo "See CHANGELOG.md for details." > release-notes.md
           fi
+          cp release-notes.md "artifacts/Orbit-Pi-$VERSION.md"
           cat release-notes.md
 
       - name: Create the release
@@ -311,7 +352,17 @@ jobs:
             echo "::error::no artifacts were produced"
             exit 1
           fi
-          printf 'Uploading:\n'; printf '  %s\n' "${files[@]}"
-          gh release create "$TAG" "${files[@]}" \
-            --draft --title "Orbit Pi $VERSION" --notes-file release-notes.md \
-            || gh release upload "$TAG" "${files[@]}" --clobber
+          printf 'Uploading to %s:\n' "$TAG"; printf '  %s\n' "${files[@]}"
+          title="Orbit Pi $VERSION"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # A leftover draft from an earlier run: refresh title and notes,
+            # then replace the assets.
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "$title" --notes-file release-notes.md --draft
+            gh release upload "$TAG" "${files[@]}" \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" "${files[@]}" \
+              --repo "$GITHUB_REPOSITORY" --draft --title "$title" \
+              --notes-file release-notes.md
+          fi

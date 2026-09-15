@@ -125,6 +125,15 @@ make_dmg() {
     -ov \
     -format UDZO \
     "$dmg"
+
+  # Sign the disk image itself so Gatekeeper accepts it as a package
+  # (`spctl -a -t open --context context:primary-signature`) and notarytool
+  # has a signature to match the ticket against. Must happen before
+  # notarizing and stapling.
+  if [ "$SIGN_ID" != "-" ]; then
+    info "Signing DMG with: $SIGN_ID"
+    codesign --force --sign "$SIGN_ID" --timestamp "$dmg"
+  fi
   echo "  -> $dmg"
 }
 

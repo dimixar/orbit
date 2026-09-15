@@ -354,7 +354,7 @@ fn build_index(files: &[&FileUsage]) -> UsageIndex {
     index
         .tool_runs
         .sort_by(|a, b| a.ts_ms.cmp(&b.ts_ms).then_with(|| a.tool.cmp(&b.tool)));
-    index.errors.sort_by(|a, b| b.ts_ms.cmp(&a.ts_ms));
+    index.errors.sort_by_key(|a| std::cmp::Reverse(a.ts_ms));
     index
 }
 

@@ -2,6 +2,10 @@
 target
 crates/**/target
 
+# Packaging output (DMGs, tarballs, checksums). Never commit these: stale
+# artifacts get swept up by the release workflow's dist/*.dmg globs.
+dist/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

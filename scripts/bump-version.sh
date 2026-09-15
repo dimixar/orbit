@@ -11,9 +11,9 @@
 #   3. moves CHANGELOG.md's [Unreleased] body under a new [<version>] heading
 #   4. commits and pushes to main
 #
-# The version change is what CI watches: .github/workflows/auto-tag.yml sees it,
-# creates the annotated tag v<version>, and starts the Release build (macOS,
-# Linux, Windows + a GitHub Release drafted from CHANGELOG.md).
+# The version change is what CI watches: .github/workflows/release.yml sees it,
+# builds every platform, creates the annotated tag v<version> at that commit,
+# and drafts a GitHub Release on it from CHANGELOG.md.
 #
 # Env:
 #   NO_PUSH=1   commit locally, but don't push
@@ -110,8 +110,8 @@ with open(path, "w") as fh:
 print(f"rolled CHANGELOG.md for {v}")
 PY
 
-# 4 — commit and push. Tagging is left to CI (auto-tag.yml), so the version
-# change on main is the single trigger.
+# 4 — commit and push. Tagging and releasing are left to CI (release.yml), so
+# the version change on main is the single trigger.
 git add crates/orbit-pi/Cargo.toml crates/orbit-rpc/Cargo.toml Cargo.lock \
   contrib/orbit-guard-extension/package.json \
   contrib/orbit-quota-extension/package.json CHANGELOG.md
