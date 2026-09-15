@@ -1,6 +1,24 @@
 {
   "version": 1,
   "skills": {
+    "gpui": {
+      "source": "aprilnea/gpui-skills",
+      "sourceType": "github",
+      "skillPath": "gpui/SKILL.md",
+      "computedHash": "7ba3b39697eaaf1f295a05d85fa2de3ace14c47967f6069ad8cefb964b0340bb"
+    },
+    "gpui-component": {
+      "source": "aprilnea/gpui-skills",
+      "sourceType": "github",
+      "skillPath": "gpui-component/SKILL.md",
+      "computedHash": "acf6afcdf0b2147b414cf53f2ccca53e345839a37923c595aeae045a943102c0"
+    },
+    "gpui-styling": {
+      "source": "cnwzhu/gpui-skills",
+      "sourceType": "github",
+      "skillPath": "gpui-styling/SKILL.md",
+      "computedHash": "937c7c84bbc549164cc5791e227c7f48b0de50a727abceeb48211815480e4595"
+    },
     "rust-best-practices": {
       "source": "apollographql/skills",
       "sourceType": "github",

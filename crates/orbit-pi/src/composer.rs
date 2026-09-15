@@ -20,8 +20,9 @@ use gpui::{
 
 use crate::{
     mentions::{detect_trigger, tokenize_mentions, MentionKind, SharedAutocomplete, Trigger},
-    theme, Backspace, Copy, Cut, Delete, Down, End, Home, Left, Newline, Paste, Right, SelectAll,
-    SelectLeft, SelectRight, Up,
+    theme, Backspace, Copy, Cut, Delete, Down, End, Home, Left, LineLeft, LineRight, Newline,
+    Paste, Right, SelectAll, SelectLeft, SelectLineLeft, SelectLineRight, SelectRight,
+    SelectWordLeft, SelectWordRight, Up, WordLeft, WordRight,
 };
 
 /// Visual rows the editor grows to before it scrolls internally.
@@ -62,6 +63,10 @@ pub struct ComposerInput {
     /// Vertical scroll in content pixels (0 until the editor exceeds
     /// `max_lines` rows).
     scroll_offset: Pixels,
+    /// Caret byte offset at the last prepaint. The caret is only pulled back
+    /// into view when it actually moves; a mouse-wheel scroll leaves it put,
+    /// so the offset the wheel set is not snapped back on the next frame.
+    last_caret: usize,
     max_lines: usize,
     /// Shared `/`-command and `@`-mention menu state. When the menu is
     /// open, ↑/↓ move the highlight instead of the caret (Enter/Escape are
@@ -101,6 +106,7 @@ impl ComposerInput {
             last_wrap_width: None,
             last_total_rows: 1,
             scroll_offset: px(0.),
+            last_caret: 0,
             max_lines: MAX_LINES,
             autocomplete: None,
             pasted_images: Vec::new(),
@@ -333,6 +339,58 @@ impl ComposerInput {
         self.select_to(self.next_boundary(self.selected_range.end), cx)
     }
 
+    /// Option+Left / Option+Right: move one word at a time (macOS text-field
+    /// convention).
+    fn word_left(&mut self, _: &WordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.move_to(self.previous_word_boundary(self.cursor_offset()), cx);
+        } else {
+            self.move_to(self.selected_range.start, cx)
+        }
+    }
+
+    fn word_right(&mut self, _: &WordRight, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.move_to(self.next_word_boundary(self.cursor_offset()), cx);
+        } else {
+            self.move_to(self.selected_range.end, cx)
+        }
+    }
+
+    fn select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.previous_word_boundary(self.cursor_offset()), cx)
+    }
+
+    fn select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.next_word_boundary(self.selected_range.end), cx)
+    }
+
+    /// Cmd+Left / Cmd+Right: jump to the start/end of the wrapped row the
+    /// caret is on (a logical line's edge when it doesn't wrap).
+    fn line_left(&mut self, _: &LineLeft, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.move_to(self.line_start(self.cursor_offset()), cx);
+        } else {
+            self.move_to(self.selected_range.start, cx)
+        }
+    }
+
+    fn line_right(&mut self, _: &LineRight, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_range.is_empty() {
+            self.move_to(self.line_end(self.cursor_offset()), cx);
+        } else {
+            self.move_to(self.selected_range.end, cx)
+        }
+    }
+
+    fn select_line_left(&mut self, _: &SelectLineLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.line_start(self.cursor_offset()), cx)
+    }
+
+    fn select_line_right(&mut self, _: &SelectLineRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.line_end(self.selected_range.end), cx)
+    }
+
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx)
@@ -369,9 +427,13 @@ impl ComposerInput {
     fn on_mouse_down(
         &mut self,
         event: &MouseDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Focus on press, like a native field: the arrows and clipboard keys
+        // are live before the button is released, and the input does not
+        // depend on an ancestor's mouse-up handler to claim focus.
+        window.focus(&self.focus_handle);
         self.is_selecting = true;
         let offset = self.index_for_mouse_position(event.position);
         match event.click_count {
@@ -504,12 +566,17 @@ impl ComposerInput {
         for (i, line) in self.last_lines.iter().enumerate() {
             let height = line.size(line_height).height;
             let is_last = i == self.last_lines.len() - 1;
-            if pos.y <= y_acc + height || is_last {
+            // `<` so a point exactly on a line boundary (e.g. the target of a
+            // vertical caret move) belongs to the line below, not the one above.
+            if pos.y < y_acc + height || is_last {
                 let local_x = pos.x.clamp(px(0.), line.width());
                 let local_y = pos.y.clamp(y_acc, y_acc + height - px(0.5)) - y_acc;
-                return line
+                // `closest_index_for_position` indexes within this logical
+                // line; add the line's byte start to get a content offset.
+                let local = line
                     .closest_index_for_position(point(local_x, local_y), line_height)
                     .unwrap_or_else(|ix| ix);
+                return self.last_line_starts.get(i).copied().unwrap_or(0) + local;
             }
             y_acc += height;
         }
@@ -521,13 +588,16 @@ impl ComposerInput {
     }
 
     /// The (x, y) of a byte offset in content coordinates — y is the top of
-    /// the visual row the offset sits on.
+    /// the visual row the offset sits on, counting all preceding lines.
     fn position_for_offset(&self, offset: usize) -> gpui::Point<Pixels> {
         let line_height = self.last_line_height;
         let line_lens: Vec<usize> = self.last_lines.iter().map(|line| line.len()).collect();
         if let Some((i, local)) = line_at_offset(&self.last_line_starts, &line_lens, offset) {
             let line = &self.last_lines[i];
-            return line
+            let line_y: Pixels = self.last_lines[..i]
+                .iter()
+                .fold(px(0.), |acc, line| acc + line.size(line_height).height);
+            let pos = line
                 .position_for_index(local, line_height)
                 .unwrap_or_else(|| {
                     point(
@@ -535,6 +605,7 @@ impl ComposerInput {
                         line.wrap_boundaries().len() as f32 * line_height,
                     )
                 });
+            return point(pos.x, line_y + pos.y);
         }
         point(px(0.), px(0.))
     }
@@ -600,6 +671,84 @@ impl ComposerInput {
             .find_map(|(idx, _)| (idx > offset).then_some(idx))
             .unwrap_or(self.content.len())
     }
+
+    /// The start of the word before `offset`, skipping any separators between.
+    /// Words are alphanumeric + `_`, the same classes double-click selects.
+    fn previous_word_boundary(&self, offset: usize) -> usize {
+        let text = &self.content;
+        let mut i = offset.min(text.len());
+        while i > 0 {
+            let prev = prev_char_boundary(text, i);
+            if text[prev..i].chars().next().is_some_and(is_word_char) {
+                break;
+            }
+            i = prev;
+        }
+        while i > 0 {
+            let prev = prev_char_boundary(text, i);
+            if text[prev..i].chars().next().is_some_and(is_word_char) {
+                i = prev;
+            } else {
+                break;
+            }
+        }
+        i
+    }
+
+    /// The end of the word after `offset`, skipping any separators between.
+    fn next_word_boundary(&self, offset: usize) -> usize {
+        let text = &self.content;
+        let mut i = offset.min(text.len());
+        while i < text.len() {
+            let next = next_char_boundary(text, i);
+            if text[i..next].chars().next().is_some_and(is_word_char) {
+                break;
+            }
+            i = next;
+        }
+        while i < text.len() {
+            let next = next_char_boundary(text, i);
+            if text[i..next].chars().next().is_some_and(is_word_char) {
+                i = next;
+            } else {
+                break;
+            }
+        }
+        i
+    }
+
+    /// Start of the visual row containing `offset` (a wrapped row's left edge,
+    /// or the logical line start when it doesn't wrap).
+    fn line_start(&self, offset: usize) -> usize {
+        if !self.last_lines.is_empty() {
+            let row = self.position_for_offset(offset).y;
+            return self.index_at_content_position(point(px(0.), row));
+        }
+        let offset = offset.min(self.content.len());
+        self.content[..offset]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0)
+    }
+
+    /// End of the visual row containing `offset`.
+    fn line_end(&self, offset: usize) -> usize {
+        if !self.last_lines.is_empty() {
+            let row = self.position_for_offset(offset).y;
+            return self.index_at_content_position(point(px(1_000_000.), row));
+        }
+        let offset = offset.min(self.content.len());
+        self.content[offset..]
+            .find('\n')
+            .map(|i| offset + i)
+            .unwrap_or(self.content.len())
+    }
+}
+
+/// Whether a character is part of a word for Option+arrow / double-click
+/// purposes (alphanumeric or underscore).
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 fn cx_focus_handle(cx: &mut Context<ComposerInput>) -> FocusHandle {
@@ -883,6 +1032,8 @@ struct PrepaintState {
     selection: Vec<PaintQuad>,
     /// Caret quad, painted over the text (focused only).
     caret: Option<PaintQuad>,
+    /// Scroll thumb, painted at the right edge while the text overflows.
+    scrollbar: Option<PaintQuad>,
 }
 
 impl Element for TextElement {
@@ -925,7 +1076,7 @@ impl Element for TextElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let line_height = window.line_height();
-        let (content, selected_range, cursor, max_lines, caret_visible) = {
+        let (content, selected_range, cursor, max_lines, caret_visible, last_caret) = {
             let input = self.input.read(cx);
             (
                 input.content.clone(),
@@ -933,6 +1084,7 @@ impl Element for TextElement {
                 input.cursor_offset(),
                 input.max_lines,
                 input.caret_visible,
+                input.last_caret,
             )
         };
         let style = window.text_style();
@@ -999,11 +1151,14 @@ impl Element for TextElement {
         let content_height = total_rows as f32 * line_height;
         let visible_height = visible_rows as f32 * line_height;
 
-        // Clamp the scroll so the caret stays on screen after edits.
+        // Clamp the scroll so the caret stays on screen after edits. Only do
+        // this when the caret actually moved: a scroll-wheel event leaves the
+        // caret where it was, and snapping to it every frame would undo the
+        // scroll instead of letting the reader browse the text.
         let mut scroll_offset = self.input.read(cx).scroll_offset;
         let max_scroll = (content_height - visible_height).max(px(0.));
         scroll_offset = scroll_offset.min(max_scroll).max(px(0.));
-        if !lines.is_empty() {
+        if cursor != last_caret && !lines.is_empty() {
             if let Some((i, local)) = line_at_offset(&line_starts, &line_lens, cursor) {
                 if let Some(pos) = lines[i].position_for_index(local, line_height) {
                     let caret_y = line_y[i] + pos.y;
@@ -1094,6 +1249,29 @@ impl Element for TextElement {
             None
         };
 
+        // Overlay scrollbar: a thin thumb at the right edge, sized to the
+        // visible share of the text and positioned by the scroll offset. Only
+        // painted while the content overflows `max_lines`.
+        let scrollbar = (max_scroll > px(0.)).then(|| {
+            let track = bounds.size.height;
+            let thumb_height =
+                (track * (visible_rows as f32 / total_rows as f32)).clamp(px(24.), track);
+            let travel = track - thumb_height;
+            let thumb_top = (scroll_offset / max_scroll) * travel;
+            let width = px(4.);
+            let inset = px(2.);
+            fill(
+                Bounds::new(
+                    point(
+                        bounds.origin.x + bounds.size.width - width - inset,
+                        bounds.origin.y + thumb_top,
+                    ),
+                    size(width, thumb_height),
+                ),
+                theme.text_3.opacity(0.45),
+            )
+        });
+
         let width_changed = self.input.read(cx).last_wrap_width != wrap_width;
         let rows_changed = self.input.read(cx).last_total_rows != total_rows;
         let snapshot = (lines.clone(), line_starts.clone(), scroll_offset);
@@ -1101,6 +1279,7 @@ impl Element for TextElement {
             input.last_lines = snapshot.0;
             input.last_line_starts = snapshot.1;
             input.scroll_offset = snapshot.2;
+            input.last_caret = cursor;
             input.last_line_height = line_height;
             input.last_bounds = Some(bounds);
             input.last_wrap_width = wrap_width;
@@ -1118,6 +1297,7 @@ impl Element for TextElement {
             scroll_offset,
             selection,
             caret,
+            scrollbar,
         }
     }
 
@@ -1169,6 +1349,10 @@ impl Element for TextElement {
                     window.paint_quad(caret);
                 }
             }
+            // Scroll thumb last, so it sits above the text and caret.
+            if let Some(scrollbar) = prepaint.scrollbar.take() {
+                window.paint_quad(scrollbar);
+            }
         });
     }
 }
@@ -1179,8 +1363,10 @@ impl Render for ComposerInput {
         self.sync_caret_blink(window, cx);
         // Transparent: the floating composer box in app.rs provides the
         // background/border; this is just the editable (auto-growing) area.
+        let debug_selector = self.element_id.to_string();
         div()
             .id(self.element_id.clone())
+            .debug_selector(move || debug_selector)
             .flex_1()
             .min_w_0()
             .key_context(self.key_context.as_ref())
@@ -1196,6 +1382,14 @@ impl Render for ComposerInput {
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
             .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
+            .on_action(cx.listener(Self::line_left))
+            .on_action(cx.listener(Self::line_right))
+            .on_action(cx.listener(Self::select_line_left))
+            .on_action(cx.listener(Self::select_line_right))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
             .on_action(cx.listener(Self::paste))
@@ -1280,5 +1474,336 @@ mod tests {
         assert_eq!(line_range_at(text, 9), 8..13);
         // An offset at the end still selects the last line.
         assert_eq!(line_range_at(text, text.len()), 8..13);
+    }
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+    use gpui::{
+        point, size, FocusHandle, KeyBinding, Modifiers, MouseButton, TestAppContext,
+        VisualTestContext,
+    };
+
+    struct Harness {
+        input: Entity<ComposerInput>,
+    }
+
+    impl Render for Harness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            // Bottom-anchored like the app: a flex-1 spacer above the input, so
+            // the input's top moves up when its height grows.
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(div().flex_1())
+                .child(div().p(px(12.)).child(self.input.clone()))
+        }
+    }
+
+    fn draw(cx: &mut VisualTestContext, harness: &Entity<Harness>) {
+        let _ = cx.draw(point(px(0.), px(0.)), size(px(500.), px(400.)), |_, _| {
+            harness.clone()
+        });
+    }
+
+    /// Clicking a visual row must land on that row's start even after the
+    /// editor grows to fit pasted text and its top edge moves up.
+    #[gpui::test]
+    fn click_mapping_survives_a_paste_growth(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let input = cx.update(|_, cx| {
+            cx.set_global(theme::Theme::for_id(theme::ThemeId::Orbit));
+            cx.new(ComposerInput::new)
+        });
+        let harness = cx.update(|_, cx| {
+            cx.new(|_| Harness {
+                input: input.clone(),
+            })
+        });
+
+        draw(cx, &harness);
+
+        // A pasted block: several short lines plus one long line that wraps.
+        let text = format!("alpha\nbravo\n{}\ndelta", "x".repeat(400));
+        cx.update(|_, cx| {
+            input.update(cx, |input, cx| input.set_text(text.clone(), cx));
+        });
+
+        draw(cx, &harness);
+
+        let mapped = cx.update(|_, cx| input.read(cx).last_bounds.expect("bounds"));
+        let painted = cx.debug_bounds("composer-input").expect("painted bounds");
+        assert_eq!(mapped, painted, "click mapping uses stale bounds");
+
+        let (lines, line_starts, line_height, bounds, scroll) = cx.update(|_, cx| {
+            let input = input.read(cx);
+            (
+                input.last_lines.clone(),
+                input.last_line_starts.clone(),
+                input.last_line_height,
+                input.last_bounds.expect("bounds"),
+                input.scroll_offset,
+            )
+        });
+        assert!(
+            line_starts.len() >= 4,
+            "expected the wrapped lines to shape"
+        );
+
+        // Walk each logical line's visual rows and click at its first column:
+        // every click must resolve to that line's byte start.
+        let mut y = px(0.);
+        for (ix, line) in lines.iter().enumerate() {
+            let start = line_starts[ix];
+            let pos = point(
+                bounds.origin.x + px(1.),
+                bounds.origin.y + y + line_height / 2. - scroll,
+            );
+            let idx =
+                cx.update(|_, cx| input.update(cx, |input, _| input.index_for_mouse_position(pos)));
+            assert_eq!(
+                idx, start,
+                "click at the start of line {ix} maps to {start}"
+            );
+            y += line.size(line_height).height;
+        }
+
+        // A click on the wrapped line's second visual row resolves inside that
+        // line, not back at the start of the buffer.
+        let wrapped_start = line_starts[2];
+        let wrapped_end = line_starts[3] - 1;
+        let wrapped_line_y = lines[0].size(line_height).height + lines[1].size(line_height).height;
+        let mid = cx.update(|_, cx| {
+            input.update(cx, |input, _| {
+                input.index_for_mouse_position(point(
+                    bounds.origin.x + px(200.),
+                    bounds.origin.y + wrapped_line_y + line_height * 1.5 - scroll,
+                ))
+            })
+        });
+        assert!(
+            mid > wrapped_start && mid < wrapped_end,
+            "click inside the wrapped line stayed inside it: {mid} not in {wrapped_start}..{wrapped_end}"
+        );
+    }
+
+    /// Up/Down move the caret one visual row across logical lines, the way a
+    /// native multi-line field behaves.
+    #[gpui::test]
+    fn vertical_caret_movement_spans_lines(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let input = cx.update(|_, cx| {
+            cx.set_global(theme::Theme::for_id(theme::ThemeId::Orbit));
+            cx.new(ComposerInput::new)
+        });
+        let harness = cx.update(|_, cx| {
+            cx.new(|_| Harness {
+                input: input.clone(),
+            })
+        });
+        draw(cx, &harness);
+        cx.update(|_, cx| {
+            input.update(cx, |input, cx| {
+                input.set_text("alpha\nbravo\ncharlie\ndelta", cx)
+            })
+        });
+        draw(cx, &harness);
+
+        // Start at the beginning of "bravo" (byte 6).
+        cx.update(|_, cx| input.update(cx, |input, cx| input.move_to(6, cx)));
+        let caret =
+            |cx: &mut VisualTestContext| cx.update(|_, cx| input.read(cx).selected_range.start);
+
+        cx.update(|_, cx| input.update(cx, |input, cx| input.move_vertically(1., cx)));
+        assert_eq!(caret(cx), 12, "down from line 1 lands on line 2");
+        cx.update(|_, cx| input.update(cx, |input, cx| input.move_vertically(1., cx)));
+        assert_eq!(caret(cx), 20, "down again lands on line 3");
+        cx.update(|_, cx| input.update(cx, |input, cx| input.move_vertically(-1., cx)));
+        assert_eq!(caret(cx), 12, "up returns to line 2");
+    }
+
+    /// The arrow keys bound in the `Composer` context must move the caret
+    /// while the input is focused.
+    #[gpui::test]
+    fn arrow_keys_move_the_caret(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let input = cx.update(|_, cx| {
+            cx.set_global(theme::Theme::for_id(theme::ThemeId::Orbit));
+            cx.bind_keys([
+                KeyBinding::new("left", Left, Some("Composer")),
+                KeyBinding::new("right", Right, Some("Composer")),
+                KeyBinding::new("up", Up, Some("Composer")),
+                KeyBinding::new("down", Down, Some("Composer")),
+            ]);
+            cx.new(ComposerInput::new)
+        });
+        let harness = cx.update(|_, cx| {
+            cx.new(|_| Harness {
+                input: input.clone(),
+            })
+        });
+        draw(cx, &harness);
+        cx.update(|_, cx| input.update(cx, |input, cx| input.set_text("abc\ndef", cx)));
+        cx.update(|window, cx| input.update(cx, |input, _| input.focus(window)));
+        draw(cx, &harness);
+
+        // Caret starts at the end (byte 7); two lefts land on byte 5.
+        cx.simulate_keystrokes("left left");
+        assert_eq!(
+            cx.update(|_, cx| input.read(cx).selected_range.start),
+            5,
+            "left arrow moves the caret"
+        );
+        cx.simulate_keystrokes("right");
+        assert_eq!(
+            cx.update(|_, cx| input.read(cx).selected_range.start),
+            6,
+            "right arrow moves the caret"
+        );
+
+        // Byte 1 is on the first line; Down drops to the same column on the
+        // second line (byte 5), and Up returns.
+        cx.update(|_, cx| input.update(cx, |input, cx| input.move_to(1, cx)));
+        cx.simulate_keystrokes("down");
+        assert_eq!(
+            cx.update(|_, cx| input.read(cx).selected_range.start),
+            5,
+            "down arrow moves to the line below"
+        );
+        cx.simulate_keystrokes("up");
+        assert_eq!(
+            cx.update(|_, cx| input.read(cx).selected_range.start),
+            1,
+            "up arrow moves to the line above"
+        );
+    }
+
+    /// The app focuses the composer from the box's mouse-up handler; a click on
+    /// the input must leave the arrows working, exactly like the real flow.
+    #[gpui::test]
+    fn clicking_the_input_keeps_arrow_keys_working(cx: &mut TestAppContext) {
+        struct ClickHarness {
+            input: Entity<ComposerInput>,
+            root_focus: FocusHandle,
+        }
+
+        impl Render for ClickHarness {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .track_focus(&self.root_focus)
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .id("test-composer-box")
+                            .debug_selector(|| "test-composer-box".to_string())
+                            .p(px(12.))
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, _, window, cx| {
+                                    this.input.read(cx).focus(window);
+                                }),
+                            )
+                            .child(self.input.clone()),
+                    )
+            }
+        }
+
+        let cx = cx.add_empty_window();
+        let input = cx.update(|_, cx| {
+            cx.set_global(theme::Theme::for_id(theme::ThemeId::Orbit));
+            cx.bind_keys([
+                KeyBinding::new("left", Left, Some("Composer")),
+                KeyBinding::new("right", Right, Some("Composer")),
+                KeyBinding::new("up", Up, Some("Composer")),
+                KeyBinding::new("down", Down, Some("Composer")),
+            ]);
+            cx.new(ComposerInput::new)
+        });
+        let harness = cx.update(|_, cx| {
+            cx.new(|cx| ClickHarness {
+                input: input.clone(),
+                root_focus: cx.focus_handle(),
+            })
+        });
+        let _ = cx.draw(point(px(0.), px(0.)), size(px(500.), px(400.)), |_, _| {
+            harness.clone()
+        });
+        cx.update(|_, cx| input.update(cx, |input, cx| input.set_text("abc\ndef", cx)));
+        let _ = cx.draw(point(px(0.), px(0.)), size(px(500.), px(400.)), |_, _| {
+            harness.clone()
+        });
+
+        let bounds = cx.debug_bounds("composer-input").expect("input bounds");
+        cx.simulate_click(bounds.center(), Modifiers::none());
+        let _ = cx.draw(point(px(0.), px(0.)), size(px(500.), px(400.)), |_, _| {
+            harness.clone()
+        });
+
+        let focused = cx.update(|window, cx| input.read(cx).focus_handle(cx).is_focused(window));
+        assert!(focused, "the input is focused after clicking it");
+
+        cx.update(|_, cx| input.update(cx, |input, cx| input.move_to(1, cx)));
+        cx.dispatch_action(Left);
+        assert_eq!(
+            cx.update(|_, cx| input.read(cx).selected_range.start),
+            0,
+            "Left action dispatches to the focused input"
+        );
+
+        cx.update(|_, cx| input.update(cx, |input, cx| input.move_to(7, cx)));
+        cx.simulate_keystrokes("left left");
+        assert_eq!(
+            cx.update(|_, cx| input.read(cx).selected_range.start),
+            5,
+            "arrows still work after clicking the input"
+        );
+    }
+
+    /// Option+Left/Right move by word; Cmd+Left/Right jump to the line edges.
+    #[gpui::test]
+    fn word_and_line_navigation(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let input = cx.update(|_, cx| {
+            cx.set_global(theme::Theme::for_id(theme::ThemeId::Orbit));
+            cx.bind_keys([
+                KeyBinding::new("alt-left", WordLeft, Some("Composer")),
+                KeyBinding::new("alt-right", WordRight, Some("Composer")),
+                KeyBinding::new("cmd-left", LineLeft, Some("Composer")),
+                KeyBinding::new("cmd-right", LineRight, Some("Composer")),
+            ]);
+            cx.new(ComposerInput::new)
+        });
+        let harness = cx.update(|_, cx| {
+            cx.new(|_| Harness {
+                input: input.clone(),
+            })
+        });
+        draw(cx, &harness);
+        cx.update(|_, cx| input.update(cx, |input, cx| input.set_text("hello world\nfoo bar", cx)));
+        cx.update(|window, cx| input.update(cx, |input, _| input.focus(window)));
+        draw(cx, &harness);
+        let caret =
+            |cx: &mut VisualTestContext| cx.update(|_, cx| input.read(cx).selected_range.start);
+
+        cx.update(|_, cx| input.update(cx, |input, cx| input.move_to(3, cx)));
+        cx.simulate_keystrokes("alt-left");
+        assert_eq!(caret(cx), 0, "alt-left moves to the word start");
+
+        cx.update(|_, cx| input.update(cx, |input, cx| input.move_to(0, cx)));
+        cx.simulate_keystrokes("alt-right");
+        assert_eq!(caret(cx), 5, "alt-right moves past the word");
+
+        cx.update(|_, cx| input.update(cx, |input, cx| input.move_to(15, cx)));
+        cx.simulate_keystrokes("cmd-left");
+        assert_eq!(caret(cx), 12, "cmd-left moves to the line start");
+
+        cx.update(|_, cx| input.update(cx, |input, cx| input.move_to(0, cx)));
+        cx.simulate_keystrokes("cmd-right");
+        assert_eq!(caret(cx), 11, "cmd-right moves to the line end");
     }
 }

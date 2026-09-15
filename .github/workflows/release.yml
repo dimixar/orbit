@@ -91,10 +91,12 @@ jobs:
     needs: version
     if: needs.version.outputs.published != 'true'
     runs-on: macos-latest
-    timeout-minutes: 60
+    # A universal (two-arch) release build, then notarizing the .app and the
+    # DMG, legitimately runs long; the reference pipeline allows 90 minutes
+    # and so do we.
+    timeout-minutes: 90
     env:
       VERSION: ${{ needs.version.outputs.version }}
-      NOTARY_PROFILE: orbit-notary
       # Baked into the binary by build.rs; empty leaves the updater dormant.
       ORBIT_UPDATE_PUBLIC_KEY: ${{ secrets.ORBIT_UPDATE_PUBLIC_KEY }}
     steps:
@@ -128,6 +130,11 @@ jobs:
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security default-keychain -s "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # A freshly created keychain re-locks after 5 minutes of inactivity.
+          # The release build spends ~11 minutes in cargo first, so without this
+          # `codesign` later blocks on the locked keychain waiting for a prompt
+          # that never comes, and the job dies on its timeout.
+          security set-keychain-settings -t 3600 -u "$KEYCHAIN"
           security list-keychains -d user -s "$KEYCHAIN" \
             $(security list-keychains -d user | sed 's/[[:space:]]*"//g')
           security import /tmp/cert.p12 -k "$KEYCHAIN" -P "$CERT_PASSWORD" \
@@ -140,6 +147,10 @@ jobs:
           echo "Signing identity: ${IDENTITY:-<none found>}"
           echo "SIGN_ID=$IDENTITY" >> "$GITHUB_ENV"
           echo "SIGNING=1" >> "$GITHUB_ENV"
+          # Only advertise the notary profile when there is a real certificate;
+          # an unsigned run must not point notarytool at a profile that was
+          # never stored.
+          echo "NOTARY_PROFILE=orbit-notary" >> "$GITHUB_ENV"
 
       - name: Store notarization credentials
         if: env.SIGNING == '1'

@@ -94,7 +94,9 @@ EOF
 
   chmod +x "$out/Contents/MacOS/$EXEC_NAME"
   info "Signing .app with: $SIGN_ID"
-  local args=(--force --deep --sign "$SIGN_ID")
+  # No `--deep`: the bundle carries no nested code, and `--deep` is deprecated
+  # and can stall `codesign` for a long time on a large universal binary.
+  local args=(--force --sign "$SIGN_ID")
   # Hardened runtime and a secure timestamp need a real Developer ID; an
   # ad-hoc signature ("-") rejects them.
   if [ "$SIGN_ID" != "-" ]; then
