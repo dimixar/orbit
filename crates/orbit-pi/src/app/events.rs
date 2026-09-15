@@ -278,6 +278,14 @@ impl OrbitApp {
                         cx,
                     );
                 }
+                // A running `ask_user_question` tool is tracked so its
+                // `select` / `input` primitives route to the inline panel.
+                Event::ToolExecutionStart { value } => {
+                    self.on_ask_tool_start(value, cx);
+                }
+                Event::ToolExecutionEnd { value } => {
+                    self.on_ask_tool_end(value, cx);
+                }
                 _ => {}
             }
             if self.transcript.apply_event(event) {

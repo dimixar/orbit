@@ -44,6 +44,7 @@ use orbit_rpc::{
 use serde_json::Value;
 
 use crate::access::AccessMode;
+use crate::ask::{AskMode, AskPrompt, AskQuestion};
 use crate::auth::{AuthEffect, AuthManager, AuthSupport, LoginPhase, ProviderStatus};
 use crate::branch_picker::BranchPicker;
 use crate::bundled_extensions::BundledExtensions;
@@ -271,6 +272,20 @@ pub struct OrbitApp {
     approval_focus: FocusHandle,
     /// Focus the approval bar on the next paint (`tick` has no window).
     approval_focus_pending: bool,
+    /// The id of the running `ask_user_question` tool call, if any. Set on
+    /// `tool_execution_start`, cleared on its `tool_execution_end`.
+    ask_tool_id: Option<String>,
+    /// The questionnaire the running ask tool was invoked with, parsed once
+    /// so the panel can render structured questions/options without reading
+    /// the request's flattened title back apart.
+    ask_questions: Vec<AskQuestion>,
+    /// The live inline questionnaire panel above the composer, answering the
+    /// extension's `select` / `input` requests without a scrim modal.
+    ask: Option<AskPrompt>,
+    /// Focus handle carrying the `AskPanel` key context.
+    ask_focus: FocusHandle,
+    /// Focus the panel (or its text field) on the next paint.
+    ask_focus_pending: bool,
     /// Full-window image lightbox for a transcript attachment image. `None`
     /// is closed. Opened by clicking an image tile, dismissed by click or
     /// Escape.
@@ -765,6 +780,11 @@ impl OrbitApp {
             approval_highlight: 0,
             approval_focus: cx.focus_handle(),
             approval_focus_pending: false,
+            ask_tool_id: None,
+            ask_questions: Vec::new(),
+            ask: None,
+            ask_focus: cx.focus_handle(),
+            ask_focus_pending: false,
             lightbox: None,
             transcript_search: None,
             session_menu: None,
@@ -1435,12 +1455,16 @@ enum SettingsSelect {
     SpacingDensity,
     UiFontFamily,
     CodeFontFamily,
+    BackdropBlur,
+    BackdropCell,
+    BackdropFade,
 }
 
 // ── feature modules ───────────────────────────────────────────────────────
 // `app.rs` keeps the `OrbitApp` model, the shared types, and the controller
 // wiring. Rendering and feature-specific logic live in child modules; they
 // are descendants of `app`, so they reach private fields/methods directly.
+mod ask;
 mod composer_ops;
 mod dialogs;
 mod events;

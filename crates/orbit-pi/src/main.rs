@@ -3,9 +3,10 @@
 //! Pure Rust on GPUI; the agent runtime is the `pi` CLI spoken to over its
 //! JSONL RPC protocol (see `crates/orbit-rpc`). Quit with cmd-q.
 
+mod access;
 mod app;
 mod app_icon;
-mod access;
+mod ask;
 mod assets;
 mod auth;
 mod branch_picker;
@@ -127,7 +128,12 @@ actions!(
 // on the open popup's focus handle).
 actions!(
     access_menu_keys,
-    [AccessMenuNext, AccessMenuPrev, AccessMenuConfirm, AccessMenuClose]
+    [
+        AccessMenuNext,
+        AccessMenuPrev,
+        AccessMenuConfirm,
+        AccessMenuClose
+    ]
 );
 
 // Inline access-guard approval actions (bound to the `Approval` context on the
@@ -142,6 +148,13 @@ actions!(
 actions!(
     dialog_keys,
     [DialogCancel, DialogConfirm, DialogNext, DialogPrev]
+);
+
+// Inline ask questionnaire actions (bound to the `AskPanel` context on the
+// panel and `AskInput` on its text field).
+actions!(
+    ask_keys,
+    [AskNext, AskPrev, AskConfirm, AskSubmit, AskClose]
 );
 
 fn bind_keys(cx: &mut App) {
@@ -228,6 +241,16 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", DialogConfirm, Some("DialogInput")),
         KeyBinding::new("up", DialogPrev, Some("DialogSelect")),
         KeyBinding::new("down", DialogNext, Some("DialogSelect")),
+        // Inline ask questionnaire keys. Registered after the Composer
+        // bindings so Enter answers instead of submitting the composer, and
+        // Escape declines instead of aborting the run.
+        KeyBinding::new("escape", AskClose, Some("AskPanel")),
+        KeyBinding::new("escape", AskClose, Some("AskInput")),
+        KeyBinding::new("enter", AskConfirm, Some("AskPanel")),
+        KeyBinding::new("space", AskConfirm, Some("AskPanel")),
+        KeyBinding::new("enter", AskSubmit, Some("AskInput")),
+        KeyBinding::new("up", AskPrev, Some("AskPanel")),
+        KeyBinding::new("down", AskNext, Some("AskPanel")),
         // In-transcript find (⌘F). The find field carries `Composer Search`,
         // so editing keys stay live; these bindings are registered after the
         // composer ones and win the same-depth tie, keeping Enter from
