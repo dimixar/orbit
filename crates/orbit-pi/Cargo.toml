@@ -51,6 +51,10 @@ reqwest = { version = "0.12.15-zed", package = "zed-reqwest", default-features =
     "blocking",
     "rustls-tls-native-roots",
 ] }
+# Parsing/validation for the update feed's download URL (`updater.rs`) and the
+# `termy://` deep link (`platform.rs`). The updater path is compiled on every
+# platform, so this cannot live under the macOS-only target.
+url = "2.5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Match gpui 0.2.2 so we can set the Dock icon from the embedded PNG
@@ -93,7 +97,6 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
     "UNUserNotificationCenter",
 ] }
 block2 = "0.6"
-url = "2.5"
 
 [target.'cfg(unix)'.dependencies]
 # The Unix self-update unpacks a signed `.tar.gz` release beside the running
