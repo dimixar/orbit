@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.2] - 2026-09-16
+
 ### Added
 
 - Native macOS menu bar (Orbit / File / Edit / View) wired to the app's
@@ -30,5 +32,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In-transcript find (⌘F) and a full-window image lightbox.
 - Native macOS app bundle, Developer-ID signed and notarizable.
 
-[Unreleased]: https://github.com/imrj05/orbit/compare/v0.0.1...HEAD
+[Unreleased]: https://github.com/imrj05/orbit/compare/v0.0.2...HEAD
 [0.0.1]: https://github.com/imrj05/orbit/releases/tag/v0.0.1
+[0.0.2]: https://github.com/imrj05/orbit/releases/tag/v0.0.2
