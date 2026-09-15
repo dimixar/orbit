@@ -109,18 +109,29 @@ impl OrbitApp {
 
     /// Start a new task rooted at `folder`: spawn a fresh pi process with
     /// that working directory (the agent reads, edits, and runs commands
-    /// there), reset the transcript/state, and focus the composer. The
-    /// previous client is idle at this point — the picker only shows on the
-    /// empty (new-task) page — so dropping it tears down its process.
+    /// there), reset the transcript/state, and focus the composer. A run in
+    /// flight is parked instead of dropped — its process keeps going in the
+    /// background — so starting a task never aborts the current one; an idle
+    /// session is torn down (its transcript is already on disk).
     pub(super) fn start_task_in_folder(
         &mut self,
         folder: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.drop_client();
+        if self.is_running() {
+            // A blocking dialog belongs to the session being left; cancel it
+            // so the parked run can settle instead of waiting on a modal.
+            self.cancel_open_dialog(cx);
+            self.park_active_session();
+        } else {
+            self.drop_client();
+        }
         self.transcript.clear();
         self.current_title = None;
+        // The parked run's busy state lives with the parked session; this
+        // view starts idle.
+        self.busy = false;
         // Picking a folder to work in adds it to Orbit's own sidebar list.
         self.add_workspace(folder.clone());
         self.current_workspace = Some(folder);

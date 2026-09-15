@@ -437,10 +437,26 @@ impl OrbitApp {
     pub(super) fn on_new_session(
         &mut self,
         _: &crate::NewSession,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A run in flight must not be sacrificed to start a new task. pi's
+        // `new_session` replaces the session and calls `abort()` on the live
+        // turn (`agent-session-runtime.teardownCurrent`), which surfaces as
+        // "This operation was aborted". Park the running session instead — its
+        // process keeps going in the background — and start the new task on a
+        // fresh pi process. An idle session is cheap to reuse in place.
+        if self.is_running() {
+            let cwd = self
+                .current_workspace
+                .clone()
+                .or_else(|| std::env::current_dir().ok())
+                .unwrap_or_else(|| PathBuf::from("."));
+            self.begin_new_task(cwd, window, cx);
+            return;
+        }
         self.send(CommandBody::NewSession, "new_session");
+        self.input.read(cx).focus(window);
         cx.notify();
     }
 
@@ -459,13 +475,30 @@ impl OrbitApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.current_workspace.as_ref() == Some(&cwd) && self.client.is_some() {
+        // Same workspace with an idle process: reuse it in place. A run in
+        // flight is parked instead, so `new_session` never aborts it; a
+        // different workspace always needs its own process anyway.
+        if self.current_workspace.as_ref() == Some(&cwd)
+            && self.client.is_some()
+            && !self.is_running()
+        {
             self.send(CommandBody::NewSession, "new_session");
             self.input.read(cx).focus(window);
             cx.notify();
             return;
         }
+        self.begin_new_task(cwd, window, cx);
+    }
 
+    /// Start a fresh task rooted at `cwd` on its own pi process, parking the
+    /// active session first so a running one keeps going in the background.
+    /// Shared by New Task and a workspace group's "+".
+    pub(super) fn begin_new_task(
+        &mut self,
+        cwd: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Leaving this session: cancel any open blocking dialog first, so a
         // parked run never waits on a modal tied to the previous session.
         self.cancel_open_dialog(cx);
