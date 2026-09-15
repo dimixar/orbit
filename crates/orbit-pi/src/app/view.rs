@@ -7,6 +7,23 @@ use super::*;
 /// where it always has — this is the one value the two must agree on.
 pub(super) const TOP_BAR_H: f32 = 44.;
 
+/// Leading inset that clears the macOS traffic lights in the transparent
+/// titlebar. The sidebar's drag strip and the main top bar share it so the
+/// window's left controls hold their place when the sidebar is toggled.
+pub(super) const TRAFFIC_LIGHT_CLEARANCE: f32 = 80.;
+
+/// Combined width of the titlebar's left controls (toggle + history) as laid
+/// out by [`OrbitApp::titlebar_left_controls`]: three 24px boxes, two 2px gaps,
+/// and the trailing 6px gap.
+pub(super) const TITLEBAR_CONTROLS_W: f32 = 24. * 3. + 2. * 2. + 6.;
+
+/// Where the main top bar's content starts when the sidebar is collapsed: past
+/// the traffic lights and the (fixed, overlaid) window controls.
+pub(super) const TITLEBAR_LEADING: f32 = TRAFFIC_LIGHT_CLEARANCE + TITLEBAR_CONTROLS_W;
+
+/// Duration of the sidebar collapse/expand slide.
+const SIDEBAR_SLIDE_MS: u64 = 180;
+
 impl Render for OrbitApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // A clicked banner asks for the window; bring it forward on the frame
@@ -113,65 +130,6 @@ impl Render for OrbitApp {
             self.usage
                 .update(cx, |page, cx| page.set_main_width(width, cx));
         }
-
-        // ── top-bar left controls: sidebar toggle + session history ──
-        let back_enabled = self.history_index > 0;
-        let forward_enabled = self.history_index + 1 < self.session_history.len();
-        let left_controls = div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .pr(px(6.))
-            .child(
-                div()
-                    .id("toggle-sidebar")
-                    .p_1()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.bg_hover))
-                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_toggle_sidebar))
-                    .child(icon("icons/panel-left.svg", 16., theme.text_2)),
-            )
-            .child(
-                div()
-                    .id("history-back")
-                    .p_1()
-                    .rounded_sm()
-                    .when(back_enabled, |b| {
-                        b.cursor_pointer()
-                            .hover(|s| s.bg(theme.bg_hover))
-                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_history_back))
-                    })
-                    .child(icon(
-                        "icons/arrow-left.svg",
-                        14.,
-                        if back_enabled {
-                            theme.text_2
-                        } else {
-                            theme.text_3
-                        },
-                    )),
-            )
-            .child(
-                div()
-                    .id("history-forward")
-                    .p_1()
-                    .rounded_sm()
-                    .when(forward_enabled, |b| {
-                        b.cursor_pointer()
-                            .hover(|s| s.bg(theme.bg_hover))
-                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_history_forward))
-                    })
-                    .child(icon(
-                        "icons/arrow-right.svg",
-                        14.,
-                        if forward_enabled {
-                            theme.text_2
-                        } else {
-                            theme.text_3
-                        },
-                    )),
-            );
 
         // ── top-bar right controls ──
         let mut top_controls = div().flex().items_center().gap_2();
@@ -294,6 +252,7 @@ impl Render for OrbitApp {
         div()
             .size_full()
             .flex()
+            .relative()
             .bg(theme.bg_main)
             .text_color(theme.text)
             .font_family(theme::ui_font_family())
@@ -302,188 +261,237 @@ impl Render for OrbitApp {
             .on_drop(cx.listener(Self::on_file_drop))
             // ── sidebar ── (hidden while the settings surface is open —
             // settings is a full-window surface with its own nav, like the
-            // reference UI)
-            .children((self.sidebar_visible && !self.settings_open).then(|| {
-                div()
-                    .id("sidebar")
-                    .relative()
+            // reference UI). The panel stays mounted and slides: an animated
+            // outer width clips a fixed-width inner column, so the content
+            // never reflows mid-slide. The titlebar controls live in a fixed
+            // overlay (below), so they hold their place while it moves.
+            .children((!self.settings_open).then(|| {
+                let open = self.sidebar_visible;
+                let panel_w = f32::from(self.sidebar_width);
+                let panel = div()
                     .flex_none()
-                    .w(self.sidebar_width)
                     .h_full()
+                    .overflow_hidden()
                     .bg(theme.bg_sidebar)
-                    .border_r_1()
-                    .border_color(theme.border)
-                    .flex()
-                    .flex_col()
-                    // traffic-light strip (drag region)
                     .child(
                         div()
-                            .h(px(38.))
-                            .w_full()
-                            .window_control_area(WindowControlArea::Drag),
-                    )
-                    // Resize handle: drag the sidebar's right edge to adjust
-                    // its width. The drag-move listener lives on the root so
-                    // the drag keeps tracking beyond the handle.
-                    .child(
-                        div()
-                            .id("sidebar-resize-handle")
-                            .absolute()
-                            .top_0()
-                            .bottom_0()
-                            .right(px(-3.))
-                            .w(px(6.))
-                            .cursor(CursorStyle::ResizeLeftRight)
-                            .hover(|style| style.bg(theme.accent.opacity(0.4)))
-                            .on_drag(SidebarResize, |_, _, _, cx| cx.new(|_| DragGhost)),
-                    )
-                    // brand — the Orbit wordmark, set over the nav column
-                    .child(
-                        div()
-                            .px_3()
-                            .pt(px(2.))
-                            .pb(px(6.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            // White mark on dark sidebars; the dark-ink mark
-                            // on light ones, where the white wordmark vanishes.
-                            // A compact fixed width keeps the brand quiet above
-                            // the nav rows.
-                            .child(embedded_image_w(
-                                if theme.mode == ThemeMode::Light {
-                                    crate::app_icon::LOGO_DARK_ASSET
-                                } else {
-                                    crate::app_icon::LOGO_ASSET
-                                },
-                                px(90.),
-                            )),
-                    )
-                    // nav — one primary action (New Task), one quiet row
-                    // (Search); the switcher palette anchors under Search
-                    .child(
-                        div()
-                            .px_3()
-                            .pt_1()
-                            .pb_2()
+                            .id("sidebar")
+                            .relative()
+                            .w(self.sidebar_width)
+                            .h_full()
                             .flex()
                             .flex_col()
-                            .gap_1()
-                            .child(self.sidebar_new_task_button(theme, cx))
-                            .child(self.sidebar_search_row(theme, cx))
-                            .child(self.sidebar_usage_row(theme, cx)),
-                    )
-                    // session list (scrolls), grouped by workspace — or the
-                    // empty state when pi's store has no sessions yet
-                    .child(if side_rows.is_empty() {
-                        empty_sessions_state(theme).into_any_element()
-                    } else {
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .flex()
-                            .flex_col()
-                            // section label — anchors the list below the nav
+                            // traffic-light strip (drag region); the window's
+                            // left controls float above it in the titlebar
+                            // overlay, so they keep the same spot whether the
+                            // sidebar is open or closed.
                             .child(
                                 div()
-                                    .px(px(14.))
-                                    .pb(px(2.))
-                                    .text_size(theme.ui_px(11.))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.text_3)
-                                    .child("Projects"),
+                                    .h(px(TOP_BAR_H))
+                                    .w_full()
+                                    .window_control_area(WindowControlArea::Drag),
                             )
+                            // Resize handle: drag the sidebar's right edge to
+                            // adjust its width. Kept fully inside the panel so
+                            // the slide wrapper's clip doesn't halve its hit
+                            // area. The drag-move listener lives on the root so
+                            // the drag keeps tracking beyond the handle.
                             .child(
                                 div()
-                                    .id("sidebar-sessions")
+                                    .id("sidebar-resize-handle")
+                                    .absolute()
+                                    .top_0()
+                                    .bottom_0()
+                                    .right_0()
+                                    .w(px(6.))
+                                    .cursor(CursorStyle::ResizeLeftRight)
+                                    .hover(|style| style.bg(theme.accent.opacity(0.4)))
+                                    .on_drag(SidebarResize, |_, _, _, cx| cx.new(|_| DragGhost)),
+                            )
+                            // brand — the Orbit wordmark, set over the nav column
+                            .child(
+                                div()
+                                    .px_3()
+                                    .pt(px(2.))
+                                    .pb(px(6.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    // White mark on dark sidebars; the dark-ink
+                                    // mark on light ones, where the white
+                                    // wordmark vanishes. A compact fixed width
+                                    // keeps the brand quiet above the nav rows.
+                                    .child(embedded_image_w(
+                                        if theme.mode == ThemeMode::Light {
+                                            crate::app_icon::LOGO_DARK_ASSET
+                                        } else {
+                                            crate::app_icon::LOGO_ASSET
+                                        },
+                                        px(90.),
+                                    )),
+                            )
+                            // nav — one primary action (New Task), one quiet row
+                            // (Search); the switcher palette anchors under Search
+                            .child(
+                                div()
+                                    .px_3()
+                                    .pt_1()
+                                    .pb_2()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .child(self.sidebar_new_task_button(theme, cx))
+                                    .child(self.sidebar_search_row(theme, cx))
+                                    .child(self.sidebar_usage_row(theme, cx)),
+                            )
+                            // session list (scrolls), grouped by workspace — or
+                            // the empty state when pi's store has no sessions
+                            .child(if side_rows.is_empty() {
+                                empty_sessions_state(theme).into_any_element()
+                            } else {
+                                div()
                                     .flex_1()
                                     .min_h_0()
-                                    .px_2()
-                                    .relative()
-                                    .child(
-                                        list(self.sidebar_list.clone(), move |ix, _window, cx| {
-                                            render_side_row(
-                                                &side_rows,
-                                                &sessions_data,
-                                                active_path.as_deref(),
-                                                ix,
-                                                &this,
-                                                agent_running,
-                                                &running_paths,
-                                                &live_paths,
-                                                session_menu.as_ref().as_ref(),
-                                                workspace_menu.as_ref().as_ref(),
-                                                *theme::get(cx),
-                                            )
-                                            .into_any_element()
-                                        })
-                                        .w_full()
-                                        .h_full(),
-                                    ),
-                            )
-                            .into_any_element()
-                    })
-                    // footer — Settings row + connection status, set off
-                    // from the session list by a hairline
-                    .child(
-                        div()
-                            .h(px(44.))
-                            .px_3()
-                            .border_t_1()
-                            .border_color(theme.border)
-                            .flex()
-                            .items_center()
-                            .child(
-                                div()
-                                    .id("settings")
-                                    .h(px(28.))
-                                    .px(px(8.))
-                                    .rounded_md()
                                     .flex()
-                                    .items_center()
-                                    .gap(px(7.))
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(theme.bg_hover))
-                                    .on_mouse_up(
-                                        MouseButton::Left,
-                                        cx.listener(Self::on_settings_gear_click),
-                                    )
-                                    .child(icon("icons/settings.svg", 14., theme.text_3))
+                                    .flex_col()
+                                    // section label — anchors the list below the nav
                                     .child(
                                         div()
-                                            .text_size(theme.ui_px(12.))
-                                            .text_color(theme.text_2)
-                                            .child("Settings"),
-                                    ),
-                            )
-                            .child(div().flex_1())
-                            .when_some(self.sidebar_updater_button(theme, cx), |footer, button| {
-                                footer.child(button).child(div().w(px(8.)))
-                            })
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(6.))
-                                    .child(div().size(px(6.)).rounded_full().bg(
-                                        if self.client.is_some() {
-                                            theme.ok_green
-                                        } else {
-                                            theme.stop_red
-                                        },
-                                    ))
-                                    .child(
-                                        div()
+                                            .px(px(14.))
+                                            .pb(px(2.))
                                             .text_size(theme.ui_px(11.))
+                                            .font_weight(FontWeight::MEDIUM)
                                             .text_color(theme.text_3)
-                                            .child(if self.client.is_some() {
-                                                "Connected"
-                                            } else {
-                                                "Offline"
-                                            }),
+                                            .child("Projects"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("sidebar-sessions")
+                                            .flex_1()
+                                            .min_h_0()
+                                            .px_2()
+                                            .relative()
+                                            .child(
+                                                list(
+                                                    self.sidebar_list.clone(),
+                                                    move |ix, _window, cx| {
+                                                        render_side_row(
+                                                            &side_rows,
+                                                            &sessions_data,
+                                                            active_path.as_deref(),
+                                                            ix,
+                                                            &this,
+                                                            agent_running,
+                                                            &running_paths,
+                                                            &live_paths,
+                                                            session_menu.as_ref().as_ref(),
+                                                            workspace_menu.as_ref().as_ref(),
+                                                            *theme::get(cx),
+                                                        )
+                                                        .into_any_element()
+                                                    },
+                                                )
+                                                .w_full()
+                                                .h_full(),
+                                            ),
+                                    )
+                                    .into_any_element()
+                            })
+                            // footer — Settings row + connection status, set off
+                            // from the session list by a hairline
+                            .child(
+                                div()
+                                    .h(px(44.))
+                                    .px_3()
+                                    .border_t_1()
+                                    .border_color(theme.border)
+                                    .flex()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .id("settings")
+                                            .h(px(28.))
+                                            .px(px(8.))
+                                            .rounded_md()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(7.))
+                                            .cursor_pointer()
+                                            .hover(|s| s.bg(theme.bg_hover))
+                                            .on_mouse_up(
+                                                MouseButton::Left,
+                                                cx.listener(Self::on_settings_gear_click),
+                                            )
+                                            .child(icon("icons/settings.svg", 14., theme.text_3))
+                                            .child(
+                                                div()
+                                                    .text_size(theme.ui_px(12.))
+                                                    .text_color(theme.text_2)
+                                                    .child("Settings"),
+                                            ),
+                                    )
+                                    .child(div().flex_1())
+                                    .when_some(
+                                        self.sidebar_updater_button(theme, cx),
+                                        |footer, button| {
+                                            footer.child(button).child(div().w(px(8.)))
+                                        },
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.))
+                                            .child(div().size(px(6.)).rounded_full().bg(
+                                                if self.client.is_some() {
+                                                    theme.ok_green
+                                                } else {
+                                                    theme.stop_red
+                                                },
+                                            ))
+                                            .child(
+                                                div()
+                                                    .text_size(theme.ui_px(11.))
+                                                    .text_color(theme.text_3)
+                                                    .child(if self.client.is_some() {
+                                                        "Connected"
+                                                    } else {
+                                                        "Offline"
+                                                    }),
+                                            ),
                                     ),
                             ),
-                    )
+                    );
+                let gen = self.sidebar_slide_gen;
+                if gen == 0 || theme::reduce_motion(cx) {
+                    // Settled state — including the first frame, so the panel
+                    // doesn't slide open on launch.
+                    panel
+                        .w(px(if open { panel_w } else { 0. }))
+                        .when(open, |p| p.border_r_1().border_color(theme.border))
+                        .into_any_element()
+                } else {
+                    panel
+                        .with_animation(
+                            ElementId::Name(format!("sidebar-slide-{gen}").into()),
+                            Animation::new(Duration::from_millis(SIDEBAR_SLIDE_MS))
+                                .with_easing(|d| 1.0 - (1.0 - d).powi(3)),
+                            move |el, d| {
+                                let w = if open {
+                                    panel_w * d
+                                } else {
+                                    panel_w * (1.0 - d)
+                                };
+                                let el = el.w(px(w));
+                                if w > 0.5 {
+                                    el.border_r_1().border_color(theme.border)
+                                } else {
+                                    el
+                                }
+                            },
+                        )
+                        .into_any_element()
+                }
             }))
             // ── main ──
             .child(if self.settings_open {
@@ -517,18 +525,18 @@ impl Render for OrbitApp {
                     // the status bar below it paint over the picture instead
                     // of sitting on a flat slab.
                     .children(Self::new_task_backdrop(theme, empty))
-                    // top bar — left controls clear the traffic lights when
-                    // the sessions sidebar is hidden; the drag spacer between
-                    // left controls and the right cluster drags the window
-                    .child(
-                        div()
+                    // top bar — the window's left controls are a fixed overlay
+                    // (see below), so the title only has to clear them when the
+                    // sidebar is collapsed. Its leading inset eases in step with
+                    // the sidebar slide. The drag spacer between it and the
+                    // right cluster drags the window.
+                    .child({
+                        let bar = div()
                             .h(px(TOP_BAR_H))
                             .w_full()
                             .flex()
                             .items_center()
-                            .pl(px(if self.sidebar_visible { 20. } else { 76. }))
                             .pr(px(12.))
-                            .child(left_controls)
                             .child(
                                 div()
                                     .flex_1()
@@ -550,8 +558,33 @@ impl Render for OrbitApp {
                                             ),
                                     ),
                             )
-                            .child(top_controls),
-                    )
+                            .child(top_controls);
+                        let gen = self.sidebar_slide_gen;
+                        if gen == 0 || theme::reduce_motion(cx) {
+                            bar.pl(px(if self.sidebar_visible {
+                                20.
+                            } else {
+                                TITLEBAR_LEADING
+                            }))
+                            .into_any_element()
+                        } else {
+                            let expanding = self.sidebar_visible;
+                            bar.with_animation(
+                                ElementId::Name(format!("topbar-lead-{gen}").into()),
+                                Animation::new(Duration::from_millis(SIDEBAR_SLIDE_MS))
+                                    .with_easing(|d| 1.0 - (1.0 - d).powi(3)),
+                                move |el, d| {
+                                    let (from, to) = if expanding {
+                                        (TITLEBAR_LEADING, 20.)
+                                    } else {
+                                        (20., TITLEBAR_LEADING)
+                                    };
+                                    el.pl(px(from + (to - from) * d))
+                                },
+                            )
+                            .into_any_element()
+                        }
+                    })
                     // transcript (centered column) or empty state
                     .child(if empty {
                         self.render_empty_state(main_width, cx).into_any_element()
@@ -703,6 +736,30 @@ impl Render for OrbitApp {
             })
             // ── right side pane (Review) ──
             .children(pane_visible.then(|| self.sidepane.clone().into_any_element()))
+            // ── titlebar controls ── a fixed overlay pinned just past the
+            // macOS traffic lights, above both the sidebar and the main column,
+            // so the toggle/history buttons hold their place while the sidebar
+            // slides underneath. Shown whenever the sidebar is open, and on the
+            // composer surface when it is closed (the Git/Usage pages carry
+            // their own headers, so they don't get the fallback). The container
+            // is not itself a hitbox, so the drag strip beneath still drags the
+            // window in the gaps between buttons while each button takes its
+            // own clicks.
+            .children(
+                (!self.settings_open
+                    && (self.sidebar_visible || (!self.git_open && !self.usage_open)))
+                    .then(|| {
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left(px(TRAFFIC_LIGHT_CLEARANCE))
+                            .h(px(TOP_BAR_H))
+                            .flex()
+                            .items_center()
+                            .child(self.titlebar_left_controls(theme, cx))
+                            .into_any_element()
+                    }),
+            )
             // ── command palette (⌘P) — a full-window deferred layer above
             // every other floating surface; the entity renders its own
             // absolute scrim + centered card.
@@ -2083,6 +2140,86 @@ impl OrbitApp {
                 cx.notify();
             },
         )
+    }
+
+    /// The window's left titlebar controls: sidebar toggle + session history.
+    /// They sit beside the macOS traffic lights in the sidebar's drag strip
+    /// when the sessions sidebar is open, and fall back to the main top bar
+    /// (clearing the lights) when it is hidden.
+    pub(super) fn titlebar_left_controls(
+        &self,
+        theme: Theme,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let back_enabled = self.history_index > 0;
+        let forward_enabled = self.history_index + 1 < self.session_history.len();
+        // Fixed 24px hit boxes with centered icons keep the three controls
+        // optically even (a bare `p_1` gives the 16px toggle a wider pill than
+        // the 14px chevrons, so their edges drift).
+        div()
+            .flex()
+            .items_center()
+            .gap(px(2.))
+            .pr(px(6.))
+            .child(
+                div()
+                    .id("toggle-sidebar")
+                    .size(px(24.))
+                    .rounded_sm()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_toggle_sidebar))
+                    .child(icon("icons/layout-left.svg", 16., theme.text_2)),
+            )
+            .child(
+                div()
+                    .id("history-back")
+                    .size(px(24.))
+                    .rounded_sm()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(back_enabled, |b| {
+                        b.cursor_pointer()
+                            .hover(|s| s.bg(theme.bg_hover))
+                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_history_back))
+                    })
+                    .child(icon(
+                        "icons/arrow-left.svg",
+                        15.,
+                        if back_enabled {
+                            theme.text_2
+                        } else {
+                            theme.text_3
+                        },
+                    )),
+            )
+            .child(
+                div()
+                    .id("history-forward")
+                    .size(px(24.))
+                    .rounded_sm()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(forward_enabled, |b| {
+                        b.cursor_pointer()
+                            .hover(|s| s.bg(theme.bg_hover))
+                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_history_forward))
+                    })
+                    .child(icon(
+                        "icons/arrow-right.svg",
+                        15.,
+                        if forward_enabled {
+                            theme.text_2
+                        } else {
+                            theme.text_3
+                        },
+                    )),
+            )
     }
 
     /// Sidebar nav row — Waku `render_sidebar_action_row` shape: fixed height,

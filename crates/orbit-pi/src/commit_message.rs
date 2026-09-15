@@ -27,9 +27,15 @@ pub fn generate(
     unstaged: &str,
     rows: &[StatusRow],
 ) -> Result<String, String> {
-    let prompt = build_prompt(staged, unstaged, rows);
+    let recent: Vec<String> = crate::git::history(cwd, 10, 0)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|commit| commit.subject)
+        .collect();
+    let prompt = build_prompt(staged, unstaged, rows, &recent);
     let raw = run_pi(cwd, provider, model, &prompt)?;
-    parse_message(&raw).ok_or_else(|| "pi returned no commit message".to_string())
+    let message = parse_message(&raw).ok_or_else(|| "pi returned no commit message".to_string())?;
+    Ok(normalize(&message))
 }
 
 /// A no-model fallback: a Conventional Commit `type(scope): description` plus a
@@ -86,8 +92,9 @@ fn describe_change(rows: &[StatusRow], verb: &str) -> String {
     }
 }
 
-/// A one-sentence prose body grouping the changes by kind. `None` when there is
-/// nothing worth adding to the subject.
+/// The fallback's body: one capitalized line per change group, matching the
+/// generated shape (subject, blank line, then short lines with no trailing
+/// period).
 fn describe_body(rows: &[StatusRow]) -> Option<String> {
     let mut added = Vec::new();
     let mut removed = Vec::new();
@@ -104,25 +111,20 @@ fn describe_body(rows: &[StatusRow]) -> Option<String> {
             _ => changed.push(name),
         }
     }
-    if added.is_empty() && removed.is_empty() && changed.is_empty() {
-        return None;
-    }
-    let mut clauses: Vec<String> = Vec::new();
+    let mut lines: Vec<String> = Vec::new();
     if !changed.is_empty() {
-        clauses.push(format!("updates {}", join_names(&changed)));
+        lines.push(format!("Updates {}", join_names(&changed)));
     }
     if !added.is_empty() {
-        clauses.push(format!("adds {}", join_names(&added)));
+        lines.push(format!("Adds {}", join_names(&added)));
     }
     if !removed.is_empty() {
-        clauses.push(format!("removes {}", join_names(&removed)));
+        lines.push(format!("Removes {}", join_names(&removed)));
     }
-    let mut sentence = clauses.join(", ");
-    if let Some(first) = sentence.get_mut(0..1) {
-        first.make_ascii_uppercase();
+    if lines.is_empty() {
+        return None;
     }
-    sentence.push('.');
-    Some(sentence)
+    Some(lines.join("\n"))
 }
 
 /// Distinct human-readable names, in first-seen order.
@@ -209,35 +211,47 @@ fn staged_summary(rows: &[StatusRow]) -> String {
         .join("\n")
 }
 
-fn build_prompt(staged: &str, unstaged: &str, rows: &[StatusRow]) -> String {
+fn build_prompt(staged: &str, unstaged: &str, rows: &[StatusRow], recent: &[String]) -> String {
     let staged = truncate(staged, MAX_DIFF_BYTES);
     let unstaged = truncate(unstaged, MAX_DIFF_BYTES);
     let mut prompt = String::from(
-        "Analyze the staged changes below and write ONE Conventional Commits message.\n\
+        "Analyze the staged changes below and write ONE commit message.\n\
          The changed-files list and the unified diff together are the source of truth.\n\
-         Use this exact format for the subject: <type>(<scope>): <description>\n\
+         Return the message in exactly this shape — a subject line, a blank line, then one\n\
+         line per change:\n\n\
+         <type>: <summary>\n\n\
+         A complete sentence describing one change\n\
+         Another complete sentence describing another change\n\n\
          Rules:\n\
          - Inspect the actual diff before generating the message.\n\
          - Identify the primary purpose of the changes.\n\
-         - Use the most specific type. type is one of feat, fix, refactor, perf, ui, style,\n\
-           docs, test, build, chore, ci, revert.\n\
-         - Add a scope when useful.\n\
-         - Keep the subject concise and preferably under 72 characters, with no trailing period.\n\
-         - Use lowercase.\n\
-         - Use imperative language (\"add\", not \"added\" or \"adds\").\n\
-         - Describe the user-facing or developer-facing outcome, not every implementation detail.\n\
-         - Do not use generic descriptions.\n\
+         - Subject: one line, concise and preferably under 72 characters, with no trailing period.\n\
+         - Use lowercase for the subject and imperative language (\"add\", not \"added\" or \"adds\").\n\
+         - Match the type prefix and scope style of the recent commits below when they are consistent.\n\
+         - When there is no consistent style, use <type>: <summary>, where type is one of feat, fix,\n\
+           refactor, perf, ui, style, docs, test, build, chore, ci, revert.\n\
+         - Body: 1-3 lines, each a complete sentence starting with a capital letter and ending with\n\
+           no period.\n\
+         - Write one line per user-facing change or effect; do not use bullets, dashes, numbers, or\n\
+           markdown.\n\
+         - Do not repeat the subject in the body, and never report a file count or list files line\n\
+           by line.\n\
          - Do not include issue numbers unless they are present in the changes/context.\n\
          - Do not invent functionality that is not present in the diff.\n\
-         - If changes contain unrelated work, mention the dominant change rather than listing everything.\n\
-         - Add a blank line, then a body: a short prose paragraph (1-3 sentences) describing\n\
-           what the change does as a whole and why. Write flowing sentences, not bullets.\n\
-         - In the body, name the affected modules, files, functions, or behavior in prose.\n\
-         - Never report a file count, list files line by line, or write \"update N files\".\n\
+         - If changes contain unrelated work, describe the dominant change rather than listing everything.\n\
          - Omit the body only for a single trivial edit.\n\
          - Return ONLY the commit message: no code fences, quotes, or commentary.\n\n\
-         Staged files:\n",
+         Recent commits on this branch (newest first):\n",
     );
+    if recent.is_empty() {
+        prompt.push_str("(none)\n");
+    } else {
+        for subject in recent {
+            prompt.push_str(subject);
+            prompt.push('\n');
+        }
+    }
+    prompt.push_str("\nStaged files:\n");
     prompt.push_str(&staged_summary(rows));
     prompt.push_str("\n\nStaged diff:\n");
     prompt.push_str(&staged);
@@ -355,6 +369,52 @@ fn parse_message(raw: &str) -> Option<String> {
     (!text.is_empty()).then(|| text.to_string())
 }
 
+/// Force the model output into the app's commit shape regardless of how closely
+/// it followed instructions: one subject line, a blank line, then capitalized
+/// body lines with no bullet markers and no trailing periods.
+fn normalize(message: &str) -> String {
+    let mut lines = message.lines().map(str::trim).filter(|line| !line.is_empty());
+    let Some(subject) = lines.next() else {
+        return String::new();
+    };
+    let subject = strip_bullet(subject).trim_end_matches('.').trim();
+    let mut body: Vec<String> = Vec::new();
+    for line in lines {
+        let line = strip_bullet(line).trim_end_matches('.').trim();
+        if !line.is_empty() {
+            body.push(capitalize(line));
+        }
+    }
+    if body.is_empty() {
+        subject.to_string()
+    } else {
+        format!("{subject}\n\n{}", body.join("\n"))
+    }
+}
+
+/// Remove a leading `- `, `* `, `• `, or `1.`/`1)` list marker.
+fn strip_bullet(line: &str) -> &str {
+    let trimmed = line
+        .trim_start_matches(['-', '*', '•', '–', '—'])
+        .trim_start();
+    let digits = trimmed.len() - trimmed.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digits > 0 {
+        let rest = &trimmed[digits..];
+        if let Some(rest) = rest.strip_prefix('.').or_else(|| rest.strip_prefix(')')) {
+            return rest.trim_start();
+        }
+    }
+    trimmed
+}
+
+fn capitalize(line: &str) -> String {
+    let mut chars = line.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,13 +490,31 @@ mod tests {
             message.lines().next().unwrap(),
             "feat(src): update git panel and commit message"
         );
-        // Prose body grouping the changes, no raw per-file bullet list.
+        // One line per change group, no trailing period, no raw per-file bullet list.
         assert!(
-            message.contains("Updates git panel, adds commit message."),
+            message.contains("\n\nUpdates git panel\nAdds commit message"),
             "{message}"
         );
         assert!(!message.contains("- M "), "{message}");
         assert!(!message.contains("2 files"), "{message}");
+    }
+
+    #[test]
+    fn normalizes_bullets_and_trailing_periods_into_the_commit_shape() {
+        let raw = "- feat: animate the sidebar\n\n* the sidebar now slides open\n1. the toggle floats above\nGit status no longer marks unstaged edits as staged.";
+        assert_eq!(
+            normalize(raw),
+            "feat: animate the sidebar\n\n\
+             The sidebar now slides open\n\
+             The toggle floats above\n\
+             Git status no longer marks unstaged edits as staged"
+        );
+    }
+
+    #[test]
+    fn normalize_keeps_a_subject_only_message() {
+        assert_eq!(normalize("fix: guard empty input."), "fix: guard empty input");
+        assert_eq!(normalize("   \n "), "");
     }
 
     #[test]
@@ -451,15 +529,18 @@ mod tests {
             unstaged_additions: 0,
             unstaged_deletions: 0,
         }];
-        let prompt = build_prompt("diff --git a/src/lib.rs b/src/lib.rs\n", "", &rows);
+        let recent = vec!["feat: add the review pane".to_string()];
+        let prompt = build_prompt("diff --git a/src/lib.rs b/src/lib.rs\n", "", &rows, &recent);
         assert!(prompt.contains("Staged files:"), "{prompt}");
         assert!(prompt.contains("  M src/lib.rs (+2 -0)"), "{prompt}");
-        assert!(prompt.contains("Never report a file count"), "{prompt}");
+        assert!(prompt.contains("never report a file count"), "{prompt}");
         assert!(prompt.contains("Staged diff:"), "{prompt}");
-        // New rule set: exact subject format, ui type, decisive wording.
-        assert!(prompt.contains("<type>(<scope>): <description>"), "{prompt}");
+        // New rule set: subject + blank line + one line per change, style matching.
+        assert!(prompt.contains("<type>: <summary>"), "{prompt}");
         assert!(prompt.contains("ui"), "{prompt}");
-        assert!(prompt.contains("Use the most specific type"), "{prompt}");
+        assert!(prompt.contains("one\nline per change"), "{prompt}");
+        assert!(prompt.contains("Recent commits on this branch"), "{prompt}");
+        assert!(prompt.contains("feat: add the review pane"), "{prompt}");
         assert!(prompt.contains("Do not invent functionality"), "{prompt}");
         assert!(prompt.contains("dominant change"), "{prompt}");
     }

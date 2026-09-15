@@ -187,6 +187,11 @@ pub struct OrbitApp {
     workspace_watch_dir: Option<PathBuf>,
     sidebar_list: ListState,
     sidebar_visible: bool,
+    /// Bumped on every sidebar toggle. The render keys its slide animation on
+    /// it, so an open→close→open cycle animates every time (a boolean key
+    /// would let the repeat skip) while the first frame — generation 0 — draws
+    /// the settled state with no launch animation.
+    sidebar_slide_gen: u64,
     pub(crate) input: Entity<ComposerInput>,
     model_label: String,
     /// Pi model id of the active model (stable match key for the picker).
@@ -743,6 +748,7 @@ impl OrbitApp {
             workspace_watch_dir: None,
             sidebar_list: ListState::new(0, ListAlignment::Top, px(44.)),
             sidebar_visible: true,
+            sidebar_slide_gen: 0,
             input,
             model_label: "…".into(),
             model_id: String::new(),

@@ -349,7 +349,7 @@ impl CommandPalette {
                 } else {
                     "Show Sidebar"
                 },
-                "icons/panel-left.svg",
+                "icons/layout-left.svg",
                 None,
                 PaletteCommand::ToggleSidebar,
                 "toggle show hide left sidebar sessions history",

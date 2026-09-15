@@ -389,16 +389,21 @@ impl StatusRow {
 /// Changed files with per-file line deltas. Staged and unstaged counts come
 /// from separate `--numstat` runs; untracked files are counted from disk.
 pub fn status_rows(cwd: &Path) -> Result<Vec<StatusRow>, String> {
-    let out = run_git(
+    // Raw (untrimmed) output: `run_git` trims the whole stdout, which would eat
+    // the leading space of the first porcelain line (" M path" → "M path") and
+    // misread an unstaged edit as staged, with a path missing its first
+    // character. `run_git_ok` keeps the output verbatim.
+    let out = run_git_ok(
         cwd,
-        &[
+        [
             "-c",
             "core.quotePath=false",
             "status",
             "--porcelain",
             "--untracked-files=all",
         ],
-    )?;
+    )
+    .map_err(|err| err.to_string())?;
     let unstaged_stats = numstat_map(cwd, false);
     let staged_stats = numstat_map(cwd, true);
     let mut rows = Vec::new();
@@ -1240,5 +1245,27 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("not a git repository"), "{error}");
+    }
+
+    #[test]
+    fn status_rows_keeps_the_first_lines_index_column() {
+        // The first porcelain line for a worktree edit starts with a space
+        // (" M path"). `run_git` trims the whole stdout, so a trimmed read
+        // would drop that column — misreading the edit as staged and the path
+        // as "argo.lock" (missing its first character). Cargo.lock sorts first.
+        let root = repository();
+        fs::write(root.join("Cargo.lock"), "version = 4\n").unwrap();
+        git_ok(&root, &["add", "Cargo.lock"]);
+        git_ok(&root, &["commit", "--quiet", "-m", "add lock"]);
+        fs::write(root.join("Cargo.lock"), "version = 5\n").unwrap();
+
+        let rows = status_rows(&root).unwrap();
+        let row = rows.iter().find(|row| row.path == "Cargo.lock").unwrap();
+        assert!(!row.staged(), "a worktree edit is not staged");
+        assert!(row.unstaged());
+        assert_eq!(row.change_badge(), 'M');
+        assert_eq!(row.unstaged_additions, 1);
+        assert_eq!(row.unstaged_deletions, 1);
+        fs::remove_dir_all(root).ok();
     }
 }

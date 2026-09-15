@@ -1340,8 +1340,15 @@ impl OrbitApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.sidebar_visible = !self.sidebar_visible;
+        self.toggle_sidebar();
         cx.notify();
+    }
+
+    /// Flip the sessions sidebar and bump the slide generation, so the render
+    /// animates the change (and every open→close→open cycle re-animates).
+    pub(super) fn toggle_sidebar(&mut self) {
+        self.sidebar_visible = !self.sidebar_visible;
+        self.sidebar_slide_gen = self.sidebar_slide_gen.wrapping_add(1);
     }
 
     pub(super) fn on_toggle_side_pane(

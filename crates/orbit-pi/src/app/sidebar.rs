@@ -224,24 +224,26 @@ pub(crate) fn render_side_row(
             let this_new = this.clone();
             let this_menu = this.clone();
             let menu_open = workspace_menu.is_some_and(|m| m.label == label);
-            // Outer shell: inter-group spacing only — hover lives on the inner
-            // card so the highlight doesn't bleed into the padding (same split
-            // as session rows below). The header is a minimal label row:
-            // chevron + folder + name, the session count pinned to the very
-            // end, and the row actions (a `…` menu, then the new-session `+`)
-            // fading in to the count's left on hover (all flex_none, so
-            // nothing shifts when they appear).
+            // Outer shell: inter-group spacing only — horizontal inset comes
+            // from the list's `px_2`, so the hover pill lines up with the
+            // session rows' (inside the same container) and the chevron lands
+            // under the "Projects" label. Hover lives on the inner card so the
+            // highlight doesn't bleed into the padding. The header is a minimal
+            // label row: chevron + folder + name, the session count pinned to
+            // the very end, and the row actions (a `…` menu, then the
+            // new-session `+`) fading in to the count's left on hover (all
+            // flex_none, so nothing shifts when they appear).
             div()
                 .w_full()
-                .px_2()
                 .pt(px(12.))
                 .pb(px(2.))
                 .group("workspace-row")
                 .child(
                     div()
                         .w_full()
-                        .h(px(24.))
-                        .px(px(6.))
+                        .h(px(26.))
+                        .pl(px(6.))
+                        .pr(px(8.))
                         .rounded_md()
                         .flex()
                         .items_center()
@@ -270,15 +272,15 @@ pub(crate) fn render_side_row(
                             10.,
                             theme.text_3,
                         ))
-                        .child(icon("icons/folder.svg", 13., theme.text_2))
+                        .child(icon("icons/folder.svg", 13., theme.text_3))
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
                                 .text_size(theme.ui_px(11.5))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme.text_2)
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text_3)
                                 .child(label.clone()),
                         )
                         // Row actions, revealed on hover: a `…` menu
@@ -295,7 +297,7 @@ pub(crate) fn render_side_row(
                                 .id(ElementId::Name(format!("workspace-new-{label}").into()))
                                 .flex_none()
                                 .size(px(18.))
-                                .rounded(px(4.))
+                                .rounded_sm()
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -338,7 +340,7 @@ pub(crate) fn render_side_row(
                 .pr_2()
                 .flex()
                 .items_center()
-                .gap_1p5()
+                .gap(px(6.))
                 .rounded_md()
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.bg_hover))
@@ -349,9 +351,10 @@ pub(crate) fn render_side_row(
                         cx.notify();
                     });
                 })
+                .child(icon("icons/chevron-down.svg", 11., theme.text_3))
                 .child(
                     div()
-                        .text_size(theme.ui_px(11.5))
+                        .text_size(theme.ui_px(11.))
                         .text_color(theme.text_3)
                         .child(format!("Show {count} more")),
                 )
@@ -367,7 +370,7 @@ pub(crate) fn render_side_row(
                 .pr_2()
                 .flex()
                 .items_center()
-                .gap_1p5()
+                .gap(px(6.))
                 .rounded_md()
                 .cursor_pointer()
                 .hover(|s| s.bg(theme.bg_hover))
@@ -378,9 +381,10 @@ pub(crate) fn render_side_row(
                         cx.notify();
                     });
                 })
+                .child(icon("icons/chevron-up.svg", 11., theme.text_3))
                 .child(
                     div()
-                        .text_size(theme.ui_px(11.5))
+                        .text_size(theme.ui_px(11.))
                         .text_color(theme.text_3)
                         .child("Show less"),
                 )
@@ -406,8 +410,9 @@ pub(crate) fn render_side_row(
             let title = session_title(*ix, session.title.clone().into(), theme, active, running);
             // Two-line row (title + actions, then preview · age),
             // indented under its workspace group so the list reads as a
-            // tree. The open session gets a raised fill and an accent bar
-            // in the indent gutter; row actions are revealed on hover.
+            // tree. The open session takes the `active` fill with `active_fg`
+            // ink — the same selected-destination grammar as the nav rows;
+            // row actions are revealed on hover.
             // Outer item carries the inter-row spacing (padding) and the click
             // handler; the inner card holds the background/hover so the gap
             // between cards stays clear. Padding (not margin) is used because
@@ -425,7 +430,6 @@ pub(crate) fn render_side_row(
                 });
             let mut card = div()
                 .group("srow")
-                .relative()
                 .w_full()
                 .pl(px(22.))
                 .pr(px(8.))
@@ -434,21 +438,8 @@ pub(crate) fn render_side_row(
                 .flex()
                 .items_center()
                 .gap(px(6.))
-                .when(active, |card| card.bg(theme.bg_raised))
+                .when(active, |card| card.bg(theme.active))
                 .when(!active, |card| card.hover(|s| s.bg(theme.bg_hover)));
-            // Active marker: a short accent bar in the indent gutter.
-            if active {
-                card = card.child(
-                    div()
-                        .absolute()
-                        .left(px(8.))
-                        .top(px(8.))
-                        .bottom(px(8.))
-                        .w(px(2.))
-                        .rounded_full()
-                        .bg(theme.accent),
-                );
-            }
             // Two-line text column: title + actions on top, then the
             // preview with the age pinned to its right end.
             card = card.child(
@@ -484,8 +475,8 @@ pub(crate) fn render_side_row(
                             )),
                     )
                     // Line 2 — first-message preview with the age at the very
-                    // end (accent at low opacity, so the timestamp reads as
-                    // metadata, not content).
+                    // end, both tertiary metadata (accent is reserved for the
+                    // running signal, not timestamps).
                     .child(
                         div()
                             .w_full()
@@ -506,7 +497,7 @@ pub(crate) fn render_side_row(
                                 div()
                                     .flex_none()
                                     .text_size(theme.ui_px(10.5))
-                                    .text_color(theme.accent.opacity(0.75))
+                                    .text_color(theme.text_3)
                                     .child(sessions::relative_time(session.modified)),
                             ),
                     ),
@@ -536,7 +527,7 @@ pub(crate) fn session_menu_button(
         .relative()
         .flex_none()
         .size(px(18.))
-        .rounded(px(4.))
+        .rounded_sm()
         .flex()
         .items_center()
         .justify_center()
@@ -609,7 +600,11 @@ fn session_title(
     active: bool,
     running: bool,
 ) -> AnyElement {
-    let color = if active { theme.text } else { theme.text_2 };
+    let color = if active {
+        theme.active_fg
+    } else {
+        theme.text_2
+    };
     let weight = if active {
         FontWeight::MEDIUM
     } else {
@@ -857,7 +852,7 @@ pub(crate) fn workspace_menu_button(
         .relative()
         .flex_none()
         .size(px(18.))
-        .rounded(px(4.))
+        .rounded_sm()
         .flex()
         .items_center()
         .justify_center()

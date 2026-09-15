@@ -392,7 +392,9 @@ fn main() {
                         // Transparent titlebar: the sidebar extends to the top
                         // and the native traffic lights sit inside it (Waku-style).
                         appears_transparent: true,
-                        traffic_light_position: Some(point(px(12.), px(13.))),
+                        // Center the lights in the 44px titlebar row so they
+                        // share a line with the window controls beside them.
+                        traffic_light_position: Some(point(px(12.), px(16.))),
                     }),
                     app_id: Some("dev.orbit.pi".into()),
                     focus: true,

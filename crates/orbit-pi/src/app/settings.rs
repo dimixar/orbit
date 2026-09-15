@@ -70,10 +70,11 @@ impl OrbitApp {
                     .border_color(theme.border)
                     .flex()
                     .flex_col()
-                    // traffic-light strip (drag region)
+                    // traffic-light strip (drag region) — same height as the
+                    // session sidebar's so the two nav columns line up
                     .child(
                         div()
-                            .h(px(38.))
+                            .h(px(super::view::TOP_BAR_H))
                             .w_full()
                             .window_control_area(WindowControlArea::Drag),
                     )
@@ -4669,7 +4670,7 @@ impl OrbitApp {
             .when(!on, |t| t.bg(theme.bg_raised).justify_start())
             .on_mouse_up(MouseButton::Left, move |_, _, cx| {
                 this.update(cx, |app, cx| {
-                    app.sidebar_visible = !app.sidebar_visible;
+                    app.toggle_sidebar();
                     cx.notify();
                 });
             })

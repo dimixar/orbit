@@ -369,7 +369,7 @@ impl OrbitApp {
                 self.input.read(cx).focus(window);
             }
             PaletteCommand::ToggleSidebar => {
-                self.sidebar_visible = !self.sidebar_visible;
+                self.toggle_sidebar();
                 cx.notify();
             }
             PaletteCommand::ToggleSidePanel => {
