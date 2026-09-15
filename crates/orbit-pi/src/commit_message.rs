@@ -213,17 +213,29 @@ fn build_prompt(staged: &str, unstaged: &str, rows: &[StatusRow]) -> String {
     let staged = truncate(staged, MAX_DIFF_BYTES);
     let unstaged = truncate(unstaged, MAX_DIFF_BYTES);
     let mut prompt = String::from(
-        "Write ONE Conventional Commits message for the staged changes below.\n\
+        "Analyze the staged changes below and write ONE Conventional Commits message.\n\
          The changed-files list and the unified diff together are the source of truth.\n\
+         Use this exact format for the subject: <type>(<scope>): <description>\n\
          Rules:\n\
-         - First line: `type(scope): imperative summary`, at most 72 characters, no trailing period.\n\
-         - type is one of feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert.\n\
+         - Inspect the actual diff before generating the message.\n\
+         - Identify the primary purpose of the changes.\n\
+         - Use the most specific type. type is one of feat, fix, refactor, perf, ui, style,\n\
+           docs, test, build, chore, ci, revert.\n\
+         - Add a scope when useful.\n\
+         - Keep the subject concise and preferably under 72 characters, with no trailing period.\n\
+         - Use lowercase.\n\
+         - Use imperative language (\"add\", not \"added\" or \"adds\").\n\
+         - Describe the user-facing or developer-facing outcome, not every implementation detail.\n\
+         - Do not use generic descriptions.\n\
+         - Do not include issue numbers unless they are present in the changes/context.\n\
+         - Do not invent functionality that is not present in the diff.\n\
+         - If changes contain unrelated work, mention the dominant change rather than listing everything.\n\
          - Add a blank line, then a body: a short prose paragraph (1-3 sentences) describing\n\
            what the change does as a whole and why. Write flowing sentences, not bullets.\n\
          - In the body, name the affected modules, files, functions, or behavior in prose.\n\
          - Never report a file count, list files line by line, or write \"update N files\".\n\
          - Omit the body only for a single trivial edit.\n\
-         - Output ONLY the commit message: no code fences, quotes, or commentary.\n\n\
+         - Return ONLY the commit message: no code fences, quotes, or commentary.\n\n\
          Staged files:\n",
     );
     prompt.push_str(&staged_summary(rows));
@@ -444,5 +456,11 @@ mod tests {
         assert!(prompt.contains("  M src/lib.rs (+2 -0)"), "{prompt}");
         assert!(prompt.contains("Never report a file count"), "{prompt}");
         assert!(prompt.contains("Staged diff:"), "{prompt}");
+        // New rule set: exact subject format, ui type, decisive wording.
+        assert!(prompt.contains("<type>(<scope>): <description>"), "{prompt}");
+        assert!(prompt.contains("ui"), "{prompt}");
+        assert!(prompt.contains("Use the most specific type"), "{prompt}");
+        assert!(prompt.contains("Do not invent functionality"), "{prompt}");
+        assert!(prompt.contains("dominant change"), "{prompt}");
     }
 }

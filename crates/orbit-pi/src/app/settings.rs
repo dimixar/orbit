@@ -4124,9 +4124,10 @@ impl OrbitApp {
     // ── Appearance ─────────────────────────────────────────────────────
 
     /// The Appearance section: theme, background, type & density, and
-    /// layout. Three grouped boards with hairline-separated rows, each
-    /// section led by a live preview so a change is legible on the page
-    /// before you leave it.
+    /// layout. Grouped boards with hairline-separated rows, each section led
+    /// by a live preview so a change is legible on the page before you leave
+    /// it. The backdrop's tuning is its own board and appears only once an
+    /// image is configured — there is nothing to tune otherwise.
     pub(super) fn appearance_rows(
         &self,
         theme: Theme,
@@ -4134,11 +4135,15 @@ impl OrbitApp {
         cx: &Context<Self>,
     ) -> Vec<AnyElement> {
         let background = crate::dither::configured_label();
-        vec![
+        let mut sections = vec![
             self.settings_section(
                 theme,
                 "Theme & background",
                 vec![
+                    // The backdrop only paints on the new-task page, so the
+                    // section leads with the processed result; without it a
+                    // tuning change could only be judged by leaving Settings.
+                    self.backdrop_preview(theme),
                     self.setting_row(
                         theme,
                         "Theme",
@@ -4149,7 +4154,7 @@ impl OrbitApp {
                     self.setting_row(
                         theme,
                         "Background image",
-                        Some("A dithered image behind the new-task and chat pages."),
+                        Some("A dithered image behind the new-task page."),
                         background.as_deref(),
                         Some(self.background_controls(theme, this.clone())),
                     ),
@@ -4274,9 +4279,58 @@ impl OrbitApp {
                     ),
                 ],
             ),
-        ]
+        ];
+        // Tuning only means something once there is an image to tune, so the
+        // board appears with it, directly under the background it belongs to.
+        if background.is_some() {
+            sections.insert(
+                1,
+                self.settings_section(
+                    theme,
+                    "Background tuning",
+                    vec![
+                        self.setting_row(
+                            theme,
+                            "Blur",
+                            Some("Softens the picture before the dither pass, so a busy photo sits further behind the text."),
+                            None,
+                            Some(self.tuning_select(
+                                SettingsSelect::BackdropBlur,
+                                theme,
+                                this.clone(),
+                                cx,
+                            )),
+                        ),
+                        self.setting_row(
+                            theme,
+                            "Pixel size",
+                            Some("The dither cell edge. Fine cells read as halftone, coarse ones as chunky pixels."),
+                            None,
+                            Some(self.tuning_select(
+                                SettingsSelect::BackdropCell,
+                                theme,
+                                this.clone(),
+                                cx,
+                            )),
+                        ),
+                        self.setting_row(
+                            theme,
+                            "Bottom fade",
+                            Some("How far the picture fades into the page behind the composer."),
+                            None,
+                            Some(self.tuning_select(
+                                SettingsSelect::BackdropFade,
+                                theme,
+                                this.clone(),
+                                cx,
+                            )),
+                        ),
+                    ],
+                ),
+            );
+        }
+        sections
     }
-
     /// The Theme row's control: a live palette strip (canvas, chrome,
     /// raised, tertiary ink, ink, accent) before the palette dropdown, so
     /// the active colors are legible without opening the menu.
@@ -4487,6 +4541,77 @@ impl OrbitApp {
         controls.into_any_element()
     }
 
+    /// Appearance → the backdrop's live preview: the real processed image
+    /// (blur + dither cell) under the real bottom fade, at strip scale. The
+    /// backdrop only paints on the new-task page, so without this a tuning
+    /// change could only be judged by leaving Settings. With no image
+    /// configured it previews the dot grid, which is what Reset returns to.
+    pub(super) fn backdrop_preview(&self, theme: Theme) -> AnyElement {
+        let image = crate::dither::background();
+        let dithered = image.is_some();
+        div()
+            .w_full()
+            .px(theme.space(16.))
+            .py(theme.space(12.))
+            .child(
+                div()
+                    .id("background-preview")
+                    .debug_selector(|| "background-preview".to_string())
+                    .relative()
+                    .w_full()
+                    .h(px(84.))
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(theme.border)
+                    .overflow_hidden()
+                    .when(!dithered, |strip| strip.child(Self::dot_backdrop(theme)))
+                    .children(Self::backdrop_image(image, crate::dither::tuning(), theme)),
+            )
+            .into_any_element()
+    }
+
+    /// The background-tuning dropdowns (blur / pixel size / bottom fade).
+    /// Each option is a named preset, never a raw number, so the chip reads
+    /// as a look — "Heavy", "Coarse", "Deep" — rather than a parameter.
+    pub(super) fn tuning_select(
+        &self,
+        kind: SettingsSelect,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        use crate::dither::{BLUR_LABELS, CELL_LABELS, FADE_LABELS};
+        let tuning = crate::dither::tuning();
+        let (id, selected, labels): (&'static str, usize, &[&str]) = match kind {
+            SettingsSelect::BackdropBlur => (
+                "backdrop-blur-select",
+                tuning.blur_index(),
+                &BLUR_LABELS[..],
+            ),
+            SettingsSelect::BackdropCell => (
+                "backdrop-cell-select",
+                tuning.cell_index(),
+                &CELL_LABELS[..],
+            ),
+            SettingsSelect::BackdropFade => (
+                "backdrop-fade-select",
+                tuning.fade_index(),
+                &FADE_LABELS[..],
+            ),
+            _ => unreachable!(),
+        };
+        self.select_control(
+            id,
+            kind,
+            labels[selected].to_string(),
+            labels.iter().map(|label| label.to_string()).collect(),
+            selected,
+            theme,
+            this,
+            cx,
+        )
+    }
+
     /// Pick the background image (native dialog), copy + process it, and
     /// warm the dither cache so the first paint of the new-task page is
     /// costless.
@@ -4621,7 +4746,10 @@ impl OrbitApp {
             SettingsSelect::Language
             | SettingsSelect::Theme
             | SettingsSelect::UiFontFamily
-            | SettingsSelect::CodeFontFamily => unreachable!(),
+            | SettingsSelect::CodeFontFamily
+            | SettingsSelect::BackdropBlur
+            | SettingsSelect::BackdropCell
+            | SettingsSelect::BackdropFade => unreachable!(),
         };
         let selected = values
             .iter()
@@ -5058,6 +5186,38 @@ impl OrbitApp {
                 theme::set_font_prefs(prefs);
                 return;
             }
+            SettingsSelect::BackdropBlur
+            | SettingsSelect::BackdropCell
+            | SettingsSelect::BackdropFade => {
+                let mut tuning = crate::dither::tuning();
+                match kind {
+                    SettingsSelect::BackdropBlur => {
+                        tuning.blur = crate::dither::BLUR_SIGMAS
+                            .get(ix)
+                            .copied()
+                            .unwrap_or(tuning.blur);
+                    }
+                    SettingsSelect::BackdropCell => {
+                        tuning.cell = crate::dither::CELL_SIZES
+                            .get(ix)
+                            .copied()
+                            .unwrap_or(tuning.cell);
+                    }
+                    SettingsSelect::BackdropFade => {
+                        tuning.fade = crate::dither::FADE_HEIGHTS
+                            .get(ix)
+                            .copied()
+                            .unwrap_or(tuning.fade);
+                    }
+                    _ => unreachable!(),
+                }
+                crate::dither::set_tuning(tuning);
+                // The cache is keyed on the tuning, so rebuild the pass now:
+                // this frame's preview and the next new-task paint both hit a
+                // warm cache instead of stalling on the first draw.
+                crate::dither::background();
+                return;
+            }
             _ => {}
         }
         use crate::theme::{Language, FONT_SIZES, SPACING_DENSITIES};
@@ -5084,7 +5244,10 @@ impl OrbitApp {
             }
             SettingsSelect::Theme
             | SettingsSelect::UiFontFamily
-            | SettingsSelect::CodeFontFamily => unreachable!(),
+            | SettingsSelect::CodeFontFamily
+            | SettingsSelect::BackdropBlur
+            | SettingsSelect::BackdropCell
+            | SettingsSelect::BackdropFade => unreachable!(),
         }
         theme::set_ui_prefs(cx, ui);
     }

@@ -1328,6 +1328,205 @@ fn render_thinking_body(thinking: &str, live: bool, theme: Theme) -> impl IntoEl
         )
 }
 
+/// The `ask_user_question` card: a compact question record for the transcript.
+/// While the tool waits the options read as a plain numbered list; once it
+/// answers, the chosen option is marked (or the typed custom answer shown).
+/// The live, answerable version is the inline panel above the composer.
+fn render_ask_card(tool: &ToolCall, theme: Theme, key: (usize, usize)) -> AnyElement {
+    use crate::ask;
+
+    let questions = ask::questions_from_args(tool.args.as_ref());
+    let answered = ask::answer_envelope(tool.output.as_ref());
+    let declined = ask::is_declined(tool.output.as_ref());
+    let waiting = tool.output.is_none() && !tool.failed;
+
+    let mut card = div()
+        .id(ElementId::NamedInteger(
+            "ask-card".into(),
+            (key.0 as u64) << 16 | key.1 as u64,
+        ))
+        .w_full()
+        .min_w_0()
+        .overflow_hidden()
+        .rounded(px(9.))
+        .border_1()
+        .border_color(theme.border_strong)
+        .bg(theme.overlay)
+        .flex()
+        .flex_col();
+
+    // ── header ──
+    let mut header = div()
+        .h(px(32.))
+        .px(px(10.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .text_size(theme.ui_px(13.))
+        .line_height(theme.ui_px(17.))
+        .child(glyph("icons/task.svg", 13., theme.text_3))
+        .child(
+            div()
+                .flex_none()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme.accent)
+                .child("Question"),
+        );
+    if questions.len() > 1 {
+        header = header.child(
+            div()
+                .flex_none()
+                .text_size(theme.ui_px(11.))
+                .text_color(theme.text_3)
+                .child(format!("{} asked", questions.len())),
+        );
+    }
+    if declined {
+        header = header.child(
+            div()
+                .flex_1()
+                .flex()
+                .justify_end()
+                .text_size(theme.ui_px(11.))
+                .text_color(theme.text_3)
+                .child("No answer"),
+        );
+    } else if tool.failed {
+        header = header.child(div().flex_1().flex().justify_end().child(glyph(
+            "icons/stop.svg",
+            12.,
+            theme.del_red,
+        )));
+    }
+    card = card.child(header);
+
+    // ── body: one block per question ──
+    let mut body = div().px(px(10.)).pb(px(10.)).flex().flex_col().gap(px(10.));
+    for question in &questions {
+        let mut block = div().flex().flex_col().gap(px(4.));
+        let mut head = div().flex().items_center().gap(px(6.));
+        if !question.header.trim().is_empty() {
+            head = head.child(
+                div()
+                    .flex_none()
+                    .px(px(6.))
+                    .py(px(1.))
+                    .rounded(px(4.))
+                    .bg(theme.overlay_strong)
+                    .text_size(theme.ui_px(10.5))
+                    .line_height(theme.ui_px(14.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_3)
+                    .child(SharedString::from(question.header.clone())),
+            );
+        }
+        head = head.child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .whitespace_normal()
+                .text_size(theme.ui_px(13.))
+                .line_height(theme.ui_px(18.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child(SharedString::from(question.question.clone())),
+        );
+        block = block.child(head);
+
+        // The answer, when the tool completed with one. A selection is marked
+        // in the list below; a typed custom answer gets its own row.
+        let answer =
+            answered.and_then(|envelope| ask::envelope_answer(envelope, &question.question));
+        let custom = answer.filter(|answer| !ask::answer_is_option_selection(question, answer));
+
+        let mut list = div().flex().flex_col().gap(px(1.));
+        for (ix, option) in question.options.iter().enumerate() {
+            let chosen =
+                answer.is_some_and(|answer| ask::answer_includes_label(answer, &option.label));
+            let mut row = div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(8.))
+                .py(px(4.))
+                .rounded(px(6.))
+                .when(chosen, |row| row.bg(theme.accent.opacity(0.10)));
+            // A plain number keeps the list readable at a glance.
+            row = row.child(
+                div()
+                    .flex_none()
+                    .text_size(theme.ui_px(12.))
+                    .line_height(theme.ui_px(17.))
+                    .text_color(if chosen { theme.accent } else { theme.text_3 })
+                    .child(format!("{}.", ix + 1)),
+            );
+            row = row.child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .whitespace_normal()
+                    .text_size(theme.ui_px(12.5))
+                    .line_height(theme.ui_px(17.))
+                    .text_color(if chosen { theme.text } else { theme.text_2 })
+                    .child(SharedString::from(option.label.clone())),
+            );
+            if chosen {
+                row = row.child(glyph("icons/check.svg", 11., theme.accent));
+            }
+            list = list.child(row);
+        }
+        if let Some(answer) = custom {
+            list = list.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(8.))
+                    .py(px(4.))
+                    .rounded(px(6.))
+                    .bg(theme.accent.opacity(0.10))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(theme.ui_px(12.))
+                            .line_height(theme.ui_px(17.))
+                            .text_color(theme.accent)
+                            .child("A."),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .whitespace_normal()
+                            .text_size(theme.ui_px(12.5))
+                            .line_height(theme.ui_px(17.))
+                            .text_color(theme.text)
+                            .child(SharedString::from(answer.to_string())),
+                    ),
+            );
+        }
+        block = block.child(list);
+
+        if waiting {
+            block = block.child(
+                div()
+                    .px(px(8.))
+                    .text_size(theme.ui_px(11.))
+                    .line_height(theme.ui_px(15.))
+                    .text_color(theme.text_3)
+                    .child("Waiting for an answer…"),
+            );
+        }
+        body = body.child(block);
+    }
+    card = card.child(body);
+    card.into_any_element()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_activity_card(
     tool: &ToolCall,
@@ -1342,6 +1541,13 @@ fn render_activity_card(
     expanded_sections: ExpandedSections,
     scroller: MessageScrollerState,
 ) -> AnyElement {
+    // A structured questionnaire gets its own card — the raw arguments JSON
+    // and the generic "Command/Arguments" detail would bury the question.
+    if crate::ask::is_ask_tool(&tool.name)
+        && !crate::ask::questions_from_args(tool.args.as_ref()).is_empty()
+    {
+        return render_ask_card(tool, theme, key);
+    }
     let action = activity_action_label(&tool.name);
     let detail = activity_preview(tool);
     let is_command = tool_command(tool).is_some();

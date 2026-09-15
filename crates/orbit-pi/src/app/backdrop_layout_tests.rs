@@ -53,6 +53,7 @@ fn backdrop_wrapper_stays_inside_the_main_area(cx: &mut gpui::TestAppContext) {
                     .relative()
                     .children(OrbitApp::backdrop_image(
                         Some(solid_image(1600, 900)),
+                        crate::dither::Tuning::default(),
                         Theme::for_id(ThemeId::Orbit),
                     )),
             )
@@ -63,6 +64,130 @@ fn backdrop_wrapper_stays_inside_the_main_area(cx: &mut gpui::TestAppContext) {
     assert_eq!(sidebar.size.width, px(240.));
     assert_eq!(main.origin.x, px(240.), "main starts after the sidebar");
     assert_eq!(main.size.width, px(1000.));
+}
+
+/// The bottom fade is how the picture drops into the page, and its height is
+/// exactly what the Settings → Appearance control writes. Pin the wiring:
+/// 0.22 of a 700 px column is 154 px, anchored to the bottom edge.
+#[gpui::test]
+fn backdrop_fade_tracks_the_tuning(cx: &mut gpui::TestAppContext) {
+    let cx = cx.add_empty_window();
+    let _ = cx.draw(point(px(0.), px(0.)), size(px(1000.), px(700.)), |_, _| {
+        div()
+            .size_full()
+            .relative()
+            .children(OrbitApp::backdrop_image(
+                Some(solid_image(1600, 900)),
+                crate::dither::Tuning {
+                    blur: 0.,
+                    cell: 4,
+                    fade: crate::dither::FADE_HEIGHTS[3],
+                },
+                Theme::for_id(ThemeId::Orbit),
+            ))
+    });
+    let fade = cx.debug_bounds("backdrop-fade").expect("fade painted");
+    assert_eq!(fade.origin.y, px(546.), "fade must sit on the bottom edge");
+    assert_eq!(fade.size.height, px(154.), "fade height follows the tuning");
+}
+
+/// "None" is the real off switch for the gradient, not a zero-height ghost
+/// layer — DESIGN.md allows exactly one backdrop gradient, and a user who
+/// turns it off should not pay for it.
+#[gpui::test]
+fn backdrop_fade_none_paints_no_gradient(cx: &mut gpui::TestAppContext) {
+    let cx = cx.add_empty_window();
+    let _ = cx.draw(point(px(0.), px(0.)), size(px(1000.), px(700.)), |_, _| {
+        div()
+            .size_full()
+            .relative()
+            .children(OrbitApp::backdrop_image(
+                Some(solid_image(1600, 900)),
+                crate::dither::Tuning {
+                    blur: 0.,
+                    cell: 4,
+                    fade: 0.,
+                },
+                Theme::for_id(ThemeId::Orbit),
+            ))
+    });
+    assert!(
+        cx.debug_bounds("backdrop-fade").is_none(),
+        "fade None must not paint a gradient layer"
+    );
+}
+
+/// The new-task backdrop must span the whole chat column below the top bar.
+/// It used to live inside the empty-state slot — the `flex_1` region *above*
+/// the composer column — so the image stopped at the composer's top edge and
+/// left the bottom of the window on a flat slab at every fade setting,
+/// including "None". This pins the layer to the column instead, so the
+/// floating composer and the status bar below it paint over the picture.
+#[gpui::test]
+fn new_task_backdrop_spans_the_composer_region(cx: &mut gpui::TestAppContext) {
+    let cx = cx.add_empty_window();
+    let _ = cx.draw(point(px(0.), px(0.)), size(px(1000.), px(700.)), |_, _| {
+        let theme = Theme::for_id(ThemeId::Orbit);
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .relative()
+            .child(
+                div()
+                    .id("test-top-bar")
+                    .debug_selector(|| "test-top-bar".to_string())
+                    .flex_none()
+                    .h(px(super::view::TOP_BAR_H))
+                    .w_full(),
+            )
+            .children(OrbitApp::new_task_backdrop(theme, true))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .id("test-composer")
+                            .debug_selector(|| "test-composer".to_string())
+                            .flex_none()
+                            .h(px(125.))
+                            .w_full(),
+                    ),
+            )
+    });
+
+    let backdrop = cx
+        .debug_bounds("new-task-backdrop")
+        .expect("backdrop layer laid out");
+    let composer = cx.debug_bounds("test-composer").expect("composer");
+    assert_eq!(
+        backdrop.origin.y,
+        px(super::view::TOP_BAR_H),
+        "backdrop must start below the top bar"
+    );
+    assert_eq!(
+        backdrop.origin.y + backdrop.size.height,
+        px(700.),
+        "backdrop must run to the window's bottom edge"
+    );
+    assert!(
+        backdrop.origin.y + backdrop.size.height > composer.origin.y,
+        "backdrop must extend below the composer's top edge: {backdrop:?} vs {composer:?}"
+    );
+}
+
+/// The chat page deliberately has no backdrop.
+#[test]
+fn new_task_backdrop_is_absent_on_a_session() {
+    assert!(
+        OrbitApp::new_task_backdrop(Theme::for_id(ThemeId::Orbit), false).is_none(),
+        "a session page has no backdrop"
+    );
 }
 
 /// Regression: a provider card's name/id column must get a real width.

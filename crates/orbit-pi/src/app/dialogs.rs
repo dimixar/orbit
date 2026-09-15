@@ -22,6 +22,22 @@ impl OrbitApp {
                     self.open_approval(request, cx);
                     return;
                 }
+                // A running `ask_user_question` owns its `select` / `input`
+                // primitives: answer them on the inline panel above the
+                // composer instead of the scrim modal.
+                if self.ask_is_live() {
+                    match method {
+                        "select" => {
+                            self.open_ask_select(id, value, cx);
+                            return;
+                        }
+                        "input" => {
+                            self.open_ask_input(id, value, cx);
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
                 if let Some(request) = DialogRequest::from_event(id, method, value) {
                     self.open_dialog(request, cx);
                 }
@@ -157,6 +173,14 @@ impl OrbitApp {
     /// blocked forever on a question no one can see.
     pub(super) fn cancel_open_dialog(&mut self, cx: &mut Context<Self>) {
         self.cancel_open_approval();
+        // The questionnaire belongs to the departing session too — decline it
+        // so its parked run can settle.
+        if let Some(prompt) = self.ask.take() {
+            self.respond_to_dialog(&prompt.id, &DialogResponse::Cancelled);
+        }
+        self.ask_tool_id = None;
+        self.ask_questions.clear();
+        self.ask_focus_pending = false;
         let Some(dialog) = self.dialog.take() else {
             return;
         };

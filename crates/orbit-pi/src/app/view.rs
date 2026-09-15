@@ -2,6 +2,11 @@ use super::helpers::*;
 use super::sidebar::*;
 use super::*;
 
+/// Height of a page's top bar (DESIGN.md: 44px header rows). The new-task
+/// backdrop is offset by it, so the picture starts below the title exactly
+/// where it always has — this is the one value the two must agree on.
+pub(super) const TOP_BAR_H: f32 = 44.;
+
 impl Render for OrbitApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // A clicked banner asks for the window; bring it forward on the frame
@@ -270,6 +275,21 @@ impl Render for OrbitApp {
             self.approval_focus_pending = false;
             window.focus(&self.approval_focus);
         }
+        // The inline ask panel owns the keyboard while it is open; a text
+        // field (custom / multi) takes focus directly so typing starts at once.
+        if self.ask_focus_pending {
+            self.ask_focus_pending = false;
+            let target = match self.ask.as_ref() {
+                Some(prompt) if prompt.mode == AskMode::Custom => prompt
+                    .input
+                    .as_ref()
+                    .map(|input| input.read(cx).focus_handle(cx)),
+                _ => Some(self.ask_focus.clone()),
+            };
+            if let Some(handle) = target {
+                window.focus(&handle);
+            }
+        }
 
         div()
             .size_full()
@@ -479,6 +499,7 @@ impl Render for OrbitApp {
                 // with install commands instead of the empty composer.
                 self.render_onboarding(cx).into_any_element()
             } else {
+                let empty = self.transcript.is_empty();
                 div()
                     .flex_1()
                     .h_full()
@@ -490,12 +511,18 @@ impl Render for OrbitApp {
                     // the column at a fixed width.
                     .min_w_0()
                     .min_h_0()
+                    .relative()
+                    // The new-task backdrop belongs to the whole column, not
+                    // just the empty-state slot, so the floating composer and
+                    // the status bar below it paint over the picture instead
+                    // of sitting on a flat slab.
+                    .children(Self::new_task_backdrop(theme, empty))
                     // top bar — left controls clear the traffic lights when
                     // the sessions sidebar is hidden; the drag spacer between
                     // left controls and the right cluster drags the window
                     .child(
                         div()
-                            .h(px(44.))
+                            .h(px(TOP_BAR_H))
                             .w_full()
                             .flex()
                             .items_center()
@@ -526,7 +553,7 @@ impl Render for OrbitApp {
                             .child(top_controls),
                     )
                     // transcript (centered column) or empty state
-                    .child(if self.transcript.is_empty() {
+                    .child(if empty {
                         self.render_empty_state(main_width, cx).into_any_element()
                     } else {
                         div()
@@ -585,6 +612,7 @@ impl Render for OrbitApp {
                                     .children(self.run_status_strip(cx))
                                     // Access-guard approval — inline, above
                                     // the queue and composer (no scrim modal).
+                                    .children(self.ask_panel(cx))
                                     .children(self.approval_bar(cx))
                                     // Queued follow-ups wait here (sticky above
                                     // the composer) until the task finishes.
@@ -798,9 +826,16 @@ impl OrbitApp {
                     .when(self.access_menu_open, |chip| {
                         chip.bg(theme.active).text_color(theme.active_fg)
                     })
-                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_access_trigger_click))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(Self::on_access_trigger_click),
+                    )
                     .child(icon(self.access_mode.icon(), 12., theme.text_3))
-                    .child(div().text_color(theme.text_2).child(self.access_mode.label()))
+                    .child(
+                        div()
+                            .text_color(theme.text_2)
+                            .child(self.access_mode.label()),
+                    )
                     .child(self.access_caret(cx)),
             )
     }
@@ -830,9 +865,7 @@ impl OrbitApp {
             "access-caret-turn",
             Animation::new(Duration::from_millis(150)).with_easing(|d| 1.0 - (1.0 - d).powi(3)),
             |svg, d| {
-                svg.with_transformation(Transformation::rotate(radians(
-                    std::f32::consts::PI * d,
-                )))
+                svg.with_transformation(Transformation::rotate(radians(std::f32::consts::PI * d)))
             },
         )
         .into_any_element()
@@ -866,7 +899,9 @@ impl OrbitApp {
                     .gap(px(10.))
                     .cursor_pointer()
                     .when(highlighted, |row| row.bg(theme.overlay_strong))
-                    .when(selected && !highlighted, |row| row.bg(theme.accent.opacity(0.1)))
+                    .when(selected && !highlighted, |row| {
+                        row.bg(theme.accent.opacity(0.1))
+                    })
                     .hover(|style| style.bg(theme.overlay_strong))
                     .on_hover(move |hovered, _, cx| {
                         if *hovered {
@@ -915,11 +950,7 @@ impl OrbitApp {
                                 div()
                                     .text_size(theme.ui_px(12.5))
                                     .font_weight(FontWeight::MEDIUM)
-                                    .text_color(if selected {
-                                        theme.text
-                                    } else {
-                                        theme.text_2
-                                    })
+                                    .text_color(if selected { theme.text } else { theme.text_2 })
                                     .child(mode.label()),
                             )
                             .child(
@@ -984,7 +1015,6 @@ impl OrbitApp {
                 .into_any_element(),
         )
     }
-
 
     /// While a run is in flight and the composer holds something to send, a
     /// quiet steer control sits beside Stop: it injects the text into the live
@@ -1256,18 +1286,49 @@ impl OrbitApp {
             )
     }
 
-    /// Fading dot-grid backdrop for the new-task page. GPUI tints the SVG
-    /// alpha mask with a theme color, so the art must be explicit circles
-    /// (patterns/masks do not survive the renderer).
+    /// The new-task backdrop layer: the configured dithered image, or the
+    /// default dot grid, absolutely filling the whole chat column below the
+    /// top bar — behind the empty state, the floating composer, and the
+    /// status bar alike, so the picture is continuous behind all three.
+    ///
+    /// It lives here rather than inside the empty state because the empty
+    /// state is only the `flex_1` slot above the composer: a backdrop scoped
+    /// to it ended at the composer's top edge and left the bottom of the
+    /// window on a flat slab, at every fade setting including "None". The
+    /// chat page deliberately has none.
+    pub(super) fn new_task_backdrop(theme: Theme, empty: bool) -> Option<AnyElement> {
+        if !empty {
+            return None;
+        }
+        let backdrop = Self::dither_backdrop(theme);
+        let dithered = backdrop.is_some();
+        Some(
+            div()
+                .id("new-task-backdrop")
+                .debug_selector(|| "new-task-backdrop".to_string())
+                .absolute()
+                .top(px(TOP_BAR_H))
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .when(!dithered, |layer| layer.child(Self::dot_backdrop(theme)))
+                .children(backdrop)
+                .into_any_element(),
+        )
+    }
+
     /// The configured dithered background image, absolutely filling its
-    /// parent. Painted once at the window root, behind every column.
+    /// parent — the new-task column, via [`Self::new_task_backdrop`].
     pub(super) fn dither_backdrop(theme: Theme) -> Option<AnyElement> {
-        Self::backdrop_image(crate::dither::background(), theme)
+        Self::backdrop_image(crate::dither::background(), crate::dither::tuning(), theme)
     }
 
     /// Wrap a dithered image so it fills its parent and nothing else, then
     /// drop it into the page: a bottom gradient to `bg_main` so the picture
-    /// fades out under the composer instead of ending on a hard edge.
+    /// fades out under the composer instead of ending on a hard edge. The
+    /// fade height comes from the backdrop's own tuning (Settings →
+    /// Appearance); `None` skips the gradient entirely rather than painting
+    /// a zero-height one.
     ///
     /// The wrapper clips: gpui's `ObjectFit::Cover` scales the image up and
     /// centers it, returning bounds *larger* than the element whenever the
@@ -1275,6 +1336,7 @@ impl OrbitApp {
     /// overflow over the sessions sidebar until this clip was added.
     pub(super) fn backdrop_image(
         image: Option<std::sync::Arc<gpui::RenderImage>>,
+        tuning: crate::dither::Tuning,
         theme: Theme,
     ) -> Option<AnyElement> {
         image.map(|image| {
@@ -1286,26 +1348,33 @@ impl OrbitApp {
                 .bottom_0()
                 .overflow_hidden()
                 .child(img(image).size_full().object_fit(ObjectFit::Cover))
-                .child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .bottom_0()
-                        // Proportional, so the drop stays put as the window
-                        // resizes instead of turning into a band.
-                        .h(relative(0.55))
-                        .bg(linear_gradient(
-                            180.,
-                            linear_color_stop(theme.bg_main.opacity(0.), 0.),
-                            linear_color_stop(theme.bg_main, 1.),
-                        )),
-                )
+                .when(tuning.fade > 0., |backdrop| {
+                    backdrop.child(
+                        div()
+                            .id("backdrop-fade")
+                            .debug_selector(|| "backdrop-fade".to_string())
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom_0()
+                            // Proportional, so the drop stays put as the window
+                            // resizes instead of turning into a band.
+                            .h(relative(tuning.fade))
+                            .bg(linear_gradient(
+                                180.,
+                                linear_color_stop(theme.bg_main.opacity(0.), 0.),
+                                linear_color_stop(theme.bg_main.opacity(tuning.fade_peak()), 1.),
+                            )),
+                    )
+                })
                 .into_any_element()
         })
     }
 
-    /// The default new-task dot grid.
+    /// Fading dot-grid backdrop for the new-task page, used whenever no
+    /// background image is configured. GPUI tints the SVG alpha mask with a
+    /// theme color, so the art must be explicit circles (patterns/masks do
+    /// not survive the renderer).
     pub(super) fn dot_backdrop(theme: Theme) -> impl IntoElement + use<> {
         let dot_color = match theme.mode {
             ThemeMode::Light => theme.text_3.opacity(0.75),
@@ -1325,9 +1394,9 @@ impl OrbitApp {
             )
     }
 
-    /// New-task empty state — minimal onboarding over the backdrop (the
-    /// configured dithered image, or the dot grid): one headline, a ghost
-    /// workspace row, and the composer below for input.
+    /// New-task empty state — minimal onboarding over the backdrop the caller
+    /// paints (the configured dithered image, or the dot grid): one headline,
+    /// a ghost workspace row, and the composer below for input.
     ///
     /// `main_width` comes from the caller (window minus sidebar/pane) because
     /// the field below gets a definite width: `w_full().max_w(_)` chains
@@ -1351,18 +1420,15 @@ impl OrbitApp {
         let path_label = cwd.to_string_lossy().into_owned();
         let picker_open = self.workspace_picker.is_some();
 
-        // This page owns the backdrop: the configured dithered image, or the
-        // default dot grid. The chat page deliberately has neither.
-        let backdrop = Self::dither_backdrop(theme);
-        let dithered = backdrop.is_some();
+        // The backdrop belongs to the caller (`new_task_backdrop`, painted by
+        // the chat column in `render`): one layer spans this state, the
+        // floating composer, and the status bar. The chat page has none.
         div()
             .flex_1()
             .min_h_0()
             .w_full()
             .relative()
             .overflow_hidden()
-            .when(!dithered, |page| page.child(Self::dot_backdrop(theme)))
-            .children(backdrop)
             .child(
                 div()
                     .relative()
@@ -2306,6 +2372,356 @@ impl OrbitApp {
         None
     }
 
+    /// The inline `ask_user_question` panel: the live question and its options
+    /// docked above the composer. It answers the extension's `select` /
+    /// `input` requests in place, so a questionnaire never covers the
+    /// transcript with a scrim. The panel owns the `AskPanel` key context
+    /// (↑/↓ move, ⏎ picks, esc declines); a text field carries `AskInput` so
+    /// Enter submits it rather than the composer.
+    pub(super) fn ask_panel(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let prompt = self.ask.as_ref()?;
+        let theme = *theme::get(cx);
+        let submitted = prompt.submitted;
+
+        let mut card = div()
+            .id("ask-panel")
+            .w_full()
+            .mb(px(8.))
+            .rounded(px(12.))
+            .border_1()
+            .border_color(theme.accent.opacity(0.3))
+            .bg(theme.bg_raised)
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .key_context("AskPanel")
+            .track_focus(&self.ask_focus)
+            .on_action(cx.listener(Self::on_ask_next))
+            .on_action(cx.listener(Self::on_ask_prev))
+            .on_action(cx.listener(Self::on_ask_confirm))
+            .on_action(cx.listener(Self::on_ask_submit))
+            .on_action(cx.listener(Self::on_ask_close));
+
+        // ── header: icon, header chip, progress ──
+        let mut header = div()
+            .px(px(14.))
+            .pt(px(12.))
+            .flex()
+            .items_center()
+            .gap(px(8.));
+        header = header.child(
+            div()
+                .flex_none()
+                .size(px(24.))
+                .rounded(px(7.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(theme.accent.opacity(0.16))
+                .child(icon("icons/task.svg", 13., theme.accent)),
+        );
+        if !prompt.header.trim().is_empty() {
+            header = header.child(
+                div()
+                    .flex_none()
+                    .px(px(7.))
+                    .py(px(2.))
+                    .rounded(px(5.))
+                    .bg(theme.overlay_strong)
+                    .text_size(theme.ui_px(10.5))
+                    .line_height(theme.ui_px(14.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_2)
+                    .child(SharedString::from(prompt.header.clone())),
+            );
+        }
+        header = header.child(div().flex_1());
+        if prompt.total > 1 {
+            header = header.child(
+                div()
+                    .flex_none()
+                    .text_size(theme.ui_px(11.))
+                    .text_color(theme.text_3)
+                    .child(format!(
+                        "Question {} of {}",
+                        prompt.question_ix + 1,
+                        prompt.total
+                    )),
+            );
+        }
+        // A visible dismiss affordance beside the keyboard hint.
+        header = header.child(
+            div()
+                .id("ask-close")
+                .flex_none()
+                .size(px(20.))
+                .rounded(px(5.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.overlay_strong))
+                .child(icon("icons/x.svg", 11., theme.text_3))
+                .on_click(cx.listener(|this, _, window, cx| this.ask_cancel(window, cx))),
+        );
+        card = card.child(header);
+
+        // ── the question ──
+        card = card.child(
+            div()
+                .px(px(14.))
+                .pt(px(8.))
+                .pb(px(10.))
+                .whitespace_normal()
+                .text_size(theme.ui_px(13.5))
+                .line_height(theme.ui_px(19.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child(SharedString::from(prompt.question.clone())),
+        );
+
+        // ── body ──
+        match prompt.mode {
+            AskMode::Custom => {
+                if let Some(input) = &prompt.input {
+                    card = card.child(
+                        div()
+                            .mx(px(12.))
+                            .mb(px(10.))
+                            .rounded(px(9.))
+                            .border_1()
+                            .border_color(theme.border_strong)
+                            .bg(theme.bg_composer)
+                            .px(px(10.))
+                            .py(px(6.))
+                            .child(input.clone()),
+                    );
+                }
+            }
+            AskMode::Select | AskMode::Multi => {
+                let multi = prompt.mode == AskMode::Multi;
+                let mut rows = div().px(px(8.)).pb(px(8.)).flex().flex_col().gap(px(2.));
+                for (ix, option) in prompt.options.iter().enumerate() {
+                    let highlighted = !submitted && ix == prompt.highlighted;
+                    let checked = multi && prompt.checked.get(ix).copied().unwrap_or(false);
+                    // A number reads as a question rather than a menu; multi
+                    // additionally marks its toggles with a trailing check.
+                    let marker = div()
+                        .flex_none()
+                        .w(px(16.))
+                        .text_size(theme.ui_px(12.))
+                        .line_height(theme.ui_px(17.))
+                        .text_color(if highlighted || checked {
+                            theme.accent
+                        } else {
+                            theme.text_3
+                        })
+                        .child(format!("{}. ", ix + 1));
+                    let mut copy = div().min_w_0().flex_1().flex().flex_col().gap(px(1.));
+                    copy = copy.child(
+                        div()
+                            .whitespace_normal()
+                            .text_size(theme.ui_px(12.5))
+                            .line_height(theme.ui_px(17.))
+                            .text_color(if highlighted || checked {
+                                theme.text
+                            } else {
+                                theme.text_2
+                            })
+                            .child(SharedString::from(option.label.clone())),
+                    );
+                    // The description only under the focused row keeps the list
+                    // compact so every choice stays visible at a glance.
+                    if highlighted && !option.description.trim().is_empty() {
+                        copy = copy.child(
+                            div()
+                                .whitespace_normal()
+                                .text_size(theme.ui_px(11.5))
+                                .line_height(theme.ui_px(16.))
+                                .text_color(theme.text_3)
+                                .child(SharedString::from(option.description.clone())),
+                        );
+                    }
+                    let mut row = div()
+                        .id(ElementId::NamedInteger("ask-option".into(), ix as u64))
+                        .w_full()
+                        .min_w_0()
+                        .px(px(10.))
+                        .py(px(6.))
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(if highlighted {
+                            theme.border_strong
+                        } else {
+                            gpui::transparent_black()
+                        })
+                        .when(highlighted, |row| row.bg(theme.overlay_strong))
+                        .when(!submitted, |row| row.cursor_pointer())
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .hover(|style| style.bg(theme.overlay_strong))
+                        .child(marker)
+                        .child(copy);
+                    if multi && checked {
+                        row = row.child(icon("icons/check.svg", 12., theme.accent));
+                    }
+                    if !submitted {
+                        row =
+                            row.on_click(cx.listener(move |this, _, window, cx| {
+                                this.ask_choose(ix, window, cx)
+                            }));
+                    }
+                    rows = rows.child(row);
+                }
+                // Trailing row: the "Type something." escape (select) or the
+                // Continue action (multi).
+                let trailing = prompt.options.len();
+                let highlighted = !submitted && trailing == prompt.highlighted;
+                let (trailing_icon, trailing_label) = if multi {
+                    ("icons/check.svg", "Continue")
+                } else {
+                    ("icons/compose.svg", "Type something.")
+                };
+                let mut row = div()
+                    .id("ask-trailing")
+                    .w_full()
+                    .min_w_0()
+                    .px(px(10.))
+                    .py(px(7.))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(if highlighted {
+                        theme.border_strong
+                    } else {
+                        gpui::transparent_black()
+                    })
+                    .when(highlighted, |row| row.bg(theme.overlay_strong))
+                    .when(!submitted, |row| row.cursor_pointer())
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .hover(|style| style.bg(theme.overlay_strong))
+                    .child(icon(trailing_icon, 12., theme.text_3))
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(12.5))
+                            .line_height(theme.ui_px(17.))
+                            .text_color(if highlighted {
+                                theme.text
+                            } else {
+                                theme.text_2
+                            })
+                            .child(trailing_label),
+                    );
+                if !submitted {
+                    row = row.on_click(cx.listener(move |this, _, window, cx| {
+                        this.ask_choose(trailing, window, cx)
+                    }));
+                }
+                rows = rows.child(row);
+                card = card.child(rows);
+
+                // The focused option's preview (select + preview only).
+                // Labeled so authored mockups read as preview content, not a
+                // second interface.
+                if !multi {
+                    if let Some(option) = prompt.options.get(prompt.highlighted) {
+                        if let Some(preview) = option.preview.as_deref() {
+                            let preview = if preview.chars().count() > 600 {
+                                let mut capped: String = preview.chars().take(600).collect();
+                                capped.push('…');
+                                capped
+                            } else {
+                                preview.to_string()
+                            };
+                            card = card.child(
+                                div()
+                                    .mx(px(12.))
+                                    .mb(px(10.))
+                                    .rounded(px(9.))
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .bg(theme.bg_main)
+                                    .overflow_hidden()
+                                    .flex()
+                                    .flex_col()
+                                    .child(
+                                        div()
+                                            .px(px(10.))
+                                            .py(px(5.))
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.))
+                                            .border_b_1()
+                                            .border_color(theme.border)
+                                            .child(icon("icons/eye.svg", 11., theme.text_3))
+                                            .child(
+                                                div()
+                                                    .text_size(theme.ui_px(10.5))
+                                                    .line_height(theme.ui_px(14.))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(theme.text_3)
+                                                    .child(format!("Preview · {}", option.label)),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .px(px(10.))
+                                            .py(px(8.))
+                                            .font_family(theme::code_font_family())
+                                            .text_size(theme.code_px(11.))
+                                            .line_height(theme.code_px(16.))
+                                            .text_color(theme.text_2)
+                                            .whitespace_normal()
+                                            .child(SharedString::from(preview)),
+                                    ),
+                            );
+                        }
+                    }
+                }
+                // The multi-select custom-answer field.
+                if multi {
+                    if let Some(input) = &prompt.input {
+                        card = card.child(
+                            div()
+                                .mx(px(12.))
+                                .mb(px(10.))
+                                .rounded(px(9.))
+                                .border_1()
+                                .border_color(theme.border_strong)
+                                .bg(theme.bg_composer)
+                                .px(px(10.))
+                                .py(px(6.))
+                                .child(input.clone()),
+                        );
+                    }
+                }
+            }
+        }
+
+        // ── footer hint ──
+        let hint = match prompt.mode {
+            AskMode::Select => "↑↓ Navigate · ⏎ Select · esc Cancel",
+            AskMode::Multi => "↑↓ Navigate · ⏎ Toggle · Continue to submit",
+            AskMode::Custom => "⏎ Submit · esc Cancel",
+        };
+        card = card.child(
+            div()
+                .h(px(30.))
+                .px(px(14.))
+                .flex()
+                .items_center()
+                .border_t_1()
+                .border_color(theme.border)
+                .text_size(theme.ui_px(11.))
+                .text_color(theme.text_3)
+                .child(hint),
+        );
+
+        Some(card.into_any_element())
+    }
+
     /// The inline access-guard approval: a compact bar directly above the
     /// composer asking whether a mutating tool call may run. Rendered here
     /// rather than as the scrim modal so the transcript stays visible and the
@@ -2440,8 +2856,7 @@ impl OrbitApp {
         } else {
             bar.with_animation(
                 "approval-in",
-                Animation::new(Duration::from_millis(170))
-                    .with_easing(|d| 1.0 - (1.0 - d).powi(3)),
+                Animation::new(Duration::from_millis(170)).with_easing(|d| 1.0 - (1.0 - d).powi(3)),
                 move |el, d| el.max_h(px(BAR_H * d)).mb(px(GAP * d)).opacity(d),
             )
             .into_any_element()
