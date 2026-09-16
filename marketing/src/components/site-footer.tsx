@@ -1,5 +1,6 @@
 import { OrbitWordmark } from "@/components/brand";
 import { Band, Shell } from "@/components/ui";
+import { getLatestRelease } from "@/lib/releases";
 
 const links = [
   { label: "Features", href: "#features", external: false },
@@ -19,7 +20,9 @@ const links = [
   },
 ];
 
-export function SiteFooter() {
+export async function SiteFooter() {
+  const release = await getLatestRelease();
+
   return (
     <footer>
       <Shell>
@@ -43,6 +46,19 @@ export function SiteFooter() {
 
           <p className="font-mono text-[11.5px] text-ink-3">
             © {new Date().getFullYear()} Orbit · same sessions as the terminal
+            {release ? (
+              <>
+                {" · "}
+                <a
+                  href={release.pageUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="no-underline transition-colors hover:text-ink"
+                >
+                  {release.tag}
+                </a>
+              </>
+            ) : null}
           </p>
         </Band>
       </Shell>

@@ -1,5 +1,6 @@
-import { ArrowRight } from "@phosphor-icons/react/dist/ssr";
+import { ArrowRight, DownloadSimple } from "@phosphor-icons/react/dist/ssr";
 import { Band, SectionLabel, Shell } from "@/components/ui";
+import { getLatestRelease, LATEST_RELEASE_URL } from "@/lib/releases";
 
 const steps = [
   {
@@ -29,7 +30,14 @@ const steps = [
   },
 ];
 
-export function Steps() {
+export async function Steps() {
+  const release = await getLatestRelease();
+  const platforms = [
+    { label: "macOS", href: release?.macos ?? LATEST_RELEASE_URL },
+    { label: "Windows", href: release?.windows ?? LATEST_RELEASE_URL },
+    { label: "Linux", href: release?.linux ?? LATEST_RELEASE_URL },
+  ];
+
   return (
     <Shell>
       <Band
@@ -47,6 +55,30 @@ export function Steps() {
             a task, and the whole loop — chat, review, and commit — stays in one
             window.
           </p>
+          <div className="mb-[18px] flex flex-wrap items-center gap-x-3 gap-y-2 font-mono text-[11px] uppercase tracking-[0.12em] text-ink-3">
+            {release ? (
+              <a
+                href={release.pageUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="rounded-full border border-[#ffffff1c] px-2.5 py-1 text-ink-2 no-underline transition-colors hover:text-ink"
+              >
+                Latest {release.tag}
+              </a>
+            ) : null}
+            {platforms.map(({ label, href }) => (
+              <a
+                key={label}
+                href={href}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 no-underline transition-colors hover:text-ink"
+              >
+                <DownloadSimple className="size-3.5" weight="bold" />
+                {label}
+              </a>
+            ))}
+          </div>
           <a
             href="#features"
             className="inline-flex items-center gap-2 text-[11px] text-ink-2 no-underline transition-colors hover:text-ink"

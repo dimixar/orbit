@@ -1,7 +1,16 @@
 import { DownloadSimple, GithubLogo } from "@phosphor-icons/react/dist/ssr";
 import { Band, ButtonLink, Shell } from "@/components/ui";
+import { getLatestRelease, LATEST_RELEASE_URL } from "@/lib/releases";
 
-export function Closer() {
+export async function Closer() {
+  const release = await getLatestRelease();
+  const downloadHref = release?.macos ?? LATEST_RELEASE_URL;
+  const platforms = [
+    { label: "macOS", href: release?.macos ?? LATEST_RELEASE_URL },
+    { label: "Windows", href: release?.windows ?? LATEST_RELEASE_URL },
+    { label: "Linux", href: release?.linux ?? LATEST_RELEASE_URL },
+  ];
+
   return (
     <Shell>
       <Band dashed className="flex flex-col items-center py-16 text-center sm:py-[88px]">
@@ -13,9 +22,14 @@ export function Closer() {
           models, same tools — just drawn on the GPU.
         </p>
         <div className="flex flex-wrap items-center justify-center gap-3.5">
-          <ButtonLink href="#install" variant="primary" className="min-w-[184px]">
+          <ButtonLink
+            href={downloadHref}
+            variant="primary"
+            className="min-w-[184px]"
+            external
+          >
             <DownloadSimple data-icon="inline-start" weight="bold" />
-            Download for macOS
+            {release ? `Download ${release.tag}` : "Download for macOS"}
           </ButtonLink>
           <ButtonLink
             href="https://github.com/imrj05/orbit"
@@ -25,6 +39,30 @@ export function Closer() {
             <GithubLogo data-icon="inline-start" />
             View on GitHub
           </ButtonLink>
+        </div>
+        <div className="mt-4 flex flex-wrap items-center justify-center gap-x-4 gap-y-2 font-mono text-[11px] uppercase tracking-[0.12em] text-ink-3">
+          {platforms.map(({ label, href }) => (
+            <a
+              key={label}
+              href={href}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 no-underline transition-colors hover:text-ink"
+            >
+              <DownloadSimple className="size-3.5" weight="bold" />
+              {label}
+            </a>
+          ))}
+          {release ? (
+            <a
+              href={release.pageUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="no-underline transition-colors hover:text-ink"
+            >
+              Release notes · {release.tag}
+            </a>
+          ) : null}
         </div>
       </Band>
     </Shell>

@@ -38,6 +38,7 @@ mod sessions;
 mod shimmer;
 mod sidepane;
 mod skills;
+mod terminal;
 mod theme;
 mod transcript;
 mod transcript_view;
@@ -109,7 +110,8 @@ actions!(
         ToggleSearch,
         SearchNext,
         SearchPrev,
-        SearchClose
+        SearchClose,
+        ToggleTerminal
     ]
 );
 
@@ -124,6 +126,8 @@ actions!(
         PickerSelectPrev
     ]
 );
+// Terminal-panel actions (bound to the `Terminal` context on the grid).
+actions!(terminal_keys, [TerminalEscape]);
 
 // Composer "+" add-menu actions (bound to the `AddMenu` context, which
 // rides on the open menu's focus handle).
@@ -209,6 +213,10 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-,", OpenSettings, None),
         // The Usage page is a destination: cmd-u matches the sidebar row.
         KeyBinding::new("cmd-u", ToggleUsage, None),
+        // Bottom terminal panel: cmd-j is the workbench convention for the
+        // panel toggle (and stays live while the shell has focus, since app
+        // actions are not scoped to a key context).
+        KeyBinding::new("cmd-j", ToggleTerminal, None),
         KeyBinding::new("cmd-p", ToggleCommandPalette, None),
         KeyBinding::new("cmd-period", AbortRun, None),
         // Transcript accelerators (work regardless of focus):
@@ -277,6 +285,12 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", SearchNext, Some("Search")),
         KeyBinding::new("shift-enter", SearchPrev, Some("Search")),
         KeyBinding::new("escape", SearchClose, Some("Search")),
+        // Terminal grid. Escape must reach the shell (vim, less, `read`), but
+        // the global `escape`-to-`AbortRun` binding is always enabled, so the
+        // `Terminal` context has to re-bind it. Registered last: gpui breaks
+        // an equal-depth tie by registration order, so this wins while the
+        // grid owns focus.
+        KeyBinding::new("escape", TerminalEscape, Some("Terminal")),
     ]);
 }
 
@@ -327,6 +341,8 @@ fn app_menus() -> Vec<Menu> {
             items: vec![
                 MenuItem::action("Command Palette…", ToggleCommandPalette),
                 MenuItem::action("Find in Transcript…", ToggleSearch),
+                MenuItem::separator(),
+                MenuItem::action("Toggle Terminal", ToggleTerminal),
                 MenuItem::separator(),
                 MenuItem::action("Usage", ToggleUsage),
             ],

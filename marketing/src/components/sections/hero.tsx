@@ -10,38 +10,42 @@ import {
 } from "@phosphor-icons/react/dist/ssr";
 import { OrbitIcon } from "@/components/brand";
 import { Band, ButtonLink, SectionLabel, Shell } from "@/components/ui";
+import { getLatestRelease, LATEST_RELEASE_URL } from "@/lib/releases";
 
-const platforms = [
-  { Icon: AppleLogo, label: "macOS 13+" },
-  { Icon: WindowsLogo, label: "Windows soon" },
-  { Icon: Terminal, label: "Linux soon" },
-];
+export async function Hero() {
+  const release = await getLatestRelease();
+  const downloadHref = release?.macos ?? LATEST_RELEASE_URL;
 
-const surfaces = [
-  {
-    Icon: Desktop,
-    name: "Desktop",
-    line: "A native workbench for pi",
-    link: "Download for macOS",
-    href: "#install",
-  },
-  {
-    Icon: Plugs,
-    name: "Providers",
-    line: "Ollama, Anthropic, Bedrock",
-    link: "See providers",
-    href: "#workbench",
-  },
-  {
-    Icon: GitDiff,
-    name: "Git",
-    line: "Review, commit, and push",
-    link: "See the flow",
-    href: "#gallery",
-  },
-];
+  const platforms = [
+    { Icon: AppleLogo, label: "macOS 13+", meta: "universal .dmg", href: release?.macos },
+    { Icon: WindowsLogo, label: "Windows", meta: "x86_64 .zip", href: release?.windows },
+    { Icon: Terminal, label: "Linux", meta: "x86_64 .tar.gz", href: release?.linux },
+  ];
 
-export function Hero() {
+  const surfaces = [
+    {
+      Icon: Desktop,
+      name: "Desktop",
+      line: "A native workbench for pi",
+      link: release ? `Download ${release.tag}` : "Download for macOS",
+      href: downloadHref,
+    },
+    {
+      Icon: Plugs,
+      name: "Providers",
+      line: "Ollama, Anthropic, Bedrock",
+      link: "See providers",
+      href: "#workbench",
+    },
+    {
+      Icon: GitDiff,
+      name: "Git",
+      line: "Review, commit, and push",
+      link: "See the flow",
+      href: "#gallery",
+    },
+  ];
+
   return (
     <Shell>
       <Band dashed className="pb-7 pt-14">
@@ -69,9 +73,10 @@ export function Hero() {
 
             <div className="flex flex-wrap items-center gap-3.5">
               <ButtonLink
-                href="#install"
+                href={downloadHref}
                 variant="primary"
                 className="min-w-[184px]"
+                external
               >
                 <DownloadSimple data-icon="inline-start" weight="bold" />
                 Download for macOS
@@ -84,18 +89,53 @@ export function Hero() {
                 <GithubLogo data-icon="inline-start" />
                 View on GitHub
               </ButtonLink>
+              {release ? (
+                <a
+                  href={release.pageUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.12em] text-ink-3 no-underline transition-colors hover:text-ink"
+                >
+                  <span className="rounded-full border border-[#ffffff1c] px-2.5 py-1">
+                    {release.tag}
+                  </span>
+                  <span>Release notes</span>
+                </a>
+              ) : null}
             </div>
 
-            <div className="flex flex-wrap items-center gap-x-[22px] gap-y-[18px]">
-              {platforms.map(({ Icon, label }) => (
-                <span
-                  key={label}
-                  className="inline-flex items-center gap-2 text-[11px] text-ink-2"
-                >
-                  <Icon className="h-4 w-3.5" />
-                  {label}
-                </span>
-              ))}
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-[14px]">
+              {platforms.map(({ Icon, label, meta, href }) => {
+                const body = (
+                  <>
+                    <Icon className="h-4 w-3.5" />
+                    <span>{label}</span>
+                    {meta ? (
+                      <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+                        {meta}
+                      </span>
+                    ) : null}
+                  </>
+                );
+                return href ? (
+                  <a
+                    key={label}
+                    href={href}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-2 text-[11px] text-ink-2 no-underline underline-offset-[3px] transition-colors hover:text-ink hover:underline"
+                  >
+                    {body}
+                  </a>
+                ) : (
+                  <span
+                    key={label}
+                    className="inline-flex items-center gap-2 text-[11px] text-ink-2"
+                  >
+                    {body}
+                  </span>
+                );
+              })}
             </div>
           </div>
 

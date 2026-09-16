@@ -18,8 +18,6 @@ export function Stage() {
         <div className="rise-window relative z-[1] mx-auto w-full max-w-[1180px]">
           <Shot
             src="/screens/session.png"
-            width={2400}
-            height={1499}
             priority
             alt="A live Orbit session: a transcript answering a question about the API with a findings table, a list of changed files, and the composer below."
           />

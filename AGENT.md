@@ -64,6 +64,7 @@ crates/orbit-pi/        GPUI app — window, shell, chat, settings
   src/sidepane.rs       Review pane: virtualized diff, sticky file headers, tree, source menu
   src/git.rs            git plumbing: branch discovery, review diffs, status/staging/history/graph
   src/git_panel.rs      full-page Git surface: Changes / History / Graph + commit bar
+  src/terminal.rs       bottom terminal panel (⌘J): alacritty_terminal PTY + VT grid, GPUI canvas render, keys/selection/paste
   src/providers.rs      provider catalog + models.json / auth.json read/write for Settings → Providers (provider metadata introspected from pi-ai; curated table is the fallback)
   src/quota.rs          account quota/balance/spend reducer over the `quota.*` RPC and the bridge's session entries (no secrets, no I/O)
   src/access.rs         access mode (Supervised / Auto-accept edits / Full access): persistence to `~/.orbit-pi/access.json`, which the guard extension reads
@@ -274,6 +275,7 @@ These compiled and ran against the pinned version. When in doubt, check
 | Review diff sources, parsing, sticky headers, changed-files tree | `src/review_diff.rs`, `src/app/right_panel.rs`, `crates/waku-core/src/workspace.rs` (`resolve_diff_range`) |
 | Per-turn checkpoints (Last Turn) | `crates/waku-core/src/checkpoint.rs` |
 | Diff syntax highlighting | `src/md/highlight.rs` |
+| Integrated terminal (PTY + emulator) | `src/terminal.rs`, `crates/waku-core/src/terminal.rs` — both build on `alacritty_terminal` |
 | Theme/chrome/sidebar/sessions | `src/theme.rs`, `src/app/window_chrome.rs`, `src/app/sidebar.rs`, `src/app/sessions.rs` |
 | Usage/charts | `src/app/usage_page.rs`, `src/app/usage_meter.rs` |
 

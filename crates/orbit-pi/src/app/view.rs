@@ -24,6 +24,11 @@ pub(super) const TITLEBAR_LEADING: f32 = TRAFFIC_LIGHT_CLEARANCE + TITLEBAR_CONT
 /// Duration of the sidebar collapse/expand slide.
 const SIDEBAR_SLIDE_MS: u64 = 180;
 
+/// Page content kept clear above the terminal panel — the transcript *and*
+/// the composer, which sits between them. Dragging the panel's top edge to the
+/// top of the window must not collapse the conversation behind the input.
+const TERMINAL_MAIN_RESERVE: f32 = 320.;
+
 impl Render for OrbitApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // A clicked banner asks for the window; bring it forward on the frame
@@ -102,6 +107,19 @@ impl Render for OrbitApp {
         let pane_workspace = self.current_workspace.clone();
         self.sidepane
             .update(cx, |pane, cx| pane.set_workspace(pane_workspace, cx));
+
+        // Bottom terminal panel. The chat branch is what renders it, so the
+        // full-page surfaces (settings / Git / Usage) hide it by construction;
+        // `terminal_visible` exists to stop a hidden shell requesting frames.
+        let terminal_visible = self.terminal_panel.read(cx).is_open()
+            && !self.settings_open
+            && !self.usage_open
+            && !self.git_open;
+        let panel_workspace = review_workspace.clone();
+        self.terminal_panel.update(cx, |panel, cx| {
+            panel.set_workspace(panel_workspace, cx);
+            panel.sync_active(terminal_visible, cx);
+        });
         let pane_session = self.session_id.clone();
         let pane_latest_turn = self.latest_turn;
         self.sidepane.update(cx, |pane, cx| {
@@ -192,6 +210,30 @@ impl Render for OrbitApp {
                         "icons/panel-right.svg",
                         16.,
                         if pane_visible {
+                            theme.text
+                        } else {
+                            theme.text_2
+                        },
+                    )),
+            )
+            // Terminal toggle — the bottom panel (cmd-j).
+            .child(
+                div()
+                    .id("toggle-terminal")
+                    .p_1()
+                    .rounded_sm()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.on_toggle_terminal(&crate::ToggleTerminal, window, cx)
+                        }),
+                    )
+                    .child(icon(
+                        "icons/terminal.svg",
+                        16.,
+                        if terminal_visible {
                             theme.text
                         } else {
                             theme.text_2
@@ -732,6 +774,11 @@ impl Render for OrbitApp {
                                     .child(self.status_bar(&workspace_label, cx)),
                             ),
                     )
+                    // bottom terminal panel — the last row of the page, under
+                    // the composer, so it hugs the window's bottom edge
+                    .children(
+                        terminal_visible.then(|| self.terminal_panel.clone().into_any_element()),
+                    )
                     .into_any_element()
             })
             // ── right side pane (Review) ──
@@ -813,6 +860,21 @@ impl Render for OrbitApp {
                     });
                 },
             ))
+            .on_drag_move(cx.listener(
+                |app: &mut Self,
+                 event: &DragMoveEvent<TerminalResize>,
+                 _: &mut Window,
+                 cx: &mut Context<Self>| {
+                    // The panel hugs the window's bottom edge, so its height is
+                    // the distance from the pointer to that edge, capped so the
+                    // transcript above it keeps a usable height.
+                    let max = (event.bounds.size.height - px(TERMINAL_MAIN_RESERVE))
+                        .max(px(TERMINAL_MAIN_RESERVE));
+                    let height = (event.bounds.size.height - event.event.position.y).min(max);
+                    app.terminal_panel
+                        .update(cx, |panel, cx| panel.set_height(height, cx));
+                },
+            ))
             .on_action(cx.listener(Self::on_submit))
             .on_action(cx.listener(Self::on_steer))
             .on_action(cx.listener(Self::on_autocomplete_accept))
@@ -825,6 +887,7 @@ impl Render for OrbitApp {
             .on_action(cx.listener(Self::on_open_settings))
             .on_action(cx.listener(Self::on_open_about))
             .on_action(cx.listener(Self::on_toggle_usage))
+            .on_action(cx.listener(Self::on_toggle_terminal))
             .on_action(cx.listener(Self::on_toggle_command_palette))
             .on_action(cx.listener(Self::on_check_for_updates))
             .on_action(cx.listener(Self::on_toggle_search))

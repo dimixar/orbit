@@ -39,7 +39,6 @@ export function Review() {
 
           <Shot
             src="/screens/review.png"
-            height={1496}
             alt="The Orbit Review panel open beside a session, showing a selected file's diff on the left and the changed-file tree on the right."
           />
         </div>

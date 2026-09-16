@@ -68,6 +68,7 @@ pub enum PaletteCommand {
     FocusComposer,
     ToggleSidebar,
     ToggleSidePanel,
+    ToggleTerminal,
     ReviewChanges,
     OpenGit,
     ChooseModel,
@@ -91,6 +92,7 @@ pub struct PaletteSnapshot {
     pub session_id: Option<String>,
     pub sidebar_visible: bool,
     pub side_panel_visible: bool,
+    pub terminal_visible: bool,
     pub can_choose_model: bool,
     pub can_choose_thinking: bool,
 }
@@ -365,6 +367,18 @@ impl CommandPalette {
                 None,
                 PaletteCommand::ToggleSidePanel,
                 "toggle show hide right panel review git diff",
+                next(),
+            ),
+            PaletteItem::command(
+                if self.snapshot.terminal_visible {
+                    "Hide Terminal"
+                } else {
+                    "Show Terminal"
+                },
+                "icons/terminal.svg",
+                Some("⌘J"),
+                PaletteCommand::ToggleTerminal,
+                "toggle show hide terminal shell console command line pty",
                 next(),
             ),
             PaletteItem::command(

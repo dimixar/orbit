@@ -306,6 +306,7 @@ impl OrbitApp {
             session_id: self.session_id.clone(),
             sidebar_visible: self.sidebar_visible,
             side_panel_visible: self.sidepane.read(cx).is_open(),
+            terminal_visible: self.terminal_panel.read(cx).is_open(),
             can_choose_model: !self.available_models.is_empty(),
             can_choose_thinking: !self.available_thinking_levels.is_empty(),
         };
@@ -374,6 +375,10 @@ impl OrbitApp {
             }
             PaletteCommand::ToggleSidePanel => {
                 self.sidepane.update(cx, |pane, cx| pane.toggle(cx));
+            }
+            PaletteCommand::ToggleTerminal => {
+                self.terminal_panel
+                    .update(cx, |panel, cx| panel.toggle(window, cx));
             }
             PaletteCommand::ReviewChanges => {
                 self.sidepane.update(cx, |pane, cx| pane.show_review(cx));

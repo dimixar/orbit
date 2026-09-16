@@ -3,8 +3,8 @@ import Image from "next/image";
 export function Shot({
   src,
   alt,
-  width = 2400,
-  height = 1499,
+  width = 3164,
+  height = 2068,
   priority = false,
   sizes = "(max-width: 768px) 100vw, (max-width: 1280px) 92vw, 1180px",
   className = "",

@@ -67,6 +67,7 @@ use crate::quota::{QuotaManager, QuotaSupport};
 use crate::sessions::{self, SessionInfo};
 use crate::sidepane::{SidePane, SidePaneResize};
 use crate::skills::Skill;
+use crate::terminal::{TerminalPanel, TerminalResize};
 use crate::theme::{self, Theme, ThemeId, ThemeMode};
 use crate::transcript::{self, Transcript};
 use crate::usage::page::UsagePage;
@@ -426,6 +427,8 @@ pub struct OrbitApp {
     latest_turn: Option<usize>,
     /// Right side pane — Review (git diff).
     sidepane: Entity<SidePane>,
+    /// Bottom panel — an integrated shell (cmd-j).
+    terminal_panel: Entity<TerminalPanel>,
     /// Whether the Git page replaces the chat area.
     git_open: bool,
     /// The full-page Git panel (tabs + commit bar).
@@ -731,6 +734,8 @@ impl OrbitApp {
 
         // Right side pane: Review (git diff).
         let sidepane = cx.new(SidePane::new);
+        // Bottom panel: an integrated shell.
+        let terminal_panel = cx.new(TerminalPanel::new);
         // Full-page Git panel (Changes / History / Graph).
         let git_panel = cx.new(GitPanel::new);
         // Usage analytics over pi's own session store.
@@ -847,6 +852,7 @@ impl OrbitApp {
             turn_open: false,
             latest_turn: None,
             sidepane,
+            terminal_panel,
             git_open: false,
             git_panel: git_panel.clone(),
             usage_open: false,

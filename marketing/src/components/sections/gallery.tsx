@@ -5,8 +5,8 @@ const shots = [
   {
     src: "/screens/new-task.png",
     kicker: "New task",
-    caption: "Pick a workspace, then describe the task.",
-    alt: "Orbit's new-task page with a workspace picker and the composer.",
+    caption: "Pick a workspace, choose an access mode, then describe the task.",
+    alt: "Orbit's new-task page with a workspace picker, the composer, and the access-mode menu open on Supervised, Auto-accept edits, and Full access.",
     wide: true,
   },
   {
@@ -31,10 +31,45 @@ const shots = [
     wide: false,
   },
   {
+    src: "/screens/skills.png",
+    kicker: "Skills",
+    caption: "Project and global pi skills, with the SKILL.md in view.",
+    alt: "Orbit's Skills page listing project and global skills with the selected skill's SKILL.md rendered on the right.",
+    wide: false,
+  },
+  {
+    src: "/screens/models.png",
+    kicker: "Models",
+    caption: "Every model pi reports, grouped by provider, with favorites.",
+    alt: "Orbit's Models page listing models grouped by provider with context sizes and favorite toggles.",
+    wide: false,
+  },
+  {
     src: "/screens/appearance.png",
     kicker: "Appearance",
     caption: "Themes, background, fonts, sizes, and spacing density.",
     alt: "Orbit's Appearance settings with theme swatches, type and density previews, and font pickers.",
+    wide: false,
+  },
+  {
+    src: "/screens/usage.png",
+    kicker: "Usage",
+    caption: "Requests, tokens, cost, and cache — read from your own sessions.",
+    alt: "Orbit's Usage page with request, token, cost, and cache metrics above a tokens-over-time chart.",
+    wide: true,
+  },
+  {
+    src: "/screens/general.png",
+    kicker: "General",
+    caption: "Local by default — sessions, workspace, and notifications.",
+    alt: "Orbit's General settings showing the connected pi agent, the local session store, the workspace, and notification toggles.",
+    wide: false,
+  },
+  {
+    src: "/screens/agent.png",
+    kicker: "Agent",
+    caption: "Follow-up delivery, compaction, retries, and session naming.",
+    alt: "Orbit's Agent settings with follow-up delivery, auto-compaction, auto-retry, compact-now, and session rename.",
     wide: false,
   },
 ];
@@ -48,8 +83,8 @@ export function Gallery() {
           Every surface, one window.
         </h2>
         <p className="mb-10 max-w-[52ch] text-[14.5px] leading-[1.7] text-ink-2">
-          Sessions, Git, providers, plugins, and settings live in the same app —
-          no context switching, no web views.
+          Sessions, Git, providers, plugins, skills, models, usage, and settings
+          live in the same app — no context switching, no web views.
         </p>
 
         <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
@@ -57,7 +92,6 @@ export function Gallery() {
             <figure key={s.kicker} className={s.wide ? "md:col-span-2" : ""}>
               <Shot
                 src={s.src}
-                height={1499}
                 alt={s.alt}
                 sizes={
                   s.wide

@@ -1,5 +1,6 @@
 import { OrbitWordmark } from "@/components/brand";
 import { Band, ButtonLink, Shell } from "@/components/ui";
+import { getLatestRelease, LATEST_RELEASE_URL } from "@/lib/releases";
 
 const links = [
   { label: "Features", href: "#features" },
@@ -9,7 +10,10 @@ const links = [
   { label: "Get started", href: "#install" },
 ];
 
-export function SiteNav() {
+export async function SiteNav() {
+  const release = await getLatestRelease();
+  const downloadHref = release?.macos ?? LATEST_RELEASE_URL;
+
   return (
     <header className="sticky top-0 z-50 bg-page/80 backdrop-blur-md">
       <Shell>
@@ -41,13 +45,13 @@ export function SiteNav() {
               >
                 GitHub
               </a>
-              <ButtonLink href="#install" variant="nav">
+              <ButtonLink href={downloadHref} variant="nav" external>
                 Download
               </ButtonLink>
             </div>
 
             <div className="md:hidden">
-              <ButtonLink href="#install" variant="nav">
+              <ButtonLink href={downloadHref} variant="nav" external>
                 Download
               </ButtonLink>
             </div>

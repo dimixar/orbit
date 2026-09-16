@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Integrated terminal — a real login shell in a resizable bottom panel (⌘J or
+  the top-bar toggle), independent of the right side pane. Built on
+  `alacritty_terminal` for PTY and VT/ANSI emulation, rendered natively by
+  GPUI: scrollback, click-drag selection with ⌘C/⌘V, bracketed paste, a
+  blinking cursor, and a per-theme ANSI palette. The shell follows the active
+  workspace and restarts when it changes.
+
 ## [0.0.2] - 2026-09-16
 
 ### Added

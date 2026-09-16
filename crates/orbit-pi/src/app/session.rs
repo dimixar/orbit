@@ -1371,6 +1371,19 @@ impl OrbitApp {
         cx.notify();
     }
 
+    /// Flip the bottom terminal panel (cmd-j). Focus moves into the shell on
+    /// open, so the next keystroke lands there rather than in the composer.
+    pub(super) fn on_toggle_terminal(
+        &mut self,
+        _: &crate::ToggleTerminal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.terminal_panel
+            .update(cx, |panel, cx| panel.toggle(window, cx));
+        cx.notify();
+    }
+
     /// The top-bar `+N -M` chip opens Review on the working tree's
     /// **Uncommitted** changes.
     pub(super) fn on_open_uncommitted_review(

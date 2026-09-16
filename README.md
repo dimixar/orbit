@@ -8,6 +8,28 @@
 
 Sessions you create in Orbit and in the terminal are the same sessions (`~/.pi/agent/sessions/`), managed by pi's own session manager.
 
+## Screenshots
+
+A live session — streaming transcript, tool rows, and the composer:
+
+![A live Orbit session: a transcript answering a question about the API with a findings table, a list of changed files, and the composer below.](marketing/public/screens/session.png)
+
+Usage — requests, tokens, cost, and cache, read from your own sessions:
+
+![Orbit's Usage page with request, token, cost, and cache metrics above a tokens-over-time chart.](marketing/public/screens/usage.png)
+
+| New task | Review |
+| --- | --- |
+| ![Orbit's new-task page with a workspace picker, the composer, and the access-mode menu open on Supervised, Auto-accept edits, and Full access.](marketing/public/screens/new-task.png) | ![The Orbit Review panel open beside a session, showing a selected file's diff on the left and the changed-file tree on the right.](marketing/public/screens/review.png) |
+| **Git** | **Providers** |
+| ![Orbit's Git page listing staged and changed files with line counts and a commit box.](marketing/public/screens/git.png) | ![Orbit's Providers page showing provider cards for Ollama, OpenCode Go, Bedrock, and Anthropic with usage meters.](marketing/public/screens/providers.png) |
+| **Plugins** | **Skills** |
+| ![Orbit's Plugins page listing installed pi packages with update and remove actions.](marketing/public/screens/plugins.png) | ![Orbit's Skills page listing project and global skills with the selected skill's SKILL.md rendered on the right.](marketing/public/screens/skills.png) |
+| **Models** | **Appearance** |
+| ![Orbit's Models page listing models grouped by provider with context sizes and favorite toggles.](marketing/public/screens/models.png) | ![Orbit's Appearance settings with theme swatches, type and density previews, and font pickers.](marketing/public/screens/appearance.png) |
+| **General** | **Agent** |
+| ![Orbit's General settings showing the connected pi agent, the local session store, the workspace, and notification toggles.](marketing/public/screens/general.png) | ![Orbit's Agent settings with follow-up delivery, auto-compaction, auto-retry, compact-now, and session rename.](marketing/public/screens/agent.png) |
+
 ## Features
 
 **Chat and transcript**

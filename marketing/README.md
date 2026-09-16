@@ -27,7 +27,7 @@ src/components/             nav, footer, ui primitives, screenshot frame
 src/components/sections/    hero, stage, steps, workbench, features,
                             guard, review, gallery, closer
 src/components/ui/          shadcn primitives (button, card)
-public/screens/             real app screenshots (window-cropped)
+public/screens/             real app screenshots (window-only)
 ```
 
 The copy describes the **app** — its features (chat, tools, sessions, find,
@@ -35,9 +35,9 @@ providers, plugins, models, usage, appearance) and the steps you take in it
 (connect a provider → start a task → watch it work → review → commit), not the
 repository's engineering internals.
 
-Screenshots in `public/screens/` are the real app, cropped to the window (the
-colourful desktop wallpapers were trimmed). They are `next/image`-optimized at
-runtime; the hero shot is `priority`, the rest lazy-load.
+Screenshots in `public/screens/` are the real app, captured window-only
+(rounded corners and shadow, no desktop or menu bar). They are `next/image`-
+optimized at runtime; the hero shot is `priority`, the rest lazy-load.
 
 The visual system mirrors the warm.run landing: a 1280px `shell` with hairline
 rules down each edge, dashed separators between `band`s, a dark slate page

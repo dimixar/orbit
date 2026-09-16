@@ -28,6 +28,19 @@ APP_NAME="Orbit Pi"
 EXEC_NAME="orbit-pi"
 BUNDLE_ID="dev.orbit.pi"
 ICON="assets/icons/icon.icns"
+# DMG window styling. The background art is 660x400 and Finder draws a folder
+# background at natural size from the top-left of the content area, so the
+# window frame has to be one title bar taller than the art to avoid trimming
+# its bottom edge.
+DMG_BG="assets/icons/background_660x400.tiff"
+DMG_BG_NAME="background.tiff"
+DMG_CONTENT_W=660
+DMG_CONTENT_H=400
+DMG_TITLEBAR_H=28
+DMG_ICON_SIZE=128
+DMG_APP_X=180
+DMG_DROP_X=480
+DMG_ICON_Y=190
 # `SIGNING=0` ad-hoc signs the bundle — what CI builds when the Apple secrets
 # are absent. Otherwise default to the maintainer's Developer ID identity.
 if [ "${SIGNING:-1}" = "0" ]; then
@@ -113,18 +126,64 @@ make_dmg() {
   info "Creating DMG: $dmg"
   rm -f "$dmg"
   local dmg_stage="$BUILD_ROOT/dmg-stage"
-  rm -rf "$dmg_stage"
+  local rw="$BUILD_ROOT/rw.dmg"
+  local mnt="/Volumes/$APP_NAME"
+  rm -rf "$dmg_stage" "$rw"
   mkdir -p "$dmg_stage"
   cp -R "$app" "$dmg_stage/"
   # Drag-and-drop target.
   ln -s /Applications "$dmg_stage/Applications"
+  # Keep the background inside the image so the layout travels with it.
+  mkdir -p "$dmg_stage/.background"
+  cp "$DMG_BG" "$dmg_stage/.background/$DMG_BG_NAME"
 
+  # Finder can only lay out a writable HFS+ image; compress it afterwards.
   hdiutil create \
     -volname "$APP_NAME" \
     -srcfolder "$dmg_stage" \
+    -fs HFS+ \
+    -format UDRW \
     -ov \
-    -format UDZO \
-    "$dmg"
+    "$rw" >/dev/null
+  # A volume of the same name from a previous run would shadow this one.
+  if [ -d "$mnt" ]; then hdiutil detach "$mnt" >/dev/null 2>&1 || true; fi
+  hdiutil attach "$rw" -readwrite -noverify -noautoopen >/dev/null
+  sleep 1
+
+  info "Laying out the DMG window"
+  # Finder writes the icon positions and background into the volume's
+  # .DS_Store. Setting the background has historically been flaky (and can
+  # fail on runners without a GUI session), so it is best-effort: without it
+  # the DMG is still valid, just unstyled.
+  osascript <<EOF || warn "Finder layout failed — shipping an unstyled DMG"
+tell application "Finder"
+  tell disk "$APP_NAME"
+    open
+    set current view of container window to icon view
+    set toolbar visible of container window to false
+    set statusbar visible of container window to false
+    set the bounds of container window to {200, 120, $((200 + DMG_CONTENT_W)), $((120 + DMG_CONTENT_H + DMG_TITLEBAR_H))}
+    set opts to the icon view options of container window
+    set arrangement of opts to not arranged
+    set icon size of opts to $DMG_ICON_SIZE
+    set position of item "$APP_NAME.app" of container window to {$DMG_APP_X, $DMG_ICON_Y}
+    set position of item "Applications" of container window to {$DMG_DROP_X, $DMG_ICON_Y}
+    try
+      set background picture of opts to file ".background:$DMG_BG_NAME"
+    on error errMsg
+      log "background not applied: " & errMsg
+    end try
+    update without registering applications
+    delay 1
+  end tell
+end tell
+EOF
+
+  sync
+  rm -rf "$mnt/.fseventsd" "$mnt/.Trashes" 2>/dev/null || true
+  hdiutil detach "$mnt" >/dev/null
+  hdiutil convert "$rw" -format UDZO -ov -o "$dmg" >/dev/null
+  rm -f "$rw"
 
   # Sign the disk image itself so Gatekeeper accepts it as a package
   # (`spctl -a -t open --context context:primary-signature`) and notarytool
