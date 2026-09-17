@@ -65,6 +65,17 @@ const HOME_SEARCH_DIRS: &[&str] = &[
 /// bundled app launch.
 const PATH_EXTRA_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"];
 
+/// The pi launcher names to probe, most specific first.
+///
+/// Windows npm installs expose `pi` as a `.cmd`/`.ps1` shim, never a real
+/// `pi.exe`, so probing only `pi.exe` can never find a standard npm install.
+/// Rust's `Command` runs `.cmd`/`.bat` through the command interpreter itself,
+/// so the shim is spawned directly.
+#[cfg(windows)]
+const PI_BIN_NAMES: &[&str] = &["pi.exe", "pi.cmd", "pi.bat", "pi.ps1"];
+#[cfg(not(windows))]
+const PI_BIN_NAMES: &[&str] = &["pi"];
+
 pub struct PiClient {
     child: Child,
     commands_tx: Sender<Outgoing>,
@@ -379,25 +390,60 @@ fn resolve_pi_bin() -> String {
             return bin;
         }
     }
-    let name = if cfg!(windows) { "pi.exe" } else { "pi" };
-    if let Some(found) = find_on_path(name) {
-        return found;
-    }
-    for dir in PI_SEARCH_DIRS {
-        let candidate = Path::new(dir).join(name);
-        if candidate.is_file() {
-            return candidate.to_string_lossy().into_owned();
+    for name in PI_BIN_NAMES {
+        if let Some(found) = find_on_path(name) {
+            return found;
         }
     }
-    if let Some(home) = home_dir() {
-        for sub in HOME_SEARCH_DIRS {
-            let candidate = home.join(sub).join(name);
+    for dir in search_dirs() {
+        for name in PI_BIN_NAMES {
+            let candidate = dir.join(name);
             if candidate.is_file() {
                 return candidate.to_string_lossy().into_owned();
             }
         }
     }
-    name.to_string()
+    PI_BIN_NAMES[0].to_string()
+}
+
+/// Install dirs probed for `pi` when it isn't on `PATH`: the absolute
+/// [`PI_SEARCH_DIRS`], the home-relative [`HOME_SEARCH_DIRS`], and (on
+/// Windows) the npm/pnpm/bun global dirs.
+fn search_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = PI_SEARCH_DIRS.iter().map(PathBuf::from).collect();
+    if let Some(home) = home_dir() {
+        dirs.extend(HOME_SEARCH_DIRS.iter().map(|sub| home.join(sub)));
+    }
+    #[cfg(windows)]
+    dirs.extend(windows_search_dirs());
+    dirs
+}
+
+/// npm and friends put their global launchers under `%APPDATA%` or
+/// `%LOCALAPPDATA%` on Windows, none of which appear in [`HOME_SEARCH_DIRS`].
+#[cfg(windows)]
+fn windows_search_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        dirs.push(PathBuf::from(appdata).join("npm"));
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        dirs.push(PathBuf::from(&local).join("pnpm"));
+        dirs.push(PathBuf::from(&local).join("Volta").join("bin"));
+        dirs.push(PathBuf::from(&local).join("Yarn").join("bin"));
+        dirs.push(PathBuf::from(&local).join("mise").join("shims"));
+        dirs.push(
+            PathBuf::from(&local)
+                .join("Programs")
+                .join("bun")
+                .join("bin"),
+        );
+    }
+    if let Some(profile) = std::env::var_os("USERPROFILE") {
+        dirs.push(PathBuf::from(&profile).join(".bun").join("bin"));
+        dirs.push(PathBuf::from(&profile).join(".volta").join("bin"));
+    }
+    dirs
 }
 
 /// The user's home directory (`HOME`, falling back to `USERPROFILE`).
@@ -433,4 +479,14 @@ fn augmented_path(bin_dir: Option<&Path>) -> OsString {
         dirs.extend(std::env::split_paths(&path));
     }
     std::env::join_paths(dirs).unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tmp_resolve_probe {
+    use super::*;
+    #[test]
+    fn tmp_probe_resolve() {
+        println!("PI_BIN_NAMES = {PI_BIN_NAMES:?}");
+        println!("resolved = {}", resolve_pi_bin());
+    }
 }

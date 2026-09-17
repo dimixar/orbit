@@ -327,10 +327,7 @@ fn read_version(install_path: &Path) -> Option<String> {
 }
 
 fn agent_dir() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"));
-    home.join(".pi").join("agent")
+    crate::platform::home_dir().join(".pi").join("agent")
 }
 
 /// Run `pi <args>` from `workspace`, returning stdout on success. Mirrors the

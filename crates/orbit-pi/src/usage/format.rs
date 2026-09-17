@@ -95,10 +95,12 @@ pub fn cost(usd: f64) -> String {
 
 /// Shorten an absolute path for prose: `~/.pi/agent/sessions`.
 pub fn short_path(path: &str) -> String {
-    match std::env::var_os("HOME").and_then(|home| {
-        let home = home.to_string_lossy().to_string();
-        path.strip_prefix(&home).map(str::to_string)
-    }) {
+    // The raw home string, not a canonicalized one: on Windows
+    // `canonicalize` answers with a `\\?\` verbatim path that would never
+    // prefix-match the plain paths pi reports.
+    let home = crate::platform::home_dir();
+    let home = home.to_string_lossy();
+    match path.strip_prefix(home.as_ref()) {
         Some(rest) => format!("~{rest}"),
         None => path.to_string(),
     }

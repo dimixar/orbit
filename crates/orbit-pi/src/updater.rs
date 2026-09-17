@@ -27,8 +27,11 @@ use base64::Engine as _;
 use gpui::Global;
 
 /// Environment variable the relaunched build reads to signal a live window.
+/// The install helper that sets it is Unix-only (see [`run_install_helper`]).
+#[cfg(unix)]
 const RELAUNCH_READY_ENV: &str = "ORBIT_UPDATE_READY_FILE";
 /// Hidden flag that turns the app binary into its own update helper.
+#[cfg(unix)]
 const INSTALL_HELPER_FLAG: &str = "--orbit-update-install";
 
 /// App-wide handle to the updater, if this build can update itself.
@@ -53,6 +56,8 @@ pub enum UpdaterEvent {
     Failed(String),
     /// The helper has validated its inputs and waits for the app's normal
     /// quit handlers to finish before it swaps directories. The UI quits.
+    /// Only a build whose updater can hand off (Unix) ever emits this.
+    #[cfg(unix)]
     QuitAndInstall,
 }
 
@@ -99,6 +104,7 @@ const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_UNPACKED_BYTES: u64 = 1024 * 1024 * 1024;
 #[cfg(unix)]
 const MAX_ARCHIVE_ENTRIES: usize = 100_000;
+#[cfg(unix)]
 const MAX_ERROR_BYTES: u64 = 16 * 1024;
 
 /// A verified artifact on disk. On Unix the payload is an extracted directory
@@ -1327,9 +1333,7 @@ fn preference_path() -> Option<PathBuf> {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
+    crate::platform::home_dir_opt()
 }
 
 /// Orbit's default is to check automatically; treat an absent or unreadable

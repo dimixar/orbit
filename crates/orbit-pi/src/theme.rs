@@ -417,10 +417,9 @@ impl Default for UiPrefs {
 
 impl UiPrefs {
     fn persist_path() -> PathBuf {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
-        home.join(".orbit-pi").join("ui.json")
+        crate::platform::home_dir()
+            .join(".orbit-pi")
+            .join("ui.json")
     }
 
     fn load() -> Self {
@@ -539,10 +538,9 @@ impl Default for FontPrefs {
 
 impl FontPrefs {
     fn persist_path() -> PathBuf {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
-        home.join(".orbit-pi").join("fonts.json")
+        crate::platform::home_dir()
+            .join(".orbit-pi")
+            .join("fonts.json")
     }
 
     fn load() -> Self {
@@ -2359,10 +2357,7 @@ fn hex(value: u32) -> Hsla {
 }
 
 fn persist_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".orbit-pi").join("theme")
+    crate::platform::home_dir().join(".orbit-pi").join("theme")
 }
 
 /// Install the persisted (or default Orbit) theme as a GPUI global and

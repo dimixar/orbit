@@ -93,10 +93,9 @@ impl Favorites {
 }
 
 fn persist_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".orbit-pi").join("favorites.json")
+    crate::platform::home_dir()
+        .join(".orbit-pi")
+        .join("favorites.json")
 }
 
 /// Lazily-loaded global store. Reads and writes lock briefly; the set is tiny.

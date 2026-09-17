@@ -3,6 +3,12 @@
 //! Pure Rust on GPUI; the agent runtime is the `pi` CLI spoken to over its
 //! JSONL RPC protocol (see `crates/orbit-rpc`). Quit with cmd-q.
 
+// Windows release builds are GUI applications: this sets the PE subsystem to
+// `WINDOWS`, so double-clicking `orbit-pi.exe` (or the installer launching it)
+// never spawns a console window. Debug builds keep the console so `eprintln!`
+// diagnostics stay visible while developing.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod access;
 mod app;
 mod app_icon;
@@ -53,9 +59,8 @@ use std::time::Duration;
 
 use app::OrbitApp;
 use gpui::{
-    actions, point, prelude::*, px, size, App, Application, AsyncWindowContext, Bounds, Entity,
-    Focusable, KeyBinding, Menu, MenuItem, SharedString, SystemMenuType, Timer, TitlebarOptions,
-    WindowBounds, WindowOptions,
+    actions, prelude::*, px, size, App, Application, AsyncWindowContext, Bounds, Entity, Focusable,
+    KeyBinding, Menu, MenuItem, SystemMenuType, Timer, WindowBounds, WindowOptions,
 };
 
 // Composer-scoped actions (bound in the `Composer` key context).
@@ -405,15 +410,7 @@ fn main() {
                     // Keep the window usable when shrunk: sidebar (min
                     // 200px) + a readable transcript + the composer.
                     window_min_size: Some(size(px(960.), px(640.))),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some(SharedString::from("Orbit Pi")),
-                        // Transparent titlebar: the sidebar extends to the top
-                        // and the native traffic lights sit inside it (Waku-style).
-                        appears_transparent: true,
-                        // Center the lights in the 44px titlebar row so they
-                        // share a line with the window controls beside them.
-                        traffic_light_position: Some(point(px(12.), px(16.))),
-                    }),
+                    titlebar: Some(platform::titlebar_options()),
                     app_id: Some("dev.orbit.pi".into()),
                     focus: true,
                     ..Default::default()

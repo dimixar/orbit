@@ -128,10 +128,7 @@ fn index_of_u32(values: &[u32], value: u32) -> usize {
 // ── paths & config ─────────────────────────────────────────────────────────
 
 fn default_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".orbit-pi")
+    crate::platform::home_dir().join(".orbit-pi")
 }
 
 fn image_path(dir: &Path) -> PathBuf {

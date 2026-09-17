@@ -265,6 +265,15 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      # windows-latest ships Inno Setup 6; install it only if a future image
+      # drops it. The bundler finds ISCC.exe on its own either way.
+      - name: Ensure Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --no-progress --yes
+          }
+
       - name: Bundle
         shell: pwsh
         env:

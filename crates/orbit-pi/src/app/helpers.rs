@@ -1,4 +1,5 @@
 use super::*;
+use crate::platform::WindowCommand;
 
 /// Turn a wire command name into a short human label, e.g. `set_model` →
 /// `Set model failed`.
@@ -64,6 +65,107 @@ pub(crate) fn icon_dyn(path: SharedString, size: f32, color: Hsla) -> impl IntoE
         .flex_none()
         .size(px(size))
         .text_color(color)
+}
+
+/// Width of one caption button, matching the metric Windows uses for its own
+/// (`platform::WINDOW_CONTROLS_W` is three of them).
+pub(crate) const CAPTION_BUTTON_W: f32 = 46.;
+
+/// The window's own minimize / maximize / close buttons, drawn by the app on
+/// the platforms where it paints the caption (`platform::draws_window_controls`).
+///
+/// Each button runs the system's own command through
+/// [`platform::window_command`] — the same one a real caption button sends — so
+/// nothing about window management is reimplemented here.
+pub(crate) fn window_controls(theme: Theme, maximized: bool) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .h_full()
+        .child(caption_button(
+            theme,
+            "window-minimize",
+            "icons/minus.svg",
+            WindowCommand::Minimize,
+            false,
+        ))
+        .child(caption_button(
+            theme,
+            "window-maximize",
+            // The glyph follows the window state, as the OS button does.
+            if maximized {
+                "icons/window-restore.svg"
+            } else {
+                "icons/window-maximize.svg"
+            },
+            WindowCommand::ToggleMaximize,
+            false,
+        ))
+        .child(caption_button(
+            theme,
+            "window-close",
+            "icons/x.svg",
+            WindowCommand::Close,
+            true,
+        ))
+}
+
+/// One caption button: a flat 46px hit area with a centred glyph. Close is the
+/// one that turns red under the pointer, the way Windows' own does, and its
+/// glyph brightens with it.
+fn caption_button(
+    theme: Theme,
+    id: &'static str,
+    glyph: &'static str,
+    command: WindowCommand,
+    close: bool,
+) -> impl IntoElement {
+    let fill = if close {
+        theme.stop_red
+    } else {
+        theme.bg_hover
+    };
+    let mut icon = gpui::svg()
+        .path(glyph)
+        .flex_none()
+        .size(px(14.))
+        .text_color(theme.text_2);
+    if close {
+        icon = icon.group_hover(id, move |style| style.text_color(theme.text));
+    }
+    div()
+        .id(id)
+        .group(id)
+        .w(px(CAPTION_BUTTON_W))
+        .h_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(move |style| style.bg(fill))
+        .on_mouse_up(MouseButton::Left, move |_, window, _| {
+            crate::platform::window_command(window, command)
+        })
+        .child(icon)
+}
+
+/// Turn a header strip into a window drag region.
+///
+/// The press is handed to the OS rather than to GPUI's `WindowControlArea::Drag`
+/// on the platform where the app paints the caption — see
+/// [`platform::start_window_drag`] for why that path is closed to this app.
+/// Elsewhere the platform's own drag area is what moves the window.
+pub(crate) fn window_drag_region(el: gpui::Div) -> gpui::Div {
+    #[cfg(windows)]
+    {
+        el.on_mouse_down(MouseButton::Left, |_, window, _| {
+            crate::platform::start_window_drag(window)
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        el.window_control_area(WindowControlArea::Drag)
+    }
 }
 
 /// Render a compile-time-embedded raster image (PNG) at a fixed height, with

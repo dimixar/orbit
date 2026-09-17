@@ -45,9 +45,7 @@ pub fn sessions_dir() -> PathBuf {
 }
 
 fn dirs_home() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
+    crate::platform::home_dir()
 }
 
 /// Load every session in pi's store, newest-*activity* first.

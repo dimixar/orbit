@@ -608,7 +608,13 @@ impl SidePane {
             .items_center()
             .gap_1()
             .pl(px(12.))
-            .pr(px(6.))
+            // The pane owns the window's right edge, so where the app paints
+            // the caption its buttons land here and the header stops short.
+            .pr(px(if crate::platform::draws_window_controls() {
+                crate::platform::WINDOW_CONTROLS_W
+            } else {
+                6.
+            }))
             .border_b_1()
             .border_color(theme.border)
             .child(

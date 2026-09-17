@@ -4,7 +4,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use gpui::Image;
+use gpui::{Image, SharedString, TitlebarOptions, Window};
+// `point`/`px` place the macOS traffic lights; no other platform takes a
+// position, so they stay behind the same gate as that titlebar.
+#[cfg(target_os = "macos")]
+use gpui::{point, px};
 use serde_json::Value;
 
 /// A folder-capable application the header's "open in" control can target,
@@ -146,9 +150,21 @@ pub fn reveal_in_file_manager(path: &Path) {
 
 #[cfg(not(target_os = "macos"))]
 pub fn reveal_in_file_manager(path: &Path) {
-    // Most Linux desktops have no "select" verb; open the containing folder.
-    let target = path.parent().unwrap_or(path);
-    let _ = std::process::Command::new("xdg-open").arg(target).spawn();
+    #[cfg(target_os = "windows")]
+    {
+        // `explorer /select,<path>` needs the comma but no separating space;
+        // it is also the only way Explorer highlights the file itself.
+        let _ = std::process::Command::new("explorer")
+            .arg(format!("/select,{}", path.display()))
+            .spawn();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Most Linux desktops have no "select" verb; open the containing
+        // folder.
+        let target = path.parent().unwrap_or(path);
+        let _ = std::process::Command::new("xdg-open").arg(target).spawn();
+    }
 }
 
 /// Open `path` in the OS default application (the user's editor for a
@@ -162,14 +178,50 @@ pub fn open_path_default(path: &Path) {
 
 #[cfg(not(target_os = "macos"))]
 pub fn open_path_default(path: &Path) {
+    // Windows has no `xdg-open`; the shell's `start` verb is the equivalent
+    // (`""` is the window title `start` would otherwise read as the path).
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "start", ""])
+        .arg(path)
+        .spawn();
+    #[cfg(not(target_os = "windows"))]
     let _ = std::process::Command::new("xdg-open").arg(path).spawn();
 }
 
+/// The user's home directory — the root of both pi's store (`~/.pi`) and
+/// Orbit's own (`~/.orbit-pi`).
+///
+/// `HOME` is the POSIX answer and the one macOS and Linux always set. Windows
+/// sets it only inside a POSIX-ish shell: a process started from Explorer or
+/// PowerShell has `USERPROFILE` (and, on domain/legacy setups, `HOMEDRIVE` +
+/// `HOMEPATH`) instead. Reading `HOME` alone would resolve the session store to
+/// a drive root there, so every platform gets the same fallback chain here.
+pub fn home_dir() -> PathBuf {
+    home_dir_opt().unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// [`home_dir`] when the platform gives one. `None` keeps a caller that would
+/// *write* there from writing to a relative path instead.
+pub fn home_dir_opt() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(home));
+    }
+    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(profile));
+    }
+    match (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH")) {
+        // `HOMEPATH` is root-relative (`\Users\name`), so `join` appends it to
+        // the drive rather than replacing it.
+        (Some(drive), Some(path)) if !drive.is_empty() && !path.is_empty() => {
+            Some(PathBuf::from(drive).join(path))
+        }
+        _ => None,
+    }
+}
+
 fn open_in_prefs_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".orbit-pi").join("open-in.json")
+    home_dir().join(".orbit-pi").join("open-in.json")
 }
 
 /// Load the persisted preferred open-in app id, if any.
@@ -220,18 +272,30 @@ pub fn open_terminal_command(command: &str) -> Result<(), String> {
 
 #[cfg(not(target_os = "macos"))]
 pub fn open_terminal_command(command: &str) -> Result<(), String> {
-    for terminal in ["x-terminal-emulator", "gnome-terminal", "konsole", "xterm"] {
-        let mut cmd = std::process::Command::new(terminal);
-        match terminal {
-            "gnome-terminal" => cmd.arg("--").args(["sh", "-c", command]),
-            "konsole" => cmd.args(["-e", "sh", "-c", command]),
-            _ => cmd.args(["-e", "sh", "-c", command]),
-        };
-        if cmd.spawn().is_ok() {
-            return Ok(());
-        }
+    // Windows opens a console running the command through the shell; `start`
+    // gives it its own window instead of attaching to this process.
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "cmd", "/K", command])
+            .spawn()
+            .map(|_| ())
+            .map_err(|err| format!("could not open a terminal: {err}"))
     }
-    Err("no terminal emulator found — run the command manually".into())
+    #[cfg(not(target_os = "windows"))]
+    {
+        for terminal in ["x-terminal-emulator", "gnome-terminal", "konsole", "xterm"] {
+            let mut cmd = std::process::Command::new(terminal);
+            match terminal {
+                "gnome-terminal" => cmd.arg("--").args(["sh", "-c", command]),
+                _ => cmd.args(["-e", "sh", "-c", command]),
+            };
+            if cmd.spawn().is_ok() {
+                return Ok(());
+            }
+        }
+        Err("no terminal emulator found — run the command manually".into())
+    }
 }
 
 /// Open an `http(s)` URL in the user's default browser. Used for the OAuth
@@ -358,9 +422,384 @@ pub fn open_notification_settings() -> Result<(), String> {
     Ok(())
 }
 
+// ── host description ────────────────────────────────────────────────────
+
+/// The machine Orbit is running on, as the setup page reports it.
+pub struct Host {
+    /// Human label: `Windows 11 (build 26100)`, `macOS 15.2`,
+    /// `Ubuntu 24.04.1 LTS`.
+    pub label: String,
+    /// Rust's target architecture, e.g. `x86_64` or `aarch64`.
+    pub arch: &'static str,
+    /// Set when the host is older than this build supports, naming the floor.
+    /// A host whose version can't be read is never reported as unsupported.
+    pub unsupported: Option<String>,
+}
+
+/// A version read off the host, compared against the floors each bundle
+/// declares. Only the fields the host exposes are filled: Windows reports a
+/// build number, macOS a major/minor pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct OsVersion {
+    major: u32,
+    minor: u32,
+    build: u32,
+}
+
+/// Probe the host OS for the setup page.
+///
+/// A version is only reachable by running something — `sw_vers` on macOS,
+/// `ver` on Windows — or by reading `/etc/os-release` on Linux; Orbit takes no
+/// dependency for one field of one page. When the probe fails the label falls
+/// back to the `std::env::consts::OS` name, which is still right about the
+/// family.
+pub fn host() -> Host {
+    os_probe()
+}
+
+/// Run `command args`, returning trimmed stdout when it succeeds.
+fn command_output(command: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(command)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!text.is_empty()).then_some(text)
+}
+
+/// The bare OS family name, used when a version probe fails.
+fn os_family() -> String {
+    match std::env::consts::OS {
+        "macos" => "macOS".into(),
+        "windows" => "Windows".into(),
+        other => other.to_owned(),
+    }
+}
+
+/// macOS 13 is the floor in `package.metadata.bundle`'s
+/// `osx_minimum_system_version` and in the `LSMinimumSystemVersion` both
+/// bundles write, so the setup page states the same number the OS enforces.
+#[cfg(target_os = "macos")]
+fn os_probe() -> Host {
+    let (label, version) = match command_output("sw_vers", &["-productVersion"])
+        .as_deref()
+        .and_then(parse_macos_version)
+    {
+        Some((label, version)) => (label, Some(version)),
+        None => (os_family(), None),
+    };
+    Host {
+        label,
+        arch: std::env::consts::ARCH,
+        unsupported: version.and_then(unsupported_reason),
+    }
+}
+
+/// Windows 10 1809 (build 17763) is the floor: GPUI composes through DXGI
+/// flip-model presentation, which earlier builds don't expose.
+#[cfg(windows)]
+fn os_probe() -> Host {
+    // `ver` prints `Microsoft Windows [Version 10.0.26100.9168]`. The 10.0
+    // major-minor pair covers both Windows 10 and 11, so the build number is
+    // what distinguishes them.
+    let (label, version) = match command_output("cmd", &["/C", "ver"])
+        .as_deref()
+        .and_then(parse_windows_version)
+    {
+        Some((label, version)) => (label, Some(version)),
+        None => (os_family(), None),
+    };
+    Host {
+        label,
+        arch: std::env::consts::ARCH,
+        unsupported: version.and_then(unsupported_reason),
+    }
+}
+
+/// Whether a host version is below this target's floor, and what it needs.
+///
+/// One rule per platform, in one place, so the probe stays a probe and the
+/// floors are testable without the machine the test runs on.
+fn unsupported_reason(version: OsVersion) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        const FLOOR_MAJOR: u32 = 13;
+        if version.major > 0 && version.major < FLOOR_MAJOR {
+            return Some(format!("Orbit needs macOS {FLOOR_MAJOR} or newer"));
+        }
+    }
+    #[cfg(windows)]
+    {
+        const FLOOR_BUILD: u32 = 17763;
+        if version.build > 0 && version.build < FLOOR_BUILD {
+            return Some("Orbit needs Windows 10 (1809) or newer".to_string());
+        }
+    }
+    // Linux has no floor to compare against (see `os_probe`).
+    let _ = version;
+    None
+}
+
+/// Linux kernels don't carry a distribution, so the label comes from
+/// `/etc/os-release`. There is no version floor to compare against: the same
+/// build runs on any distro with a Vulkan or GL driver.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn os_probe() -> Host {
+    let label = std::fs::read_to_string("/etc/os-release")
+        .ok()
+        .and_then(|contents| parse_os_release(&contents))
+        .unwrap_or_else(os_family);
+    Host {
+        label,
+        arch: std::env::consts::ARCH,
+        unsupported: None,
+    }
+}
+
+/// `15.2.1` → `("macOS 15.2", 15.2)`.
+#[cfg(any(target_os = "macos", test))]
+fn parse_macos_version(raw: &str) -> Option<(String, OsVersion)> {
+    let mut parts = raw.trim().split('.').map(str::trim);
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = parts.next().unwrap_or("0").parse().unwrap_or(0);
+    Some((
+        format!("macOS {major}.{minor}"),
+        OsVersion {
+            major,
+            minor,
+            build: 0,
+        },
+    ))
+}
+
+/// `Microsoft Windows [Version 10.0.26100.9168]` →
+/// `("Windows 11 (build 26100)", 10.0.26100)`. The marketing name follows the
+/// build number: 22000 and up is Windows 11, everything the 10.0 line covers
+/// below that is Windows 10.
+#[cfg(any(windows, test))]
+fn parse_windows_version(raw: &str) -> Option<(String, OsVersion)> {
+    let inside = raw.split_once("Version ")?.1;
+    let inside = inside.trim_end_matches(']').trim();
+    let mut parts = inside.split('.').map(str::trim);
+    let major: u32 = parts.next()?.parse().ok()?;
+    let minor: u32 = parts.next().unwrap_or("0").parse().unwrap_or(0);
+    let build: u32 = parts.next().unwrap_or("0").parse().unwrap_or(0);
+    let edition = if build >= 22000 {
+        "Windows 11"
+    } else {
+        "Windows 10"
+    };
+    let label = if build > 0 {
+        format!("{edition} (build {build})")
+    } else {
+        edition.to_string()
+    };
+    Some((
+        label,
+        OsVersion {
+            major,
+            minor,
+            build,
+        },
+    ))
+}
+
+/// `PRETTY_NAME="Ubuntu 24.04.1 LTS"` out of `/etc/os-release`.
+#[cfg(any(all(unix, not(target_os = "macos")), test))]
+fn parse_os_release(contents: &str) -> Option<String> {
+    contents.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        (key.trim() == "PRETTY_NAME").then(|| value.trim().trim_matches('"').to_owned())
+    })
+}
+
+// ── window chrome ───────────────────────────────────────────────────────
+
+/// Clearance the app's own titlebar controls must leave for the OS's window
+/// buttons. macOS draws its traffic lights *inside* the transparent titlebar
+/// (see [`titlebar_options`]), so the controls start past them; every other
+/// platform keeps the system titlebar, whose buttons sit above the client
+/// area, and only needs a plain inset from the window edge.
+pub const WINDOW_CONTROLS_CLEARANCE: f32 = if cfg!(target_os = "macos") { 80. } else { 12. };
+
+/// What one of the app's caption buttons asks the window to do. These mirror
+/// the system commands, so the platform performs the action — the app never
+/// reimplements window management.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowCommand {
+    Minimize,
+    /// Maximize when the window is not maximized, restore it when it is —
+    /// what the system's own maximize button does.
+    ToggleMaximize,
+    Close,
+}
+
+/// Windows is the one platform where the app paints the caption itself: macOS
+/// gets AppKit's traffic lights inside the transparent titlebar, and Linux
+/// decorates through the window manager. See [`titlebar_options`].
+pub fn draws_window_controls() -> bool {
+    cfg!(windows)
+}
+
+/// Begin an OS-driven window move, the way grabbing a titlebar does.
+///
+/// Windows only, and not through GPUI's `WindowControlArea::Drag`: that path
+/// needs the press to reach the platform unhandled, and this app's root
+/// tracks focus, so GPUI's focus-transfer listener calls
+/// `Window::prevent_default` on every press inside the window. A prevented
+/// press is treated as handled, which makes GPUI drop the window-control
+/// path entirely — no move loop, and no caption-button commands. So the press
+/// hands the move to the OS itself (`WM_NCLBUTTONDOWN` + `HTCAPTION`), which
+/// is the standard way a custom titlebar drags a Windows window.
+pub fn start_window_drag(window: &Window) {
+    #[cfg(windows)]
+    windows_chrome::start_drag(window);
+    #[cfg(not(windows))]
+    let _ = window;
+}
+
+/// Perform [`WindowCommand`] — the same system command the corresponding
+/// caption button sends.
+pub fn window_command(window: &Window, command: WindowCommand) {
+    #[cfg(windows)]
+    windows_chrome::command(window, command);
+    #[cfg(not(windows))]
+    let _ = (window, command);
+}
+
+/// The raw `user32` calls behind [`start_window_drag`] and [`window_command`].
+///
+/// Declared here rather than pulled in with a windows-sys feature: four
+/// functions and six constants is less code than the dependency, and the
+/// signatures are documented on MSDN (`ReleaseCapture`, `SendMessageW`,
+/// `PostMessageW`).
+#[cfg(windows)]
+mod windows_chrome {
+    use std::ffi::c_void;
+
+    use gpui::Window;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    use super::WindowCommand;
+
+    const WM_NCLBUTTONDOWN: u32 = 0x00A1;
+    const WM_SYSCOMMAND: u32 = 0x0112;
+    const HTCAPTION: usize = 2;
+    const SC_MINIMIZE: usize = 0xF020;
+    const SC_MAXIMIZE: usize = 0xF030;
+    const SC_RESTORE: usize = 0xF120;
+    const SC_CLOSE: usize = 0xF060;
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn ReleaseCapture() -> i32;
+        fn SendMessageW(hwnd: *mut c_void, msg: u32, wparam: usize, lparam: isize) -> isize;
+        fn PostMessageW(hwnd: *mut c_void, msg: u32, wparam: usize, lparam: isize) -> i32;
+    }
+
+    /// The window's `HWND`. `None` if the platform refuses to hand out a
+    /// handle, in which case the caller simply does nothing.
+    fn hwnd(window: &Window) -> Option<*mut c_void> {
+        // `Window::window_handle` is GPUI's own accessor; the raw handle is
+        // the trait method, so it has to be named through the trait.
+        let handle = HasWindowHandle::window_handle(window).ok()?;
+        match handle.as_raw() {
+            RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as *mut c_void),
+            _ => None,
+        }
+    }
+
+    pub(super) fn start_drag(window: &Window) {
+        let Some(hwnd) = hwnd(window) else {
+            return;
+        };
+        // SAFETY: `hwnd` is the window's own handle for as long as `window`
+        // lives, and both calls are the documented sequence for starting a
+        // system move loop (`ReleaseCapture` drops the current capture so the
+        // window can take it; `SendMessageW` of a non-client left-button-down
+        // with `HTCAPTION` is what the OS reads as "the user grabbed the
+        // titlebar"). `SendMessageW` does not return until the move ends.
+        eprintln!("DRAG-DEBUG start_drag called");
+        unsafe {
+            ReleaseCapture();
+            SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+        }
+        eprintln!("DRAG-DEBUG move loop returned");
+    }
+
+    pub(super) fn command(window: &Window, command: WindowCommand) {
+        let Some(hwnd) = hwnd(window) else {
+            return;
+        };
+        let sc = match command {
+            WindowCommand::Minimize => SC_MINIMIZE,
+            WindowCommand::Close => SC_CLOSE,
+            WindowCommand::ToggleMaximize => {
+                if window.is_maximized() {
+                    SC_RESTORE
+                } else {
+                    SC_MAXIMIZE
+                }
+            }
+        };
+        // SAFETY: as above — the handle belongs to this window, and
+        // `WM_SYSCOMMAND` is how a window asks the system to run one of its
+        // own commands. Posted rather than sent so the command is handled
+        // after the click returns, like a real caption button.
+        unsafe {
+            PostMessageW(hwnd, WM_SYSCOMMAND, sc, 0);
+        }
+    }
+}
+
+/// Width the app's caption buttons occupy at the right of the header row —
+/// three 46px buttons, the metric Windows uses for its own. Headers that reach
+/// the window's right edge keep their content clear of it.
+pub const WINDOW_CONTROLS_W: f32 = 46. * 3.;
+
+/// The window's titlebar configuration.
+///
+/// macOS gets the transparent titlebar the app draws its own controls into,
+/// with the traffic lights moved onto the sidebar's 44px row; Windows gets one
+/// too, because it paints its own caption buttons in that same row
+/// (`draws_window_controls`, Waku-style) and a system caption above them would
+/// double the header. That trade is deliberate: the app's buttons carry
+/// `WindowControlArea` hit areas, so minimize/maximize/close, `Alt+Space`, and
+/// double-click-to-maximize all still run the system's own commands, but the
+/// Win11 snap-layouts flyout — which only a real system caption button opens —
+/// is not available. Linux ignores [`TitlebarOptions`] (it decorates through
+/// `WindowOptions::window_decorations`), so neither branch has to be right for
+/// it.
+#[cfg(target_os = "macos")]
+pub fn titlebar_options() -> TitlebarOptions {
+    TitlebarOptions {
+        title: Some(SharedString::from("Orbit Pi")),
+        // Transparent titlebar: the sidebar extends to the top and the native
+        // traffic lights sit inside it (Waku-style).
+        appears_transparent: true,
+        // Center the lights in the 44px titlebar row so they share a line with
+        // the window controls beside them.
+        traffic_light_position: Some(point(px(12.), px(16.))),
+    }
+}
+
+/// Transparent on Windows for the same reason as macOS — the app draws the
+/// caption buttons itself — and `false` anywhere else, where nothing would.
+#[cfg(not(target_os = "macos"))]
+pub fn titlebar_options() -> TitlebarOptions {
+    TitlebarOptions {
+        title: Some(SharedString::from("Orbit Pi")),
+        appears_transparent: draws_window_controls(),
+        traffic_light_position: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_safe_browser_url;
+    use super::*;
 
     #[test]
     fn only_http_urls_are_opened() {
@@ -369,5 +808,90 @@ mod tests {
         assert!(!is_safe_browser_url("file:///etc/passwd"));
         assert!(!is_safe_browser_url("javascript:alert(1)"));
         assert!(!is_safe_browser_url("  "));
+    }
+
+    /// The Windows label distinguishes 10 from 11 off the build number, since
+    /// both report 10.0 as their version.
+    #[test]
+    #[cfg(any(windows, test))]
+    fn windows_label_follows_the_build_number() {
+        let eleven = parse_windows_version("Microsoft Windows [Version 10.0.26100.9168]");
+        assert_eq!(
+            eleven.map(|(label, _)| label).as_deref(),
+            Some("Windows 11 (build 26100)")
+        );
+        let ten = parse_windows_version("Microsoft Windows [Version 10.0.17763.1]");
+        assert_eq!(
+            ten.map(|(label, _)| label).as_deref(),
+            Some("Windows 10 (build 17763)")
+        );
+        assert!(parse_windows_version("not a version").is_none());
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", test))]
+    fn macos_label_keeps_major_and_minor() {
+        let parsed = parse_macos_version("15.2.1\n");
+        assert_eq!(
+            parsed.map(|(label, _)| label).as_deref(),
+            Some("macOS 15.2")
+        );
+        assert!(parse_macos_version("Sequoia").is_none());
+    }
+
+    #[test]
+    #[cfg(any(all(unix, not(target_os = "macos")), test))]
+    fn os_release_prefers_pretty_name() {
+        let contents =
+            "NAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nPRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\n";
+        assert_eq!(
+            parse_os_release(contents).as_deref(),
+            Some("Ubuntu 24.04.1 LTS")
+        );
+        assert!(parse_os_release("ID=alpine\n").is_none());
+    }
+
+    /// The floors are what the bundles declare, so a host below one is called
+    /// out rather than left looking supported.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_below_the_floor_is_unsupported() {
+        let old = OsVersion {
+            major: 12,
+            minor: 7,
+            build: 0,
+        };
+        assert!(unsupported_reason(old).is_some());
+        let floor = OsVersion {
+            major: 13,
+            minor: 0,
+            build: 0,
+        };
+        assert!(unsupported_reason(floor).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_below_the_floor_is_unsupported() {
+        let old = OsVersion {
+            major: 10,
+            minor: 0,
+            build: 17134,
+        };
+        assert!(unsupported_reason(old).is_some());
+        let floor = OsVersion {
+            major: 10,
+            minor: 0,
+            build: 17763,
+        };
+        assert!(unsupported_reason(floor).is_none());
+    }
+
+    /// The probe answers with a real label on the machine running the tests.
+    #[test]
+    fn host_label_is_never_empty() {
+        let host = host();
+        assert!(!host.label.trim().is_empty());
+        assert!(!host.arch.trim().is_empty());
     }
 }

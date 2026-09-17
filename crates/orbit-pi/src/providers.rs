@@ -20,10 +20,10 @@ use serde_json::{Map, Value};
 
 /// `~/.pi/agent/models.json`, matching the pi CLI's own store.
 pub(crate) fn models_json_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".pi").join("agent").join("models.json")
+    crate::platform::home_dir()
+        .join(".pi")
+        .join("agent")
+        .join("models.json")
 }
 
 /// One provider entry from `models.json`, flattened to what the UI edits.
@@ -271,10 +271,10 @@ fn write_root_at(path: &Path, root: &Value) -> Result<(), String> {
 
 /// `~/.pi/agent/auth.json`, pi's credential store (0600).
 pub(crate) fn auth_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".pi").join("agent").join("auth.json")
+    crate::platform::home_dir()
+        .join(".pi")
+        .join("agent")
+        .join("auth.json")
 }
 
 /// `auth.json` key holding the Ollama Cloud session cookie. Deliberately not a
