@@ -1,10 +1,10 @@
 import type { Metadata } from "next";
-import { Geist_Mono, Inter } from "next/font/google";
+import { Geist_Mono, Sora } from "next/font/google";
 import "./globals.css";
 
-const inter = Inter({
+const sora = Sora({
   subsets: ["latin"],
-  variable: "--font-inter",
+  variable: "--font-sora",
   display: "swap",
 });
 
@@ -45,7 +45,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
     <html
       lang="en"
       data-scroll-behavior="smooth"
-      className={`dark ${inter.variable} ${geistMono.variable} h-full`}
+      className={`dark ${sora.variable} ${geistMono.variable} h-full`}
     >
       <body className="min-h-full flex flex-col bg-page text-ink">
         {children}

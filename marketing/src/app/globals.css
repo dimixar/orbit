@@ -23,7 +23,7 @@
   --color-winbar: #1d1e22;
   --color-side: #131417;
 
-  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-sans: var(--font-sora), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, Menlo, monospace;
 
   --shadow-window: 0 0 0 1px #ffffff17, 0 24px 60px #0000008c;
@@ -36,7 +36,7 @@
  * light theme. The site is dark-only, so the values live on `:root`.
  */
 @theme inline {
-  --font-heading: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-heading: var(--font-sora), ui-sans-serif, system-ui, sans-serif;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -281,12 +281,209 @@ body {
   animation: pulse-dot 0.72s cubic-bezier(0.32, 0.72, 0, 1) both;
 }
 
+/* Nav settles in with a quiet fade, matching the reference. */
+@keyframes nav-settle {
+  0% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+.nav-in {
+  animation: nav-settle 0.7s ease-out both;
+}
+
+/*
+ * Announce pill: a seed dot pulses, motes burst off it, and the copy
+ * wipes in behind a moving mask (reference launch-line treatment).
+ */
+@keyframes announce-pulse {
+  0% {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  16% {
+    opacity: 1;
+    transform: scale(1.28);
+  }
+  30% {
+    opacity: 0.18;
+    transform: scale(0.82);
+  }
+  46% {
+    opacity: 1;
+    transform: scale(1.14);
+  }
+  60% {
+    opacity: 0.28;
+    transform: scale(0.9);
+  }
+  78% {
+    opacity: 1;
+    transform: scale(1.04);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes announce-mote {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.3);
+  }
+  32% {
+    opacity: 0.95;
+    transform: translate(calc(-50% + var(--x)), calc(-50% + var(--y)))
+      scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(calc(-50% + var(--x) * 1.7), calc(-50% + var(--y) * 1.7))
+      scale(0.2);
+  }
+}
+
+@keyframes announce-wipe {
+  to {
+    -webkit-mask-size: 165% 100%;
+    mask-size: 165% 100%;
+  }
+}
+
+@keyframes announce-focus {
+  0% {
+    opacity: 0.35;
+    filter: blur(7px);
+    transform: translateY(3px);
+  }
+  100% {
+    opacity: 1;
+    filter: none;
+    transform: none;
+  }
+}
+
+.announce-seed {
+  position: relative;
+  flex: none;
+  width: 5px;
+  height: 5px;
+}
+
+.announce-seed > i {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--color-brand);
+  animation: announce-pulse 1.6s cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+.announce-motes {
+  pointer-events: none;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 0;
+  height: 0;
+}
+
+.announce-motes b {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: var(--color-brand);
+  animation: announce-mote 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.announce-clip {
+  min-width: 0;
+  -webkit-mask-image: linear-gradient(90deg, #000 0% 68%, #0000);
+  mask-image: linear-gradient(90deg, #000 0% 68%, #0000);
+  -webkit-mask-size: 0% 100%;
+  mask-size: 0% 100%;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  animation: announce-wipe 0.92s cubic-bezier(0.16, 1, 0.3, 1) 0.22s forwards;
+}
+
+.announce-copy {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  animation: announce-focus 0.88s cubic-bezier(0.16, 1, 0.3, 1) 0.16s both;
+}
+
+/* Live-status shimmer: gradient swept through clipped text. */
+@keyframes shimmer-sweep {
+  0% {
+    background-position: 150% 0;
+  }
+  100% {
+    background-position: -50% 0;
+  }
+}
+
+.shimmer-text {
+  background: linear-gradient(
+    90deg,
+    var(--color-ink-3) 35%,
+    var(--color-ink) 50%,
+    var(--color-ink-3) 65%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer-sweep 1.4s linear infinite;
+}
+
+/* Pixel-dither halftone patches, faded into a corner of a band. */
+.dither {
+  pointer-events: none;
+  position: absolute;
+  z-index: 0;
+  background-image: radial-gradient(circle, #ffffff 1.2px, transparent 1.3px);
+  background-size: 6px 6px;
+  opacity: 0.055;
+}
+
+.dither-tl {
+  -webkit-mask-image: radial-gradient(120% 120% at 0% 0%, #000 0%, #0000 70%);
+  mask-image: radial-gradient(120% 120% at 0% 0%, #000 0%, #0000 70%);
+}
+
+.dither-br {
+  -webkit-mask-image: radial-gradient(120% 120% at 100% 100%, #000 0%, #0000 70%);
+  mask-image: radial-gradient(120% 120% at 100% 100%, #000 0%, #0000 70%);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .rise,
   .rise-window,
   .caret,
-  .pulse-dot {
+  .pulse-dot,
+  .nav-in,
+  .announce-seed > i,
+  .announce-motes b,
+  .announce-clip,
+  .announce-copy,
+  .shimmer-text {
     animation: none;
+  }
+  .announce-clip {
+    -webkit-mask-size: 165% 100%;
+    mask-size: 165% 100%;
+  }
+  .announce-motes {
+    display: none;
   }
   *,
   ::before,

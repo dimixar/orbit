@@ -22,7 +22,9 @@ export function TranscriptMock() {
       </p>
       <div className="flex items-center gap-2 text-ink-3">
         <Brain className="size-3.5" />
-        <span className="font-mono text-[10.5px]">thinking · 8.1s</span>
+        <span className="shimmer-text font-mono text-[10.5px]">
+          thinking · 8.1s
+        </span>
       </div>
       <div className="flex items-center gap-2 rounded-md bg-[#ffffff0a] px-2.5 py-1.5 font-mono text-[10.5px] text-ink-2">
         Run bun test

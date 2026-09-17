@@ -65,7 +65,7 @@ export function Workbench() {
             {features.map(({ Icon, title, body }) => (
               <Card
                 key={title}
-                className="gap-3 rounded-[18px] p-5 ring-0"
+                className="gap-3 rounded-2xl p-5 ring-0"
               >
                 <Icon className="size-5 text-ink-3" />
                 <h3 className="text-[15px] font-medium text-ink">{title}</h3>

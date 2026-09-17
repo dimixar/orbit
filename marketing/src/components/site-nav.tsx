@@ -18,7 +18,7 @@ export async function SiteNav() {
     <header className="sticky top-0 z-50 bg-page/80 backdrop-blur-md">
       <Shell>
         <Band dashed>
-          <nav className="flex h-16 items-center justify-between">
+          <nav className="nav-in flex h-16 items-center justify-between">
             <a
               href="#top"
               aria-label="Orbit home"

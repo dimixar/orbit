@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import {
   AppleLogo,
   DownloadSimple,
@@ -53,7 +54,7 @@ export async function Hero() {
           <SectionLabel>Sessions · Providers · Git</SectionLabel>
 
           <div className="flex flex-col items-start gap-6">
-            <h1 className="flex flex-col items-start text-[clamp(36px,4.2vw,52px)] font-[250] leading-[1.16] tracking-[-0.022em] text-ink">
+            <h1 className="flex flex-col items-start text-[clamp(26px,7vw,36px)] leading-[1.22] tracking-[-0.022em] text-ink sm:text-[clamp(36px,4.2vw,52px)] sm:leading-[1.16] font-[250]">
               <span className="rise flex flex-wrap items-center gap-x-[0.23em] gap-y-[0.12em]">
                 Get
                 <OrbitIcon className="block h-[0.95em] w-auto shrink-0" alt="" />
@@ -71,7 +72,10 @@ export async function Hero() {
               Your sessions, your models, your machine.
             </p>
 
-            <div className="flex flex-wrap items-center gap-3.5">
+            <div
+              className="rise flex flex-wrap items-center gap-3.5"
+              style={{ animationDelay: "180ms" }}
+            >
               <ButtonLink
                 href={downloadHref}
                 variant="primary"
@@ -94,17 +98,44 @@ export async function Hero() {
                   href={release.pageUrl}
                   target="_blank"
                   rel="noreferrer"
-                  className="inline-flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.12em] text-ink-3 no-underline transition-colors hover:text-ink"
+                  className="inline-flex items-center gap-2.5 font-mono text-[11px] uppercase tracking-[0.12em] text-ink-3 no-underline transition-colors hover:text-ink"
                 >
-                  <span className="rounded-full border border-[#ffffff1c] px-2.5 py-1">
-                    {release.tag}
+                  <span className="announce-seed" aria-hidden="true">
+                    <i />
+                    <span className="announce-motes">
+                      <b style={{ "--x": "8px", "--y": "-7px" } as CSSProperties} />
+                      <b
+                        style=
+                          {{ "--x": "-6px", "--y": "-5px", animationDelay: "50ms" } as CSSProperties}
+                      />
+                      <b
+                        style=
+                          {{ "--x": "11px", "--y": "2px", animationDelay: "90ms" } as CSSProperties}
+                      />
+                      <b
+                        style=
+                          {{ "--x": "-8px", "--y": "6px", animationDelay: "130ms" } as CSSProperties}
+                      />
+                      <b
+                        style=
+                          {{ "--x": "5px", "--y": "-9px", animationDelay: "30ms" } as CSSProperties}
+                      />
+                    </span>
                   </span>
-                  <span>Release notes</span>
+                  <span className="announce-clip">
+                    <span className="announce-copy">
+                      <span className="text-ink">{release.tag}</span>
+                      <span>Release notes</span>
+                    </span>
+                  </span>
                 </a>
               ) : null}
             </div>
 
-            <div className="flex flex-wrap items-center gap-x-5 gap-y-[14px]">
+            <div
+              className="rise flex flex-wrap items-center gap-x-5 gap-y-[14px]"
+              style={{ animationDelay: "260ms" }}
+            >
               {platforms.map(({ Icon, label, meta, href }) => {
                 const body = (
                   <>
@@ -140,11 +171,14 @@ export async function Hero() {
           </div>
 
           {/* three surfaces */}
-          <div className="grid w-full max-w-[940px] grid-cols-1 gap-y-[18px] sm:grid-cols-3 sm:gap-y-0">
+          <div
+            className="rise grid w-full max-w-[940px] grid-cols-1 gap-y-[18px] sm:grid-cols-3 sm:gap-y-0"
+            style={{ animationDelay: "340ms" }}
+          >
             {surfaces.map(({ Icon, name, line, link, href }, i) => (
               <div
                 key={name}
-                className={`relative flex flex-col items-center gap-1.5 px-7 text-center ${
+                className={`group relative flex flex-col items-center gap-1.5 px-7 text-center ${
                   i > 0
                     ? "border-t border-dashed border-[#ffffff1c] pt-[18px] sm:border-t-0 sm:pt-0 sm:pl-7"
                     : ""
@@ -154,11 +188,11 @@ export async function Hero() {
                     : ""
                 }`}
               >
-                <Icon className="mb-2 size-6 text-ink-3" />
+                <Icon className="mb-2 size-6 text-ink-3 transition-colors duration-[150ms] group-hover:text-ink-2" />
                 <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-ink-3">
                   {name}
                 </span>
-                <span className="inline-flex min-h-9 items-center text-[13.5px] text-ink-2">
+                <span className="inline-flex min-h-9 items-center text-[13.5px] text-ink-2 transition-colors duration-[150ms] group-hover:text-ink">
                   {line}
                 </span>
                 <a

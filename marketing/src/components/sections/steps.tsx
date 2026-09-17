@@ -88,7 +88,7 @@ export async function Steps() {
           </a>
         </div>
 
-        <div className="min-w-0 overflow-hidden rounded-[14px] bg-window shadow-pop">
+        <div className="min-w-0 overflow-hidden rounded-2xl bg-window shadow-pop">
           <div className="flex items-center gap-2 bg-winbar px-3 py-[9px] text-[11px] text-ink-3 shadow-[inset_0_-1px_#00000066]">
             <span className="mr-2 inline-flex gap-1.5">
               <i className="size-[10px] rounded-full bg-[#ffffff29]" />
