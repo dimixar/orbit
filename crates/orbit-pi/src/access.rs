@@ -113,11 +113,9 @@ impl AccessMode {
 
 /// `~/.orbit-pi/access.json` — the app and the guard extension share it.
 fn store_path() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".orbit-pi").join("access.json")
+    crate::platform::home_dir()
+        .join(".orbit-pi")
+        .join("access.json")
 }
 
 #[cfg(test)]

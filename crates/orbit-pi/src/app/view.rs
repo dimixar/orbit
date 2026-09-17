@@ -7,10 +7,13 @@ use super::*;
 /// where it always has — this is the one value the two must agree on.
 pub(super) const TOP_BAR_H: f32 = 44.;
 
-/// Leading inset that clears the macOS traffic lights in the transparent
-/// titlebar. The sidebar's drag strip and the main top bar share it so the
-/// window's left controls hold their place when the sidebar is toggled.
-pub(super) const TRAFFIC_LIGHT_CLEARANCE: f32 = 80.;
+/// Leading inset that clears the OS window buttons in the titlebar row: the
+/// macOS traffic lights when the titlebar is transparent, or a plain edge
+/// inset where the system titlebar holds them (see
+/// [`platform::titlebar_options`]). The sidebar's drag strip and the main top
+/// bar share it so the window's left controls hold their place when the
+/// sidebar is toggled.
+pub(super) const TRAFFIC_LIGHT_CLEARANCE: f32 = platform::WINDOW_CONTROLS_CLEARANCE;
 
 /// Combined width of the titlebar's left controls (toggle + history) as laid
 /// out by [`OrbitApp::titlebar_left_controls`]: three 24px boxes, two 2px gaps,
@@ -327,12 +330,7 @@ impl Render for OrbitApp {
                             // left controls float above it in the titlebar
                             // overlay, so they keep the same spot whether the
                             // sidebar is open or closed.
-                            .child(
-                                div()
-                                    .h(px(TOP_BAR_H))
-                                    .w_full()
-                                    .window_control_area(WindowControlArea::Drag),
-                            )
+                            .child(window_drag_region(div().h(px(TOP_BAR_H)).w_full()))
                             // Resize handle: drag the sidebar's right edge to
                             // adjust its width. Kept fully inside the panel so
                             // the slide wrapper's clip doesn't halve its hit
@@ -548,6 +546,9 @@ impl Render for OrbitApp {
                 // Missing runtime pieces (pi / node): show the setup page
                 // with install commands instead of the empty composer.
                 self.render_onboarding(cx).into_any_element()
+            } else if self.setup_open {
+                // The same page on request, from Settings → About.
+                self.render_onboarding(cx).into_any_element()
             } else {
                 let empty = self.transcript.is_empty();
                 div()
@@ -578,27 +579,31 @@ impl Render for OrbitApp {
                             .w_full()
                             .flex()
                             .items_center()
-                            .pr(px(12.))
+                            // Caption buttons are drawn above the bar, so its
+                            // right cluster stops short of them — unless the
+                            // side pane owns the window's right edge, and
+                            // carries the clearance itself.
+                            .pr(px(if platform::draws_window_controls() && !pane_visible {
+                                platform::WINDOW_CONTROLS_W
+                            } else {
+                                12.
+                            }))
                             .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .h_full()
-                                    .window_control_area(WindowControlArea::Drag)
-                                    .flex()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_size(theme.ui_px(13.))
-                                            .text_color(theme.text_2)
-                                            .child(
-                                                self.current_title
-                                                    .clone()
-                                                    .unwrap_or_else(|| "New task".into()),
-                                            ),
-                                    ),
+                                window_drag_region(
+                                    div().flex_1().min_w_0().h_full().flex().items_center(),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(theme.ui_px(13.))
+                                        .text_color(theme.text_2)
+                                        .child(
+                                            self.current_title
+                                                .clone()
+                                                .unwrap_or_else(|| "New task".into()),
+                                        ),
+                                ),
                             )
                             .child(top_controls);
                         let gen = self.sidebar_slide_gen;
@@ -807,6 +812,23 @@ impl Render for OrbitApp {
                             .into_any_element()
                     }),
             )
+            // ── window caption buttons ── the app owns the caption on the
+            // platforms where it draws it (`platform::draws_window_controls`),
+            // so these sit above *every* surface — settings, git, usage,
+            // onboarding, and the session view — and only the headers that
+            // reach the window's right edge keep their content clear of them.
+            // Drawn before the deferred layers, so an open popover still wins.
+            .children(platform::draws_window_controls().then(|| {
+                div()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .h(px(TOP_BAR_H))
+                    .flex()
+                    .items_center()
+                    .child(window_controls(theme, window.is_maximized()))
+                    .into_any_element()
+            }))
             // ── command palette (⌘P) — a full-window deferred layer above
             // every other floating surface; the entity renders its own
             // absolute scrim + centered card.
@@ -1729,7 +1751,24 @@ impl OrbitApp {
     /// Re-run the dependency probe and, if `pi` just became available, spawn
     /// the agent client. Runs the probe off the main thread and spins the
     /// setup page's Refresh button while it's in flight.
-    pub(super) fn refresh_setup(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+    /// Open the setup page on request (Settings → About → Requirements),
+    /// off the settings surface so the page owns the main area.
+    pub(super) fn open_setup(&mut self, cx: &mut Context<Self>) {
+        self.settings_open = false;
+        self.setup_open = true;
+        // The page reports what is on disk right now, so re-probe on open.
+        self.refresh_setup(cx);
+        cx.notify();
+    }
+
+    /// Leave the setup page. Only reachable on request: the page also shows
+    /// when something is missing, and then there is nothing to go back to.
+    pub(super) fn close_setup(&mut self, cx: &mut Context<Self>) {
+        self.setup_open = false;
+        cx.notify();
+    }
+
+    pub(super) fn refresh_setup(&mut self, cx: &mut Context<Self>) {
         if self.refreshing {
             return; // ignore double-clicks while a refresh is running
         }
@@ -1737,18 +1776,19 @@ impl OrbitApp {
         cx.notify();
 
         cx.spawn(async move |this, cx| {
-            let deps = cx
+            let (deps, host) = cx
                 .background_executor()
                 .spawn(async {
                     // Short pause so the spinner reads as "working" rather than
                     // a flash before the probe returns.
                     std::thread::sleep(Duration::from_millis(250));
-                    onboarding::check_dependencies()
+                    (onboarding::check_dependencies(), platform::host())
                 })
                 .await;
             let ready = onboarding::all_required_installed(&deps);
             let _ = this.update(cx, |app, cx| {
                 app.deps = deps;
+                app.host = host;
                 app.refreshing = false;
                 if ready && app.client.is_none() {
                     let workspace = app
@@ -1776,6 +1816,9 @@ impl OrbitApp {
     pub(super) fn render_onboarding(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = *theme::get(cx);
         let missing = onboarding::missing_required_count(&self.deps);
+        // Opened from Settings → About on a provisioned machine, the page is
+        // a report rather than a checklist, so it says so.
+        let asked_for = missing == 0;
 
         div()
             .flex_1()
@@ -1830,9 +1873,11 @@ impl OrbitApp {
                                             .text_size(theme.ui_px(13.))
                                             .text_color(theme.text_3)
                                             .text_align(TextAlign::Center)
-                                            .child(
-                                                "A few pieces are missing before Orbit can run the pi agent. Install them, then refresh.",
-                                            ),
+                                            .child(if asked_for {
+                                                "Everything Orbit needs is installed. This is what it found on this machine."
+                                            } else {
+                                                "A few pieces are missing before Orbit can run the pi agent. Install them, then refresh."
+                                            }),
                                     ),
                             )
                             .child(
@@ -1844,6 +1889,7 @@ impl OrbitApp {
                                         self.render_dependency_row(dep, ix, cx).into_any_element()
                                     })),
                             )
+                            .child(self.render_host_facts(cx))
                             .child(
                                 div()
                                     .flex()
@@ -1858,7 +1904,14 @@ impl OrbitApp {
                                             .text_size(theme.ui_px(12.))
                                             .text_color(theme.text_3)
                                             .child(
-                                                div().size(px(8.)).rounded_full().bg(theme.stop_red),
+                                                // Green once nothing is
+                                                // missing: the page doubles
+                                                // as a health report.
+                                                div().size(px(8.)).rounded_full().bg(if missing > 0 {
+                                                    theme.stop_red
+                                                } else {
+                                                    theme.ok_green
+                                                }),
                                             )
                                             .child(if missing > 0 {
                                                 format!("{missing} required piece(s) missing")
@@ -1881,9 +1934,9 @@ impl OrbitApp {
                                             })
                                             .on_click({
                                                 let this = cx.entity();
-                                                move |_, window, cx| {
+                                                move |_, _window, cx| {
                                                     this.update(cx, |app, cx| {
-                                                        app.refresh_setup(window, cx);
+                                                        app.refresh_setup(cx);
                                                     });
                                                 }
                                             })
@@ -1920,10 +1973,81 @@ impl OrbitApp {
                                                         "Refresh"
                                                     }),
                                             ),
-                                    ),
+                                    )
+                                    // Only offered when the page was opened on
+                                    // request — with something missing, the
+                                    // setup page is the app.
+                                    .when(asked_for, |footer| {
+                                        footer.child(self.runtime_button(
+                                            "setup-done",
+                                            "Done",
+                                            true,
+                                            theme,
+                                            cx.entity(),
+                                            OrbitApp::close_setup,
+                                        ))
+                                    }),
                             ),
                     ),
             )
+    }
+
+    /// The machine and the paths Orbit reads and writes, under the
+    /// dependency list: the OS it is running on, pi's session store, and
+    /// Orbit's own config directory.
+    ///
+    /// Nothing here is installable, so these are quiet rows rather than
+    /// dependency cards — but they are what the install commands above have
+    /// to work against, and the first thing to check when the app comes up
+    /// with an empty sidebar.
+    pub(super) fn render_host_facts(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let theme = *theme::get(cx);
+        let facts = onboarding::host_facts(&self.host);
+        div()
+            .w_full()
+            // A panel that hugs its rows: the setup page centres its column, so
+            // a shrinkable child here would be clipped instead of grown.
+            .flex_none()
+            .rounded_lg()
+            .border_1()
+            .border_color(theme.border)
+            .overflow_hidden()
+            .children(facts.iter().enumerate().map(|(ix, fact)| {
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .px(px(14.))
+                    .py(px(8.))
+                    // Rows are separated by a hairline, so the group reads as
+                    // one panel rather than three.
+                    .when(ix > 0, |row| row.border_t_1().border_color(theme.border))
+                    .child(
+                        div()
+                            .w(px(88.))
+                            .flex_none()
+                            .text_size(theme.ui_px(11.5))
+                            .text_color(theme.text_3)
+                            .child(fact.label),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(theme.ui_px(11.5))
+                            .text_color(theme.text_2)
+                            .child(fact.value.clone()),
+                    )
+                    .children(fact.note.clone().map(|note| {
+                        div()
+                            .flex_none()
+                            .text_size(theme.ui_px(11.5))
+                            .text_color(if fact.alert { theme.crit } else { theme.text_3 })
+                            .child(note)
+                    }))
+            }))
     }
 
     /// One dependency row: status dot, name + detail, and either a version

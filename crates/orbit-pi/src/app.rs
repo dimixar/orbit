@@ -35,7 +35,7 @@ use gpui::{
     ListAlignment, ListState, MouseButton, MouseDownEvent, MouseUpEvent, ObjectFit,
     PathPromptOptions, Pixels, Render, Resource, ScrollStrategy, SharedString,
     StatefulInteractiveElement, Subscription, TextAlign, Transformation, UniformListScrollHandle,
-    Window, WindowControlArea,
+    Window,
 };
 use orbit_rpc::{
     CommandBody, ContextUsage, Event, PendingQueue, PiClient, QuotaReport, SessionState,
@@ -411,6 +411,13 @@ pub struct OrbitApp {
     _input_sub: Subscription,
     /// Onboarding dependency check results (pi, node, git).
     deps: Vec<Dependency>,
+    /// Whether the setup page is open on request (Settings → About →
+    /// Requirements) rather than because something is missing.
+    setup_open: bool,
+    /// The machine this build is running on. Probed at startup and on the
+    /// setup page's Refresh (the OS probe runs a command, so it never happens
+    /// on the render path); the setup page and Settings → About read it.
+    host: platform::Host,
     /// Whether the setup page's Refresh check is in flight (spins the button).
     refreshing: bool,
     /// Whether the top-bar session-details popover is open.
@@ -731,6 +738,7 @@ impl OrbitApp {
         // Probe the runtime pieces we need (pi, node, git) so the setup page
         // can show install commands when something is missing.
         let deps = onboarding::check_dependencies();
+        let host = platform::host();
 
         // Right side pane: Review (git diff).
         let sidepane = cx.new(SidePane::new);
@@ -844,6 +852,8 @@ impl OrbitApp {
             _theme_sub: theme_sub,
             _input_sub: input_sub,
             deps,
+            setup_open: false,
+            host,
             refreshing: false,
             session_details_open: false,
             quota_popup_open: false,
@@ -1135,9 +1145,7 @@ enum SideRow {
 /// Orbit-owned: pi owns the session files, this only records which projects
 /// the user added. Removing a workspace here never touches pi.
 fn workspaces_path() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+    crate::platform::home_dir()
         .join(".orbit-pi")
         .join("workspaces.json")
 }

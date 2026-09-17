@@ -59,6 +59,7 @@ impl OrbitApp {
                     self.updater_status = UpdateStatus::Idle;
                     self.set_error(format!("Update failed: {error}"));
                 }
+                #[cfg(unix)]
                 UpdaterEvent::QuitAndInstall => {
                     // The helper has the staged build and is waiting for this
                     // process to finish its normal quit handlers.

@@ -109,11 +109,8 @@ fn install_guard() -> Option<PathBuf> {
     )
 }
 
-/// The user's home directory (`HOME`, falling back to `USERPROFILE`).
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+    crate::platform::home_dir_opt()
 }
 
 /// Write only when the bytes differ, so relaunches don't churn mtimes (and a

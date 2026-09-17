@@ -628,6 +628,11 @@ impl GitPanel {
             .h(px(44.))
             .flex_none()
             .px(px(12.))
+            // The Git page spans the window, so its header's right end (branch
+            // chip, ±stats, search) clears the app's caption buttons.
+            .when(crate::platform::draws_window_controls(), |row| {
+                row.pr(px(crate::platform::WINDOW_CONTROLS_W))
+            })
             .flex()
             .items_center()
             .gap_2()

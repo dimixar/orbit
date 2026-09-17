@@ -1178,10 +1178,11 @@ impl Focusable for TerminalView {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl TerminalView {
     /// A view around an already-open session and no auto-start task, so a test
-    /// drives an exact shell (say `/bin/cat`) instead of the login shell.
+    /// drives an exact shell (say `/bin/cat`) instead of the login shell. Its
+    /// only caller runs on Unix, so Windows test builds do not carry it.
     fn with_session(session: TerminalSession, cx: &mut Context<Self>) -> Self {
         Self {
             session: Some(session),
@@ -1787,14 +1788,8 @@ impl Render for TerminalPanel {
     }
 }
 
-#[cfg(windows)]
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE").map(PathBuf::from)
-}
-
-#[cfg(not(windows))]
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    crate::platform::home_dir_opt()
 }
 
 /// `~/Personal/orbit` rather than the full path, so the header reads at a

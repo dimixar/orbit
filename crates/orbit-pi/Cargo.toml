@@ -18,7 +18,21 @@ icon = [
 osx_minimum_system_version = "13.0"
 
 [dependencies]
-gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+# `windows-manifest` is a gpui default feature that links gpui's own
+# `RT_MANIFEST` resource into every binary. This crate embeds its own manifest
+# (see `build.rs`), and two manifests of the same type/id/language make CVTRES
+# fail the Windows link with `CVT1100: duplicate resource`. So it is turned off
+# here and the app's manifest — the superset, with per-monitor-v2 DPI, long
+# paths, `asInvoker`, and the supportedOS list — is the one that ships. The
+# remaining defaults are re-listed because `default-features = false` clears all
+# of them; `font-kit`/`wayland`/`x11` gate Linux/FreeBSD-only dependencies, so
+# they stay no-ops on Windows and macOS.
+gpui = { version = "0.2.2", default-features = false, features = [
+    "font-kit",
+    "runtime_shaders",
+    "wayland",
+    "x11",
+] }
 # Native open/folder dialogs (NSOpenPanel on macOS) for folder selection
 rfd = "0.15"
 orbit-rpc = { path = "../orbit-rpc" }
@@ -114,5 +128,23 @@ tar = "0.4"
 # helper waits for the app to finish quitting before it swaps directories.
 libc = "0.2"
 
+# The app's own window caption on Windows (see `platform::start_window_drag`)
+# needs the window's native handle. Already in the graph through gpui, so this
+# adds no package — it only names the version gpui itself uses.
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+
+[build-dependencies]
+# Embeds the Windows icon, version metadata, and per-monitor-DPI manifest into
+# `orbit-pi.exe` (see `build.rs`). Already in the dependency graph through
+# gpui, so it pulls in no new packages. A no-op on non-Windows targets.
+embed-resource = "3"
+
 [dev-dependencies]
-gpui = { version = "0.2.2", features = ["runtime_shaders", "test-support"] }
+gpui = { version = "0.2.2", default-features = false, features = [
+    "font-kit",
+    "runtime_shaders",
+    "test-support",
+    "wayland",
+    "x11",
+] }

@@ -41,6 +41,16 @@ const VERSION_MANAGER_GLOBS: &[(&str, &str)] = &[
     (".local/share/fnm/node-versions", "installation/bin"),
 ];
 
+/// Executable suffixes to probe on Windows, most-preferred first.
+///
+/// Windows resolves executables by extension, and npm's global installs ship
+/// three files per command: an extensionless `pi` that is a POSIX *shell*
+/// script, the `pi.cmd` shim `Command` can actually spawn, and `pi.ps1`.
+/// Probing the bare name first would therefore find a `pi` that can never
+/// report a version, and would miss `node.exe` entirely.
+#[cfg(windows)]
+const WINDOWS_EXEC_SUFFIXES: &[&str] = &["exe", "cmd", "bat"];
+
 /// One runtime dependency checked at startup.
 #[derive(Debug, Clone)]
 pub struct Dependency {
@@ -56,10 +66,25 @@ pub struct Dependency {
     pub installed: bool,
     /// First line of `<bin> --version`, when installed.
     pub version: Option<String>,
-    /// Shell command that installs it.
+    /// Shell command that installs it *on this host* (see [`install_hint`]).
     pub install_hint: &'static str,
     /// One-line explanation of what it's used for.
     pub detail: &'static str,
+}
+
+/// A read-only fact about the machine, shown under the dependency list.
+///
+/// Not a dependency — there is nothing to install — but the OS, and the two
+/// directories Orbit and pi read and write, are what the install commands
+/// above have to work against, and they are the first thing to check when the
+/// app comes up with an empty sidebar.
+pub struct HostFact {
+    pub label: &'static str,
+    pub value: String,
+    /// Trailing state, e.g. `not created yet`.
+    pub note: Option<String>,
+    /// True when the fact is a problem rather than a statement.
+    pub alert: bool,
 }
 
 /// Probe every known dependency, in display order (required first).
@@ -69,24 +94,56 @@ pub fn check_dependencies() -> Vec<Dependency> {
             "pi",
             "pi",
             true,
-            "npm install -g @earendil-works/pi-coding-agent",
             "The pi coding agent — Orbit's agent runtime.",
         ),
         dependency(
             "node",
             "Node.js",
             true,
-            "brew install node",
             "Runtime that runs the pi CLI (pi is a Node script).",
         ),
         dependency(
             "git",
             "git",
             false,
-            "brew install git",
             "Used for the branch picker and diff panel.",
         ),
     ]
+}
+
+/// The host and the paths Orbit depends on, for the setup page. Takes the
+/// host the caller already probed ([`crate::platform::host`]) so the page
+/// never runs a probe while rendering.
+pub fn host_facts(host: &crate::platform::Host) -> Vec<HostFact> {
+    let platform = HostFact {
+        label: "Platform",
+        value: format!("{} · {}", host.label, host.arch),
+        alert: host.unsupported.is_some(),
+        note: host.unsupported.clone(),
+    };
+    vec![
+        platform,
+        path_fact("pi sessions", crate::sessions::sessions_dir()),
+        path_fact(
+            "Orbit config",
+            crate::platform::home_dir().join(".orbit-pi"),
+        ),
+    ]
+}
+
+/// A row for a directory the app expects to exist. A missing one is a
+/// statement, not an error: pi and Orbit both create theirs on first use.
+fn path_fact(label: &'static str, path: PathBuf) -> HostFact {
+    let note = (!path.is_dir()).then(|| "not created yet".to_string());
+    HostFact {
+        label,
+        // Displayed with forward slashes on every platform — the store path is
+        // built as `.pi/agent/sessions`, so Windows would otherwise render a
+        // mix of both separators.
+        value: crate::usage::format::short_path(&path.to_string_lossy()).replace('\\', "/"),
+        note,
+        alert: false,
+    }
 }
 
 /// True when every required dependency is installed.
@@ -103,7 +160,6 @@ fn dependency(
     bin: &'static str,
     name: &'static str,
     required: bool,
-    install_hint: &'static str,
     detail: &'static str,
 ) -> Dependency {
     let found = locate(bin);
@@ -114,9 +170,36 @@ fn dependency(
         required,
         installed: found.is_some(),
         version,
-        install_hint,
+        install_hint: install_hint(bin),
         detail,
     }
+}
+
+/// The command that installs `bin` on this host. `pi` is always npm — it is a
+/// Node package, and npm arrives with node — while node and git come from
+/// whatever package manager the OS ships: `winget` on Windows 10/11, Homebrew
+/// on macOS (the manager a Mac user with neither already has), and apt on
+/// Linux.
+fn install_hint(bin: &str) -> &'static str {
+    const PI: &str = "npm install -g @earendil-works/pi-coding-agent";
+    #[cfg(target_os = "macos")]
+    return match bin {
+        "pi" => PI,
+        "node" => "brew install node",
+        _ => "brew install git",
+    };
+    #[cfg(windows)]
+    return match bin {
+        "pi" => PI,
+        "node" => "winget install OpenJS.NodeJS.LTS",
+        _ => "winget install Git.Git",
+    };
+    #[cfg(not(any(target_os = "macos", windows)))]
+    return match bin {
+        "pi" => PI,
+        "node" => "sudo apt install nodejs npm",
+        _ => "sudo apt install git",
+    };
 }
 
 /// Locate a binary by name, honoring `PI_BIN` for `pi`, then `PATH`, then
@@ -136,16 +219,14 @@ fn locate(name: &str) -> Option<PathBuf> {
     }
     if let Some(path) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path) {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
+            if let Some(found) = existing_in(&dir, name) {
+                return Some(found);
             }
         }
     }
     for dir in SEARCH_DIRS {
-        let candidate = Path::new(dir).join(name);
-        if candidate.is_file() {
-            return Some(candidate);
+        if let Some(found) = existing_in(Path::new(dir), name) {
+            return Some(found);
         }
     }
     if let Some(home) = home_dir() {
@@ -160,9 +241,8 @@ fn locate(name: &str) -> Option<PathBuf> {
 /// binary. Split out so tests can point it at a temp dir.
 fn locate_in_home(home: &Path, name: &str) -> Option<PathBuf> {
     for sub in HOME_SEARCH_SUBDIRS {
-        let candidate = home.join(sub).join(name);
-        if candidate.is_file() {
-            return Some(candidate);
+        if let Some(found) = existing_in(&home.join(sub), name) {
+            return Some(found);
         }
     }
     for (base, sub) in VERSION_MANAGER_GLOBS {
@@ -171,20 +251,31 @@ fn locate_in_home(home: &Path, name: &str) -> Option<PathBuf> {
             continue;
         };
         for version in versions.flatten() {
-            let candidate = version.path().join(sub).join(name);
-            if candidate.is_file() {
-                return Some(candidate);
+            if let Some(found) = existing_in(&version.path().join(sub), name) {
+                return Some(found);
             }
         }
     }
     None
 }
 
+/// `dir/name` as it exists on disk, trying the Windows executable suffixes
+/// first there (see [`WINDOWS_EXEC_SUFFIXES`]) and the bare name last.
+fn existing_in(dir: &Path, name: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    for suffix in WINDOWS_EXEC_SUFFIXES {
+        let candidate = dir.join(format!("{name}.{suffix}"));
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    let candidate = dir.join(name);
+    candidate.is_file().then_some(candidate)
+}
+
 /// The user's home directory.
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+    crate::platform::home_dir_opt()
 }
 
 /// First line of `<bin> --version`, trimmed; `None` if it fails or is empty.
@@ -206,6 +297,77 @@ fn version_of(bin: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hint is what a user copies, so it has to be a command for the OS
+    /// they are on — the page used to offer Homebrew on Windows.
+    #[test]
+    fn install_hints_match_the_host() {
+        assert_eq!(
+            install_hint("pi"),
+            "npm install -g @earendil-works/pi-coding-agent"
+        );
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(install_hint("node"), "brew install node");
+            assert_eq!(install_hint("git"), "brew install git");
+        }
+        #[cfg(windows)]
+        {
+            assert!(install_hint("node").starts_with("winget install"));
+            assert!(install_hint("git").starts_with("winget install"));
+        }
+        for bin in ["pi", "node", "git"] {
+            assert!(!install_hint(bin).trim().is_empty());
+        }
+    }
+
+    /// Every dependency row carries a hint, and every hint names the binary it
+    /// installs so a copied command can't be confused for another row's.
+    #[test]
+    fn every_dependency_has_an_install_hint() {
+        for dep in check_dependencies() {
+            assert!(!dep.install_hint.trim().is_empty(), "{}", dep.name);
+            // Case-insensitively: installers spell the package, not the
+            // executable (`winget install Git.Git` for `git`).
+            assert!(
+                dep.install_hint.to_lowercase().contains(dep.bin),
+                "{}: {}",
+                dep.name,
+                dep.install_hint
+            );
+        }
+    }
+
+    /// The setup page reports the platform and the two directories the app
+    /// needs to read and write — the paths that decide whether the sidebar
+    /// has anything in it.
+    #[test]
+    fn host_facts_cover_the_platform_and_the_stores() {
+        let host = crate::platform::host();
+        let facts = host_facts(&host);
+        assert_eq!(facts.len(), 3);
+
+        let platform = &facts[0];
+        assert_eq!(platform.label, "Platform");
+        assert!(platform.value.contains(&host.label), "{}", platform.value);
+        assert!(platform.value.contains(host.arch), "{}", platform.value);
+        assert_eq!(platform.alert, host.unsupported.is_some());
+
+        let sessions = facts.iter().find(|f| f.label == "pi sessions").unwrap();
+        assert!(sessions.value.contains("sessions"), "{}", sessions.value);
+        // Displayed, not used: separators are normalized so a Windows user
+        // never sees `.pi/agent\sessions`.
+        assert!(!sessions.value.contains('\\'), "{}", sessions.value);
+        let config = facts.iter().find(|f| f.label == "Orbit config").unwrap();
+        assert!(config.value.contains(".orbit-pi"), "{}", config.value);
+        // A missing directory is reported, not treated as an error.
+        for fact in facts.iter().skip(1) {
+            assert!(!fact.alert);
+            if let Some(note) = &fact.note {
+                assert_eq!(note, "not created yet");
+            }
+        }
+    }
 
     #[test]
     fn reports_expected_dependencies() {

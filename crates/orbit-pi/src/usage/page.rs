@@ -1878,9 +1878,7 @@ impl Default for Prefs {
 
 impl Prefs {
     fn path() -> PathBuf {
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."))
+        crate::platform::home_dir()
             .join(".orbit-pi")
             .join("usage.json")
     }

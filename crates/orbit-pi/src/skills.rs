@@ -169,9 +169,7 @@ fn agent_dir() -> PathBuf {
 }
 
 fn home_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/"))
+    crate::platform::home_dir()
 }
 
 /// `.agents/skills` in `start` and every ancestor up to the git root.

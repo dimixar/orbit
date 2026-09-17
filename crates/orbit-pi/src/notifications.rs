@@ -51,7 +51,9 @@ const SOUND_NAME: &str = "Glass";
 
 /// Longest notification body kept, in characters. Smart-reply cutoffs and
 /// Notification Center both truncate anyway; a preview is what gets read.
-#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+/// Only the macOS `notify` reads it, so a non-macOS build (including a test
+/// build, where `cfg(test)` alone would not cover the gap) has it unused.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const BODY_PREVIEW_CHARS: usize = 180;
 
 /// Longest title / subtitle kept, in characters.
@@ -78,10 +80,9 @@ impl Default for Prefs {
 
 impl Prefs {
     fn persist_path() -> PathBuf {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
-        home.join(".orbit-pi").join("notifications.json")
+        crate::platform::home_dir()
+            .join(".orbit-pi")
+            .join("notifications.json")
     }
 
     pub fn load() -> Self {
@@ -128,7 +129,11 @@ impl Prefs {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DesktopAuth {
     Unknown,
+    /// Only macOS can observe the system's notification authorization, so
+    /// these two are never constructed elsewhere.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Granted,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Denied,
     /// The process is not a `.app` bundle, so banners go out through the
     /// osascript fallback and macOS attributes them to Script Editor. Only

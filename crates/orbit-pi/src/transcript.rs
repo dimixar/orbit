@@ -558,9 +558,7 @@ const RAIL_HINT_TTL: Duration = Duration::from_secs(10);
 /// rail hint shows once the conversation rail first appears, then never
 /// again (dismissed by use or timeout).
 fn hints_path() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+    crate::platform::home_dir()
         .join(".orbit-pi")
         .join("hints.json")
 }

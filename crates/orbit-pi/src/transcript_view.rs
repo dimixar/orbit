@@ -4940,13 +4940,16 @@ mod tests {
 
     #[test]
     fn workspace_relative_path_strips_workspace_prefix() {
-        let root = Path::new("/Users/dev/orbit");
+        // `Path::is_absolute` needs a drive prefix on Windows, so the root is
+        // built from a path that is absolute on whatever host runs the test.
+        let root = crate::platform::home_dir().join("orbit-ws");
+        let file = root.join("src").join("main.rs");
         assert_eq!(
-            workspace_relative_path("/Users/dev/orbit/src/main.rs", Some(root)),
+            workspace_relative_path(&file.to_string_lossy(), Some(&root)),
             "src/main.rs"
         );
         assert_eq!(
-            workspace_relative_path("src/main.rs", Some(root)),
+            workspace_relative_path("src/main.rs", Some(&root)),
             "src/main.rs"
         );
     }

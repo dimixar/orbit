@@ -70,14 +70,13 @@ impl OrbitApp {
                     .border_color(theme.border)
                     .flex()
                     .flex_col()
-                    // traffic-light strip (drag region) — same height as the
-                    // session sidebar's so the two nav columns line up
-                    .child(
-                        div()
-                            .h(px(super::view::TOP_BAR_H))
-                            .w_full()
-                            .window_control_area(WindowControlArea::Drag),
-                    )
+                    // Window drag strip — same height as the session
+                    // sidebar's so the two nav columns line up. It holds the
+                    // macOS traffic lights inside the transparent titlebar;
+                    // elsewhere it is simply how the column can be dragged.
+                    .child(window_drag_region(
+                        div().h(px(super::view::TOP_BAR_H)).w_full(),
+                    ))
                     // Back — inset like the sessions nav, breathing room below
                     .child(
                         div().px_2().pt_1().pb_3().child(
@@ -360,6 +359,42 @@ impl OrbitApp {
                     "pi CLI",
                     "The only agent runtime — pi speaks its own RPC protocol over stdio.",
                     Some(self.connection_status(theme)),
+                ),
+                // The host, next to the versions: which OS the build was made
+                // for is the first question a bug report needs answered, and
+                // the floor is what the bundles declare.
+                self.card(
+                    theme,
+                    "Platform",
+                    "The machine this build is running on.",
+                    Some(match &self.host.unsupported {
+                        Some(reason) => div()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.crit)
+                            .child(reason.clone())
+                            .into_any_element(),
+                        None => div()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.text_2)
+                            .child(format!("{} · {}", self.host.label, self.host.arch))
+                            .into_any_element(),
+                    }),
+                ),
+                // The setup page is otherwise only reachable while something
+                // is missing; this is how it stays inspectable on a machine
+                // that is already provisioned.
+                self.card(
+                    theme,
+                    "Requirements",
+                    "The runtime pieces Orbit drives (pi, Node.js, git) and the paths it reads.",
+                    Some(self.runtime_button(
+                        "about-requirements",
+                        "Review",
+                        false,
+                        theme,
+                        this.clone(),
+                        OrbitApp::open_setup,
+                    )),
                 ),
             ],
         }
