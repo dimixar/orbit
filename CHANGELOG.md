@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Windows releases attach the bare `orbit-pi.exe` alongside the `.zip`, so the
+  executable is a direct single-file download (`scripts/bundle-windows.ps1`).
+- Linux releases attach a native `.deb` alongside the `.tar.gz`, installable
+  with `apt install ./orbit-pi_*.deb` (`scripts/bundle-linux.sh`).
+
 ## [0.0.4] - 2026-09-17
 
 ## [0.0.3] - 2026-09-16

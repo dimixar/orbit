@@ -242,7 +242,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: linux
-          path: dist/orbit-pi-*.tar.gz
+          path: |
+            dist/orbit-pi-*.tar.gz
+            dist/orbit-pi_*.deb
           if-no-files-found: warn
 
   windows:
@@ -274,7 +276,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: dist/orbit-pi-*.zip
+          path: |
+            dist/orbit-pi-*.zip
+            dist/orbit-pi-*.exe
           if-no-files-found: warn
 
   draft-release:
@@ -308,7 +312,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          built=(artifacts/*.dmg artifacts/*.tar.gz artifacts/*.zip)
+          built=(artifacts/*.dmg artifacts/*.tar.gz artifacts/*.zip artifacts/*.exe artifacts/*.deb)
           if [ "${#built[@]}" -eq 0 ]; then
             echo "::error::no platform produced an artifact; not tagging"
             exit 1

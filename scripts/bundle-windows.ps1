@@ -1,5 +1,7 @@
-# Package the Windows build as a zip: the self-contained orbit-pi.exe (assets
-# and bundled pi extensions are compiled in), the app icon, and the license.
+# Package the Windows build twice: a zip (the self-contained orbit-pi.exe with
+# assets and bundled pi extensions compiled in, the app icon, and the license)
+# and the bare orbit-pi.exe on its own, so the release carries a direct
+# single-file download as well as the archive.
 #
 # Usage (from the repo root, in PowerShell):
 #   pwsh scripts/bundle-windows.ps1
@@ -34,4 +36,9 @@ Copy-Item "LICENSE" "$stage/LICENSE"
 New-Item -ItemType Directory -Force dist | Out-Null
 Compress-Archive -Path "$stage/*" -DestinationPath "dist/$package.zip" -Force
 
+# The bare executable, byte-for-byte what went into the zip above, as its own
+# release asset. Copied from the staged tree so the two can never diverge.
+Copy-Item "$stage/orbit-pi.exe" "dist/$package.exe" -Force
+
 Write-Host "Created dist/$package.zip"
+Write-Host "Created dist/$package.exe"

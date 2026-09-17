@@ -140,8 +140,10 @@ the release. Notes come from `CHANGELOG.md`.
    - **macOS** — builds the universal `.app`, signs it with your Developer ID,
      notarizes and staples the `.app` and DMG, and emits the updater `.tar.gz`
      (`scripts/make-dmg.sh`);
-   - **Linux** — builds `orbit-pi` and packages a tarball (`scripts/bundle-linux.sh`);
-   - **Windows** — builds `orbit-pi.exe` and packages a zip (`scripts/bundle-windows.ps1`);
+   - **Linux** — builds `orbit-pi` and packages a `.tar.gz` plus a native `.deb`
+     (`scripts/bundle-linux.sh`);
+   - **Windows** — builds `orbit-pi.exe` and ships it both bare and in a `.zip`
+     (`scripts/bundle-windows.ps1`);
    - **drafts** a GitHub Release on tag `v0.0.2` whose notes are the `[0.0.2]`
      section of `CHANGELOG.md` (`scripts/release-notes.py`). The same notes
      ship as an `Orbit-Pi-0.0.2.md` release asset.
