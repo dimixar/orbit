@@ -164,7 +164,7 @@ pub(crate) fn window_drag_region(el: gpui::Div) -> gpui::Div {
     }
     #[cfg(not(windows))]
     {
-        el.window_control_area(WindowControlArea::Drag)
+        el.window_control_area(gpui::WindowControlArea::Drag)
     }
 }
 
