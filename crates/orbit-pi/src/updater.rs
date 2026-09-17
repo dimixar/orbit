@@ -108,6 +108,9 @@ struct StagedUpdate {
     /// the installer executable.
     path: PathBuf,
     cleanup: Option<PathBuf>,
+    /// The release version the payload carries, so the settings surfaces can
+    /// name the download ("Download v0.0.3") without touching the feed again.
+    version: Option<String>,
 }
 
 impl StagedUpdate {
@@ -115,6 +118,7 @@ impl StagedUpdate {
         Self {
             path,
             cleanup: Some(cleanup),
+            version: None,
         }
     }
 
@@ -430,6 +434,17 @@ impl Updater {
             .status
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The version of the verified release waiting in [`Self::status`]'s
+    /// `Available`, for the settings buttons that name the download. `None`
+    /// when nothing is staged.
+    pub fn available_version(&self) -> Option<String> {
+        self.staged
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(|update| update.version.clone())
     }
 
     /// Drain one pending event. The heartbeat calls this each tick.
@@ -914,7 +929,11 @@ where
         );
     }
     verify_artifact(&archive, &item)?;
-    stage(archive, directory)
+    let mut staged = stage(archive, directory)?;
+    if let Some(update) = staged.as_mut() {
+        update.version = Some(item.version);
+    }
+    Ok(staged)
 }
 
 #[cfg(unix)]

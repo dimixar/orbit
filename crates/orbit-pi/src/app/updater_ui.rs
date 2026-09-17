@@ -16,16 +16,28 @@ impl OrbitApp {
             .is_some_and(|state| state.0.is_some())
     }
 
-    /// Re-read the updater's status and preference. Called when Settings
-    /// opens so the toggle reflects what is actually on disk.
+    /// Re-read the updater's status, staged version, and preference. Called
+    /// when Settings opens so the toggle and buttons reflect what is actually
+    /// on disk.
     pub(super) fn refresh_updater(&mut self, cx: &App) {
         if let Some(updater) = cx
             .try_global::<UpdaterState>()
             .and_then(|state| state.0.as_ref())
         {
             self.updater_status = updater.status();
+            self.updater_version = updater.available_version();
             self.automatic_updates_enabled = updater.automatically_checks_for_updates();
         }
+    }
+
+    /// Mirror the staged release's version beside the status. The worker
+    /// stages the payload before it publishes `Available`, so by the time an
+    /// event drains the version is already there to read.
+    fn sync_staged_version(&mut self, cx: &App) {
+        self.updater_version = cx
+            .try_global::<UpdaterState>()
+            .and_then(|state| state.0.as_ref())
+            .and_then(|updater| updater.available_version());
     }
 
     /// Drain the updater channel. The heartbeat calls this each tick; it is
@@ -53,7 +65,7 @@ impl OrbitApp {
                 }
                 UpdaterEvent::UpToDate => {
                     self.updater_status = UpdateStatus::Idle;
-                    self.set_status("Orbit is up to date");
+                    self.toast_info("Orbit is up to date");
                 }
                 UpdaterEvent::Failed(error) => {
                     self.updater_status = UpdateStatus::Idle;
@@ -67,6 +79,9 @@ impl OrbitApp {
                 }
             }
         }
+        // A finished check reports its status before its event, and a staged
+        // release names its version; re-read both so the buttons stay in step.
+        self.sync_staged_version(cx);
         cx.notify();
     }
 
@@ -82,7 +97,7 @@ impl OrbitApp {
             .is_some_and(|updater| updater.install_available_update());
         if started {
             self.updater_status = UpdateStatus::Updating;
-            self.set_status("Preparing the update…");
+            self.toast_info("Preparing the update…");
             cx.notify();
         }
     }
@@ -97,7 +112,7 @@ impl OrbitApp {
             updater.check_for_updates();
             self.set_status("Checking for updates…");
         } else {
-            self.set_status("Updates are not available in this build");
+            self.toast_warning("Updates are not available in this build");
         }
         cx.notify();
     }
@@ -191,9 +206,46 @@ impl OrbitApp {
                 theme,
                 "Check for updates",
                 "Verify a new release now; a staged update downloads, verifies, and installs after Orbit quits.",
-                Some(self.check_for_updates_button(theme, this)),
+                Some(self.update_action_button(theme, this)),
             ),
         ]
+    }
+
+    /// Settings → About's update row: the General control with a description
+    /// that names the release once one is staged, so the app-menu About page
+    /// can check for and install an update. `None` when this build cannot
+    /// update itself (matching [`Self::updater_rows`]).
+    pub(super) fn about_update_row(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.updater_available(cx) {
+            return None;
+        }
+        let desc = match (self.updater_status, self.updater_version.as_deref()) {
+            (UpdateStatus::Available, Some(version)) => format!(
+                "Orbit Pi v{version} is ready. Downloading installs the update and relaunches Orbit."
+            ),
+            (UpdateStatus::Available, None) => {
+                "A signed release is ready. Downloading installs the update and relaunches Orbit."
+                    .to_owned()
+            }
+            (UpdateStatus::Updating, _) => {
+                "Installing the update. Orbit will relaunch when the install finishes.".to_owned()
+            }
+            (UpdateStatus::Idle, _) => {
+                "Check for a newer signed release. Downloading installs the update and relaunches Orbit."
+                    .to_owned()
+            }
+        };
+        Some(self.card(
+            theme,
+            "Updates",
+            &desc,
+            Some(self.update_action_button(theme, this)),
+        ))
     }
 
     /// Settings → General toggle for scheduled checks.
@@ -226,31 +278,56 @@ impl OrbitApp {
             .into_any_element()
     }
 
-    /// Settings → General "Check for Updates" button.
-    pub(super) fn check_for_updates_button(
-        &self,
-        theme: Theme,
-        this: Entity<OrbitApp>,
-    ) -> AnyElement {
-        div()
-            .id("settings-check-updates")
+    /// The settings update control shared by General and About: a check
+    /// button at rest, the staged release's download once one is ready, and a
+    /// quiet label while the install helper owns the swap.
+    pub(super) fn update_action_button(&self, theme: Theme, this: Entity<OrbitApp>) -> AnyElement {
+        let base = div()
+            .id("settings-update-action")
             .h(px(26.))
             .px(px(12.))
             .rounded_md()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.bg_raised)
             .flex()
             .items_center()
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.bg_hover))
+            .gap_1p5()
             .text_size(theme.ui_px(12.))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(theme.text_2)
-            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-                this.update(cx, |app, cx| app.begin_update_check(cx));
-            })
-            .child("Check for Updates\u{2026}")
-            .into_any_element()
+            .font_weight(FontWeight::MEDIUM);
+        match self.updater_status {
+            UpdateStatus::Available => {
+                let label = match self.updater_version.as_deref() {
+                    Some(version) => format!("Download v{version}"),
+                    None => "Download update".to_owned(),
+                };
+                base.bg(theme.send_bg)
+                    .text_color(theme.send_fg)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.send_bg_hover))
+                    .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                        this.update(cx, |app, cx| app.install_available_update(cx));
+                    })
+                    .child(label)
+                    .into_any_element()
+            }
+            UpdateStatus::Updating => base
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.bg_raised)
+                .text_color(theme.text_3)
+                .cursor_default()
+                .child("Updating\u{2026}")
+                .into_any_element(),
+            UpdateStatus::Idle => base
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.bg_raised)
+                .text_color(theme.text_2)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.bg_hover))
+                .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                    this.update(cx, |app, cx| app.begin_update_check(cx));
+                })
+                .child("Check for Updates\u{2026}")
+                .into_any_element(),
+        }
     }
 }

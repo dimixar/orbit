@@ -188,7 +188,7 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 /// First line of `<bin> --version`, trimmed; `None` if it fails or is empty.
-fn version_of(bin: &Path) -> Option<String> {
+pub(crate) fn version_of(bin: &Path) -> Option<String> {
     let output = Command::new(bin).arg("--version").output().ok()?;
     let text = if output.stdout.is_empty() {
         output.stderr

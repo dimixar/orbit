@@ -14,7 +14,14 @@ impl OrbitApp {
     /// status line, errors persist (in a red banner) until dismissed or
     /// superseded, so a failure is never silently lost.
     pub(super) fn set_error(&mut self, message: impl Into<String>) {
-        self.error = Some(message.into());
+        let message = message.into();
+        // The banner renders on the chat and settings surfaces. The Git and
+        // Usage pages own the main area, so an error raised while one of them
+        // is open also surfaces as a toast — the failure is never off-screen.
+        if self.git_open || self.usage_open {
+            self.toast_error(message.clone());
+        }
+        self.error = Some(message);
     }
 
     /// Dismiss the current error banner.
@@ -73,7 +80,7 @@ impl OrbitApp {
     /// there is no process) so callers can keep the user's input intact.
     pub(super) fn send(&mut self, body: CommandBody, label: &str) -> bool {
         let Some(client) = self.client.as_ref() else {
-            self.set_status("pi is not running");
+            self.toast_warning("pi is not running");
             return false;
         };
         match client.send(body) {
@@ -229,7 +236,7 @@ impl OrbitApp {
             match effect {
                 AuthEffect::OpenUrl(url) => {
                     if let Err(err) = platform::open_url(&url) {
-                        self.set_status(format!("Could not open the browser: {err}"));
+                        self.toast_warning(format!("Could not open the browser: {err}"));
                     }
                 }
                 AuthEffect::CancelLogin(session_id) => {
@@ -239,6 +246,11 @@ impl OrbitApp {
                     // The login/logout already took effect in pi; no restart
                     // banner is needed on the RPC path.
                     self.provider_auth_dirty = false;
+                    if let Some(session) = self.auth.login() {
+                        if session.phase == LoginPhase::Succeeded {
+                            self.toast_success(format!("Signed in to {}", session.provider));
+                        }
+                    }
                     self.send(CommandBody::AuthList, "auth.list");
                     self.refresh_quota();
                     self.refresh_catalogs();
@@ -315,13 +327,13 @@ impl OrbitApp {
                 self.refresh_catalogs();
                 // Capability probes queue after the state request.
                 self.probe_auth();
-                self.set_status("pi process started");
+                self.toast_info("pi process started");
             }
             Err(err) => {
                 let message = format!("pi spawn failed: {err}");
                 self.client = None;
                 self.runtime.error = Some(message.clone());
-                self.set_status(message);
+                self.toast_error(message);
             }
         }
         cx.notify();
@@ -334,7 +346,7 @@ impl OrbitApp {
         }
         self.drop_client();
         self.busy = false;
-        self.set_status("pi process stopped");
+        self.toast_info("pi process stopped");
         cx.notify();
     }
 

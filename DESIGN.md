@@ -20,7 +20,7 @@ colors:
   ink-light: "#242424"
   ink-secondary-light: "#666666"
   hairline-light: "#E2E2E2"
-  ember-light: "#C85F44"
+  ember-light: "#B55035"
 typography:
   title:
     fontFamily: ".ZedSans, IBM Plex Sans, system-ui, sans-serif"
@@ -106,7 +106,7 @@ rationed: selection, focus, the caret, the active series. Everything else is ink
 canvas at three weights of emphasis.
 
 The system is monochrome-by-default with semantic color reserved for state, so a
-screenshot in any of the thirty-one palettes still reads as Orbit. Depth is delivered by
+screenshot in any of the thirty-two palettes still reads as Orbit. Depth is delivered by
 hairlines and tonal steps rather than shadows; shadows exist only for surfaces that
 genuinely float above the page (composer, popovers, modals).
 
@@ -117,15 +117,17 @@ genuinely float above the page (composer, popovers, modals).
 - Density with air: 28–34px controls, 6–10px padding, 44px page headers. The
   Appearance panel exposes this as UI, Terminal/Editor font sizes (px), and
   Spacing Density (a global multiplier through `theme.space`).
-- Thirty-one palettes, one grammar: every color is read from `theme::get(cx)`, never hardcoded.
+- Thirty-two palettes, one grammar: every color is read from `theme::get(cx)`, never hardcoded.
 
 ## Colors
 
 A near-black canvas with a single ember accent; light mode is warm off-white, not white.
 
 ### Primary
-- **Ember** (#E2795B dark / #C85F44 light): selection, focus rings, links, the active
+- **Ember** (#E2795B dark / #B55035 light): selection, focus rings, links, the active
   data series, the caret, inline-code wash. Never decoration, never a large fill.
+  The light ember is held dark enough to clear 4.5:1 on the light canvas, since links
+  and inline code paint it as text.
 
 ### Neutral
 - **Canvas** (#1A1A1A / #F6F5F6): the main content plane and every page background.
@@ -144,6 +146,18 @@ one of them is wrong.
 **The Ink Weight Rule.** Emphasis comes from ink weight and size, never from hue.
 A number that must shout gets `text` + a larger size, not a color.
 
+**The Surface Ramp Rule.** On dark palettes `raised` clears both the canvas and the
+chrome plane, and each state steps up from there — `canvas ≤ raised`, `sidebar ≤
+raised`, `raised ≤ hover ≤ active` — so a card, a hovered row and a selected row never
+invert into holes. Light palettes mirror the ramp downward. `menu_bg` sits at `raised`;
+a popover floats, it never recesses. Every palette is asserted against this
+monotonicity, not just Orbit.
+
+**The Accent-Is-Not-Status Rule.** The accent may never equal `ok_green`, `add_green`,
+`stop_red`, or `crit`. If the theme's signature hue is also its success or error color,
+the accent moves to the palette's second hue; a green selection over a green checkmark
+reads as one state, not two.
+
 ### Composer tokens
 The composer paints two inline token roles. They are read as content — siblings of the
 `syn_*` editor colors — not as chrome accents, so they sit outside the accent economy:
@@ -153,7 +167,7 @@ The composer paints two inline token roles. They are read as content — sibling
   a command. Chroma-less palettes (Ashwood, Mono) stay monochrome and split the two by
   ink instead of hue.
 
-Both are derived in `Theme`, so all thirty-one palettes stay legible without per-palette tuning.
+Both are derived in `Theme`, so all thirty-two palettes stay legible without per-palette tuning.
 
 ## Typography
 
@@ -304,7 +318,7 @@ element, not the palette.
 
 ### Do:
 - **Do** read every color, size, and radius from `theme::get(cx)`; add a role to
-  `Palette` when a new semantic need appears so all thirty-one palettes stay legible.
+  `Palette` when a new semantic need appears so all thirty-two palettes stay legible.
 - **Do** use hairlines and whitespace to separate sections; reserve rounded bordered
   surfaces for objects that are conceptually singular (composer, metric board, popover).
 - **Do** keep controls at 28px (compact) / 34px (primary) so a 900px-tall window shows

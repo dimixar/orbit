@@ -1,4 +1,5 @@
 use super::*;
+use crate::toast::ToastKind;
 
 impl OrbitApp {
     /// Heartbeat (~90ms): drain protocol events into the UI.
@@ -9,6 +10,15 @@ impl OrbitApp {
             .is_some_and(|at| at.elapsed() >= STATUS_MESSAGE_TTL)
         {
             self.status_at = None;
+            cx.notify();
+        }
+        // Retire toasts past their TTL (plus the fade-out, when animated).
+        let toast_fade = if theme::reduce_motion(cx) {
+            Duration::ZERO
+        } else {
+            crate::toast::FADE
+        };
+        if self.toasts.expire(Instant::now(), toast_fade) {
             cx.notify();
         }
         self.tick_background(cx);
@@ -198,14 +208,13 @@ impl OrbitApp {
                     // Capture the turn's end checkpoint, then refresh Review.
                     self.finish_turn(cx);
                     // The run ended: announce it if the user is elsewhere.
-                    self.notify_turn_finished(
-                        self.current_session_path.as_deref(),
-                        self.current_title
-                            .clone()
-                            .or_else(|| self.session_name.clone())
-                            .as_deref(),
-                        self.transcript.latest_turn_summary().as_ref(),
-                    );
+                    let path = self.current_session_path.clone();
+                    let title = self
+                        .current_title
+                        .clone()
+                        .or_else(|| self.session_name.clone());
+                    let summary = self.transcript.latest_turn_summary();
+                    self.notify_turn_finished(path.as_deref(), title.as_deref(), summary.as_ref());
                 }
                 Event::CompactionStart { .. } => {
                     // The run-status strip carries the in-progress state;
@@ -368,9 +377,11 @@ impl OrbitApp {
             self.lives.remove(&path);
         }
         // A parked run that settled while the user was elsewhere still wants
-        // saying; `post_notification` suppresses it when the window is up.
+        // saying. The settle also flips the sidebar's running loader, so the
+        // final repaint is unconditional.
         for (path, title, summary) in finished {
             self.notify_turn_finished(Some(&path), title.as_deref(), summary.as_ref());
+            changed = true;
         }
         if changed || any_busy {
             // Repaint while a background run is live (sidebar loader phase,
@@ -483,7 +494,7 @@ impl OrbitApp {
             // compacting state belongs before the data gate.
             "compact" => {
                 self.is_compacting = false;
-                self.set_status("Context compacted");
+                self.toast_info("Context compacted");
                 self.refresh_context_stats();
                 self.send(CommandBody::GetState, "get_state");
                 return;
@@ -511,7 +522,7 @@ impl OrbitApp {
                     }
                 }
                 *refresh_sessions = true;
-                self.set_status("Session cloned");
+                self.toast_success("Session cloned");
                 self.send(CommandBody::GetMessages, "get_messages");
                 self.send(CommandBody::GetState, "get_state");
                 self.refresh_catalogs();
@@ -805,10 +816,11 @@ impl OrbitApp {
     }
 
     /// Post the "turn finished" notification for a settle. Nothing is posted
-    /// while the window is frontmost, and a turn the user aborted holds no
-    /// news. `session` is the file path that a click routes back to.
+    /// while the window is frontmost except the in-app toast, and a turn the
+    /// user aborted holds no news. `session` is the file path that a banner
+    /// click routes back to.
     pub(super) fn notify_turn_finished(
-        &self,
+        &mut self,
         session: Option<&Path>,
         title: Option<&str>,
         summary: Option<&transcript::TurnSummary>,
@@ -817,22 +829,26 @@ impl OrbitApp {
         if summary.aborted {
             return;
         }
-        let (subtitle, fallback) = if summary.failed {
-            ("Agent error", "The turn ended with an error.")
+        let (subtitle, fallback, kind) = if summary.failed {
+            (
+                "Agent error",
+                "The turn ended with an error.",
+                ToastKind::Error,
+            )
         } else {
-            ("Turn finished", "pi finished the turn.")
+            ("Turn finished", "pi finished the turn.", ToastKind::Success)
         };
         let body = if summary.body.trim().is_empty() {
             fallback
         } else {
             summary.body.as_str()
         };
-        self.post_notification(session, title, subtitle, body);
+        self.post_notification(session, title, subtitle, body, kind);
     }
 
     /// A run is blocked on an extension dialog — the one event a user cannot
     /// discover once they have left the window.
-    fn notify_input_needed(&self, method: &str, value: &Value) {
+    fn notify_input_needed(&mut self, method: &str, value: &Value) {
         if !matches!(method, "select" | "confirm" | "input" | "editor") {
             return;
         }
@@ -846,29 +862,42 @@ impl OrbitApp {
             .and_then(Value::as_str)
             .filter(|text| !text.trim().is_empty())
             .unwrap_or("pi is waiting for your answer.");
+        let session = self.current_session_path.clone();
         self.post_notification(
-            self.current_session_path.as_deref(),
+            session.as_deref(),
             title.as_deref(),
             "Waiting for your answer",
             body,
+            ToastKind::Warning,
         );
     }
 
     /// Deliver a background notification through every enabled channel.
-    /// Nothing is posted while the window is frontmost: the transcript is the
-    /// notification then, and a banner over a window you are reading is noise.
+    /// While the window is frontmost the banner and sound stay quiet — the
+    /// in-app toast carries the event instead.
     fn post_notification(
-        &self,
+        &mut self,
         session: Option<&Path>,
         title: Option<&str>,
         subtitle: &str,
         body: &str,
+        kind: ToastKind,
     ) {
-        if self.window_active {
+        let prefs = self.notification_prefs;
+        if !prefs.desktop && !prefs.sound && !prefs.toasts {
             return;
         }
-        let prefs = self.notification_prefs;
-        if !prefs.desktop && !prefs.sound {
+        if self.window_active {
+            if prefs.toasts {
+                let title = title
+                    .filter(|title| !title.trim().is_empty())
+                    .unwrap_or("Orbit Pi");
+                self.push_toast(
+                    kind,
+                    title,
+                    Some(notifications::preview(body, notifications::BODY_PREVIEW_CHARS)),
+                );
+            }
             return;
         }
         if prefs.desktop {

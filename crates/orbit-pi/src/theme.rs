@@ -42,6 +42,7 @@ pub enum ThemeId {
     Nord,
     TokyoNight,
     OneDarkPro,
+    OneDarkProMax,
     Monokai,
     SolarizedDark,
     AyuDark,
@@ -62,7 +63,7 @@ pub enum ThemeId {
 impl ThemeId {
     /// Selectable themes, in the order shown in the settings dropdown
     /// (the two Orbit palettes first, then the ported/curated dark themes).
-    pub const ALL: [ThemeId; 31] = [
+    pub const ALL: [ThemeId; 32] = [
         Self::Orbit,
         Self::OrbitLight,
         Self::Vague,
@@ -89,6 +90,7 @@ impl ThemeId {
         Self::NightOwl,
         Self::Nord,
         Self::OneDarkPro,
+        Self::OneDarkProMax,
         Self::OpenChamber,
         Self::SolarizedDark,
         Self::TokyoNight,
@@ -115,6 +117,7 @@ impl ThemeId {
             Self::Nord => "nord",
             Self::TokyoNight => "tokyo-night",
             Self::OneDarkPro => "one-dark-pro",
+            Self::OneDarkProMax => "one-dark-pro-max",
             Self::Monokai => "monokai",
             Self::SolarizedDark => "solarized-dark",
             Self::AyuDark => "ayu-dark",
@@ -164,6 +167,7 @@ impl ThemeId {
             "nord" | "nord-dark" => Some(Self::Nord),
             "tokyo-night" | "tokyonight" | "tokyo-night-storm" => Some(Self::TokyoNight),
             "one-dark-pro" | "onedarkpro" => Some(Self::OneDarkPro),
+            "one-dark-pro-max" | "onedarkpromax" | "odpm" => Some(Self::OneDarkProMax),
             "monokai" => Some(Self::Monokai),
             "solarized-dark" | "solarized" => Some(Self::SolarizedDark),
             "ayu-dark" | "ayu" => Some(Self::AyuDark),
@@ -202,6 +206,7 @@ impl ThemeId {
             Self::Nord => "Nord",
             Self::TokyoNight => "Tokyonight",
             Self::OneDarkPro => "One Dark Pro",
+            Self::OneDarkProMax => "One Dark Pro Max",
             Self::Monokai => "Monokai",
             Self::SolarizedDark => "Solarized",
             Self::AyuDark => "Ayu",
@@ -238,6 +243,7 @@ impl ThemeId {
             | Self::Nord
             | Self::TokyoNight
             | Self::OneDarkPro
+            | Self::OneDarkProMax
             | Self::Monokai
             | Self::SolarizedDark
             | Self::AyuDark
@@ -803,12 +809,12 @@ const ORBIT_LIGHT: Palette = Palette {
     text: 0x242424,
     text_2: 0x666666,
     text_3: 0x858585,
-    ok_green: 0x2F8F52,
-    stop_red: 0xC64A42,
+    ok_green: 0x297E48,
+    stop_red: 0xC3433B,
     stop_red_hover: 0xD5604F,
-    add_green: 0x2F8F52,
-    del_red: 0xC64A42,
-    accent: 0xC85F44,
+    add_green: 0x297E48,
+    del_red: 0xC3433B,
+    accent: 0xB55035,
     menu_bg: 0xECECEC,
     send_bg: 0x202227,
     send_bg_hover: 0x34363C,
@@ -816,20 +822,20 @@ const ORBIT_LIGHT: Palette = Palette {
     assistant_text: 0x242424,
     code_bg: 0xE6E6E6,
     code_text: 0x242424,
-    syn_string: 0x2F8F52,
-    syn_number: 0xA66B20,
+    syn_string: 0x297E48,
+    syn_number: 0x99631E,
     syn_function: 0x242424,
     syn_type: 0x242424,
     syn_comment: 0x666666,
-    syn_literal: 0xC85F44,
-    syn_meta: 0xC64A42,
-    syn_operator: 0x858585,
+    syn_literal: 0xB55035,
+    syn_meta: 0xC3433B,
+    syn_operator: 0x6F6F6F,
     tool_border: 0xE2E2E2,
     tool_meta: 0x666666,
     ring_track: 0xECECEC,
     ring_fill: 0x242424,
-    warn: 0xA66B20,
-    crit: 0xC64A42,
+    warn: 0x99631E,
+    crit: 0xC3433B,
     trough: 0xECECEC,
 };
 
@@ -839,15 +845,15 @@ const ORBIT_LIGHT: Palette = Palette {
 /// theme's own token colors rather than the UI's greens/ambers.
 const VAGUE: Palette = Palette {
     bg_main: 0x141415,
-    bg_sidebar: 0x141415,
+    bg_sidebar: 0x171718,
     bg_raised: 0x252530,
-    bg_hover: 0x1C1C24,
-    active: 0x252530,
+    bg_hover: 0x2E2E3B,
+    active: 0x3C3C4E,
     active_fg: 0xCDCDCD,
-    border: 0x252530,
+    border: 0x2A2A37,
     text: 0xCDCDCD,
     text_2: 0x878787,
-    text_3: 0x606079,
+    text_3: 0x64647E,
     ok_green: 0x7FA563,
     stop_red: 0xD8647E,
     stop_red_hover: 0xE08398,
@@ -856,7 +862,7 @@ const VAGUE: Palette = Palette {
     accent: 0x6E94B2,
     menu_bg: 0x252530,
     send_bg: 0xCDCDCD,
-    send_bg_hover: 0xD7D7D7,
+    send_bg_hover: 0xBEBEBE,
     send_fg: 0x141415,
     assistant_text: 0xCDCDCD,
     code_bg: 0x18181F,
@@ -865,29 +871,29 @@ const VAGUE: Palette = Palette {
     syn_number: 0xE0A363,
     syn_function: 0xC48282,
     syn_type: 0x9BB4BC,
-    syn_comment: 0x606079,
+    syn_comment: 0x63637C,
     syn_literal: 0xE0A363,
     syn_meta: 0xAEAED1,
     syn_operator: 0x90A0B5,
-    tool_border: 0x252530,
+    tool_border: 0x2A2A37,
     tool_meta: 0x878787,
-    ring_track: 0x252530,
+    ring_track: 0x30303E,
     ring_fill: 0xCDCDCD,
     warn: 0xF3BE7C,
     crit: 0xD8647E,
-    trough: 0x252530,
+    trough: 0x19191A,
 };
 
 /// Batsignal (Dark): ported from the Zed community theme of the same name
 /// (via zed-themes.com). Dark appearance.
 const BATSIGNAL: Palette = Palette {
     bg_main: 0x000000,
-    bg_sidebar: 0x000000,
+    bg_sidebar: 0x030303,
     bg_raised: 0x0F0F0F,
-    bg_hover: 0x0F0F0F,
-    active: 0x0F0F0F,
+    bg_hover: 0x191919,
+    active: 0x2A2A2A,
     active_fg: 0xB3B3B3,
-    border: 0x121212,
+    border: 0x212121,
     text: 0xB3B3B3,
     text_2: 0x767676,
     text_3: 0x5E5E5E,
@@ -896,29 +902,29 @@ const BATSIGNAL: Palette = Palette {
     stop_red_hover: 0xF66868,
     add_green: 0x62C987,
     del_red: 0xF44747,
-    accent: 0xFFFF00,
+    accent: 0xE7C24A,
     menu_bg: 0x0F0F0F,
     send_bg: 0xB3B3B3,
-    send_bg_hover: 0x989898,
+    send_bg_hover: 0xA4A4A4,
     send_fg: 0x000000,
     assistant_text: 0xB3B3B3,
     code_bg: 0x070707,
     code_text: 0xB3B3B3,
     syn_string: 0xAAAAAA,
     syn_number: 0xAAAAAA,
-    syn_function: 0xFFFF00,
+    syn_function: 0xE7C24A,
     syn_type: 0xB3B3B3,
     syn_comment: 0x606060,
     syn_literal: 0xAAAAAA,
     syn_meta: 0x777777,
     syn_operator: 0xB3B3B3,
-    tool_border: 0x121212,
+    tool_border: 0x212121,
     tool_meta: 0x767676,
-    ring_track: 0x0F0F0F,
+    ring_track: 0x1C1C1C,
     ring_fill: 0xB3B3B3,
     warn: 0xCD9731,
     crit: 0xF44747,
-    trough: 0x0F0F0F,
+    trough: 0x050505,
 };
 
 /// Ashwood: ported from the Zed community theme of the same name
@@ -926,9 +932,9 @@ const BATSIGNAL: Palette = Palette {
 const ASHWOOD: Palette = Palette {
     bg_main: 0x111111,
     bg_sidebar: 0x151515,
-    bg_raised: 0x191919,
-    bg_hover: 0x232323,
-    active: 0x594242,
+    bg_raised: 0x1E1E1E,
+    bg_hover: 0x282828,
+    active: 0x2E2E2E,
     active_fg: 0xE1E1E1,
     border: 0x3A3A3A,
     text: 0xA9A9A9,
@@ -939,10 +945,10 @@ const ASHWOOD: Palette = Palette {
     stop_red_hover: 0xCFA4AC,
     add_green: 0x62C987,
     del_red: 0xC4909A,
-    accent: 0xAAAAAA,
-    menu_bg: 0x191919,
+    accent: 0xB4B4B4,
+    menu_bg: 0x1E1E1E,
     send_bg: 0xA9A9A9,
-    send_bg_hover: 0x909090,
+    send_bg_hover: 0x9A9A9A,
     send_fg: 0x111111,
     assistant_text: 0xA9A9A9,
     code_bg: 0x161616,
@@ -957,11 +963,11 @@ const ASHWOOD: Palette = Palette {
     syn_operator: 0xDEA8B3,
     tool_border: 0x3A3A3A,
     tool_meta: 0x7E7E7E,
-    ring_track: 0x191919,
+    ring_track: 0x2B2B2B,
     ring_fill: 0xA9A9A9,
     warn: 0xE99696,
     crit: 0xC4909A,
-    trough: 0x191919,
+    trough: 0x161616,
 };
 
 /// Obsidian Dark: ported from the Zed community theme of the same name
@@ -970,10 +976,10 @@ const OBSIDIAN: Palette = Palette {
     bg_main: 0x161616,
     bg_sidebar: 0x101010,
     bg_raised: 0x222222,
-    bg_hover: 0x282828,
-    active: 0x2E2E2E,
+    bg_hover: 0x2C2C2C,
+    active: 0x3D3D3D,
     active_fg: 0xDEDEDE,
-    border: 0x222222,
+    border: 0x2D2D2D,
     text: 0xDEDEDE,
     text_2: 0x888888,
     text_3: 0x686868,
@@ -982,41 +988,41 @@ const OBSIDIAN: Palette = Palette {
     stop_red_hover: 0xE08686,
     add_green: 0x3DBA6F,
     del_red: 0xD96B6B,
-    accent: 0x3DBA6F,
+    accent: 0x5CA8CF,
     menu_bg: 0x222222,
     send_bg: 0xDEDEDE,
-    send_bg_hover: 0xBDBDBD,
+    send_bg_hover: 0xCFCFCF,
     send_fg: 0x161616,
     assistant_text: 0xDEDEDE,
     code_bg: 0x101010,
     code_text: 0xDEDEDE,
     syn_string: 0x5AAD7A,
-    syn_number: 0x3DBA6F,
+    syn_number: 0x5CA8CF,
     syn_function: 0xE2E2E2,
     syn_type: 0xAAAAAA,
     syn_comment: 0x646464,
-    syn_literal: 0x3DBA6F,
-    syn_meta: 0x3DBA6F,
+    syn_literal: 0x5CA8CF,
+    syn_meta: 0x5CA8CF,
     syn_operator: 0x888888,
-    tool_border: 0x222222,
+    tool_border: 0x2D2D2D,
     tool_meta: 0x888888,
-    ring_track: 0x222222,
+    ring_track: 0x2F2F2F,
     ring_fill: 0xDEDEDE,
     warn: 0xC8964A,
     crit: 0xD96B6B,
-    trough: 0x222222,
+    trough: 0x1B1B1B,
 };
 
 /// Matte Black: ported from the Zed community theme of the same name
 /// (via zed-themes.com). Dark appearance.
 const MATTE_BLACK: Palette = Palette {
     bg_main: 0x1A1A1A,
-    bg_sidebar: 0x1A1A1A,
+    bg_sidebar: 0x1D1D1D,
     bg_raised: 0x252525,
     bg_hover: 0x3A3A3A,
-    active: 0x3A3A3A,
+    active: 0x4B4B4B,
     active_fg: 0xE0E0E0,
-    border: 0x2A2A2A,
+    border: 0x303030,
     text: 0xE0E0E0,
     text_2: 0x888888,
     text_3: 0x6A6A6A,
@@ -1028,7 +1034,7 @@ const MATTE_BLACK: Palette = Palette {
     accent: 0x40C4FF,
     menu_bg: 0x252525,
     send_bg: 0xE0E0E0,
-    send_bg_hover: 0xBEBEBE,
+    send_bg_hover: 0xD1D1D1,
     send_fg: 0x1A1A1A,
     assistant_text: 0xE0E0E0,
     code_bg: 0x252525,
@@ -1041,13 +1047,13 @@ const MATTE_BLACK: Palette = Palette {
     syn_literal: 0xFF9E80,
     syn_meta: 0x80D8FF,
     syn_operator: 0xD0D0D0,
-    tool_border: 0x2A2A2A,
+    tool_border: 0x303030,
     tool_meta: 0x888888,
-    ring_track: 0x252525,
+    ring_track: 0x323232,
     ring_fill: 0xE0E0E0,
     warn: 0xFFD740,
     crit: 0xFF5252,
-    trough: 0x252525,
+    trough: 0x1F1F1F,
 };
 
 /// Adwaita Pastel Dark: ported from the Zed community theme of the same name
@@ -1055,9 +1061,9 @@ const MATTE_BLACK: Palette = Palette {
 const ADWAITA_PASTEL: Palette = Palette {
     bg_main: 0x1E1E1E,
     bg_sidebar: 0x303030,
-    bg_raised: 0x303030,
-    bg_hover: 0x444444,
-    active: 0x444444,
+    bg_raised: 0x3B3B3B,
+    bg_hover: 0x454545,
+    active: 0x515151,
     active_fg: 0xE7E7E7,
     border: 0x4F4F4F,
     text: 0xE7E7E7,
@@ -1068,10 +1074,10 @@ const ADWAITA_PASTEL: Palette = Palette {
     stop_red_hover: 0xF0585E,
     add_green: 0x57E389,
     del_red: 0xED333B,
-    accent: 0x1E78E4,
-    menu_bg: 0x303030,
+    accent: 0x3686E7,
+    menu_bg: 0x3B3B3B,
     send_bg: 0xE7E7E7,
-    send_bg_hover: 0xC4C4C4,
+    send_bg_hover: 0xD8D8D8,
     send_fg: 0x1E1E1E,
     assistant_text: 0xE7E7E7,
     code_bg: 0x303030,
@@ -1086,21 +1092,21 @@ const ADWAITA_PASTEL: Palette = Palette {
     syn_operator: 0x89DCEB,
     tool_border: 0x4F4F4F,
     tool_meta: 0xC7C7C7,
-    ring_track: 0x303030,
+    ring_track: 0x484848,
     ring_fill: 0xE7E7E7,
     warn: 0xF8E45C,
     crit: 0xED333B,
-    trough: 0x303030,
+    trough: 0x232323,
 };
 
 /// Ashen: ported from the Zed community theme of the same name
 /// (via zed-themes.com). Dark appearance.
 const ASHEN: Palette = Palette {
     bg_main: 0x121212,
-    bg_sidebar: 0x121212,
+    bg_sidebar: 0x151515,
     bg_raised: 0x212121,
     bg_hover: 0x323232,
-    active: 0x323232,
+    active: 0x434343,
     active_fg: 0xC0C0C0,
     border: 0x323232,
     text: 0xB4B4B4,
@@ -1111,10 +1117,10 @@ const ASHEN: Palette = Palette {
     stop_red_hover: 0xCF5555,
     add_green: 0x629C7D,
     del_red: 0xC53030,
-    accent: 0xDF6464,
+    accent: 0x7FA9CE,
     menu_bg: 0x212121,
     send_bg: 0xB4B4B4,
-    send_bg_hover: 0x999999,
+    send_bg_hover: 0xA5A5A5,
     send_fg: 0x121212,
     assistant_text: 0xB4B4B4,
     code_bg: 0x151515,
@@ -1129,23 +1135,23 @@ const ASHEN: Palette = Palette {
     syn_operator: 0xD87C4A,
     tool_border: 0x323232,
     tool_meta: 0x949494,
-    ring_track: 0x212121,
+    ring_track: 0x2E2E2E,
     ring_fill: 0xB4B4B4,
     warn: 0xE5A72A,
     crit: 0xC53030,
-    trough: 0x212121,
+    trough: 0x171717,
 };
 
 /// Discord Dark: ported from the Zed community theme of the same name
 /// (via zed-themes.com). Dark appearance.
 const DISCORD: Palette = Palette {
     bg_main: 0x121214,
-    bg_sidebar: 0x121214,
-    bg_raised: 0x1A1A1E,
-    bg_hover: 0x242428,
-    active: 0x242428,
+    bg_sidebar: 0x151517,
+    bg_raised: 0x1E1E22,
+    bg_hover: 0x28282C,
+    active: 0x37373E,
     active_fg: 0xB5B4B4,
-    border: 0x222225,
+    border: 0x2A2A2E,
     text: 0xB5B4B4,
     text_2: 0x959DA5,
     text_3: 0x6D6D73,
@@ -1155,9 +1161,9 @@ const DISCORD: Palette = Palette {
     add_green: 0x4D9375,
     del_red: 0xCB7676,
     accent: 0x5197ED,
-    menu_bg: 0x1A1A1E,
+    menu_bg: 0x1E1E22,
     send_bg: 0xB5B4B4,
-    send_bg_hover: 0x9A9999,
+    send_bg_hover: 0xA6A5A5,
     send_fg: 0x121214,
     assistant_text: 0xB5B4B4,
     code_bg: 0x1A1A1E,
@@ -1170,13 +1176,13 @@ const DISCORD: Palette = Palette {
     syn_literal: 0x4D9375,
     syn_meta: 0xB8A965,
     syn_operator: 0xCB7676,
-    tool_border: 0x222225,
+    tool_border: 0x2A2A2E,
     tool_meta: 0x959DA5,
-    ring_track: 0x1A1A1E,
+    ring_track: 0x2A2A30,
     ring_fill: 0xB5B4B4,
     warn: 0xE6CC77,
     crit: 0xCB7676,
-    trough: 0x1A1A1E,
+    trough: 0x171719,
 };
 
 /// Catppuccin — ported from OpenChamber's `catppuccin-dark`.
@@ -1184,7 +1190,7 @@ const CATPPUCCIN: Palette = Palette {
     bg_main: 0x1E1E2E,
     bg_sidebar: 0x2A273B,
     bg_raised: 0x282841,
-    bg_hover: 0x2E2E42,
+    bg_hover: 0x34344A,
     active: 0x44425C,
     active_fg: 0xF4F2FF,
     border: 0x35324A,
@@ -1197,9 +1203,9 @@ const CATPPUCCIN: Palette = Palette {
     add_green: 0xA6D189,
     del_red: 0xF38BA8,
     accent: 0x7D8FFF,
-    menu_bg: 0x1E1E2E,
+    menu_bg: 0x282841,
     send_bg: 0x7D8FFF,
-    send_bg_hover: 0x9EA6DF,
+    send_bg_hover: 0x99A7FF,
     send_fg: 0x1E1E2E,
     assistant_text: 0xCDD6F4,
     code_bg: 0x211F31,
@@ -1214,34 +1220,34 @@ const CATPPUCCIN: Palette = Palette {
     syn_operator: 0xF38BA8,
     tool_border: 0x35324A,
     tool_meta: 0x969CB1,
-    ring_track: 0x282841,
+    ring_track: 0x323251,
     ring_fill: 0xCDD6F4,
     warn: 0xF4B8E4,
     crit: 0xF38BA8,
-    trough: 0x26263F,
+    trough: 0x222234,
 };
 
 /// Dracula — ported from OpenChamber's `dracula-dark`.
 const DRACULA: Palette = Palette {
     bg_main: 0x14151F,
     bg_sidebar: 0x181926,
-    bg_raised: 0x161722,
+    bg_raised: 0x1E202E,
     bg_hover: 0x26283B,
-    active: 0x30334B,
+    active: 0x33364F,
     active_fg: 0xFFFFFF,
-    border: 0x292A36,
+    border: 0x2B2C38,
     text: 0xF8F8F2,
     text_2: 0x7C7E9C,
-    text_3: 0x5D5E76,
+    text_3: 0x64657F,
     ok_green: 0x50FA7B,
     stop_red: 0xFF5555,
     stop_red_hover: 0xFF7474,
     add_green: 0x50FA7B,
     del_red: 0xFF5555,
     accent: 0xBD93F9,
-    menu_bg: 0x14151F,
+    menu_bg: 0x1E202E,
     send_bg: 0xBD93F9,
-    send_bg_hover: 0xA480D8,
+    send_bg_hover: 0xCDAEFA,
     send_fg: 0x14151F,
     assistant_text: 0xF8F8F2,
     code_bg: 0x181926,
@@ -1254,36 +1260,36 @@ const DRACULA: Palette = Palette {
     syn_literal: 0xFF79C6,
     syn_meta: 0xFFB86C,
     syn_operator: 0xFF79C6,
-    tool_border: 0x292A36,
+    tool_border: 0x2B2C38,
     tool_meta: 0x7C7E9C,
-    ring_track: 0x161722,
+    ring_track: 0x282B3D,
     ring_fill: 0xF8F8F2,
     warn: 0xFFB86C,
     crit: 0xFF5555,
-    trough: 0x1F2030,
+    trough: 0x181925,
 };
 
 /// Gruvbox — ported from OpenChamber's `gruvbox-dark`.
 const GRUVBOX: Palette = Palette {
     bg_main: 0x282828,
     bg_sidebar: 0x32302F,
-    bg_raised: 0x25292B,
+    bg_raised: 0x313639,
     bg_hover: 0x534F42,
-    active: 0x535043,
+    active: 0x656151,
     active_fg: 0xFBF1C7,
     border: 0x453F3B,
     text: 0xEBDBB2,
-    text_2: 0x918574,
-    text_3: 0x72695D,
+    text_2: 0x948877,
+    text_3: 0x7E7467,
     ok_green: 0xB8BB26,
     stop_red: 0xFB4934,
     stop_red_hover: 0xFC6A59,
     add_green: 0xB8BB26,
     del_red: 0xFB4934,
     accent: 0x83A598,
-    menu_bg: 0x282828,
+    menu_bg: 0x313639,
     send_bg: 0x83A598,
-    send_bg_hover: 0x759287,
+    send_bg_hover: 0x93B1A6,
     send_fg: 0x282828,
     assistant_text: 0xEBDBB2,
     code_bg: 0x32302F,
@@ -1298,34 +1304,34 @@ const GRUVBOX: Palette = Palette {
     syn_operator: 0xFB4934,
     tool_border: 0x453F3B,
     tool_meta: 0x918574,
-    ring_track: 0x25292B,
+    ring_track: 0x3D4347,
     ring_fill: 0xEBDBB2,
     warn: 0xFABD2F,
     crit: 0xFB4934,
-    trough: 0x343230,
+    trough: 0x2D2D2D,
 };
 
 /// Nord — ported from OpenChamber's `nord-dark`.
 const NORD: Palette = Palette {
     bg_main: 0x1F2430,
     bg_sidebar: 0x222938,
-    bg_raised: 0x1C202A,
+    bg_raised: 0x2A303E,
     bg_hover: 0x313A46,
     active: 0x3E4A56,
     active_fg: 0xF8FAFC,
     border: 0x383D49,
     text: 0xE5E9F0,
-    text_2: 0x7C828E,
-    text_3: 0x606672,
+    text_2: 0x808692,
+    text_3: 0x6B727F,
     ok_green: 0xA3BE8C,
     stop_red: 0xBF616A,
     stop_red_hover: 0xCB7D85,
     add_green: 0xA3BE8C,
     del_red: 0xBF616A,
     accent: 0x88C0D0,
-    menu_bg: 0x1F2430,
+    menu_bg: 0x2A303E,
     send_bg: 0x88C0D0,
-    send_bg_hover: 0x78A9B8,
+    send_bg_hover: 0x9CCBD8,
     send_fg: 0x1F2430,
     assistant_text: 0xE5E9F0,
     code_bg: 0x222938,
@@ -1340,20 +1346,20 @@ const NORD: Palette = Palette {
     syn_operator: 0xD57780,
     tool_border: 0x383D49,
     tool_meta: 0x7C828E,
-    ring_track: 0x1C202A,
+    ring_track: 0x343C4D,
     ring_fill: 0xE5E9F0,
     warn: 0xD08770,
     crit: 0xBF616A,
-    trough: 0x252C3C,
+    trough: 0x232936,
 };
 
 /// Tokyonight — ported from OpenChamber's `tokyonight-dark`.
 const TOKYO_NIGHT: Palette = Palette {
     bg_main: 0x0F111A,
     bg_sidebar: 0x111428,
-    bg_raised: 0x131629,
+    bg_raised: 0x15192D,
     bg_hover: 0x272E49,
-    active: 0x30313E,
+    active: 0x3F4152,
     active_fg: 0xEAEAFF,
     border: 0x2D2F43,
     text: 0xC0CAF5,
@@ -1365,9 +1371,9 @@ const TOKYO_NIGHT: Palette = Palette {
     add_green: 0x9ECE6A,
     del_red: 0xF7768E,
     accent: 0x7AA2F7,
-    menu_bg: 0x0F111A,
+    menu_bg: 0x15192D,
     send_bg: 0x7AA2F7,
-    send_bg_hover: 0x6A8CD6,
+    send_bg_hover: 0x94B5F9,
     send_fg: 0x0F111A,
     assistant_text: 0xC0CAF5,
     code_bg: 0x111428,
@@ -1382,36 +1388,36 @@ const TOKYO_NIGHT: Palette = Palette {
     syn_operator: 0xFF9E64,
     tool_border: 0x2D2F43,
     tool_meta: 0x8890B3,
-    ring_track: 0x131629,
+    ring_track: 0x1D233E,
     ring_fill: 0xC0CAF5,
     warn: 0xE0AF68,
     crit: 0xF7768E,
-    trough: 0x15192B,
+    trough: 0x131520,
 };
 
 /// One Dark Pro — ported from OpenChamber's `onedarkpro-dark`.
 const ONE_DARK_PRO: Palette = Palette {
     bg_main: 0x1E222A,
     bg_sidebar: 0x212631,
-    bg_raised: 0x232832,
+    bg_raised: 0x282E39,
     bg_hover: 0x323640,
-    active: 0x3A3E49,
+    active: 0x414652,
     active_fg: 0xF6F7FB,
     border: 0x313848,
-    text: 0xABB2BF,
-    text_2: 0x737A89,
-    text_3: 0x5A606C,
+    text: 0xACB3C0,
+    text_2: 0x7D8392,
+    text_3: 0x69707E,
     ok_green: 0x98C379,
     stop_red: 0xE06C75,
     stop_red_hover: 0xE6868E,
     add_green: 0x98C379,
     del_red: 0xE06C75,
     accent: 0x61AFEF,
-    menu_bg: 0x1E222A,
+    menu_bg: 0x282E39,
     send_bg: 0x61AFEF,
-    send_bg_hover: 0x579AD1,
+    send_bg_hover: 0x7ABCF2,
     send_fg: 0x1E222A,
-    assistant_text: 0xABB2BF,
+    assistant_text: 0xACB3C0,
     code_bg: 0x212631,
     code_text: 0xABB2BF,
     syn_string: 0x98C379,
@@ -1424,22 +1430,70 @@ const ONE_DARK_PRO: Palette = Palette {
     syn_operator: 0xE06C75,
     tool_border: 0x313848,
     tool_meta: 0x737A89,
-    ring_track: 0x232832,
+    ring_track: 0x333A48,
     ring_fill: 0xABB2BF,
     warn: 0xE5C07B,
     crit: 0xE06C75,
-    trough: 0x272C37,
+    trough: 0x222730,
+};
+
+/// One Dark Pro Max — ported from the Zed extension of the same name
+/// (<https://github.com/bukitoka/one-dark-pro-max>): One Dark Pro's syntax
+/// over a near-black `#080909` canvas with a flat, border-separated chrome.
+/// The 2c313a family replaces OpenChamber's `element.*`, and the syntax hues
+/// keep the upstream names (functions blue, keywords purple, strings green,
+/// numbers/literals orange, types yellow, operators cyan) — with the UI
+/// accent on the theme's blue and the purple carried by `syn_meta`.
+const ONE_DARK_PRO_MAX: Palette = Palette {
+    bg_main: 0x080909,
+    bg_sidebar: 0x080909,
+    bg_raised: 0x2C313A,
+    bg_hover: 0x343B46,
+    active: 0x3E4756,
+    active_fg: 0xD7DAE0,
+    border: 0x212121,
+    text: 0xABB2BF,
+    text_2: 0x7F838C,
+    text_3: 0x636B78,
+    ok_green: 0x98C379,
+    stop_red: 0xE05561,
+    stop_red_hover: 0xFF616E,
+    add_green: 0x98C379,
+    del_red: 0xE05561,
+    accent: 0x61AFEF,
+    menu_bg: 0x2C313A,
+    send_bg: 0x61AFEF,
+    send_bg_hover: 0x7CC0F5,
+    send_fg: 0x080909,
+    assistant_text: 0xABB2BF,
+    code_bg: 0x0E1013,
+    code_text: 0xABB2BF,
+    syn_string: 0x98C379,
+    syn_number: 0xD19A66,
+    syn_function: 0x61AFEF,
+    syn_type: 0xE5C07B,
+    syn_comment: 0x7F838C,
+    syn_literal: 0xD19A66,
+    syn_meta: 0xC678DD,
+    syn_operator: 0x56B6C2,
+    tool_border: 0x212121,
+    tool_meta: 0x7F838C,
+    ring_track: 0x383F4A,
+    ring_fill: 0xABB2BF,
+    warn: 0xD19A66,
+    crit: 0xE05561,
+    trough: 0x0C0E10,
 };
 
 /// Monokai — ported from OpenChamber's `monokai-dark`.
 const MONOKAI: Palette = Palette {
     bg_main: 0x23241E,
     bg_sidebar: 0x282A20,
-    bg_raised: 0x21221A,
-    bg_hover: 0x36372A,
-    active: 0x434D3C,
+    bg_raised: 0x323428,
+    bg_hover: 0x3F4031,
+    active: 0x475240,
     active_fg: 0xFFFFFF,
-    border: 0x343528,
+    border: 0x37382B,
     text: 0xF8F8F2,
     text_2: 0x939390,
     text_3: 0x71726E,
@@ -1449,9 +1503,9 @@ const MONOKAI: Palette = Palette {
     add_green: 0xA6E22E,
     del_red: 0xF92672,
     accent: 0xAE81FF,
-    menu_bg: 0x23241E,
+    menu_bg: 0x323428,
     send_bg: 0xAE81FF,
-    send_bg_hover: 0x9973DD,
+    send_bg_hover: 0xC09DFF,
     send_fg: 0x23241E,
     assistant_text: 0xF8F8F2,
     code_bg: 0x27281F,
@@ -1464,78 +1518,78 @@ const MONOKAI: Palette = Palette {
     syn_literal: 0xF92672,
     syn_meta: 0xFD971F,
     syn_operator: 0xF92672,
-    tool_border: 0x343528,
+    tool_border: 0x37382B,
     tool_meta: 0x939390,
-    ring_track: 0x21221A,
+    ring_track: 0x404233,
     ring_fill: 0xF8F8F2,
     warn: 0xFD971F,
     crit: 0xF92672,
-    trough: 0x303126,
+    trough: 0x282A23,
 };
 
 /// Solarized — ported from OpenChamber's `solarized-dark`.
 const SOLARIZED_DARK: Palette = Palette {
     bg_main: 0x001E25,
     bg_sidebar: 0x02232E,
-    bg_raised: 0x052832,
+    bg_raised: 0x0A2B35,
     bg_hover: 0x16333B,
-    active: 0x1E3B43,
+    active: 0x23454F,
     active_fg: 0xFDF6E3,
     border: 0x223A41,
-    text: 0x93A1A1,
-    text_2: 0x6F7475,
-    text_3: 0x515D60,
+    text: 0xA1ADAD,
+    text_2: 0x797E7F,
+    text_3: 0x5F6D71,
     ok_green: 0x859900,
     stop_red: 0xDC322F,
     stop_red_hover: 0xE25754,
     add_green: 0x859900,
     del_red: 0xDC322F,
     accent: 0x278BD2,
-    menu_bg: 0x001E25,
+    menu_bg: 0x0A2B35,
     send_bg: 0x278BD2,
-    send_bg_hover: 0x5C65AC,
+    send_bg_hover: 0x3B98DB,
     send_fg: 0x001F27,
-    assistant_text: 0x93A1A1,
+    assistant_text: 0xA1ADAD,
     code_bg: 0x022733,
     code_text: 0x93A1A1,
     syn_string: 0x859900,
-    syn_number: 0xD33682,
+    syn_number: 0xD53E87,
     syn_function: 0x6C71C4,
     syn_type: 0xB58900,
     syn_comment: 0x6C7F80,
-    syn_literal: 0xD33682,
+    syn_literal: 0xD53E87,
     syn_meta: 0xB58900,
-    syn_operator: 0xD33682,
+    syn_operator: 0xD53E87,
     tool_border: 0x223A41,
     tool_meta: 0x6F7475,
-    ring_track: 0x052832,
+    ring_track: 0x0E3C4A,
     ring_fill: 0x93A1A1,
     warn: 0xB58900,
     crit: 0xDC322F,
-    trough: 0x062930,
+    trough: 0x00262F,
 };
 
 /// Ayu — ported from OpenChamber's `ayu-dark`.
 const AYU_DARK: Palette = Palette {
     bg_main: 0x0F1419,
     bg_sidebar: 0x18222C,
-    bg_raised: 0x17202A,
-    bg_hover: 0x22262D,
-    active: 0x242830,
+    bg_raised: 0x202D3B,
+    bg_hover: 0x273748,
+    active: 0x2F4257,
     active_fg: 0xFBFBFD,
     border: 0x292C30,
     text: 0xD6DAE0,
     text_2: 0x777E86,
-    text_3: 0x585E65,
+    text_3: 0x61676F,
     ok_green: 0x78D05C,
     stop_red: 0xF58572,
     stop_red_hover: 0xF79B8B,
     add_green: 0x78D05C,
     del_red: 0xF58572,
     accent: 0x3FB7E3,
-    menu_bg: 0x0F1419,
+    menu_bg: 0x202D3B,
     send_bg: 0x3FB7E3,
-    send_bg_hover: 0x389FC5,
+    send_bg_hover: 0x57C0E7,
     send_fg: 0x0F1419,
     assistant_text: 0xD6DAE0,
     code_bg: 0x18222C,
@@ -1550,11 +1604,11 @@ const AYU_DARK: Palette = Palette {
     syn_operator: 0xF2856F,
     tool_border: 0x292C30,
     tool_meta: 0x777E86,
-    ring_track: 0x17202A,
+    ring_track: 0x293A4C,
     ring_fill: 0xD6DAE0,
     warn: 0xE4A75C,
     crit: 0xF58572,
-    trough: 0x1E252D,
+    trough: 0x13191F,
 };
 
 /// Kanagawa — ported from OpenChamber's `kanagawa-dark`.
@@ -1563,21 +1617,21 @@ const KANAGAWA: Palette = Palette {
     bg_sidebar: 0x23232D,
     bg_raised: 0x2A2A37,
     bg_hover: 0x363646,
-    active: 0x303944,
+    active: 0x414D5C,
     active_fg: 0xDCD7BA,
     border: 0x333343,
     text: 0xDCD7BA,
     text_2: 0x8B8B85,
-    text_3: 0x6B6B69,
+    text_3: 0x6F6F6D,
     ok_green: 0x98BB6C,
     stop_red: 0xE82424,
     stop_red_hover: 0xEC4B4B,
     add_green: 0x98BB6C,
     del_red: 0xE82424,
     accent: 0x7FB4CA,
-    menu_bg: 0x1F1F28,
+    menu_bg: 0x2A2A37,
     send_bg: 0x7FB4CA,
-    send_bg_hover: 0x9DC5E0,
+    send_bg_hover: 0x93C0D2,
     send_fg: 0x1F1F28,
     assistant_text: 0xDCD7BA,
     code_bg: 0x16161D,
@@ -1586,17 +1640,17 @@ const KANAGAWA: Palette = Palette {
     syn_number: 0xFF9E3B,
     syn_function: 0xE6C384,
     syn_type: 0xC8C093,
-    syn_comment: 0x54546D,
+    syn_comment: 0x61617E,
     syn_literal: 0xFF9E3B,
     syn_meta: 0xFF9E3B,
     syn_operator: 0xC34043,
     tool_border: 0x333343,
     tool_meta: 0x8B8B85,
-    ring_track: 0x2A2A37,
+    ring_track: 0x353545,
     ring_fill: 0xDCD7BA,
     warn: 0xFF9E3B,
     crit: 0xE82424,
-    trough: 0x2A2A36,
+    trough: 0x23232E,
 };
 
 /// Aura — ported from OpenChamber's `aura-dark`.
@@ -1605,21 +1659,21 @@ const AURA: Palette = Palette {
     bg_sidebar: 0x1A1921,
     bg_raised: 0x201E2B,
     bg_hover: 0x262835,
-    active: 0x2C2F3E,
+    active: 0x343749,
     active_fg: 0xFFFFFF,
-    border: 0x2A2935,
+    border: 0x2C2B37,
     text: 0xEDECEE,
     text_2: 0x8A8282,
-    text_3: 0x676163,
+    text_3: 0x6B6567,
     ok_green: 0x61FFCA,
     stop_red: 0xFF6767,
     stop_red_hover: 0xFF8282,
     add_green: 0x61FFCA,
     del_red: 0xFF6767,
     accent: 0xA277FF,
-    menu_bg: 0x15141B,
+    menu_bg: 0x201E2B,
     send_bg: 0xA277FF,
-    send_bg_hover: 0x8D68DD,
+    send_bg_hover: 0xB593FF,
     send_fg: 0x15141B,
     assistant_text: 0xEDECEE,
     code_bg: 0x1A1921,
@@ -1632,24 +1686,24 @@ const AURA: Palette = Palette {
     syn_literal: 0xFF6767,
     syn_meta: 0xFFCA85,
     syn_operator: 0xFF6767,
-    tool_border: 0x2A2935,
+    tool_border: 0x2C2B37,
     tool_meta: 0x8A8282,
-    ring_track: 0x201E2B,
+    ring_track: 0x2B283A,
     ring_fill: 0xEDECEE,
     warn: 0xFFCA85,
     crit: 0xFF6767,
-    trough: 0x25232F,
+    trough: 0x1A1821,
 };
 
 /// Carbonfox — ported from OpenChamber's `carbonfox-dark`.
 const CARBONFOX: Palette = Palette {
     bg_main: 0x161616,
     bg_sidebar: 0x222222,
-    bg_raised: 0x222222,
-    bg_hover: 0x262626,
-    active: 0x333333,
+    bg_raised: 0x2D2D2D,
+    bg_hover: 0x373737,
+    active: 0x434343,
     active_fg: 0xFFFFFF,
-    border: 0x2D2C2C,
+    border: 0x2E2D2D,
     text: 0xF2F4F8,
     text_2: 0x8B8A8A,
     text_3: 0x686767,
@@ -1659,9 +1713,9 @@ const CARBONFOX: Palette = Palette {
     add_green: 0x42BE65,
     del_red: 0xFF8389,
     accent: 0x33B1FF,
-    menu_bg: 0x161616,
+    menu_bg: 0x2D2D2D,
     send_bg: 0x33B1FF,
-    send_bg_hover: 0x2F9ADC,
+    send_bg_hover: 0x4FBCFF,
     send_fg: 0x161616,
     assistant_text: 0xF2F4F8,
     code_bg: 0x262626,
@@ -1674,13 +1728,13 @@ const CARBONFOX: Palette = Palette {
     syn_literal: 0xFF8389,
     syn_meta: 0xF1C21B,
     syn_operator: 0xFF8389,
-    tool_border: 0x2D2C2C,
+    tool_border: 0x2E2D2D,
     tool_meta: 0x8B8A8A,
-    ring_track: 0x222222,
+    ring_track: 0x3A3A3A,
     ring_fill: 0xF2F4F8,
     warn: 0xF1C21B,
     crit: 0xFF8389,
-    trough: 0x292828,
+    trough: 0x1B1B1B,
 };
 
 /// Fields of the Shire — ported from OpenChamber's `fields-of-the-shire-dark`.
@@ -1688,22 +1742,22 @@ const FIELDS_OF_THE_SHIRE: Palette = Palette {
     bg_main: 0x1B1815,
     bg_sidebar: 0x23201C,
     bg_raised: 0x2B2622,
-    bg_hover: 0x332D28,
-    active: 0x35312D,
+    bg_hover: 0x37302B,
+    active: 0x47423C,
     active_fg: 0xEBE0D1,
     border: 0x35322F,
     text: 0xEBE0D1,
-    text_2: 0x83796F,
-    text_3: 0x645C54,
+    text_2: 0x847A70,
+    text_3: 0x71685F,
     ok_green: 0x7F905E,
     stop_red: 0xB34D3B,
     stop_red_hover: 0xC16D5E,
     add_green: 0x7F905E,
     del_red: 0xB34D3B,
-    accent: 0x7A8A5A,
-    menu_bg: 0x1B1815,
+    accent: 0x9CAF72,
+    menu_bg: 0x2B2622,
     send_bg: 0x7A8A5A,
-    send_bg_hover: 0x93A56B,
+    send_bg_hover: 0x899B65,
     send_fg: 0x0C0A08,
     assistant_text: 0xEBE0D1,
     code_bg: 0x23201C,
@@ -1711,41 +1765,41 @@ const FIELDS_OF_THE_SHIRE: Palette = Palette {
     syn_string: 0x93A56B,
     syn_number: 0xC47A3A,
     syn_function: 0xC47A3A,
-    syn_type: 0x7A8A5A,
-    syn_comment: 0x6A5E52,
+    syn_type: 0x9CAF72,
+    syn_comment: 0x76685B,
     syn_literal: 0xC47A3A,
     syn_meta: 0xC47A3A,
     syn_operator: 0xA89888,
     tool_border: 0x35322F,
     tool_meta: 0x83796F,
-    ring_track: 0x2B2622,
+    ring_track: 0x39332D,
     ring_fill: 0xEBE0D1,
     warn: 0xC47A3A,
     crit: 0xB34D3B,
-    trough: 0x282320,
+    trough: 0x211D19,
 };
 
 /// Flexoki — ported from OpenChamber's `flexoki-dark`.
 const FLEXOKI: Palette = Palette {
     bg_main: 0x171515,
     bg_sidebar: 0x1C1B1A,
-    bg_raised: 0x1C1A19,
+    bg_raised: 0x252221,
     bg_hover: 0x2D2B2B,
-    active: 0x323030,
+    active: 0x3E3B3B,
     active_fg: 0xCECDC3,
-    border: 0x2B2A28,
+    border: 0x2D2C2A,
     text: 0xCECDC3,
     text_2: 0x807E79,
-    text_3: 0x605E5B,
+    text_3: 0x696764,
     ok_green: 0xA0AF54,
     stop_red: 0xD14D41,
     stop_red_hover: 0xD96D63,
     add_green: 0xA0AF54,
     del_red: 0xD14D41,
     accent: 0xDA702C,
-    menu_bg: 0x171515,
+    menu_bg: 0x252221,
     send_bg: 0xDA702C,
-    send_bg_hover: 0xDA702C,
+    send_bg_hover: 0xDE8044,
     send_fg: 0x171515,
     assistant_text: 0xCECDC3,
     code_bg: 0x1C1B1A,
@@ -1758,13 +1812,13 @@ const FLEXOKI: Palette = Palette {
     syn_literal: 0x8B7EC8,
     syn_meta: 0xDA702C,
     syn_operator: 0xD14D41,
-    tool_border: 0x2B2A28,
+    tool_border: 0x2D2C2A,
     tool_meta: 0x807E79,
-    ring_track: 0x1C1A19,
+    ring_track: 0x322E2D,
     ring_fill: 0xCECDC3,
     warn: 0xDA702C,
     crit: 0xD14D41,
-    trough: 0x1E1D1C,
+    trough: 0x1C1A1A,
 };
 
 /// JetBrains — ported from OpenChamber's `jetbrains-dark`.
@@ -1773,7 +1827,7 @@ const JETBRAINS: Palette = Palette {
     bg_sidebar: 0x26282B,
     bg_raised: 0x2B2D30,
     bg_hover: 0x3C3E41,
-    active: 0x43454A,
+    active: 0x4B4D53,
     active_fg: 0xDFE1E5,
     border: 0x383A3F,
     text: 0xDFE1E5,
@@ -1785,12 +1839,12 @@ const JETBRAINS: Palette = Palette {
     add_green: 0x57965D,
     del_red: 0xFA6675,
     accent: 0x6796F5,
-    menu_bg: 0x1E1F22,
+    menu_bg: 0x2B2D30,
     send_bg: 0x6796F5,
-    send_bg_hover: 0x70AEFF,
+    send_bg_hover: 0x81A8F7,
     send_fg: 0x1E1F22,
     assistant_text: 0xDFE1E5,
-    code_bg: 0x1E1F22,
+    code_bg: 0x212226,
     code_text: 0xBCBEC4,
     syn_string: 0x6AAB73,
     syn_number: 0x2AACB8,
@@ -1802,11 +1856,11 @@ const JETBRAINS: Palette = Palette {
     syn_operator: 0xBCBEC4,
     tool_border: 0x383A3F,
     tool_meta: 0x9FA0A2,
-    ring_track: 0x2B2D30,
+    ring_track: 0x373A3D,
     ring_fill: 0xDFE1E5,
     warn: 0xF2C55C,
     crit: 0xFA6675,
-    trough: 0x28292C,
+    trough: 0x232427,
 };
 
 /// Mono — ported from OpenChamber's `mono-dark`.
@@ -1815,21 +1869,21 @@ const MONO: Palette = Palette {
     bg_sidebar: 0x0A0A0A,
     bg_raised: 0x141414,
     bg_hover: 0x1F1F1F,
-    active: 0x1F1F1F,
+    active: 0x303030,
     active_fg: 0xE5E5E5,
     border: 0x2F2F2F,
     text: 0xE5E5E5,
     text_2: 0x808080,
-    text_3: 0x5A5A5A,
+    text_3: 0x5E5E5E,
     ok_green: 0xE5E5E5,
     stop_red: 0x666666,
     stop_red_hover: 0x828282,
     add_green: 0xE5E5E5,
     del_red: 0x666666,
     accent: 0xFFFFFF,
-    menu_bg: 0x000000,
+    menu_bg: 0x141414,
     send_bg: 0xFFFFFF,
-    send_bg_hover: 0xE5E5E5,
+    send_bg_hover: 0xF0F0F0,
     send_fg: 0x000000,
     assistant_text: 0xE5E5E5,
     code_bg: 0x0A0A0A,
@@ -1844,11 +1898,11 @@ const MONO: Palette = Palette {
     syn_operator: 0x808080,
     tool_border: 0x2F2F2F,
     tool_meta: 0x808080,
-    ring_track: 0x141414,
+    ring_track: 0x212121,
     ring_fill: 0xE5E5E5,
     warn: 0x999999,
     crit: 0x666666,
-    trough: 0x1A1A1A,
+    trough: 0x050505,
 };
 
 /// Mono Plus — ported from OpenChamber's `mono-plus-dark`.
@@ -1857,21 +1911,21 @@ const MONO_PLUS: Palette = Palette {
     bg_sidebar: 0x0A0A0A,
     bg_raised: 0x141414,
     bg_hover: 0x1F1F1F,
-    active: 0x1F1F1F,
+    active: 0x303030,
     active_fg: 0xE5E5E5,
     border: 0x2F2F2F,
     text: 0xE5E5E5,
     text_2: 0x808080,
-    text_3: 0x5A5A5A,
+    text_3: 0x5E5E5E,
     ok_green: 0x6A8E6A,
     stop_red: 0x9E6A6A,
     stop_red_hover: 0xAF8585,
     add_green: 0x6A8E6A,
     del_red: 0x9E6A6A,
     accent: 0xA2BEE8,
-    menu_bg: 0x000000,
+    menu_bg: 0x141414,
     send_bg: 0xA2BEE8,
-    send_bg_hover: 0xE5E5E5,
+    send_bg_hover: 0xB8CEEE,
     send_fg: 0x000000,
     assistant_text: 0xE5E5E5,
     code_bg: 0x0A0A0A,
@@ -1886,34 +1940,34 @@ const MONO_PLUS: Palette = Palette {
     syn_operator: 0xDCCDBE,
     tool_border: 0x2F2F2F,
     tool_meta: 0x808080,
-    ring_track: 0x141414,
+    ring_track: 0x212121,
     ring_fill: 0xE5E5E5,
     warn: 0x9E8A6A,
     crit: 0x9E6A6A,
-    trough: 0x1A1A1A,
+    trough: 0x050505,
 };
 
 /// Night Owl — ported from OpenChamber's `nightowl-dark`.
 const NIGHT_OWL: Palette = Palette {
     bg_main: 0x011627,
     bg_sidebar: 0x0B253A,
-    bg_raised: 0x001122,
-    bg_hover: 0x233344,
-    active: 0x323F50,
+    bg_raised: 0x133149,
+    bg_hover: 0x173C59,
+    active: 0x1C486B,
     active_fg: 0xFFFFFF,
     border: 0x2B3339,
     text: 0xD6DEEB,
     text_2: 0x7D8892,
-    text_3: 0x586672,
+    text_3: 0x5A6874,
     ok_green: 0xC5E478,
     stop_red: 0xEF5350,
     stop_red_hover: 0xF27270,
     add_green: 0xC5E478,
     del_red: 0xEF5350,
     accent: 0x82AAFF,
-    menu_bg: 0x011627,
+    menu_bg: 0x133149,
     send_bg: 0x82AAFF,
-    send_bg_hover: 0x6F94DF,
+    send_bg_hover: 0x9EBDFF,
     send_fg: 0x011627,
     assistant_text: 0xD6DEEB,
     code_bg: 0x0B253A,
@@ -1928,22 +1982,22 @@ const NIGHT_OWL: Palette = Palette {
     syn_operator: 0xF78C6C,
     tool_border: 0x2B3339,
     tool_meta: 0x7D8892,
-    ring_track: 0x001122,
+    ring_track: 0x183F5D,
     ring_fill: 0xD6DEEB,
     warn: 0xECC48D,
     crit: 0xEF5350,
-    trough: 0x162431,
+    trough: 0x011C31,
 };
 
 /// OpenChamber — ported from OpenChamber's `openchamber-dark`.
 const OPEN_CHAMBER: Palette = Palette {
     bg_main: 0x120F0E,
     bg_sidebar: 0x171615,
-    bg_raised: 0x181715,
-    bg_hover: 0x23201F,
-    active: 0x312E2D,
+    bg_raised: 0x1F1D1B,
+    bg_hover: 0x2A2625,
+    active: 0x3A3736,
     active_fg: 0xC9C5BA,
-    border: 0x242323,
+    border: 0x2A2929,
     text: 0xC9C5BA,
     text_2: 0x8F8B81,
     text_3: 0x6A665E,
@@ -1953,12 +2007,12 @@ const OPEN_CHAMBER: Palette = Palette {
     add_green: 0x76AD4F,
     del_red: 0xDA5B4A,
     accent: 0xDA7C47,
-    menu_bg: 0x120F0E,
+    menu_bg: 0x1F1D1B,
     send_bg: 0xDA7C47,
-    send_bg_hover: 0xEB8C57,
+    send_bg_hover: 0xDF8D5E,
     send_fg: 0x000000,
     assistant_text: 0xC9C5BA,
-    code_bg: 0x120F0E,
+    code_bg: 0x161211,
     code_text: 0xC9C5BA,
     syn_string: 0xD58373,
     syn_number: 0x279E93,
@@ -1968,13 +2022,13 @@ const OPEN_CHAMBER: Palette = Palette {
     syn_literal: 0x279E93,
     syn_meta: 0xC67F13,
     syn_operator: 0xDA6B6D,
-    tool_border: 0x242323,
+    tool_border: 0x2A2929,
     tool_meta: 0x8F8B81,
-    ring_track: 0x181715,
+    ring_track: 0x2D2A27,
     ring_fill: 0xC9C5BA,
     warn: 0xC67F13,
     crit: 0xDA5B4A,
-    trough: 0x171616,
+    trough: 0x181412,
 };
 
 /// Vesper — ported from OpenChamber's `vesper-dark`.
@@ -1983,21 +2037,21 @@ const VESPER: Palette = Palette {
     bg_sidebar: 0x1C1B1B,
     bg_raised: 0x242121,
     bg_hover: 0x2F2F2F,
-    active: 0x343333,
+    active: 0x403F3F,
     active_fg: 0xFFFFFF,
     border: 0x373636,
     text: 0xE8E5E5,
     text_2: 0x848484,
-    text_3: 0x636363,
+    text_3: 0x676767,
     ok_green: 0x99FFE4,
     stop_red: 0xFF8080,
     stop_red_hover: 0xFF9797,
     add_green: 0x99FFE4,
     del_red: 0xFF8080,
     accent: 0xFFC799,
-    menu_bg: 0x151515,
+    menu_bg: 0x242121,
     send_bg: 0xFFC799,
-    send_bg_hover: 0xDBAC84,
+    send_bg_hover: 0xFFD6B5,
     send_fg: 0x101010,
     assistant_text: 0xE8E5E5,
     code_bg: 0x141414,
@@ -2012,20 +2066,20 @@ const VESPER: Palette = Palette {
     syn_operator: 0xFF8080,
     tool_border: 0x373636,
     tool_meta: 0x848484,
-    ring_track: 0x242121,
+    ring_track: 0x312D2D,
     ring_fill: 0xE8E5E5,
     warn: 0xFFC799,
     crit: 0xFF8080,
-    trough: 0x1F1F1F,
+    trough: 0x1A1A1A,
 };
 
 /// Vitesse — ported from OpenChamber's `vitesse-dark-dark`.
 const VITESSE: Palette = Palette {
     bg_main: 0x121212,
     bg_sidebar: 0x171717,
-    bg_raised: 0x1A1A1A,
-    bg_hover: 0x232323,
-    active: 0x272727,
+    bg_raised: 0x1F1F1F,
+    bg_hover: 0x292929,
+    active: 0x3A3A3A,
     active_fg: 0xDBD7CA,
     border: 0x313131,
     text: 0xDBD7CA,
@@ -2036,13 +2090,13 @@ const VITESSE: Palette = Palette {
     stop_red_hover: 0xD48F8F,
     add_green: 0x4D9375,
     del_red: 0xCB7676,
-    accent: 0x4D9375,
-    menu_bg: 0x121212,
-    send_bg: 0x4D9375,
-    send_bg_hover: 0x4D9375,
-    send_fg: 0x121212,
+    accent: 0x6C9BD1,
+    menu_bg: 0x1F1F1F,
+    send_bg: 0x6C9BD1,
+    send_bg_hover: 0x82ABDA,
+    send_fg: 0x10141A,
     assistant_text: 0xDBD7CA,
-    code_bg: 0x121212,
+    code_bg: 0x161616,
     code_text: 0xDBD7CA,
     syn_string: 0xC98A7D,
     syn_number: 0x4C9A91,
@@ -2054,11 +2108,11 @@ const VITESSE: Palette = Palette {
     syn_operator: 0xCB7676,
     tool_border: 0x313131,
     tool_meta: 0xC0BEB9,
-    ring_track: 0x1A1A1A,
+    ring_track: 0x2C2C2C,
     ring_fill: 0xDBD7CA,
     warn: 0xD4976C,
     crit: 0xCB7676,
-    trough: 0x1E1E1E,
+    trough: 0x171717,
 };
 
 fn palette(id: ThemeId) -> Palette {
@@ -2079,6 +2133,7 @@ fn palette(id: ThemeId) -> Palette {
         ThemeId::Nord => NORD,
         ThemeId::TokyoNight => TOKYO_NIGHT,
         ThemeId::OneDarkPro => ONE_DARK_PRO,
+        ThemeId::OneDarkProMax => ONE_DARK_PRO_MAX,
         ThemeId::Monokai => MONOKAI,
         ThemeId::SolarizedDark => SOLARIZED_DARK,
         ThemeId::AyuDark => AYU_DARK,
@@ -2464,6 +2519,7 @@ mod tests {
             "Night Owl",
             "Nord",
             "One Dark Pro",
+            "One Dark Pro Max",
             "OpenChamber",
             "Solarized",
             "Tokyonight",
@@ -2474,47 +2530,137 @@ mod tests {
         }
     }
 
+    fn rel_lum(v: u32) -> f64 {
+        let f = |c: u32| {
+            let c = c as f64 / 255.;
+            if c <= 0.03928 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * f((v >> 16) & 0xff) + 0.7152 * f((v >> 8) & 0xff) + 0.0722 * f(v & 0xff)
+    }
+
+    fn contrast(a: u32, b: u32) -> f64 {
+        let (l1, l2) = (rel_lum(a), rel_lum(b));
+        let (hi, lo) = if l1 > l2 { (l1, l2) } else { (l2, l1) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
     /// Every palette must keep its foreground readable against the surfaces
-    /// it is painted on — the ported Zed themes are normalised into the same
-    /// contrast band as Orbit so none reads as washed out or blown out.
+    /// it is painted on. The bars are the delivered floor: ink clears AA on
+    /// the canvas, the accent is legible as text (links, inline code) rather
+    /// than only as a wash, and every state pair (active row, send button,
+    /// focus accent) holds at 4.5:1.
     #[test]
     fn every_theme_has_readable_foregrounds() {
-        fn rel_lum(v: u32) -> f64 {
-            let f = |c: u32| {
-                let c = c as f64 / 255.;
-                if c <= 0.03928 {
-                    c / 12.92
-                } else {
-                    ((c + 0.055) / 1.055).powf(2.4)
-                }
-            };
-            0.2126 * f((v >> 16) & 0xff) + 0.7152 * f((v >> 8) & 0xff) + 0.0722 * f(v & 0xff)
-        }
-        fn contrast(a: u32, b: u32) -> f64 {
-            let (l1, l2) = (rel_lum(a), rel_lum(b));
-            let (hi, lo) = if l1 > l2 { (l1, l2) } else { (l2, l1) };
-            (hi + 0.05) / (lo + 0.05)
-        }
         for id in ThemeId::ALL {
             let p = palette(id);
+            let c = |a, b| contrast(a, b);
+            assert!(c(p.text, p.bg_main) >= 7.0, "{id:?}: body text on canvas");
+            assert!(c(p.text, p.bg_raised) >= 4.5, "{id:?}: body text on raised");
+            assert!(c(p.text_2, p.bg_main) >= 4.0, "{id:?}: secondary text");
+            assert!(c(p.text_3, p.bg_main) >= 3.0, "{id:?}: tertiary/label text");
+            assert!(c(p.accent, p.bg_main) >= 4.5, "{id:?}: accent as text");
+            assert!(c(p.active_fg, p.active) >= 4.5, "{id:?}: active row");
+            assert!(c(p.send_fg, p.send_bg) >= 4.5, "{id:?}: send button");
+            assert!(c(p.border, p.bg_main) >= 1.15, "{id:?}: hairline vs canvas");
+            // Syntax must stay legible on the code wash, comments included.
+            for (label, token) in [
+                ("string", p.syn_string),
+                ("number", p.syn_number),
+                ("function", p.syn_function),
+                ("type", p.syn_type),
+                ("literal", p.syn_literal),
+                ("meta", p.syn_meta),
+                ("operator", p.syn_operator),
+            ] {
+                assert!(
+                    c(token, p.code_bg) >= 3.5,
+                    "{id:?}: syntax {label} on code wash"
+                );
+            }
             assert!(
-                contrast(p.text, p.bg_main) >= 4.5,
-                "{id:?}: body text on bg"
+                c(p.syn_comment, p.code_bg) >= 3.0,
+                "{id:?}: comment on code wash"
             );
+        }
+    }
+
+    /// One surface grammar for all thirty-one palettes: on dark, each step up
+    /// the ramp is lighter than the one below (canvas → raised → hover →
+    /// active); on light it is the inverse. Menu surfaces float at `raised`,
+    /// and the send button always answers a hover with a visible step.
+    #[test]
+    fn every_theme_holds_its_surface_grammar() {
+        for id in ThemeId::ALL {
+            let p = palette(id);
+            let l = |v: u32| rel_lum(v);
+            match id.appearance() {
+                ThemeMode::Dark => {
+                    assert!(
+                        l(p.bg_raised) > l(p.bg_main),
+                        "{id:?}: raised must lift off the canvas"
+                    );
+                    assert!(
+                        l(p.bg_raised) >= l(p.bg_sidebar),
+                        "{id:?}: raised must float above the chrome plane"
+                    );
+                    assert!(
+                        l(p.bg_hover) >= l(p.bg_raised),
+                        "{id:?}: hover must sit above raised"
+                    );
+                    assert!(
+                        l(p.active) >= l(p.bg_hover),
+                        "{id:?}: active must sit above hover"
+                    );
+                }
+                ThemeMode::Light => {
+                    assert!(
+                        l(p.bg_raised) < l(p.bg_main),
+                        "{id:?}: raised must recess in light mode"
+                    );
+                    assert!(
+                        l(p.bg_raised) <= l(p.bg_sidebar),
+                        "{id:?}: raised must sit below the light chrome plane"
+                    );
+                    assert!(
+                        l(p.bg_hover) <= l(p.bg_raised),
+                        "{id:?}: hover must recess below raised"
+                    );
+                    assert!(
+                        l(p.active) <= l(p.bg_hover),
+                        "{id:?}: active must recess below hover"
+                    );
+                }
+            }
+            assert_eq!(p.menu_bg, p.bg_raised, "{id:?}: menus float at raised");
+            assert_ne!(p.send_bg, p.send_bg_hover, "{id:?}: send hover feedback");
+            // The accent is the lone interactive hue; it can never double as
+            // a status color or a second accent would read as state.
+            assert_ne!(p.accent, p.ok_green, "{id:?}: accent collides with success");
+            assert_ne!(p.accent, p.add_green, "{id:?}: accent collides with added");
+            assert_ne!(p.accent, p.stop_red, "{id:?}: accent collides with stop");
+            assert_ne!(p.accent, p.crit, "{id:?}: accent collides with critical");
+        }
+    }
+
+    /// Only Ashwood and Mono are authored chroma-less; every other palette
+    /// must carry a real accent hue (the composer derives `@file` by
+    /// inverting it), so a grey accent there is a defect.
+    #[test]
+    fn accent_carries_chroma_where_expected() {
+        for id in ThemeId::ALL {
+            if matches!(id, ThemeId::Ashwood | ThemeId::Mono) {
+                continue;
+            }
+            let accent = Theme::for_id(id).accent;
             assert!(
-                contrast(p.text, p.bg_raised) >= 3.5,
-                "{id:?}: body text on raised"
+                accent.s > 0.05,
+                "{id:?}: accent is nearly achromatic (s = {:.3})",
+                accent.s
             );
-            assert!(contrast(p.active_fg, p.active) >= 4.5, "{id:?}: active row");
-            assert!(
-                contrast(p.text_2, p.bg_main) >= 3.0,
-                "{id:?}: secondary text"
-            );
-            assert!(
-                contrast(p.text_3, p.bg_main) >= 2.5,
-                "{id:?}: tertiary text"
-            );
-            assert!(contrast(p.send_fg, p.send_bg) >= 4.5, "{id:?}: send button");
         }
     }
 

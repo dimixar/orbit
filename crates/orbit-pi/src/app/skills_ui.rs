@@ -736,7 +736,7 @@ impl OrbitApp {
                 if let Some(path) = selected {
                     let text = skills::display_path(&path);
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
-                    self.set_status(format!("Copied {text}"));
+                    self.toast_success(format!("Copied {text}"));
                 }
             }
             SkillAction::AskDelete => {
@@ -762,7 +762,7 @@ impl OrbitApp {
         match skills::delete(&skill, &self.workspace_dir()) {
             Ok(()) => {
                 self.selected_skill = None;
-                self.set_status(format!("Deleted skill {}", skill.name));
+                self.toast_info(format!("Deleted skill {}", skill.name));
                 self.refresh_skills(cx);
             }
             Err(err) => self.set_error(err),

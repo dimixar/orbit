@@ -188,7 +188,9 @@ impl OrbitApp {
                     .when(
                         matches!(
                             self.settings_section,
-                            SettingsSection::Providers | SettingsSection::Plugins
+                            SettingsSection::Providers
+                                | SettingsSection::Plugins
+                                | SettingsSection::Models
                         ),
                         |header| header.border_b_1().border_color(theme.border),
                     )
@@ -330,8 +332,8 @@ impl OrbitApp {
             SettingsSection::Models => self.model_rows(theme, this.clone(), cx),
             SettingsSection::Appearance => self.appearance_rows(theme, this.clone(), cx),
             SettingsSection::Providers => self.provider_rows(theme, this.clone(), cx),
-            SettingsSection::About => vec![
-                self.card(
+            SettingsSection::About => {
+                let mut rows = vec![self.card(
                     theme,
                     "Orbit Pi",
                     "Native workbench for the pi coding agent.",
@@ -342,26 +344,38 @@ impl OrbitApp {
                             .child(format!("v{}", env!("CARGO_PKG_VERSION")))
                             .into_any_element(),
                     ),
-                ),
-                self.card(
-                    theme,
-                    "GPUI",
-                    "GPU-accelerated UI framework (pinned; runtime shaders).",
-                    Some(
-                        div()
-                            .text_size(theme.ui_px(12.))
-                            .text_color(theme.text_2)
-                            .child("0.2.2")
-                            .into_any_element(),
+                )];
+                // The app-menu "About Orbit Pi" lands here, so the update
+                // check lives beside the version it would replace.
+                rows.extend(self.about_update_row(theme, this.clone(), cx));
+                rows.push(
+                    self.card(
+                        theme,
+                        "GPUI",
+                        "GPU-accelerated UI framework (pinned; runtime shaders).",
+                        Some(
+                            div()
+                                .text_size(theme.ui_px(12.))
+                                .text_color(theme.text_2)
+                                .child("0.2.2")
+                                .into_any_element(),
+                        ),
                     ),
-                ),
-                self.card(
+                );
+                rows.push(self.card(
                     theme,
                     "pi CLI",
                     "The only agent runtime — pi speaks its own RPC protocol over stdio.",
                     Some(self.connection_status(theme)),
-                ),
-            ],
+                ));
+                rows.push(self.card(
+                    theme,
+                    "Source",
+                    "Open source under Apache-2.0 — code, issues, and release notes live on GitHub.",
+                    Some(self.about_github_button(theme)),
+                ));
+                rows
+            }
         }
     }
 
@@ -383,14 +397,14 @@ impl OrbitApp {
 
     // ── Settings → Models ──────────────────────────────────────────────
 
-    /// The sticky Models header: a search field plus a live count. The
-    /// catalog is pi's own (`get_available_models`), grouped by provider in
-    /// the body; favorites toggle the same store the composer picker reads.
+    /// The pinned Models header: search, a live count, and the favorites
+    /// filter. The catalog is pi's own (`get_available_models`); favorites
+    /// toggle the same store the composer picker reads.
     pub(super) fn model_toolbar(
         &self,
         theme: Theme,
-        _this: Entity<OrbitApp>,
-        _cx: &Context<Self>,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let search = div()
             .w_full()
@@ -407,26 +421,68 @@ impl OrbitApp {
             .child(icon("icons/search.svg", 14., theme.text_3))
             .child(self.models_filter.clone());
 
-        let count = self.available_models.len();
+        let needle = self.models_filter.read(cx).text().trim().to_lowercase();
         let favorites = crate::favorites::all();
+        let total = self.available_models.len();
         let favorite_count = self
             .available_models
             .iter()
             .filter(|model| favorites.contains(&model.provider, &model.id))
             .count();
+        let shown = self
+            .available_models
+            .iter()
+            .filter(|model| {
+                model_visible(model, &needle, self.models_favorites_only, &favorites)
+            })
+            .count();
 
-        let toolbar = div().w_full().flex().items_center().gap_2().child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_size(theme.ui_px(12.))
-                .text_color(theme.text_3)
-                .child(if count == 0 {
-                    "No models reported by the runtime".to_string()
+        // A filter chip in the toolbar's button language: `bg_raised` + a
+        // hairline when off, the standard `active` fill when on — never an
+        // accent wash, which is reserved for the favorite stars themselves.
+        let favorites_button = div()
+            .id("models-favorites-filter")
+            .h(px(30.))
+            .px(px(12.))
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .cursor_pointer()
+            .when(self.models_favorites_only, |button| {
+                button.bg(theme.active).text_color(theme.active_fg)
+            })
+            .when(!self.models_favorites_only, |button| {
+                button.bg(theme.bg_raised).hover(|s| s.bg(theme.bg_hover))
+            })
+            .on_mouse_up(MouseButton::Left, {
+                let this = this.clone();
+                move |_, _, cx| {
+                    this.update(cx, |app, cx| app.toggle_models_favorites_only(cx));
+                }
+            })
+            .child(icon(
+                "icons/star.svg",
+                13.,
+                if self.models_favorites_only {
+                    theme.active_fg
                 } else {
-                    format!("{count} models · {favorite_count} favorites")
-                }),
-        );
+                    theme.text_2
+                },
+            ))
+            .child(
+                div()
+                    .text_size(theme.ui_px(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(if self.models_favorites_only {
+                        theme.active_fg
+                    } else {
+                        theme.text_2
+                    })
+                    .child("Favorites"),
+            );
 
         div()
             .w_full()
@@ -434,12 +490,39 @@ impl OrbitApp {
             .flex_col()
             .gap_3()
             .child(search)
-            .child(toolbar)
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(theme.ui_px(12.))
+                            .text_color(theme.text_3)
+                            .child(model_count_label(
+                                total,
+                                shown,
+                                favorite_count,
+                                self.models_favorites_only || !needle.is_empty(),
+                            )),
+                    )
+                    .child(favorites_button),
+            )
             .into_any_element()
     }
 
-    /// The Models page: the catalog grouped by provider, each row a real
-    /// `SetModel` action plus a favorite star.
+    /// Flip the Models page's favorites-only filter.
+    pub(super) fn toggle_models_favorites_only(&mut self, cx: &mut Context<Self>) {
+        self.models_favorites_only = !self.models_favorites_only;
+        cx.notify();
+    }
+
+    /// The Models page: the catalog grouped by provider — a hairline header
+    /// over a three-column grid of cards. A card click sets the active
+    /// model; the star toggles the favorite the composer picker reads.
     pub(super) fn model_rows(
         &self,
         theme: Theme,
@@ -456,6 +539,7 @@ impl OrbitApp {
         }
         let needle = self.models_filter.read(cx).text().trim().to_lowercase();
         let favorites = crate::favorites::all();
+        let favorites_only = self.models_favorites_only;
 
         // Group in catalog order: a stable provider order with its models.
         let mut providers: Vec<String> = Vec::new();
@@ -465,176 +549,258 @@ impl OrbitApp {
             }
         }
 
-        let mut rows: Vec<AnyElement> = Vec::new();
+        let mut sections: Vec<AnyElement> = Vec::new();
         for provider in providers {
             let models: Vec<&ModelEntry> = self
                 .available_models
                 .iter()
-                .filter(|model| model.provider == provider)
                 .filter(|model| {
-                    needle.is_empty()
-                        || model.name.to_lowercase().contains(&needle)
-                        || model.id.to_lowercase().contains(&needle)
-                        || provider.to_lowercase().contains(&needle)
+                    model.provider == provider
+                        && model_visible(model, &needle, favorites_only, &favorites)
                 })
                 .collect();
             if models.is_empty() {
                 continue;
             }
-            let mut group = div()
-                .id(ElementId::NamedInteger(
-                    "model-group".into(),
-                    rows.len() as u64,
-                ))
-                .flex()
-                .flex_col()
-                .gap(px(2.))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .pb(px(4.))
-                        .child(icon_dyn(provider_icon(&provider), 14., theme.text_3))
-                        .child(
-                            div()
-                                .text_size(theme.ui_px(12.))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.text_2)
-                                .child(crate::providers::provider_display_name(&provider)),
-                        )
-                        .child(
-                            div()
-                                .text_size(theme.ui_px(11.))
-                                .text_color(theme.text_3)
-                                .child(models.len().to_string()),
-                        ),
-                );
-            for model in models {
-                let (id, model_provider) = (model.id.clone(), model.provider.clone());
-                let active = self.model_id == model.id && self.model_provider == model.provider;
-                let is_favorite = favorites.contains(&model.provider, &model.id);
-                let (star_provider, star_id) = (model.provider.clone(), model.id.clone());
-                let mut row = div()
-                    .id(ElementId::Name(
-                        format!("model-row-{model_provider}-{id}").into(),
+            let cards: Vec<AnyElement> = models
+                .iter()
+                .map(|model| self.model_card(model, &favorites, theme, this.clone()))
+                .collect();
+            sections.push(
+                div()
+                    .id(ElementId::NamedInteger(
+                        "model-group".into(),
+                        sections.len() as u64,
                     ))
                     .w_full()
-                    .px(px(10.))
-                    .py(px(7.))
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(if active { theme.accent } else { theme.border })
-                    .bg(if active {
-                        theme.active
-                    } else {
-                        theme.bg_raised
-                    })
+                    .flex()
+                    .flex_col()
+                    .gap(theme.space(10.))
+                    .child(
+                        // Provider header: glyph, name, then the group's
+                        // count, closed by a hairline. The grid below has no
+                        // frame of its own, so the header draws the rule.
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .pb(theme.space(6.))
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .child(icon_dyn(provider_icon(&provider), 14., theme.text_3))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(theme.ui_px(12.5))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text_2)
+                                    .child(crate::providers::provider_display_name(&provider)),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(theme.ui_px(11.))
+                                    .text_color(theme.text_3)
+                                    .child(format!(
+                                        "{} model{}",
+                                        models.len(),
+                                        if models.len() == 1 { "" } else { "s" }
+                                    )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .grid()
+                            .grid_cols(3)
+                            .gap(theme.space(10.))
+                            .children(cards),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        if sections.is_empty() {
+            sections.push(self.empty_resource_card(
+                theme,
+                "icons/search.svg",
+                "No models match",
+                if favorites_only {
+                    "Nothing favorited matches this search — star a model, or turn the filter off."
+                } else {
+                    "Try a different search — the catalog itself is unchanged."
+                },
+            ));
+        }
+        sections
+    }
+
+    /// One card in the Models grid: name + star, the model id, and a footer
+    /// with the context window and the active mark. Clicking anywhere sets
+    /// the model; the star stops propagation so favoriting never switches.
+    fn model_card(
+        &self,
+        model: &ModelEntry,
+        favorites: &crate::favorites::Favorites,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+    ) -> AnyElement {
+        let (provider, id) = (model.provider.clone(), model.id.clone());
+        let active = self.model_id == model.id && self.model_provider == model.provider;
+        let is_favorite = favorites.contains(&model.provider, &model.id);
+        // Ink on the active fill comes from `active_fg`, stepped down for the
+        // secondary lines — `text_3` is authored for the canvas, not a
+        // selected card.
+        let meta_ink = if active {
+            theme.active_fg.opacity(0.72)
+        } else {
+            theme.text_3
+        };
+
+        let star = div()
+            .id(ElementId::Name(
+                format!("model-star-{provider}-{id}").into(),
+            ))
+            .flex_none()
+            .size(px(24.))
+            .rounded_md()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.overlay))
+            .on_mouse_up(MouseButton::Left, {
+                let this = this.clone();
+                let (provider, id) = (provider.clone(), id.clone());
+                move |_, _, cx| {
+                    // Keep the star from bubbling to the card's
+                    // "set active model" handler.
+                    cx.stop_propagation();
+                    crate::favorites::toggle(&provider, &id);
+                    this.update(cx, |_, cx| cx.notify());
+                }
+            })
+            .child(icon(
+                "icons/star.svg",
+                14.,
+                if is_favorite { theme.accent } else { meta_ink },
+            ));
+
+        let mut footer = div().flex().items_center().gap(px(6.));
+        if let Some(window) = model.context_window {
+            footer = footer.child(
+                div()
+                    .h(px(20.))
+                    .px(px(7.))
+                    .rounded(px(6.))
+                    .bg(theme.overlay_strong)
                     .flex()
                     .items_center()
-                    .gap_3()
-                    .cursor_pointer()
-                    .when(!active, |row| row.hover(|s| s.bg(theme.bg_hover)))
-                    .on_mouse_up(MouseButton::Left, {
-                        let this = this.clone();
-                        let provider = model_provider.clone();
-                        let id = id.clone();
-                        move |_, _, cx| {
-                            this.update(cx, |app, cx| {
-                                app.set_model(id.clone(), provider.clone(), cx)
-                            });
-                        }
-                    })
+                    .text_size(theme.ui_px(10.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(meta_ink)
+                    .child(format!(
+                        "{} ctx",
+                        crate::context_meter::format_tokens(window)
+                    )),
+            );
+        }
+        footer = footer.child(div().flex_1());
+        if active {
+            footer = footer.child(
+                div()
+                    .h(px(20.))
+                    .px(px(7.))
+                    .rounded(px(6.))
+                    .bg(theme.accent.opacity(0.12))
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .child(icon("icons/check.svg", 11., theme.accent))
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(10.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.accent)
+                            .child("Active"),
+                    ),
+            );
+        } else {
+            // Revealed on card hover; the reserved space keeps every card's
+            // footer the same height.
+            footer = footer.child(
+                div()
+                    .h(px(20.))
+                    .flex()
+                    .items_center()
+                    .opacity(0.)
+                    .group_hover("model-card", |s| s.opacity(1.))
+                    .text_size(theme.ui_px(10.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_3)
+                    .child("Set active"),
+            );
+        }
+
+        div()
+            .id(ElementId::Name(
+                format!("model-card-{provider}-{id}").into(),
+            ))
+            .group("model-card")
+            .w_full()
+            .min_w_0()
+            .bg(if active { theme.active } else { theme.bg_composer })
+            .border_1()
+            .border_color(if active { theme.accent } else { theme.border })
+            .rounded_lg()
+            .p(theme.space(12.))
+            .flex()
+            .flex_col()
+            .gap(theme.space(8.))
+            .cursor_pointer()
+            .when(!active, |card| {
+                card.hover(|s| s.bg(theme.bg_hover).border_color(theme.border_strong))
+            })
+            .on_mouse_up(MouseButton::Left, {
+                let this = this.clone();
+                move |_, _, cx| {
+                    this.update(cx, |app, cx| {
+                        app.set_model(id.clone(), provider.clone(), cx)
+                    });
+                }
+            })
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_2()
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(1.))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(theme.ui_px(13.))
-                                    .font_weight(if active {
-                                        FontWeight::MEDIUM
-                                    } else {
-                                        FontWeight::NORMAL
-                                    })
-                                    .text_color(if active { theme.active_fg } else { theme.text })
-                                    .child(model.name.clone()),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .font_family(theme::code_font_family())
-                                    .text_size(theme.ui_px(11.))
-                                    .text_color(theme.text_3)
-                                    .child(model.id.clone()),
-                            ),
-                    );
-                if let Some(window) = model.context_window {
-                    row = row.child(
-                        div()
-                            .flex_none()
-                            .text_size(theme.ui_px(11.))
-                            .text_color(theme.text_3)
-                            .child(format!(
-                                "{} ctx",
-                                crate::context_meter::format_tokens(window)
-                            )),
-                    );
-                }
-                if active {
-                    row = row.child(icon("icons/check.svg", 13., theme.accent));
-                }
-                row = row.child(
-                    div()
-                        .id(ElementId::Name(
-                            format!("model-star-{star_provider}-{star_id}").into(),
-                        ))
-                        .size(px(24.))
-                        .flex_none()
-                        .rounded_md()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.overlay))
-                        .on_mouse_up(MouseButton::Left, {
-                            let this = this.clone();
-                            move |_, _, cx| {
-                                // Keep the star from bubbling to the row's
-                                // "set active model" handler.
-                                cx.stop_propagation();
-                                crate::favorites::toggle(&star_provider, &star_id);
-                                this.update(cx, |_, cx| cx.notify());
-                            }
-                        })
-                        .child(icon(
-                            "icons/star.svg",
-                            14.,
-                            if is_favorite {
-                                theme.accent
-                            } else {
-                                theme.text_3
-                            },
-                        )),
-                );
-                group = group.child(row);
-            }
-            rows.push(group.into_any_element());
-        }
-
-        if rows.is_empty() {
-            rows.push(self.empty_resource_card(
-                theme,
-                "icons/search.svg",
-                "No models match",
-                "Try a different search — the catalog itself is unchanged.",
-            ));
-        }
-        rows
+                            .truncate()
+                            .text_size(theme.ui_px(13.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(if active { theme.active_fg } else { theme.text })
+                            .child(model.name.clone()),
+                    )
+                    .child(star),
+            )
+            .child(
+                div()
+                    .truncate()
+                    .font_family(theme::code_font_family())
+                    .text_size(theme.code_px(10.5))
+                    .text_color(meta_ink)
+                    .child(model.id.clone()),
+            )
+            .child(div().flex_1())
+            .child(footer)
+            .into_any_element()
     }
 
     // ── Settings → Plugins ─────────────────────────────────────────────
@@ -2583,12 +2749,12 @@ impl OrbitApp {
             }
             ProviderAction::AuthOpenUrl(url) => {
                 if let Err(err) = platform::open_url(&url) {
-                    self.set_status(format!("Could not open the browser: {err}"));
+                    self.toast_warning(format!("Could not open the browser: {err}"));
                 }
             }
             ProviderAction::AuthCopy(value) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(value));
-                self.set_status("Copied to clipboard");
+                self.toast_success("Copied to clipboard");
             }
             ProviderAction::EditKey {
                 id,
@@ -3396,9 +3562,38 @@ impl OrbitApp {
             .into_any_element()
     }
 
+    // ── Settings → About: the repository link ──────────────────────────
+
+    /// The About page's repository link: a ghost button that opens the
+    /// project's GitHub page in the OS browser.
+    pub(super) fn about_github_button(&self, theme: Theme) -> AnyElement {
+        div()
+            .id("about-github")
+            .h(px(26.))
+            .px(px(12.))
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_raised)
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .text_size(theme.ui_px(12.))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(theme.text_2)
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.bg_hover))
+            .child(icon("icons/arrow-up-right.svg", 12., theme.text_2))
+            .child("GitHub")
+            .on_mouse_up(MouseButton::Left, |_, _, cx| {
+                cx.open_url(env!("CARGO_PKG_REPOSITORY"));
+            })
+            .into_any_element()
+    }
+
     // ── Settings → General: notifications ──────────────────────────────
 
-    /// The notification board: two real channels plus the honest system
+    /// The notification board: three real channels plus the honest system
     /// state when macOS is blocking banners or the build is unbundled. A
     /// switch the OS ignores must not look like it is working.
     pub(super) fn notification_rows(&self, theme: Theme, this: Entity<OrbitApp>) -> AnyElement {
@@ -3416,6 +3611,21 @@ impl OrbitApp {
                     theme,
                     this.clone(),
                     Self::toggle_desktop_notifications,
+                )),
+            ),
+            self.setting_row(
+                theme,
+                "In-app toasts",
+                Some(
+                    "Show a toast in the window when a run finishes, or when pi is waiting for your answer, while Orbit is frontmost.",
+                ),
+                None,
+                Some(self.settings_toggle(
+                    "notification-toasts-toggle",
+                    self.notification_prefs.toasts,
+                    theme,
+                    this.clone(),
+                    Self::toggle_toast_notifications,
                 )),
             ),
             self.setting_row(
@@ -3475,6 +3685,17 @@ impl OrbitApp {
             self.refresh_notification_auth(cx);
         } else {
             self.notification_auth = notifications::DesktopAuth::Unknown;
+        }
+        cx.notify();
+    }
+
+    /// Flip the in-app toast channel; turning it on previews a card so the
+    /// switch shows what it toggles.
+    pub(super) fn toggle_toast_notifications(&mut self, cx: &mut Context<Self>) {
+        self.notification_prefs.toasts = !self.notification_prefs.toasts;
+        notifications::Prefs::persist(self.notification_prefs);
+        if self.notification_prefs.toasts {
+            self.toast_info("In-app toasts are on");
         }
         cx.notify();
     }
@@ -3765,42 +3986,16 @@ impl OrbitApp {
 
     // ── Settings → Agent ───────────────────────────────────────────────
 
-    /// The Agent section: queue delivery modes, auto-compaction, auto-retry,
-    /// manual compaction, and the session name. Every control sends a real pi
-    /// RPC command.
+    /// The Agent section: queue delivery modes, auto-compaction, and
+    /// auto-retry. Every control sends a real pi RPC command. Manual
+    /// compaction lives in the context-usage popover and the session rename
+    /// in the session-details popover, next to the state they act on.
     pub(super) fn agent_rows(
         &self,
         theme: Theme,
         this: Entity<OrbitApp>,
         _cx: &Context<Self>,
     ) -> Vec<AnyElement> {
-        let name_control = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(
-                div()
-                    .w(px(200.))
-                    .h(px(28.))
-                    .px(px(8.))
-                    .rounded_md()
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.bg_raised)
-                    .flex()
-                    .items_center()
-                    .child(self.session_name_input.clone()),
-            )
-            .child(self.runtime_button(
-                "session-rename-save",
-                "Rename",
-                false,
-                theme,
-                this.clone(),
-                Self::rename_session,
-            ))
-            .into_any_element();
-
         let mut rows = vec![
             self.card(
                 theme,
@@ -3831,33 +4026,6 @@ impl OrbitApp {
                     this.clone(),
                     Self::toggle_auto_retry,
                 )),
-            ),
-            self.card(
-                theme,
-                "Compact now",
-                if self.is_compacting {
-                    "pi is compacting this session's context…"
-                } else {
-                    "Manually compact the conversation to free up context window."
-                },
-                Some(self.runtime_button(
-                    "compact-now",
-                    if self.is_compacting {
-                        "Compacting…"
-                    } else {
-                        "Compact"
-                    },
-                    false,
-                    theme,
-                    this.clone(),
-                    Self::compact_now,
-                )),
-            ),
-            self.card(
-                theme,
-                "Session name",
-                "The display name pi stores with this session; shown in session listings.",
-                Some(name_control),
             ),
         ];
 
@@ -4044,13 +4212,13 @@ impl OrbitApp {
     pub(super) fn rename_session(&mut self, cx: &mut Context<Self>) {
         let name = self.session_name_input.read(cx).text().trim().to_string();
         if name.is_empty() {
-            self.set_status("Enter a session name first");
+            self.toast_warning("Enter a session name first");
             cx.notify();
             return;
         }
         self.session_name = Some(name.clone());
         self.send(CommandBody::SetSessionName { name }, "set_session_name");
-        self.set_status("Session renamed");
+        self.toast_success("Session renamed");
         cx.notify();
     }
 
@@ -5367,7 +5535,7 @@ impl OrbitApp {
         }
         let source = self.plugin_source_input.read(cx).text().trim().to_string();
         if source.is_empty() {
-            self.set_status("Enter a package source to install");
+            self.toast_warning("Enter a package source to install");
             cx.notify();
             return;
         }
@@ -5407,7 +5575,7 @@ impl OrbitApp {
                             .rev()
                             .find(|line| !line.trim().is_empty())
                             .map(str::to_string);
-                        app.set_status(last.unwrap_or_else(|| format!("{done} — done")));
+                        app.toast_success(last.unwrap_or_else(|| format!("{done} — done")));
                         app.refresh_plugins(cx);
                     }
                     Err(err) => app.set_error(err),
@@ -5444,7 +5612,7 @@ impl OrbitApp {
             }
             PluginAction::Refresh => {
                 self.refresh_plugins(cx);
-                self.set_status("Reloaded installed plugins");
+                self.toast_info("Reloaded installed plugins");
                 cx.notify();
             }
         }
@@ -5555,7 +5723,7 @@ impl OrbitApp {
             });
         })
         .detach();
-        self.set_status("Refreshed provider catalog");
+        self.toast_info("Refreshed provider catalog");
         cx.notify();
     }
 
@@ -5565,7 +5733,7 @@ impl OrbitApp {
     pub(super) fn provider_apply_credentials(&mut self, cx: &mut Context<Self>) {
         // Never yank the process out from under a live turn.
         if self.busy || self.transcript.is_streaming() {
-            self.set_status("Finish the current turn, then Restart pi to load credentials");
+            self.toast_warning("Finish the current turn, then Restart pi to load credentials");
             cx.notify();
             return;
         }
@@ -5582,7 +5750,7 @@ impl OrbitApp {
         }
         self.provider_auth_dirty = false;
         self.reload_custom_providers(cx);
-        self.set_status("pi restarted — credentials loaded");
+        self.toast_success("pi restarted — credentials loaded");
         cx.notify();
     }
 
@@ -5667,7 +5835,7 @@ impl OrbitApp {
                     ProviderKeyKind::ApiKey => "API key",
                     ProviderKeyKind::OllamaCloudSession => "Ollama Cloud session",
                 };
-                self.set_status(format!("{what} saved for {name} — Restart pi to use it"));
+                self.toast_success(format!("{what} saved for {name} — Restart pi to use it"));
             }
             Err(err) => {
                 if let Some(editor) = self.provider_key_editor.as_mut() {
@@ -5691,7 +5859,7 @@ impl OrbitApp {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         {
-            self.set_status(format!(
+            self.toast_error(format!(
                 "Refusing to run login for invalid provider id {id}"
             ));
             cx.notify();
@@ -5701,12 +5869,14 @@ impl OrbitApp {
         match platform::open_terminal_command(&command) {
             Ok(()) => {
                 self.provider_auth_dirty = true;
-                self.set_status(format!(
+                self.toast_info(format!(
                     "Finish signing in to {name} in Terminal, then Restart pi"
                 ));
             }
             Err(err) => {
-                self.set_status(format!("Could not open Terminal: {err} — run `{command}`"));
+                self.toast_warning(format!(
+                    "Could not open Terminal: {err} — run `{command}`"
+                ));
             }
         }
         cx.notify();
@@ -5732,7 +5902,7 @@ impl OrbitApp {
                 },
                 "auth.logout",
             );
-            self.set_status(format!("Signing out of {id}…"));
+            self.toast_info(format!("Signing out of {id}…"));
             cx.notify();
             return;
         }
@@ -5740,7 +5910,7 @@ impl OrbitApp {
             Ok(()) => {
                 self.provider_auth_dirty = true;
                 self.reload_custom_providers(cx);
-                self.set_status(format!("Signed out of {id} — Restart pi to apply"));
+                self.toast_success(format!("Signed out of {id} — Restart pi to apply"));
             }
             Err(err) => {
                 self.provider_auth_error = Some(err);
@@ -5962,7 +6132,7 @@ impl OrbitApp {
                 self.provider_editor = None;
                 self.reload_custom_providers(cx);
                 self.refresh_catalogs();
-                self.set_status(format!(
+                self.toast_success(format!(
                     "Saved {id} — restart pi if it doesn't appear in the catalog"
                 ));
             }
@@ -5982,13 +6152,48 @@ impl OrbitApp {
                 self.provider_remove_confirm = None;
                 self.reload_custom_providers(cx);
                 self.refresh_catalogs();
-                self.set_status(format!("Removed provider {id}"));
+                self.toast_info(format!("Removed provider {id}"));
             }
             Err(err) => {
                 self.custom_providers_error = Some(err);
             }
         }
         cx.notify();
+    }
+}
+
+/// Whether a catalog model survives the Models page's search + favorites
+/// filter. Shared by the grid and the toolbar's live count so the two can
+/// never disagree.
+fn model_visible(
+    model: &ModelEntry,
+    needle: &str,
+    favorites_only: bool,
+    favorites: &crate::favorites::Favorites,
+) -> bool {
+    if favorites_only && !favorites.contains(&model.provider, &model.id) {
+        return false;
+    }
+    needle.is_empty()
+        || model.name.to_lowercase().contains(needle)
+        || model.id.to_lowercase().contains(needle)
+        || model.provider.to_lowercase().contains(needle)
+}
+
+/// The Models toolbar's count line: the catalog total, or "shown of total"
+/// while a search or the favorites filter is narrowing the grid.
+fn model_count_label(total: usize, shown: usize, favorites: usize, filtered: bool) -> String {
+    if total == 0 {
+        return "No models reported by the runtime".to_string();
+    }
+    let favorites = format!(
+        "{favorites} favorite{}",
+        if favorites == 1 { "" } else { "s" }
+    );
+    if filtered {
+        format!("{shown} of {total} shown · {favorites}")
+    } else {
+        format!("{total} models · {favorites}")
     }
 }
 
@@ -6045,5 +6250,60 @@ mod settings_select_tests {
     fn stepping_an_empty_list_stays_put() {
         assert_eq!(stepped_visible_position(&[], Some(0), 1), None);
         assert_eq!(stepped_visible_position(&[], None, -1), None);
+    }
+}
+
+#[cfg(test)]
+mod model_filter_tests {
+    use super::{model_count_label, model_visible, ModelEntry};
+    use crate::favorites::Favorites;
+
+    fn entry(provider: &str, id: &str, name: &str) -> ModelEntry {
+        ModelEntry {
+            id: id.into(),
+            name: name.into(),
+            provider: provider.into(),
+            context_window: None,
+        }
+    }
+
+    #[test]
+    fn search_matches_name_id_and_provider_case_insensitively() {
+        // Callers hand the helper an already-lowercased needle.
+        let favorites = Favorites::from_pairs(&[]);
+        let model = entry("anthropic", "claude-sonnet-4-5", "Claude Sonnet 4.5");
+        assert!(model_visible(&model, "", false, &favorites));
+        assert!(model_visible(&model, "sonnet", false, &favorites));
+        assert!(model_visible(&model, "claude-sonnet", false, &favorites));
+        assert!(model_visible(&model, "anthropic", false, &favorites));
+        assert!(!model_visible(&model, "gemini", false, &favorites));
+    }
+
+    #[test]
+    fn favorites_only_keeps_starred_models_and_still_searches() {
+        let favorites = Favorites::from_pairs(&[("openai", "gpt-5")]);
+        let starred = entry("openai", "gpt-5", "GPT-5");
+        let other = entry("openai", "gpt-5-mini", "GPT-5 mini");
+        assert!(model_visible(&starred, "", true, &favorites));
+        assert!(!model_visible(&other, "", true, &favorites));
+        // The search still applies inside the favorites scope.
+        assert!(!model_visible(&starred, "mini", true, &favorites));
+    }
+
+    #[test]
+    fn count_label_reflects_the_active_filters() {
+        assert_eq!(
+            model_count_label(0, 0, 0, false),
+            "No models reported by the runtime"
+        );
+        assert_eq!(
+            model_count_label(236, 236, 12, false),
+            "236 models · 12 favorites"
+        );
+        assert_eq!(
+            model_count_label(236, 1, 12, true),
+            "1 of 236 shown · 12 favorites"
+        );
+        assert_eq!(model_count_label(3, 3, 1, false), "3 models · 1 favorite");
     }
 }

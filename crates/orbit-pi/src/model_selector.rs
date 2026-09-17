@@ -885,6 +885,8 @@ pub(crate) fn provider_icon(provider: &str) -> SharedString {
         "groq",
         "huggingface",
         "kimi-coding",
+        "llama.cpp",
+        "manifest",
         "minimax",
         "minimax-cn",
         "mistral",
@@ -900,6 +902,7 @@ pub(crate) fn provider_icon(provider: &str) -> SharedString {
         "qwen-token-plan",
         "qwen-token-plan-cn",
         "qwen-token-plan-individual",
+        "radius",
         "together",
         "vercel-ai-gateway",
         "xai",
@@ -1584,5 +1587,44 @@ mod tests {
             "alpha",
         );
         assert_eq!(providers(&rows), vec!["openai"]);
+    }
+
+    /// Every built-in provider needs a mapped mark and an embedded asset —
+    /// the whitelist and the `assets/icons/providers/` directory must not
+    /// drift apart (a missing entry silently paints the cloud fallback).
+    #[test]
+    fn every_builtin_provider_has_an_embedded_brand_mark() {
+        use gpui::AssetSource as _;
+        for builtin in crate::providers::BUILTIN_PROVIDERS {
+            let path = provider_icon(builtin.id);
+            assert_ne!(
+                path.as_ref(),
+                "icons/cloud.svg",
+                "{} has no KNOWN entry",
+                builtin.id
+            );
+            assert!(
+                crate::assets::Assets.load(&path).unwrap().is_some(),
+                "{path} is not embedded"
+            );
+        }
+    }
+
+    #[test]
+    fn custom_provider_marks_resolve_to_embedded_assets() {
+        use gpui::AssetSource as _;
+        for id in ["manifest", "llama.cpp"] {
+            let path = provider_icon(id);
+            assert_eq!(path.as_ref(), format!("icons/providers/{id}.svg"));
+            assert!(
+                crate::assets::Assets.load(&path).unwrap().is_some(),
+                "{path} is not embedded"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_providers_fall_back_to_the_cloud_glyph() {
+        assert_eq!(provider_icon("my-gateway").as_ref(), "icons/cloud.svg");
     }
 }

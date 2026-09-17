@@ -1,15 +1,16 @@
 //! Context-window indicator: a circular used-ring, compact hover copy, and
-//! a click-to-open breakdown. Numbers come from pi `get_session_stats`;
-//! conversation vs "other" is a chars/4 estimate over the loaded transcript
-//! (the same heuristic pi's own /context view uses). Categories the protocol
-//! does not expose (rules, MCP, skills, …) are not invented.
+//! a click-to-open breakdown carrying the manual-compaction action
+//! (`compact`). Numbers come from pi `get_session_stats`; conversation vs
+//! "other" is a chars/4 estimate over the loaded transcript (the same
+//! heuristic pi's own /context view uses). Categories the protocol does not
+//! expose (rules, MCP, skills, …) are not invented.
 
 use std::rc::Rc;
 
 use gpui::{
     canvas, deferred, div, point, prelude::*, px, relative, svg, AnyElement, App, Background,
-    Bounds, ClickEvent, Context, Entity, Hsla, IntoElement, MouseDownEvent, PathBuilder, Pixels,
-    SharedString, Window,
+    Bounds, ClickEvent, Context, Entity, FontWeight, Hsla, IntoElement, MouseDownEvent,
+    PathBuilder, Pixels, SharedString, Window,
 };
 use orbit_rpc::{ContextUsage, SessionUsage};
 
@@ -32,6 +33,12 @@ pub enum ContextPopup {
     Hover,
     Details,
 }
+
+/// A click handler for the details panel's action button.
+type ActionClick = dyn Fn(&ClickEvent, &mut Window, &mut App);
+
+/// The entity-bound form [`context_control`] relays the action through.
+type EntityAction<V> = dyn Fn(&mut V, &mut Window, &mut Context<V>);
 
 pub struct ContextSlice {
     pub label: SharedString,
@@ -292,11 +299,15 @@ fn format_cost(cost: f64) -> String {
     }
 }
 
-/// Full click panel: percent, token total, segmented bar, per-slice legend.
+/// Full click panel: percent, token total, segmented bar, per-slice legend,
+/// and — when an active session can compact — the manual-compaction action.
+#[allow(clippy::too_many_arguments)]
 pub fn details_card(
     usage: Option<&ContextUsage>,
     session: Option<&SessionUsage>,
     slices: &[ContextSlice],
+    is_compacting: bool,
+    on_compact: Option<Rc<ActionClick>>,
     theme: Theme,
     on_close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_outside: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
@@ -382,6 +393,41 @@ pub fn details_card(
         .child(segmented_bar(slices, window_tokens, theme))
         .child(legend(slices, theme))
         .children(session.map(|session| session_usage_section(session, theme)))
+        .children(on_compact.map(|on_compact| compact_action(is_compacting, on_compact, theme)))
+}
+
+/// The details panel's one action: compact this session's context now. The
+/// label names the in-flight state while pi works, so the control is never
+/// a second click on a run that is already compacting.
+fn compact_action(is_compacting: bool, on_compact: Rc<ActionClick>, theme: Theme) -> AnyElement {
+    let button = div()
+        .id("context-compact-now")
+        .w_full()
+        .h(px(28.))
+        .rounded_md()
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.bg_raised)
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(theme.ui_px(12.))
+        .font_weight(FontWeight::MEDIUM);
+    if is_compacting {
+        button
+            .text_color(theme.text_3)
+            .cursor_default()
+            .child("Compacting\u{2026}")
+            .into_any_element()
+    } else {
+        button
+            .text_color(theme.text_2)
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.bg_hover))
+            .on_click(move |event, window, cx| on_compact(event, window, cx))
+            .child("Compact now")
+            .into_any_element()
+    }
 }
 
 fn segmented_bar(slices: &[ContextSlice], window: u64, theme: Theme) -> impl IntoElement + use<> {
@@ -572,6 +618,7 @@ pub struct ContextMeterData<'a> {
 }
 
 /// Ring chip + optional hover/details popover, anchored above the control.
+#[allow(clippy::too_many_arguments)]
 pub fn context_control<V: 'static>(
     data: ContextMeterData<'_>,
     popup: ContextPopup,
@@ -579,6 +626,8 @@ pub fn context_control<V: 'static>(
     theme: Theme,
     on_hover: impl Fn(&mut V, bool, &mut Context<V>) + 'static,
     on_click: impl Fn(&mut V, &mut Window, &mut Context<V>) + 'static,
+    is_compacting: bool,
+    on_compact: Option<Rc<EntityAction<V>>>,
     on_close: impl Fn(&mut V, &mut Window, &mut Context<V>) + 'static,
 ) -> impl IntoElement {
     let usage = data.usage;
@@ -605,12 +654,24 @@ pub fn context_control<V: 'static>(
             let outside = this_outside;
             let on_close_btn = on_close.clone();
             let on_close_out = on_close.clone();
+            let on_compact = on_compact.map(|compact| {
+                let this = entity.clone();
+                Rc::new(
+                    move |_event: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        this.update(cx, |app, cx| {
+                            (compact.as_ref())(app, window, cx);
+                        });
+                    },
+                ) as Rc<ActionClick>
+            });
             Some(popup_above_ring(
                 PANEL_W,
                 details_card(
                     usage,
                     session,
                     &slices,
+                    is_compacting,
+                    on_compact,
                     theme,
                     move |_, window, cx| {
                         close.update(cx, |app, cx| {
