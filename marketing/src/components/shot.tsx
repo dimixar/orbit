@@ -19,7 +19,7 @@ export function Shot({
 }) {
   return (
     <div
-      className={`overflow-hidden rounded-[12px] bg-window shadow-pop ${className}`}
+      className={`overflow-hidden rounded-2xl bg-window shadow-pop ${className}`}
     >
       <Image
         src={src}

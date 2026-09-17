@@ -62,7 +62,8 @@ export function ButtonLink({
           variant: buttonIntents[variant],
           size: variant === "nav" ? "sm" : "lg",
         }),
-        variant === "primary" && "min-h-10 gap-[9px] px-[18px] text-[12px]",
+        variant === "primary" &&
+          "min-h-10 gap-[9px] px-[18px] text-[12px] hover:bg-white",
         variant === "secondary" && "min-h-10 gap-[9px] px-[18px] text-[12px]",
         variant === "nav" && "rounded-full px-[15px] text-[13.5px]",
         variant === "text" &&

@@ -24,6 +24,14 @@ export function Guard() {
         dashed
         className="relative scroll-mt-20 overflow-hidden bg-missions py-16 sm:py-[88px]"
       >
+        <div
+          aria-hidden="true"
+          className="dither dither-tl left-0 top-0 h-[220px] w-[320px]"
+        />
+        <div
+          aria-hidden="true"
+          className="dither dither-br bottom-0 right-0 h-[220px] w-[320px]"
+        />
         <div className="relative z-[1] grid grid-cols-1 items-center gap-12 lg:grid-cols-2 lg:gap-16">
           <div>
             <SectionLabel>Safeguards</SectionLabel>

@@ -15,6 +15,14 @@ export function Stage() {
           aria-hidden="true"
           className="pointer-events-none absolute left-1/2 top-1/2 h-[24rem] w-[52rem] max-w-none -translate-x-1/2 -translate-y-1/2 rounded-full bg-[radial-gradient(closest-side,rgba(91,157,255,0.06),transparent)]"
         />
+        <div
+          aria-hidden="true"
+          className="dither dither-tl left-0 top-0 h-[240px] w-[360px]"
+        />
+        <div
+          aria-hidden="true"
+          className="dither dither-br bottom-0 right-0 h-[240px] w-[360px]"
+        />
         <div className="rise-window relative z-[1] mx-auto w-full max-w-[1180px]">
           <Shot
             src="/screens/session.png"

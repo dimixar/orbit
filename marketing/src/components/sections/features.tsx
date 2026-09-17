@@ -67,7 +67,7 @@ export function Features() {
           {cards.map((c) => (
             <Card
               key={c.kicker}
-              className="gap-4 rounded-[18px] p-5 pb-[26px] ring-0"
+              className="gap-4 rounded-2xl p-5 pb-[26px] ring-0"
             >
               <p className="mx-1.5 font-mono text-[11px] uppercase tracking-[0.12em] text-ink-3">
                 {c.kicker}
