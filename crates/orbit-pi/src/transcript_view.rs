@@ -5018,6 +5018,7 @@ mod tests {
             args: Some(serde_json::json!({ "command": "ls -la" })),
             output: None,
             failed: false,
+            duration: None,
         };
         assert_eq!(tool_command(&bash).as_deref(), Some("ls -la"));
         // The header preview shows the command, not the raw JSON summary.
@@ -5069,6 +5070,7 @@ mod tests {
             })),
             output: None,
             failed: false,
+            duration: None,
         };
         let rows = build_edit_diff(&tool).expect("diff");
         assert_eq!(rows.len(), 2);
@@ -5095,6 +5097,7 @@ mod tests {
             args: Some(serde_json::json!({ "path": "src/new.rs", "content": "a\nb\n" })),
             output: None,
             failed: false,
+            duration: None,
         };
         let rows = build_edit_diff(&tool).expect("diff");
         assert_eq!(rows.len(), 2);
@@ -5473,6 +5476,7 @@ mod tests {
             args: Some(serde_json::json!({ "command": "cargo test" })),
             output: None,
             failed: false,
+            duration: None,
         };
         let step = Step {
             tools: vec![bash],
@@ -5493,6 +5497,7 @@ mod tests {
             args: Some(serde_json::json!({ "path": "src/auth.rs" })),
             output: None,
             failed: false,
+            duration: None,
         };
         let step = Step {
             tools: vec![read],

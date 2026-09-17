@@ -1097,14 +1097,14 @@ impl OrbitApp {
         if let Some(menu) = self.session_menu.take() {
             // Defensive: a warm parked process would recreate the file.
             if self.lives.contains_key(&menu.path) {
-                self.set_status("Session has a live process — switch away and wait, then delete");
+                self.toast_warning("Session has a live process — switch away and wait, then delete");
                 cx.notify();
                 return;
             }
             if let Err(err) = fs::remove_file(&menu.path) {
-                self.set_status(format!("delete failed: {err}"));
+                self.toast_error(format!("delete failed: {err}"));
             } else {
-                self.set_status("Session deleted");
+                self.toast_info("Session deleted");
             }
             self.sessions = sessions::load_sessions();
             cx.notify();
@@ -1174,7 +1174,7 @@ impl OrbitApp {
         self.collapsed_workspaces.remove(&menu.label);
         self.expanded_workspace_groups.remove(&menu.label);
         self.expanded_session_groups.remove(&menu.label);
-        self.set_status(format!("Removed {} from the sidebar", menu.label));
+        self.toast_info(format!("Removed {} from the sidebar", menu.label));
         cx.notify();
     }
 

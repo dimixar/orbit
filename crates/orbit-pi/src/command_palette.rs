@@ -463,7 +463,7 @@ impl CommandPalette {
                 SettingsSection::Agent,
                 "icons/spark.svg",
                 "Agent",
-                "settings preferences agent steer follow-up compaction retry rename",
+                "settings preferences agent steer follow-up compaction retry",
             ),
             (
                 SettingsSection::Skills,

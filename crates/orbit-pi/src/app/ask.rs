@@ -1,5 +1,21 @@
 use super::*;
-use crate::ask::{self, AskMode};
+use crate::ask::{self, AskAnswer, AskQuestion};
+
+/// Replays a committed questionnaire back to the extension.
+///
+/// The whole questionnaire is answered locally (that is what lets the user go
+/// back and change an earlier answer); on commit the buffered answers are fed
+/// to the extension one blocking `select` / `input` request at a time, exactly
+/// as if the user had answered each dialog in turn. The response sequence
+/// itself lives in [`ask::AskReplayState`], so it is unit-testable.
+pub(super) struct AskReplay {
+    questions: Vec<AskQuestion>,
+    answers: Vec<AskAnswer>,
+    state: ask::AskReplayState,
+    /// RPC id of the request being answered right now, so a departing session
+    /// can still be declined out of its parked block.
+    pub(super) current_id: Option<String>,
+}
 
 impl OrbitApp {
     /// Record a running `ask_user_question` call and parse its questionnaire.
@@ -15,6 +31,7 @@ impl OrbitApp {
             .and_then(Value::as_str)
             .map(str::to_string);
         self.ask_questions = ask::questions_from_args(value.get("args"));
+        self.ask_replay = None;
         cx.notify();
     }
 
@@ -31,6 +48,7 @@ impl OrbitApp {
         self.ask_tool_id = None;
         self.ask_questions.clear();
         self.ask = None;
+        self.ask_replay = None;
         self.ask_focus_pending = false;
         cx.notify();
     }
@@ -40,227 +58,274 @@ impl OrbitApp {
         self.ask_tool_id.is_some() && !self.ask_questions.is_empty()
     }
 
-    /// Open (or replace) the inline panel for a `select` request belonging to
-    /// the running questionnaire.
-    pub(super) fn open_ask_select(&mut self, id: String, value: &Value, cx: &mut Context<Self>) {
+    /// Open the inline questionnaire panel for the running tool's first
+    /// blocking request. Every question is known up front (parsed from the
+    /// tool arguments), so the panel drives the whole questionnaire locally
+    /// and only talks back to the extension on commit.
+    pub(super) fn open_ask(&mut self, id: String, cx: &mut Context<Self>) {
         // pi blocks one request at a time; a modal that is somehow already up
-        // owns the answer. Cancel rather than clobber it.
-        if self.dialog.is_some() || self.approval.is_some() {
+        // owns the answer, and a live panel already owns the questionnaire.
+        if self.dialog.is_some() || self.approval.is_some() || self.ask.is_some() {
             self.respond_to_dialog(&id, &DialogResponse::Cancelled);
             return;
         }
-        let title = value.get("title").and_then(Value::as_str).unwrap_or("");
-        let ix = ask::question_index_for_title(&self.ask_questions, title)
-            .or_else(|| self.ask.as_ref().map(|prompt| prompt.question_ix))
-            .unwrap_or(0);
-        let Some(question) = self.ask_questions.get(ix) else {
+        if self.ask_questions.is_empty() {
             self.respond_to_dialog(&id, &DialogResponse::Cancelled);
-            return;
-        };
-        let total = self.ask_questions.len();
-        let header = question.header.clone();
-        let question_text = question.question.clone();
-        let options = question.options.clone();
-        let custom_row = !question.multi_select;
-        self.ask = Some(AskPrompt {
-            id,
-            mode: AskMode::Select,
-            question_ix: ix,
-            total,
-            header,
-            question: question_text,
-            options,
-            custom_row,
-            checked: Vec::new(),
-            highlighted: 0,
-            submitted: false,
-            input: None,
-        });
-        self.ask_focus_pending = true;
-        cx.notify();
-    }
-
-    /// Open the inline panel for an `input` request belonging to the running
-    /// questionnaire: a multi-select question, or the free-text follow-up to a
-    /// single-select "Type something." row.
-    pub(super) fn open_ask_input(&mut self, id: String, value: &Value, cx: &mut Context<Self>) {
-        if !self.ask_is_live() {
             return;
         }
-        let title = value.get("title").and_then(Value::as_str).unwrap_or("");
-        let ix = ask::question_index_for_title(&self.ask_questions, title)
-            .or_else(|| self.ask.as_ref().map(|prompt| prompt.question_ix))
-            .unwrap_or(0);
-        let Some(question) = self.ask_questions.get(ix) else {
-            self.respond_to_dialog(&id, &DialogResponse::Cancelled);
-            return;
-        };
-        let multi = question.multi_select;
-        let total = self.ask_questions.len();
-        let header = question.header.clone();
-        let question_text = question.question.clone();
-        let options = question.options.clone();
-        let checked = vec![false; options.len()];
-        let placeholder = value
-            .get("placeholder")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+        let questions = self.ask_questions.clone();
+        let count = questions.len();
+        let checked = questions
+            .iter()
+            .map(|question| vec![false; question.options.len()])
+            .collect();
         let input = cx.new(|cx| {
             ComposerInput::new(cx)
                 .with_element_id("ask-input")
-                .with_placeholder(placeholder)
-                .with_max_lines(1)
+                .with_placeholder("Type your answer…")
+                .with_max_lines(3)
                 .with_key_context("Composer AskInput")
         });
         self.ask = Some(AskPrompt {
             id,
-            mode: if multi {
-                AskMode::Multi
-            } else {
-                AskMode::Custom
-            },
-            question_ix: ix,
-            total,
-            header,
-            question: question_text,
-            options,
-            custom_row: false,
+            questions,
+            cursor: 0,
+            highlighted: vec![0; count],
             checked,
-            highlighted: 0,
+            custom: vec![String::new(); count],
+            input,
             submitted: false,
-            input: Some(input),
         });
         self.ask_focus_pending = true;
         cx.notify();
     }
 
-    /// Move the panel highlight (arrow keys). `Custom` has one focusable field
-    /// and nothing to move between.
+    /// Snapshot the live text field into the current question's buffered
+    /// custom answer, so navigating away (or committing) never loses it.
+    fn ask_sync_custom(&mut self, cx: &mut Context<Self>) {
+        let Some(prompt) = self.ask.as_mut() else {
+            return;
+        };
+        let text = prompt.input.read(cx).text();
+        let cursor = prompt.cursor;
+        if let Some(slot) = prompt.custom.get_mut(cursor) {
+            *slot = text;
+        }
+    }
+
+    /// Restore the text field from the buffered custom answer for the cursor.
+    fn ask_restore_custom(&mut self, cx: &mut Context<Self>) {
+        let Some(prompt) = self.ask.as_mut() else {
+            return;
+        };
+        let cursor = prompt.cursor;
+        let text = prompt.custom.get(cursor).cloned().unwrap_or_default();
+        prompt
+            .input
+            .update(cx, |input, cx| input.set_text(text, cx));
+    }
+
+    /// Move the question cursor (Back / Next within the panel), carrying the
+    /// current question's custom text along.
+    fn ask_goto(&mut self, cursor: usize, cx: &mut Context<Self>) {
+        self.ask_sync_custom(cx);
+        let Some(prompt) = self.ask.as_mut() else {
+            return;
+        };
+        if cursor >= prompt.questions.len() || cursor == prompt.cursor {
+            return;
+        }
+        prompt.cursor = cursor;
+        self.ask_restore_custom(cx);
+        self.ask_focus_pending = true;
+        cx.notify();
+    }
+
+    /// Move the highlight within the current question (arrow keys). Select
+    /// questions include the trailing "Type something." row; multi questions
+    /// list only their options.
     pub(super) fn ask_move(&mut self, forward: bool, cx: &mut Context<Self>) {
         let Some(prompt) = self.ask.as_mut() else {
             return;
         };
-        if prompt.mode == AskMode::Custom || prompt.submitted {
+        if prompt.submitted {
             return;
         }
         let count = prompt.row_count();
         if count == 0 {
             return;
         }
-        prompt.highlighted = if forward {
-            (prompt.highlighted + 1) % count
+        let cursor = prompt.cursor;
+        let current = prompt.highlighted();
+        let next = if forward {
+            (current + 1) % count
         } else {
-            (prompt.highlighted + count - 1) % count
+            (current + count - 1) % count
         };
+        if let Some(slot) = prompt.highlighted.get_mut(cursor) {
+            *slot = next;
+        }
         cx.notify();
     }
 
-    /// Answer the panel: the highlighted row (select), the toggles (multi), or
-    /// the typed text (custom). Sends the `extension_ui_response` pi is
-    /// blocked on and hands focus back to the composer so typing resumes; the
-    /// next request re-focuses the panel.
-    pub(super) fn ask_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Click / keyboard action for one option row. A single-select row only
+    /// records the choice (Next advances); a multi-select row toggles.
+    pub(super) fn ask_choose(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some(prompt) = self.ask.as_mut() else {
+            return;
+        };
+        if prompt.submitted {
+            return;
+        }
+        let cursor = prompt.cursor;
+        if prompt.is_multi() {
+            if let Some(slot) = prompt
+                .checked
+                .get_mut(cursor)
+                .and_then(|row| row.get_mut(ix))
+            {
+                *slot = !*slot;
+            }
+        } else if ix >= prompt.row_count() {
+            return;
+        }
+        if let Some(slot) = prompt.highlighted.get_mut(cursor) {
+            *slot = ix;
+        }
+        cx.notify();
+    }
+
+    /// Advance to the next question, or commit the questionnaire when the
+    /// current one is the last. Called by the Next / Submit button and by
+    /// Enter on a single-select question.
+    pub(super) fn ask_next_question(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(prompt) = self.ask.as_ref() else {
             return;
         };
         if prompt.submitted {
             return;
         }
-        let response = match prompt.mode {
-            AskMode::Select => {
-                let ix = prompt.highlighted;
-                if ix < prompt.options.len() {
-                    // The extension parses the leading number out of the
-                    // chosen string (`parseIndex`); the label keeps the value
-                    // legible in the transcript envelope.
-                    DialogResponse::Value(format!("{}. {}", ix + 1, prompt.options[ix].label))
-                } else if prompt.custom_row {
-                    DialogResponse::Value(format!("{}. Type something.", prompt.options.len() + 1))
-                } else {
-                    DialogResponse::Cancelled
-                }
-            }
-            AskMode::Multi => {
-                let typed = prompt
-                    .input
-                    .as_ref()
-                    .map(|input| input.read(cx).text())
-                    .unwrap_or_default();
-                let value = if typed.trim().is_empty() {
-                    prompt
-                        .checked
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, on)| **on)
-                        .map(|(ix, _)| (ix + 1).to_string())
-                        .collect::<Vec<_>>()
-                        .join(",")
-                } else {
-                    typed.trim().to_string()
-                };
-                DialogResponse::Value(value)
-            }
-            AskMode::Custom => {
-                let text = prompt
-                    .input
-                    .as_ref()
-                    .map(|input| input.read(cx).text())
-                    .unwrap_or_default();
-                DialogResponse::Value(text)
-            }
-        };
-        let id = prompt.id.clone();
-        self.respond_to_dialog(&id, &response);
-        if let Some(prompt) = self.ask.as_mut() {
-            prompt.submitted = true;
+        if prompt.cursor + 1 < prompt.questions.len() {
+            let cursor = prompt.cursor + 1;
+            self.ask_goto(cursor, cx);
+        } else {
+            self.ask_commit(window, cx);
         }
+    }
+
+    /// Step back to the previous question so its answer can be changed.
+    pub(super) fn ask_prev_question(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(prompt) = self.ask.as_ref() else {
+            return;
+        };
+        if prompt.submitted || prompt.cursor == 0 {
+            return;
+        }
+        let cursor = prompt.cursor - 1;
+        self.ask_goto(cursor, cx);
+    }
+
+    /// Commit the whole questionnaire: freeze the panel and replay every
+    /// buffered answer to the extension, starting with the request that is
+    /// currently blocking pi.
+    fn ask_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ask_sync_custom(cx);
+        let Some(prompt) = self.ask.as_mut() else {
+            return;
+        };
+        if prompt.submitted {
+            return;
+        }
+        let answers: Vec<AskAnswer> = prompt
+            .questions
+            .iter()
+            .enumerate()
+            .map(|(ix, question)| {
+                if question.multi_select {
+                    AskAnswer::Multi {
+                        checked: prompt
+                            .checked
+                            .get(ix)
+                            .cloned()
+                            .unwrap_or_else(|| vec![false; question.options.len()]),
+                        custom: prompt.custom.get(ix).cloned().unwrap_or_default(),
+                    }
+                } else {
+                    let highlighted = prompt.highlighted.get(ix).copied().unwrap_or(0);
+                    if highlighted >= question.options.len() {
+                        AskAnswer::Custom(prompt.custom.get(ix).cloned().unwrap_or_default())
+                    } else {
+                        AskAnswer::Option(highlighted)
+                    }
+                }
+            })
+            .collect();
+        prompt.submitted = true;
+        let id = prompt.id.clone();
+        let questions = prompt.questions.clone();
+        let first_is_multi = questions
+            .first()
+            .is_some_and(|question| question.multi_select);
+        self.ask_replay = Some(AskReplay {
+            questions,
+            answers,
+            state: ask::AskReplayState::default(),
+            current_id: Some(id.clone()),
+        });
+        // Hand focus back to the composer: the panel is now read-only.
         self.input.read(cx).focus(window);
         cx.notify();
+        self.ask_replay_reply(&id, if first_is_multi { "input" } else { "select" });
     }
 
-    /// Click / keyboard action for one panel row.
-    pub(super) fn ask_choose(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(prompt) = self.ask.as_ref() else {
-            return;
+    /// Answer the extension's current questionnaire request from the buffered
+    /// answers, advancing through the questionnaire. Runs once per request
+    /// until every answer has been replayed.
+    pub(super) fn ask_replay_reply(&mut self, id: &str, method: &str) {
+        let reply = {
+            let Some(replay) = self.ask_replay.as_mut() else {
+                return;
+            };
+            replay.current_id = Some(id.to_string());
+            replay
+                .state
+                .reply(method, &replay.questions, &replay.answers)
         };
-        if prompt.submitted {
-            return;
+
+        match reply {
+            ask::AskReplayReply::Value(value) => {
+                self.respond_to_dialog(id, &DialogResponse::Value(value))
+            }
+            ask::AskReplayReply::Cancel => {
+                self.ask_replay = None;
+                self.respond_to_dialog(id, &DialogResponse::Cancelled);
+            }
         }
-        match prompt.mode {
-            // A single-select row is the answer — no separate confirm step.
-            AskMode::Select => {
-                if let Some(prompt) = self.ask.as_mut() {
-                    prompt.highlighted = ix;
-                }
-                self.ask_confirm(window, cx);
-            }
-            AskMode::Multi => {
-                if ix < prompt.options.len() {
-                    if let Some(prompt) = self.ask.as_mut() {
-                        if let Some(slot) = prompt.checked.get_mut(ix) {
-                            *slot = !*slot;
-                        }
-                        prompt.highlighted = ix;
-                    }
-                    cx.notify();
-                } else {
-                    // The trailing Continue row commits the toggles.
-                    self.ask_confirm(window, cx);
-                }
-            }
-            AskMode::Custom => {}
+        if self
+            .ask_replay
+            .as_ref()
+            .is_some_and(|replay| replay.state.ix >= replay.questions.len())
+        {
+            self.ask_replay = None;
         }
     }
 
     /// Cancel the questionnaire (Esc / session replaced): pi sees a decline
     /// and the run continues without an answer.
     pub(super) fn ask_cancel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(prompt) = self.ask.take() else {
+        let Some(prompt) = self.ask.as_ref() else {
             return;
         };
+        // A committed questionnaire is already replaying; there is nothing
+        // left to decline.
+        if prompt.submitted {
+            return;
+        }
+        let id = prompt.id.clone();
+        self.ask = None;
+        self.ask_replay = None;
         self.ask_focus_pending = false;
-        self.respond_to_dialog(&prompt.id, &DialogResponse::Cancelled);
+        self.respond_to_dialog(&id, &DialogResponse::Cancelled);
         self.input.read(cx).focus(window);
         cx.notify();
     }
@@ -291,33 +356,25 @@ impl OrbitApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // In multi-select, Enter/Space toggles the highlighted row; the
-        // trailing Continue row submits. Every other mode answers outright.
-        if self
-            .ask
-            .as_ref()
-            .is_some_and(|prompt| prompt.mode == AskMode::Multi)
-        {
-            let ix = self
-                .ask
-                .as_ref()
-                .map(|prompt| prompt.highlighted)
-                .unwrap_or(0);
-            self.ask_choose(ix, window, cx);
+        // On a multi-select question Enter/Space toggles the highlighted row;
+        // the Next button commits. Every other question advances on Enter.
+        if self.ask.as_ref().is_some_and(AskPrompt::is_multi) {
+            let ix = self.ask.as_ref().map(AskPrompt::highlighted).unwrap_or(0);
+            self.ask_choose(ix, cx);
         } else {
-            self.ask_confirm(window, cx);
+            self.ask_next_question(window, cx);
         }
     }
 
-    /// Enter inside the panel's text field always submits the typed value
-    /// (custom answer, or a multi custom answer).
+    /// Enter inside the panel's text field advances (submits on the last
+    /// question), matching the Next button.
     pub(super) fn on_ask_submit(
         &mut self,
         _: &crate::AskSubmit,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.ask_confirm(window, cx);
+        self.ask_next_question(window, cx);
     }
 
     pub(super) fn on_ask_close(

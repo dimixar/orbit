@@ -9,10 +9,12 @@
 //! - [`events`] — the heartbeat: event drain, responses, session watcher
 //! - [`session`] — prompt/queue/turn lifecycle and navigation
 //! - [`pickers`] — model, command-palette, branch, and workspace pickers
+//! - [`pi_update_ui`] — the launch-time pi self-update: check, install, report
 //! - [`composer_ops`] — autocomplete, attachments, add-menu, model chips
 //! - [`sidebar`] — session/workspace sidebar rendering + row menus
 //! - [`settings`] — Settings surface (General/Runtime/Agent/Skills/Plugins/Providers)
 //! - [`skills_ui`] — Settings → Skills master-detail page + controllers
+//! - [`toast_ui`] — the in-app toast stack: push/dismiss helpers and layer
 //! - [`view`] — top-level chrome: sidebar, transcript, composer, status bar
 //! - [`open_in`] — "open workspace in" app detection and menu
 //! - [`helpers`] — icons, file glyphs, and small formatting helpers
@@ -44,7 +46,7 @@ use orbit_rpc::{
 use serde_json::Value;
 
 use crate::access::AccessMode;
-use crate::ask::{AskMode, AskPrompt, AskQuestion};
+use crate::ask::{AskPrompt, AskQuestion};
 use crate::auth::{AuthEffect, AuthManager, AuthSupport, LoginPhase, ProviderStatus};
 use crate::branch_picker::BranchPicker;
 use crate::bundled_extensions::BundledExtensions;
@@ -69,6 +71,7 @@ use crate::sidepane::{SidePane, SidePaneResize};
 use crate::skills::Skill;
 use crate::terminal::{TerminalPanel, TerminalResize};
 use crate::theme::{self, Theme, ThemeId, ThemeMode};
+use crate::toast;
 use crate::transcript::{self, Transcript};
 use crate::usage::page::UsagePage;
 use crate::watch;
@@ -230,6 +233,10 @@ pub struct OrbitApp {
     /// dismissible red banner until cleared — a failure is never dropped
     /// (docs: #error-handling).
     error: Option<String>,
+    /// The in-app toast stack: action confirmations and notifications that
+    /// land while the window is frontmost. Rendered bottom-right over every
+    /// surface (see [`toast_ui`]).
+    toasts: toast::Toasts,
     /// Text of the last optimistic follow-up. Cleared once pi confirms it in
     /// `queue_update`; restored to the composer if the command fails.
     pending_follow_up: Option<String>,
@@ -288,6 +295,10 @@ pub struct OrbitApp {
     /// The live inline questionnaire panel above the composer, answering the
     /// extension's `select` / `input` requests without a scrim modal.
     ask: Option<AskPrompt>,
+    /// Set once the panel commits: the buffered answers replay to the
+    /// extension one blocking request at a time, so incoming requests are
+    /// answered here instead of opening a panel.
+    ask_replay: Option<ask::AskReplay>,
     /// Focus handle carrying the `AskPanel` key context.
     ask_focus: FocusHandle,
     /// Focus the panel (or its text field) on the next paint.
@@ -514,6 +525,9 @@ pub struct OrbitApp {
     models_filter: Entity<ComposerInput>,
     /// Re-render the model list as the filter is typed.
     _models_filter_sub: Subscription,
+    /// Models page: show favorited models only (the second filter next to
+    /// the search field).
+    models_favorites_only: bool,
     /// Skills discovered for the current workspace (project + user scope).
     skills: Vec<Skill>,
     /// Installed pi packages (plugins) from user + project settings.
@@ -545,9 +559,13 @@ pub struct OrbitApp {
     /// Re-render the skill list as the filter is typed.
     _skills_filter_sub: Subscription,
     /// Background updater status mirrored from the global: `Idle` (nothing to
-    /// show), `Available` (the footer offers the update), `Updating` (spinning
-    /// until the app quits to install). The details stay on the worker.
+    /// show), `Available` (the footer and settings offer the update),
+    /// `Updating` (spinning until the app quits to install). The payload
+    /// details stay on the worker; only the release version rides along.
     updater_status: crate::updater::UpdateStatus,
+    /// The staged release's version (e.g. `0.0.3`), mirrored beside
+    /// `updater_status` so the settings buttons can name the download.
+    updater_version: Option<String>,
     /// Mirror of the persisted automatic-check preference, refreshed when the
     /// updater reports and on toggle, so frames never read the file.
     automatic_updates_enabled: bool,
@@ -694,9 +712,10 @@ impl OrbitApp {
         });
         let skills_filter_sub = cx.observe(&skills_filter, |_, _, cx| cx.notify());
 
-        // Settings → Agent: rename field. Default `Composer` key context keeps
-        // real text editing (selection, clipboard, arrows); Enter routes to the
-        // app's Submit, which no-ops on the empty main composer.
+        // Session-details popover: rename field. Default `Composer` key context
+        // keeps real text editing (selection, clipboard, arrows); Enter routes
+        // to Submit, which commits the name instead of the composer while this
+        // field holds focus (see `on_submit`).
         let session_name_input = cx.new(|cx| {
             ComposerInput::new(cx)
                 .with_element_id("session-name-input")
@@ -778,6 +797,7 @@ impl OrbitApp {
             retrying: false,
             retry_detail: None,
             error: None,
+            toasts: toast::Toasts::new(),
             pending_follow_up: None,
             session_name_input,
             status: connect_error.clone(),
@@ -802,6 +822,7 @@ impl OrbitApp {
             ask_tool_id: None,
             ask_questions: Vec::new(),
             ask: None,
+            ask_replay: None,
             ask_focus: cx.focus_handle(),
             ask_focus_pending: false,
             lightbox: None,
@@ -894,6 +915,7 @@ impl OrbitApp {
             _provider_filter_sub: provider_filter_sub,
             models_filter: models_filter.clone(),
             _models_filter_sub: models_filter_sub,
+            models_favorites_only: false,
             skills: Vec::new(),
             plugins: Vec::new(),
             plugins_error: None,
@@ -914,6 +936,10 @@ impl OrbitApp {
                 .and_then(|state| state.0.as_ref())
                 .map(|updater| updater.status())
                 .unwrap_or_default(),
+            updater_version: cx
+                .try_global::<crate::updater::UpdaterState>()
+                .and_then(|state| state.0.as_ref())
+                .and_then(|updater| updater.available_version()),
             automatic_updates_enabled: cx
                 .try_global::<crate::updater::UpdaterState>()
                 .and_then(|state| state.0.as_ref())
@@ -978,6 +1004,9 @@ impl OrbitApp {
         // The branch chip tracks the launch workspace even before a session
         // is open.
         app.refresh_branch_status(cx);
+        // Check for a newer pi in the background; a newer release installs
+        // itself through pi's own updater (see `pi_update_ui`).
+        app.check_pi_update_on_launch(cx);
         // Route banner clicks back to their session (bundle builds only).
         notifications::init();
         // A first launch with notifications on shows macOS's permission
@@ -1491,12 +1520,14 @@ mod events;
 mod helpers;
 mod open_in;
 mod pickers;
+mod pi_update_ui;
 mod runtime;
 mod search;
 mod session;
 mod settings;
 mod sidebar;
 mod skills_ui;
+mod toast_ui;
 mod updater_ui;
 mod view;
 

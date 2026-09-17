@@ -278,20 +278,11 @@ impl Render for OrbitApp {
             self.approval_focus_pending = false;
             window.focus(&self.approval_focus);
         }
-        // The inline ask panel owns the keyboard while it is open; a text
-        // field (custom / multi) takes focus directly so typing starts at once.
+        // The inline ask panel owns the keyboard while it is open.
         if self.ask_focus_pending {
             self.ask_focus_pending = false;
-            let target = match self.ask.as_ref() {
-                Some(prompt) if prompt.mode == AskMode::Custom => prompt
-                    .input
-                    .as_ref()
-                    .map(|input| input.read(cx).focus_handle(cx)),
-                _ => Some(self.ask_focus.clone()),
-            };
-            if let Some(handle) = target {
-                window.focus(&handle);
-            }
+            let focus = self.ask_focus.clone();
+            window.focus(&focus);
         }
 
         div()
@@ -848,6 +839,9 @@ impl Render for OrbitApp {
                     .clone()
                     .map(|image| self.lightbox_layer(image, cx)),
             )
+            // ── toasts — the in-app stack, topmost so a notification is
+            // never buried by whatever surface happens to be open.
+            .children(self.toast_layer(cx))
             .track_focus(&self.focus_handle(cx))
             // Sidebar resize: fires for every mouse move while the handle
             // drag is active, wherever the pointer travels.
@@ -1801,9 +1795,9 @@ impl OrbitApp {
                             app.client = Some(client);
                             app.send(CommandBody::GetState, "get_state");
                             app.refresh_catalogs();
-                            app.set_status("Connected");
+                            app.toast_success("Connected");
                         }
-                        Err(err) => app.set_status(format!("pi spawn failed: {err}")),
+                        Err(err) => app.toast_error(format!("pi spawn failed: {err}")),
                     }
                 }
                 cx.notify();
@@ -2284,6 +2278,15 @@ impl OrbitApp {
     pub(super) fn context_button(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let entity = cx.entity();
         let theme = *theme::get(cx);
+        // Manual compaction is offered only while pi is connected: without a
+        // session process there is nothing to compact.
+        let on_compact = self.client.is_some().then(|| {
+            Rc::new(
+                |app: &mut OrbitApp, _window: &mut Window, cx: &mut Context<OrbitApp>| {
+                    app.compact_now(cx);
+                },
+            ) as Rc<dyn Fn(&mut OrbitApp, &mut Window, &mut Context<OrbitApp>)>
+        });
         context_meter::context_control(
             ContextMeterData {
                 usage: self.context.as_ref(),
@@ -2321,6 +2324,8 @@ impl OrbitApp {
                 }
                 cx.notify();
             },
+            self.is_compacting,
+            on_compact,
             |app, _, cx| {
                 app.menu_dismissed_at = Some(Instant::now());
                 app.context_popup = ContextPopup::None;
@@ -2699,13 +2704,21 @@ impl OrbitApp {
     /// The inline `ask_user_question` panel: the live question and its options
     /// docked above the composer. It answers the extension's `select` /
     /// `input` requests in place, so a questionnaire never covers the
-    /// transcript with a scrim. The panel owns the `AskPanel` key context
-    /// (↑/↓ move, ⏎ picks, esc declines); a text field carries `AskInput` so
-    /// Enter submits it rather than the composer.
+    /// transcript with a scrim. Every question is buffered locally — Back and
+    /// Next step through them so an earlier answer can be changed — and only
+    /// the final Submit replays them to the extension. The panel owns the
+    /// `AskPanel` key context (↑/↓ move, ⏎ advances, esc declines); its text
+    /// field carries `AskInput` so Enter advances rather than submitting the
+    /// composer.
     pub(super) fn ask_panel(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let prompt = self.ask.as_ref()?;
+        let question = prompt.question()?;
         let theme = *theme::get(cx);
         let submitted = prompt.submitted;
+        let cursor = prompt.cursor;
+        let total = prompt.total();
+        let multi = prompt.is_multi();
+        let highlighted = prompt.highlighted();
 
         let mut card = div()
             .id("ask-panel")
@@ -2744,7 +2757,7 @@ impl OrbitApp {
                 .bg(theme.accent.opacity(0.16))
                 .child(icon("icons/task.svg", 13., theme.accent)),
         );
-        if !prompt.header.trim().is_empty() {
+        if !question.header.trim().is_empty() {
             header = header.child(
                 div()
                     .flex_none()
@@ -2756,21 +2769,17 @@ impl OrbitApp {
                     .line_height(theme.ui_px(14.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_2)
-                    .child(SharedString::from(prompt.header.clone())),
+                    .child(SharedString::from(question.header.clone())),
             );
         }
         header = header.child(div().flex_1());
-        if prompt.total > 1 {
+        if total > 1 {
             header = header.child(
                 div()
                     .flex_none()
                     .text_size(theme.ui_px(11.))
                     .text_color(theme.text_3)
-                    .child(format!(
-                        "Question {} of {}",
-                        prompt.question_ix + 1,
-                        prompt.total
-                    )),
+                    .child(format!("Question {} of {}", cursor + 1, total)),
             );
         }
         // A visible dismiss affordance beside the keyboard hint.
@@ -2801,246 +2810,277 @@ impl OrbitApp {
                 .line_height(theme.ui_px(19.))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.text)
-                .child(SharedString::from(prompt.question.clone())),
+                .child(SharedString::from(question.question.clone())),
         );
 
         // ── body ──
-        match prompt.mode {
-            AskMode::Custom => {
-                if let Some(input) = &prompt.input {
+        let mut rows = div().px(px(8.)).pb(px(8.)).flex().flex_col().gap(px(2.));
+        for (ix, option) in question.options.iter().enumerate() {
+            let row_highlighted = !submitted && ix == highlighted;
+            let checked = multi
+                && prompt
+                    .checked
+                    .get(cursor)
+                    .and_then(|row| row.get(ix))
+                    .copied()
+                    .unwrap_or(false);
+            let chosen = row_highlighted || checked;
+            // A number reads as a question rather than a menu; multi
+            // additionally marks its toggles with a trailing check.
+            let marker = div()
+                .flex_none()
+                .w(px(16.))
+                .text_size(theme.ui_px(12.))
+                .line_height(theme.ui_px(17.))
+                .text_color(if chosen { theme.accent } else { theme.text_3 })
+                .child(format!("{}. ", ix + 1));
+            let mut copy = div().min_w_0().flex_1().flex().flex_col().gap(px(1.));
+            copy = copy.child(
+                div()
+                    .whitespace_normal()
+                    .text_size(theme.ui_px(12.5))
+                    .line_height(theme.ui_px(17.))
+                    .text_color(if chosen { theme.text } else { theme.text_2 })
+                    .child(SharedString::from(option.label.clone())),
+            );
+            // The description only under the focused row keeps the list
+            // compact so every choice stays visible at a glance.
+            if row_highlighted && !option.description.trim().is_empty() {
+                copy = copy.child(
+                    div()
+                        .whitespace_normal()
+                        .text_size(theme.ui_px(11.5))
+                        .line_height(theme.ui_px(16.))
+                        .text_color(theme.text_3)
+                        .child(SharedString::from(option.description.clone())),
+                );
+            }
+            let mut row = div()
+                .id(ElementId::NamedInteger("ask-option".into(), ix as u64))
+                .w_full()
+                .min_w_0()
+                .px(px(10.))
+                .py(px(6.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(if row_highlighted {
+                    theme.border_strong
+                } else {
+                    gpui::transparent_black()
+                })
+                .when(row_highlighted, |row| row.bg(theme.overlay_strong))
+                .when(!submitted, |row| row.cursor_pointer())
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .hover(|style| style.bg(theme.overlay_strong))
+                .child(marker)
+                .child(copy);
+            if multi && checked {
+                row = row.child(icon("icons/check.svg", 12., theme.accent));
+            }
+            if !submitted {
+                row = row.on_click(cx.listener(move |this, _, _, cx| this.ask_choose(ix, cx)));
+            }
+            rows = rows.child(row);
+        }
+        // Single-select questions carry a trailing "Type something." row.
+        if !multi {
+            let trailing = question.options.len();
+            let row_highlighted = !submitted && trailing == highlighted;
+            let mut row = div()
+                .id("ask-trailing")
+                .w_full()
+                .min_w_0()
+                .px(px(10.))
+                .py(px(7.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(if row_highlighted {
+                    theme.border_strong
+                } else {
+                    gpui::transparent_black()
+                })
+                .when(row_highlighted, |row| row.bg(theme.overlay_strong))
+                .when(!submitted, |row| row.cursor_pointer())
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .hover(|style| style.bg(theme.overlay_strong))
+                .child(icon("icons/compose.svg", 12., theme.text_3))
+                .child(
+                    div()
+                        .text_size(theme.ui_px(12.5))
+                        .line_height(theme.ui_px(17.))
+                        .text_color(if row_highlighted {
+                            theme.text
+                        } else {
+                            theme.text_2
+                        })
+                        .child("Type something."),
+                );
+            if !submitted {
+                row =
+                    row.on_click(cx.listener(move |this, _, _, cx| this.ask_choose(trailing, cx)));
+            }
+            rows = rows.child(row);
+        }
+        card = card.child(rows);
+
+        // The focused option's preview (single-select + preview only).
+        // Labeled so authored mockups read as preview content, not a
+        // second interface.
+        if !multi {
+            if let Some(option) = question.options.get(highlighted) {
+                if let Some(preview) = option.preview.as_deref() {
+                    let preview = if preview.chars().count() > 600 {
+                        let mut capped: String = preview.chars().take(600).collect();
+                        capped.push('…');
+                        capped
+                    } else {
+                        preview.to_string()
+                    };
                     card = card.child(
                         div()
                             .mx(px(12.))
                             .mb(px(10.))
                             .rounded(px(9.))
                             .border_1()
-                            .border_color(theme.border_strong)
-                            .bg(theme.bg_composer)
-                            .px(px(10.))
-                            .py(px(6.))
-                            .child(input.clone()),
-                    );
-                }
-            }
-            AskMode::Select | AskMode::Multi => {
-                let multi = prompt.mode == AskMode::Multi;
-                let mut rows = div().px(px(8.)).pb(px(8.)).flex().flex_col().gap(px(2.));
-                for (ix, option) in prompt.options.iter().enumerate() {
-                    let highlighted = !submitted && ix == prompt.highlighted;
-                    let checked = multi && prompt.checked.get(ix).copied().unwrap_or(false);
-                    // A number reads as a question rather than a menu; multi
-                    // additionally marks its toggles with a trailing check.
-                    let marker = div()
-                        .flex_none()
-                        .w(px(16.))
-                        .text_size(theme.ui_px(12.))
-                        .line_height(theme.ui_px(17.))
-                        .text_color(if highlighted || checked {
-                            theme.accent
-                        } else {
-                            theme.text_3
-                        })
-                        .child(format!("{}. ", ix + 1));
-                    let mut copy = div().min_w_0().flex_1().flex().flex_col().gap(px(1.));
-                    copy = copy.child(
-                        div()
-                            .whitespace_normal()
-                            .text_size(theme.ui_px(12.5))
-                            .line_height(theme.ui_px(17.))
-                            .text_color(if highlighted || checked {
-                                theme.text
-                            } else {
-                                theme.text_2
-                            })
-                            .child(SharedString::from(option.label.clone())),
-                    );
-                    // The description only under the focused row keeps the list
-                    // compact so every choice stays visible at a glance.
-                    if highlighted && !option.description.trim().is_empty() {
-                        copy = copy.child(
-                            div()
-                                .whitespace_normal()
-                                .text_size(theme.ui_px(11.5))
-                                .line_height(theme.ui_px(16.))
-                                .text_color(theme.text_3)
-                                .child(SharedString::from(option.description.clone())),
-                        );
-                    }
-                    let mut row = div()
-                        .id(ElementId::NamedInteger("ask-option".into(), ix as u64))
-                        .w_full()
-                        .min_w_0()
-                        .px(px(10.))
-                        .py(px(6.))
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(if highlighted {
-                            theme.border_strong
-                        } else {
-                            gpui::transparent_black()
-                        })
-                        .when(highlighted, |row| row.bg(theme.overlay_strong))
-                        .when(!submitted, |row| row.cursor_pointer())
-                        .flex()
-                        .items_center()
-                        .gap(px(4.))
-                        .hover(|style| style.bg(theme.overlay_strong))
-                        .child(marker)
-                        .child(copy);
-                    if multi && checked {
-                        row = row.child(icon("icons/check.svg", 12., theme.accent));
-                    }
-                    if !submitted {
-                        row =
-                            row.on_click(cx.listener(move |this, _, window, cx| {
-                                this.ask_choose(ix, window, cx)
-                            }));
-                    }
-                    rows = rows.child(row);
-                }
-                // Trailing row: the "Type something." escape (select) or the
-                // Continue action (multi).
-                let trailing = prompt.options.len();
-                let highlighted = !submitted && trailing == prompt.highlighted;
-                let (trailing_icon, trailing_label) = if multi {
-                    ("icons/check.svg", "Continue")
-                } else {
-                    ("icons/compose.svg", "Type something.")
-                };
-                let mut row = div()
-                    .id("ask-trailing")
-                    .w_full()
-                    .min_w_0()
-                    .px(px(10.))
-                    .py(px(7.))
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(if highlighted {
-                        theme.border_strong
-                    } else {
-                        gpui::transparent_black()
-                    })
-                    .when(highlighted, |row| row.bg(theme.overlay_strong))
-                    .when(!submitted, |row| row.cursor_pointer())
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .hover(|style| style.bg(theme.overlay_strong))
-                    .child(icon(trailing_icon, 12., theme.text_3))
-                    .child(
-                        div()
-                            .text_size(theme.ui_px(12.5))
-                            .line_height(theme.ui_px(17.))
-                            .text_color(if highlighted {
-                                theme.text
-                            } else {
-                                theme.text_2
-                            })
-                            .child(trailing_label),
-                    );
-                if !submitted {
-                    row = row.on_click(cx.listener(move |this, _, window, cx| {
-                        this.ask_choose(trailing, window, cx)
-                    }));
-                }
-                rows = rows.child(row);
-                card = card.child(rows);
-
-                // The focused option's preview (select + preview only).
-                // Labeled so authored mockups read as preview content, not a
-                // second interface.
-                if !multi {
-                    if let Some(option) = prompt.options.get(prompt.highlighted) {
-                        if let Some(preview) = option.preview.as_deref() {
-                            let preview = if preview.chars().count() > 600 {
-                                let mut capped: String = preview.chars().take(600).collect();
-                                capped.push('…');
-                                capped
-                            } else {
-                                preview.to_string()
-                            };
-                            card = card.child(
+                            .border_color(theme.border)
+                            .bg(theme.bg_main)
+                            .overflow_hidden()
+                            .flex()
+                            .flex_col()
+                            .child(
                                 div()
-                                    .mx(px(12.))
-                                    .mb(px(10.))
-                                    .rounded(px(9.))
-                                    .border_1()
-                                    .border_color(theme.border)
-                                    .bg(theme.bg_main)
-                                    .overflow_hidden()
+                                    .px(px(10.))
+                                    .py(px(5.))
                                     .flex()
-                                    .flex_col()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .border_b_1()
+                                    .border_color(theme.border)
+                                    .child(icon("icons/eye.svg", 11., theme.text_3))
                                     .child(
                                         div()
-                                            .px(px(10.))
-                                            .py(px(5.))
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(6.))
-                                            .border_b_1()
-                                            .border_color(theme.border)
-                                            .child(icon("icons/eye.svg", 11., theme.text_3))
-                                            .child(
-                                                div()
-                                                    .text_size(theme.ui_px(10.5))
-                                                    .line_height(theme.ui_px(14.))
-                                                    .font_weight(FontWeight::MEDIUM)
-                                                    .text_color(theme.text_3)
-                                                    .child(format!("Preview · {}", option.label)),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .px(px(10.))
-                                            .py(px(8.))
-                                            .font_family(theme::code_font_family())
-                                            .text_size(theme.code_px(11.))
-                                            .line_height(theme.code_px(16.))
-                                            .text_color(theme.text_2)
-                                            .whitespace_normal()
-                                            .child(SharedString::from(preview)),
+                                            .text_size(theme.ui_px(10.5))
+                                            .line_height(theme.ui_px(14.))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.text_3)
+                                            .child(format!("Preview · {}", option.label)),
                                     ),
-                            );
-                        }
-                    }
-                }
-                // The multi-select custom-answer field.
-                if multi {
-                    if let Some(input) = &prompt.input {
-                        card = card.child(
-                            div()
-                                .mx(px(12.))
-                                .mb(px(10.))
-                                .rounded(px(9.))
-                                .border_1()
-                                .border_color(theme.border_strong)
-                                .bg(theme.bg_composer)
-                                .px(px(10.))
-                                .py(px(6.))
-                                .child(input.clone()),
-                        );
-                    }
+                            )
+                            .child(
+                                div()
+                                    .px(px(10.))
+                                    .py(px(8.))
+                                    .font_family(theme::code_font_family())
+                                    .text_size(theme.code_px(11.))
+                                    .line_height(theme.code_px(16.))
+                                    .text_color(theme.text_2)
+                                    .whitespace_normal()
+                                    .child(SharedString::from(preview)),
+                            ),
+                    );
                 }
             }
         }
 
-        // ── footer hint ──
-        let hint = match prompt.mode {
-            AskMode::Select => "↑↓ Navigate · ⏎ Select · esc Cancel",
-            AskMode::Multi => "↑↓ Navigate · ⏎ Toggle · Continue to submit",
-            AskMode::Custom => "⏎ Submit · esc Cancel",
+        // The custom-answer field: always on multi questions, and on a
+        // single-select question once its "Type something." row is active.
+        if prompt.custom_active() {
+            card = card.child(
+                div()
+                    .mx(px(12.))
+                    .mb(px(10.))
+                    .rounded(px(9.))
+                    .border_1()
+                    .border_color(theme.border_strong)
+                    .bg(theme.bg_composer)
+                    .px(px(10.))
+                    .py(px(6.))
+                    .child(prompt.input.clone()),
+            );
+        }
+
+        // ── footer: hint + Back / Next (Submit on the last question) ──
+        let hint = if submitted {
+            "Sending your answers…"
+        } else if multi {
+            "↑↓ Navigate · ⏎ Toggle · esc Cancel"
+        } else {
+            "↑↓ Navigate · ⏎ Next · esc Cancel"
         };
+        let mut back = div()
+            .id("ask-back")
+            .h(px(28.))
+            .px(px(12.))
+            .rounded(px(7.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(theme.ui_px(11.5))
+            .font_weight(FontWeight::MEDIUM)
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .bg(theme.overlay)
+            .text_color(theme.text_2);
+        let back_disabled = submitted || cursor == 0;
+        if back_disabled {
+            back = back.opacity(0.45);
+        } else {
+            back = back
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.overlay_strong).text_color(theme.text))
+                .on_click(cx.listener(|this, _, window, cx| this.ask_prev_question(window, cx)));
+        }
+        back = back.child("Back");
+
+        let last = cursor + 1 >= total;
+        let next_label = if last { "Submit" } else { "Next" };
+        let mut next = div()
+            .id("ask-next")
+            .h(px(28.))
+            .px(px(14.))
+            .rounded(px(7.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_size(theme.ui_px(11.5))
+            .font_weight(FontWeight::MEDIUM)
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .bg(theme.accent.opacity(0.16))
+            .text_color(theme.accent);
+        if submitted {
+            next = next.opacity(0.45);
+        } else {
+            next = next
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.accent.opacity(0.26)))
+                .on_click(cx.listener(|this, _, window, cx| this.ask_next_question(window, cx)));
+        }
+        next = next.child(next_label);
+
         card = card.child(
             div()
-                .h(px(30.))
-                .px(px(14.))
+                .h(px(46.))
+                .px(px(12.))
                 .flex()
                 .items_center()
+                .gap(px(8.))
                 .border_t_1()
                 .border_color(theme.border)
-                .text_size(theme.ui_px(11.))
-                .text_color(theme.text_3)
-                .child(hint),
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(theme.ui_px(11.))
+                        .text_color(theme.text_3)
+                        .child(hint),
+                )
+                .child(back)
+                .child(next),
         );
 
         Some(card.into_any_element())

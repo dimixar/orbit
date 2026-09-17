@@ -39,55 +39,180 @@ pub struct AskQuestion {
     pub options: Vec<AskOption>,
 }
 
-/// Which primitive the live panel is answering.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AskMode {
-    /// Single-select: option rows plus a "Type something." escape.
-    Select,
-    /// Multi-select: toggle rows plus a Continue action.
-    Multi,
-    /// Free text (a single-select custom answer, or a multi custom answer).
-    Custom,
+/// A locally-buffered answer to one questionnaire question.
+///
+/// Nothing is sent to the extension until the whole questionnaire is
+/// committed. Keeping every answer local is what lets the user step back to
+/// an earlier question and change it; replay then hands the extension the
+/// same `select` / `input` responses it would have seen one at a time.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum AskAnswer {
+    /// No choice recorded yet.
+    #[default]
+    Unanswered,
+    /// Single-select: index into the question's options.
+    Option(usize),
+    /// Single-select "Type something." (or a multi custom answer): free text.
+    Custom(String),
+    /// Multi-select: per-option toggles plus an optional custom answer. An
+    /// empty selection is a deliberate commit, exactly as the extension's RPC
+    /// fallback treats a blank input.
+    Multi { checked: Vec<bool>, custom: String },
 }
 
 /// The live questionnaire panel rendered above the composer. It answers the
-/// extension's `select` / `input` requests in place of the scrim modal. The
-/// rich structure (headers, descriptions) comes from the tool arguments; the
-/// response value only needs to encode the chosen index, which is exactly
-/// what the extension parses back.
+/// extension's `select` / `input` requests in place of the scrim modal.
+///
+/// The panel is whole-questionnaire: it renders one question at a time with
+/// back / next, buffering every answer locally so the user can revisit and
+/// change earlier choices. It only talks to the extension once, when the last
+/// answer is committed — see `crate::app::ask` for the replay.
 pub struct AskPrompt {
-    /// RPC id of the live `extension_ui_request`.
+    /// RPC id of the questionnaire's first (currently blocking) request.
     pub id: String,
-    pub mode: AskMode,
-    /// Index of the question being answered (for the "N of M" hint).
-    pub question_ix: usize,
-    pub total: usize,
-    pub header: String,
-    pub question: String,
-    pub options: Vec<AskOption>,
-    /// Single-select questions append a "Type something." row (the last row).
-    pub custom_row: bool,
-    /// Multi-select toggles, one per option.
-    pub checked: Vec<bool>,
-    /// Highlighted row (0..=options.len(); the last is custom / Continue).
-    pub highlighted: usize,
-    /// A response was sent; the panel waits for the next request or the tool
-    /// to end. Clicks are ignored while set.
+    /// Every question in the running `ask_user_question` call.
+    pub questions: Vec<AskQuestion>,
+    /// The question on screen.
+    pub cursor: usize,
+    /// Highlighted row per question (parallel to `questions`).
+    pub highlighted: Vec<usize>,
+    /// Multi-select toggles per question (parallel to `questions`; empty for
+    /// single-select questions).
+    pub checked: Vec<Vec<bool>>,
+    /// Custom-answer text per question (parallel to `questions`).
+    pub custom: Vec<String>,
+    /// Shared text field for the current question's custom answer.
+    pub input: Entity<ComposerInput>,
+    /// The questionnaire was committed; buffered answers are replaying to the
+    /// extension, so the panel is read-only.
     pub submitted: bool,
-    /// Text field for `Custom` (and the custom-answer field for `Multi`).
-    pub input: Option<Entity<ComposerInput>>,
 }
 
 impl AskPrompt {
-    /// The number of selectable rows (options plus the trailing custom /
-    /// Continue row when the mode has one).
+    /// The question currently on screen.
+    pub fn question(&self) -> Option<&AskQuestion> {
+        self.questions.get(self.cursor)
+    }
+
+    pub fn total(&self) -> usize {
+        self.questions.len()
+    }
+
+    pub fn is_multi(&self) -> bool {
+        self.question()
+            .is_some_and(|question| question.multi_select)
+    }
+
+    /// The highlighted row for the current question.
+    pub fn highlighted(&self) -> usize {
+        self.highlighted.get(self.cursor).copied().unwrap_or(0)
+    }
+
+    /// Whether the current question offers a trailing "Type something." row.
+    pub fn has_custom_row(&self) -> bool {
+        self.question()
+            .is_some_and(|question| !question.multi_select)
+    }
+
+    /// Selectable rows for the current question: its options plus the trailing
+    /// "Type something." row on single-select questions.
     pub fn row_count(&self) -> usize {
-        let extra = match self.mode {
-            AskMode::Select => usize::from(self.custom_row),
-            AskMode::Multi => 1, // Continue
-            AskMode::Custom => 0,
+        let Some(question) = self.question() else {
+            return 0;
         };
-        self.options.len() + extra
+        question.options.len() + usize::from(!question.multi_select)
+    }
+
+    /// The custom-answer field is meaningful on multi questions (always) and
+    /// on single-select questions when the trailing row is highlighted.
+    pub fn custom_active(&self) -> bool {
+        match self.question() {
+            Some(question) if question.multi_select => true,
+            _ => self.has_custom_row() && self.highlighted() >= self.row_count().saturating_sub(1),
+        }
+    }
+}
+
+/// The cursor over a questionnaire being replayed to the extension, plus the
+/// text a single-select "Type something." choice owes the `input` request that
+/// follows its `select`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct AskReplayState {
+    /// Index of the next question to answer.
+    pub ix: usize,
+    /// Text for the pending custom follow-up `input`, if any.
+    pub pending_custom: Option<String>,
+}
+
+/// What to send the extension for its current request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AskReplayReply {
+    /// Send this value as `extension_ui_response`.
+    Value(String),
+    /// The buffered answers cannot answer this request — decline.
+    Cancel,
+}
+
+impl AskReplayState {
+    /// Answer one `select` / `input` request from the buffered answers,
+    /// advancing when a question is fully consumed. A `select` that chooses
+    /// "Type something." records the owed text and leaves `ix` put so the
+    /// `input` that follows completes the same question.
+    pub fn reply(
+        &mut self,
+        method: &str,
+        questions: &[AskQuestion],
+        answers: &[AskAnswer],
+    ) -> AskReplayReply {
+        if method == "select" {
+            let answer = answers.get(self.ix).cloned().unwrap_or_default();
+            let options_len = questions
+                .get(self.ix)
+                .map(|question| question.options.len())
+                .unwrap_or(0);
+            let label = match (&answer, questions.get(self.ix)) {
+                (AskAnswer::Option(ix), Some(question)) => question
+                    .options
+                    .get(*ix)
+                    .map(|option| option.label.clone())
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            match answer {
+                AskAnswer::Option(ix) => {
+                    self.ix += 1;
+                    AskReplayReply::Value(format!("{}. {}", ix + 1, label))
+                }
+                AskAnswer::Custom(text) => {
+                    self.pending_custom = Some(text);
+                    AskReplayReply::Value(format!("{}. Type something.", options_len + 1))
+                }
+                _ => AskReplayReply::Cancel,
+            }
+        } else if let Some(text) = self.pending_custom.take() {
+            self.ix += 1;
+            AskReplayReply::Value(text)
+        } else {
+            match answers.get(self.ix).cloned() {
+                Some(AskAnswer::Multi { checked, custom }) => {
+                    let custom = custom.trim();
+                    let value = if custom.is_empty() {
+                        checked
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, on)| **on)
+                            .map(|(ix, _)| (ix + 1).to_string())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    } else {
+                        custom.to_string()
+                    };
+                    self.ix += 1;
+                    AskReplayReply::Value(value)
+                }
+                _ => AskReplayReply::Cancel,
+            }
+        }
     }
 }
 
@@ -160,16 +285,6 @@ fn option_from_value(value: &Value) -> Option<AskOption> {
         description,
         preview,
     })
-}
-
-/// Find the question a live `extension_ui_request` belongs to. The extension
-/// prefixes the request title with `[Header] ` and appends folded preview
-/// blocks, but always embeds the full question text — so a substring match
-/// against the authored questions is exact enough to pick the right one.
-pub fn question_index_for_title(questions: &[AskQuestion], title: &str) -> Option<usize> {
-    questions
-        .iter()
-        .position(|question| title.contains(question.question.as_str()))
 }
 
 /// Whether the tool result is the extension's "declined" envelope. The
@@ -276,25 +391,6 @@ mod tests {
     }
 
     #[test]
-    fn matches_a_request_title_to_its_question() {
-        let questions = vec![
-            AskQuestion {
-                header: "A".into(),
-                question: "First question?".into(),
-                ..Default::default()
-            },
-            AskQuestion {
-                header: "B".into(),
-                question: "Second question?".into(),
-                ..Default::default()
-            },
-        ];
-        let title = "[B] Second question?\n\n--- 1. Preview ---\nbody";
-        assert_eq!(question_index_for_title(&questions, title), Some(1));
-        assert_eq!(question_index_for_title(&questions, "unrelated"), None);
-    }
-
-    #[test]
     fn reads_the_answer_envelope() {
         let answered = json!("User has answered your questions: \"Q\"=\"OAuth\". You can now continue with the user's answers in mind.");
         let envelope = answer_envelope(Some(&answered)).unwrap();
@@ -307,6 +403,90 @@ mod tests {
             "User declined to answer questions"
         ))));
         assert!(!is_declined(Some(&answered)));
+    }
+
+    /// Shorthand for a question with the given options.
+    fn ask_question(multi: bool, labels: &[&str]) -> AskQuestion {
+        AskQuestion {
+            multi_select: multi,
+            options: labels
+                .iter()
+                .map(|label| AskOption {
+                    label: (*label).into(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn replay_walks_options_then_multi() {
+        let questions = vec![
+            ask_question(false, &["A", "B"]),
+            ask_question(true, &["X", "Y"]),
+        ];
+        let answers = vec![
+            AskAnswer::Option(1),
+            AskAnswer::Multi {
+                checked: vec![false, true],
+                custom: String::new(),
+            },
+        ];
+        let mut state = AskReplayState::default();
+        assert_eq!(
+            state.reply("select", &questions, &answers),
+            AskReplayReply::Value("2. B".into())
+        );
+        assert_eq!(state.ix, 1);
+        assert_eq!(
+            state.reply("input", &questions, &answers),
+            AskReplayReply::Value("2".into())
+        );
+        assert_eq!(state.ix, 2);
+    }
+
+    #[test]
+    fn replay_answers_a_custom_select_follow_up() {
+        let questions = vec![ask_question(false, &["A", "B"])];
+        let answers = vec![AskAnswer::Custom("hello".into())];
+        let mut state = AskReplayState::default();
+        // The select picks the trailing row and waits for the input.
+        assert_eq!(
+            state.reply("select", &questions, &answers),
+            AskReplayReply::Value("3. Type something.".into())
+        );
+        assert_eq!(state.ix, 0);
+        assert_eq!(
+            state.reply("input", &questions, &answers),
+            AskReplayReply::Value("hello".into())
+        );
+        assert_eq!(state.ix, 1);
+    }
+
+    #[test]
+    fn replay_prefers_multi_custom_over_toggles() {
+        let questions = vec![ask_question(true, &["X", "Y"])];
+        let answers = vec![AskAnswer::Multi {
+            checked: vec![true, false],
+            custom: "other".into(),
+        }];
+        let mut state = AskReplayState::default();
+        assert_eq!(
+            state.reply("input", &questions, &answers),
+            AskReplayReply::Value("other".into())
+        );
+    }
+
+    #[test]
+    fn replay_declines_unanswerable_requests() {
+        let questions = vec![ask_question(false, &["A"])];
+        let answers = vec![AskAnswer::Unanswered];
+        let mut state = AskReplayState::default();
+        assert_eq!(
+            state.reply("select", &questions, &answers),
+            AskReplayReply::Cancel
+        );
     }
 
     #[test]

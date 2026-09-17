@@ -3,8 +3,8 @@
 
 Reads the release artifacts from a directory, Ed25519-signs each one, and
 writes one `appcast-<os>-<arch>.xml` per platform/architecture that has a
-matching artifact. The files are committed under `appcasts/` on `main`, where
-the app fetches them from `raw.githubusercontent.com`.
+matching artifact. The files are attached to the release as assets, where the
+app fetches them through GitHub's `releases/latest/download/` alias.
 
 The signature and format match what `crates/orbit-pi/src/updater.rs` verifies:
 `sparkle:edSignature` is the base64 Ed25519 signature over the *artifact bytes*
@@ -13,7 +13,7 @@ The signature and format match what `crates/orbit-pi/src/updater.rs` verifies:
 Usage:
     python3 scripts/appcast.py \
         --version 0.0.3 --tag v0.0.3 --repo imrj05/orbit \
-        --assets artifacts --out appcasts
+        --assets artifacts --out artifacts
 
 Signing key:
     ORBIT_UPDATE_PRIVATE_KEY holds the base64 of an Ed25519 private key PEM.
@@ -138,7 +138,7 @@ def main():
     parser.add_argument("--tag", required=True)
     parser.add_argument("--repo", required=True, help="owner/name")
     parser.add_argument("--assets", default="artifacts")
-    parser.add_argument("--out", default="appcasts")
+    parser.add_argument("--out", default="artifacts")
     parser.add_argument("--key-file", help="Ed25519 private key PEM")
     args = parser.parse_args()
 

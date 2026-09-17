@@ -289,7 +289,23 @@ impl OrbitApp {
         .detach();
     }
 
-    pub(super) fn on_submit(&mut self, _: &crate::Submit, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn on_submit(
+        &mut self,
+        _: &crate::Submit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // The session-details rename field shares the `Composer` key context;
+        // Enter there commits the name instead of reaching the main composer.
+        if self
+            .session_name_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+        {
+            self.rename_session(cx);
+            return;
+        }
         // Enter commits the highlighted autocomplete entry while the menu
         // is open; a second Enter submits.
         if self.commit_autocomplete_if_open(cx) {
@@ -404,6 +420,14 @@ impl OrbitApp {
         }
         if self.context_popup != ContextPopup::None {
             self.context_popup = ContextPopup::None;
+            cx.notify();
+            return;
+        }
+        // The session-details popover can hold keyboard focus (its rename
+        // field), so Escape closes it before falling through to aborting a run.
+        if self.session_details_open {
+            self.session_details_open = false;
+            self.input.read(cx).focus(window);
             cx.notify();
             return;
         }
@@ -906,6 +930,64 @@ impl OrbitApp {
         let model = self.model_label.clone();
         let thinking = self.thinking_label.clone();
 
+        // The header names the active session. With one live, the name is the
+        // rename field itself: pi owns the name, `get_state` keeps the field
+        // in step, and Enter or the button commits it (`set_session_name`).
+        let title_row: AnyElement = if session_id.is_empty() {
+            div()
+                .text_size(theme.ui_px(12.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child(title)
+                .into_any_element()
+        } else {
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h(px(26.))
+                        .px(px(8.))
+                        .rounded_md()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.bg_raised)
+                        .flex()
+                        .items_center()
+                        .child(self.session_name_input.clone()),
+                )
+                .child(
+                    div()
+                        .id("sess-rename")
+                        .flex_none()
+                        .h(px(26.))
+                        .px(px(10.))
+                        .rounded_md()
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.bg_raised)
+                        .flex()
+                        .items_center()
+                        .cursor_pointer()
+                        .text_size(theme.ui_px(11.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_2)
+                        .hover(|s| s.bg(theme.bg_hover))
+                        .on_click({
+                            let this = this.clone();
+                            move |_, _, cx| {
+                                this.update(cx, |app, cx| app.rename_session(cx));
+                            }
+                        })
+                        .child("Rename"),
+                )
+                .into_any_element()
+        };
+
         let popup = div()
             .w(px(300.))
             .font_family(theme::ui_font_family())
@@ -942,13 +1024,7 @@ impl OrbitApp {
                     .flex()
                     .flex_col()
                     .gap(px(2.))
-                    .child(
-                        div()
-                            .text_size(theme.ui_px(12.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(title),
-                    )
+                    .child(title_row)
                     .child(
                         div()
                             .text_size(theme.ui_px(11.))
@@ -1456,13 +1532,13 @@ impl OrbitApp {
         cx: &mut Context<Self>,
     ) {
         let Some((ix, text)) = self.transcript.last_response_text() else {
-            self.set_status("No response to copy yet");
+            self.toast_warning("No response to copy yet");
             cx.notify();
             return;
         };
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         self.transcript.mark_copied(ix);
-        self.set_status("Copied latest response");
+        self.toast_success("Copied latest response");
         cx.notify();
     }
 

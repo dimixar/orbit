@@ -335,6 +335,40 @@ jobs:
           git push origin "$TAG"
           echo "Created $TAG at $GITHUB_SHA"
 
+      # A missing signing key must not block the release; it only means this
+      # release ships no update feeds, so installed apps will not see it.
+      - name: Check for the update signing key
+        id: signing
+        env:
+          ORBIT_UPDATE_PRIVATE_KEY: ${{ secrets.ORBIT_UPDATE_PRIVATE_KEY }}
+        run: |
+          if [ -n "${ORBIT_UPDATE_PRIVATE_KEY:-}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::ORBIT_UPDATE_PRIVATE_KEY is not set; shipping without update feeds. Installed apps poll releases/latest/download and will see no update."
+          fi
+
+      # Sign each artifact and attach the update feeds to the same release, so a
+      # published release serves them at
+      # https://github.com/<owner>/<repo>/releases/latest/download/appcast-*.xml
+      # (see crates/orbit-pi/src/updater.rs). Signing covers the artifact's exact
+      # bytes, so it must run on the same assets that ship here.
+      - name: Sign artifacts and write appcasts
+        if: steps.signing.outputs.available == 'true'
+        env:
+          ORBIT_UPDATE_PRIVATE_KEY: ${{ secrets.ORBIT_UPDATE_PRIVATE_KEY }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/appcast.py \
+            --version "$VERSION" \
+            --tag "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --assets artifacts \
+            --out artifacts
+
       # Waku-style: the release body is this version's CHANGELOG.md section,
       # and the same notes ship as an asset so they can be linked directly.
       - name: Write release notes from CHANGELOG.md

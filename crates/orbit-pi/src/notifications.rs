@@ -1,11 +1,14 @@
-//! Desktop and sound notifications for background agent events.
+//! Notification channels for background agent events: a system banner, the
+//! alert sound, and an in-app toast.
 //!
-//! Two independent channels, both persisted to
+//! Three independent channels, all persisted to
 //! `~/.orbit-pi/notifications.json` alongside the other UI prefs:
-//! **desktop** — a system banner, and **sound** — the system alert sound.
-//! The app suppresses both while its window is frontmost: the transcript is
-//! the notification then, and a banner over a window you are reading is
-//! noise.
+//! **desktop** — a system banner, **sound** — the system alert sound, and
+//! **toasts** — the in-app card that stands in for the banner while the
+//! window is frontmost. Banner and sound are suppressed while the window is
+//! frontmost (the transcript is the notification then, and a banner over a
+//! window you are reading is noise); the toast channel is what those events
+//! surface through instead.
 //!
 //! macOS is the shipping target (INTENT.md D5). Banners go through
 //! `UNUserNotificationCenter` when Orbit runs from its `.app` bundle — the
@@ -51,22 +54,21 @@ const SOUND_NAME: &str = "Glass";
 
 /// Longest notification body kept, in characters. Smart-reply cutoffs and
 /// Notification Center both truncate anyway; a preview is what gets read.
-/// Only the macOS `notify` reads it, so a non-macOS build (including a test
-/// build, where `cfg(test)` alone would not cover the gap) has it unused.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-const BODY_PREVIEW_CHARS: usize = 180;
+pub(crate) const BODY_PREVIEW_CHARS: usize = 180;
 
 /// Longest title / subtitle kept, in characters.
 #[cfg(target_os = "macos")]
 const LINE_PREVIEW_CHARS: usize = 64;
 
-/// The two notification channels, persisted between runs.
+/// The three notification channels, persisted between runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Prefs {
     /// Show a system banner for background events.
     pub desktop: bool,
     /// Play the alert sound for background events.
     pub sound: bool,
+    /// Show an in-app toast for background events while the window is up.
+    pub toasts: bool,
 }
 
 impl Default for Prefs {
@@ -74,6 +76,7 @@ impl Default for Prefs {
         Self {
             desktop: true,
             sound: true,
+            toasts: true,
         }
     }
 }
@@ -104,6 +107,9 @@ impl Prefs {
         if let Some(sound) = value.get("sound").and_then(Value::as_bool) {
             prefs.sound = sound;
         }
+        if let Some(toasts) = value.get("toasts").and_then(Value::as_bool) {
+            prefs.toasts = toasts;
+        }
         prefs
     }
 
@@ -117,6 +123,7 @@ impl Prefs {
             serde_json::json!({
                 "desktop": self.desktop,
                 "sound": self.sound,
+                "toasts": self.toasts,
             })
             .to_string(),
         );
@@ -144,9 +151,8 @@ pub enum DesktopAuth {
 
 /// Collapse whitespace and truncate on a word boundary. Notification bodies
 /// arrive as model output: multi-line markdown would otherwise render as a
-/// wall of text in a banner that shows two lines.
-#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
-fn preview(text: &str, max_chars: usize) -> String {
+/// wall of text in a banner — or toast — that shows a few lines.
+pub(crate) fn preview(text: &str, max_chars: usize) -> String {
     // Split first, then drop non-whitespace control characters: filtering
     // before the split would glue words together across the removed spaces.
     let collapsed = text
@@ -451,6 +457,7 @@ mod tests {
             Prefs {
                 desktop: false,
                 sound: true,
+                toasts: true,
             }
         );
         assert_eq!(Prefs::from_value(&json!({})), Prefs::default());
@@ -459,6 +466,15 @@ mod tests {
             Prefs {
                 desktop: true,
                 sound: false,
+                toasts: true,
+            }
+        );
+        assert_eq!(
+            Prefs::from_value(&json!({ "toasts": false })),
+            Prefs {
+                desktop: true,
+                sound: true,
+                toasts: false,
             }
         );
     }

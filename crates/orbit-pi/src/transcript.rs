@@ -121,6 +121,10 @@ pub struct ToolCall {
     pub output: Option<Value>,
     /// The tool execution reported `isError`.
     pub failed: bool,
+    /// Wall-clock time the tool took, measured client-side between
+    /// `tool_execution_start` and `tool_execution_end` (live runs only —
+    /// snapshots carry no timing). The header shows it once settled.
+    pub duration: Option<Duration>,
 }
 
 impl ToolCall {
@@ -142,6 +146,7 @@ impl ToolCall {
             },
             output: None,
             failed: false,
+            duration: None,
         }
     }
 }
@@ -229,8 +234,66 @@ impl ChatMessage {
             }
             _ => {}
         }
+        if user {
+            if let Some((name, trailing)) = injected_skill(&message.steps[0].text) {
+                message.steps[0].text = compact_skill_prompt(&name, &trailing);
+            }
+        }
         message.steps[0].usage = MessageUsage::from_value(value.get("usage"));
         Some(message)
+    }
+}
+
+/// pi records a loaded skill as an ordinary user message: a
+/// `<skill name="…" location="…">…SKILL.md body…</skill>` document with the
+/// text the user typed after the slash command appended. Returns the skill
+/// name and that trailing prompt.
+///
+/// The close tag is required, so prose that merely starts with `<skill` is
+/// left alone.
+fn injected_skill(text: &str) -> Option<(String, String)> {
+    let rest = text.trim_start().strip_prefix("<skill")?;
+    let header = &rest[..rest.find('>')?];
+    let close = rest.find("</skill>")?;
+    let name = header
+        .split("name=\"")
+        .nth(1)
+        .and_then(|value| value.split('"').next())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let trailing = rest[close + "</skill>".len()..].trim().to_string();
+    Some((name, trailing))
+}
+
+/// The readable prompt a stored skill block is reduced to: the slash command
+/// the user ran, plus whatever they typed after it. The skill body itself is
+/// never rendered.
+fn compact_skill_prompt(name: &str, trailing: &str) -> String {
+    let name = if name.is_empty() { "skill" } else { name };
+    if trailing.is_empty() {
+        format!("/skill:{name}")
+    } else {
+        format!("/skill:{name} {trailing}")
+    }
+}
+
+/// Whether a pi message value is that injected skill document.
+fn injected_skill_message(value: &Value) -> bool {
+    let value = value.get("message").unwrap_or(value);
+    if value.get("role").and_then(Value::as_str) != Some("user") {
+        return false;
+    }
+    match value.get("content") {
+        Some(Value::String(text)) => injected_skill(text).is_some(),
+        Some(Value::Array(blocks)) => blocks.iter().any(|block| {
+            block.get("type").and_then(Value::as_str) == Some("text")
+                && block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| injected_skill(text).is_some())
+        }),
+        _ => false,
     }
 }
 
@@ -283,17 +346,22 @@ fn tool_result_parts(value: &Value) -> Option<(String, Option<Value>, bool)> {
 /// results as `{"content": [{"type":"text","text":…}], "details":…}` — the
 /// transcript shows the joined text, never the raw envelope (protocol data
 /// is presentation-sanitized). Payloads with no text blocks (structured
-/// results) pass through unchanged so they still highlight as JSON.
+/// results) pass through unchanged so they still highlight as JSON — except
+/// an envelope whose `content` carries no text yet (the empty array that
+/// streams before the first chunk), which reads as no output at all rather
+/// than leaking the protocol wrapper into the detail card.
 fn normalize_tool_result(value: &Value) -> Value {
     match value {
         Value::String(_) => value.clone(),
-        Value::Object(_) => {
-            let text = tool_result_output(value);
-            match text {
-                Some(text) => text,
-                None => value.clone(),
-            }
-        }
+        Value::Object(map) => match tool_result_output(value) {
+            Some(text) => text,
+            // Only pi's envelope — an *array* `content` that carries no text
+            // yet (the empty array that streams before the first chunk) — is
+            // collapsed to empty output. A bare `{"content": "text"}` from
+            // an older build, or any other shape, passes through unchanged.
+            None if map.get("content").is_some_and(Value::is_array) => Value::String(String::new()),
+            None => value.clone(),
+        },
         _ => value.clone(),
     }
 }
@@ -645,6 +713,11 @@ pub struct Transcript {
     rail_autoscroll: Rc<Cell<Option<usize>>>,
     /// Where the streaming step began in its (merged) message.
     step_mark: Rc<Cell<Option<StepMark>>>,
+    /// Accumulated `toolcall_delta` argument text for the call currently
+    /// streaming (pi sends the arguments as raw JSON text chunks). Reset on
+    /// `toolcall_start`, applied to the row once the buffer parses as JSON,
+    /// cleared on `toolcall_end`.
+    toolcall_args: Rc<RefCell<String>>,
     /// Whether the current `message_start` snapshot already carries the first
     /// content chunk. Some providers buffer one delta and put it in the start
     /// message, then re-send that same chunk as the first delta; these flags
@@ -681,6 +754,7 @@ impl Transcript {
             rail_scroll: ScrollHandle::new(),
             rail_autoscroll: Rc::new(Cell::new(None)),
             step_mark: Rc::new(Cell::new(None)),
+            toolcall_args: Rc::new(RefCell::new(String::new())),
             seed_text: Rc::new(Cell::new(false)),
             seed_thinking: Rc::new(Cell::new(false)),
             tail_summary: Rc::new(Cell::new(false)),
@@ -735,6 +809,7 @@ impl Transcript {
         self.rail_scroll.set_offset(point(px(0.), px(0.)));
         self.rail_autoscroll.set(None);
         self.step_mark.set(None);
+        self.toolcall_args.borrow_mut().clear();
         // Rebuild resets the list to the message count; re-add the summary
         // row when the loaded session touched files.
         self.tail_summary.set(false);
@@ -763,6 +838,7 @@ impl Transcript {
         self.rail_scroll.set_offset(point(px(0.), px(0.)));
         self.rail_autoscroll.set(None);
         self.step_mark.set(None);
+        self.toolcall_args.borrow_mut().clear();
         self.tail_summary.set(false);
     }
 
@@ -806,6 +882,7 @@ impl Transcript {
         let Some(message) = ChatMessage::from_value(value) else {
             return false;
         };
+        let injected = injected_skill_message(value);
         if message.user {
             // A new turn begins: the previous run's end-of-task summary row
             // steps aside before the prompt row lands.
@@ -813,6 +890,13 @@ impl Transcript {
         }
         let mut messages = self.messages.borrow_mut();
         if message.user {
+            // pi restates a loaded skill as its own user message (the body
+            // plus the prompt text). The optimistic prompt — or the compact
+            // row a reload rebuilt — already represents this turn, so the
+            // restatement is dropped rather than shown as a second bubble.
+            if injected && messages.last().map(|m| m.user).unwrap_or(false) {
+                return false;
+            }
             // pi echoes the user's own message; show it (dedupe if identical).
             if messages
                 .last()
@@ -836,8 +920,7 @@ impl Transcript {
         // providers buffer one delta before emitting it); the matching first
         // delta then re-sends it. Flag the seed so that delta can drop it.
         let seed = message.steps.last();
-        self.seed_text
-            .set(seed.is_some_and(|s| !s.text.is_empty()));
+        self.seed_text.set(seed.is_some_and(|s| !s.text.is_empty()));
         self.seed_thinking
             .set(seed.is_some_and(|s| !s.thinking.is_empty()));
         let continues_run = messages.last().map(|m| !m.user).unwrap_or(false);
@@ -896,10 +979,17 @@ impl Transcript {
                     .get("toolName")
                     .and_then(Value::as_str)
                     .unwrap_or("tool");
+                // pi 0.85 names the call id `id` (rpc.md: "toolcall_start
+                // provides the call `id` and `toolName`"); older builds sent
+                // `toolCallId`. Arguments are not carried here — they stream
+                // in as `toolcall_delta` chunks.
                 let id = value
-                    .get("toolCallId")
+                    .get("id")
+                    .or_else(|| value.get("toolCallId"))
                     .and_then(Value::as_str)
                     .map(str::to_string);
+                // A fresh call streams a fresh argument buffer.
+                self.toolcall_args.borrow_mut().clear();
                 let (changed, created) = self.with_streaming(|m| {
                     let mut tool = ToolCall::from_value(name, value.get("arguments"));
                     tool.id = id.clone();
@@ -918,24 +1008,78 @@ impl Transcript {
                 }
                 (changed, created)
             }
+            Am::ToolcallDelta { value } => {
+                // Arguments stream as raw JSON text chunks (rpc.md: "buffer
+                // toolcall_delta.delta for arguments"). Apply them to the
+                // row as soon as the accumulated buffer parses, so a command
+                // or file path shows while the model is still writing it.
+                if let Some(delta) = value.get("delta").and_then(Value::as_str) {
+                    let mut buffer = self.toolcall_args.borrow_mut();
+                    buffer.push_str(delta);
+                    // Only a buffer that looks like a complete JSON object
+                    // is worth a parse attempt — mid-stream chunks stay
+                    // cheap (no O(n²) re-parse per chunk).
+                    let looks_complete = buffer.trim_end().ends_with('}');
+                    let parsed = looks_complete
+                        .then(|| serde_json::from_str::<Value>(&buffer).ok())
+                        .flatten();
+                    drop(buffer);
+                    match parsed {
+                        Some(args) => self.with_streaming(move |m| {
+                            let step = m.steps.last_mut().expect("step");
+                            let Some(tool) = step.tools.last_mut() else {
+                                return;
+                            };
+                            if tool.args.as_ref() == Some(&args) {
+                                return;
+                            }
+                            // Rebuild so summary/path/line stats derive from
+                            // the parsed arguments; keep live result state.
+                            let mut rebuilt = ToolCall::from_value(&tool.name, Some(&args));
+                            rebuilt.id = tool.id.clone();
+                            rebuilt.output = tool.output.take();
+                            rebuilt.failed = tool.failed;
+                            *tool = rebuilt;
+                        }),
+                        None => (false, false),
+                    }
+                } else {
+                    (false, false)
+                }
+            }
             Am::ToolcallEnd { value } => {
-                let name = value
-                    .get("toolName")
+                // pi 0.85 nests the completed call under `toolCall`
+                // (rpc.md: "toolcall_end.toolCall contains the completed
+                // call"); older builds carried the fields flat on the event.
+                let call = value.get("toolCall").unwrap_or(value);
+                let name = call
+                    .get("name")
+                    .or_else(|| call.get("toolName"))
                     .and_then(Value::as_str)
                     .unwrap_or("tool");
-                let id = value
-                    .get("toolCallId")
+                let id = call
+                    .get("id")
+                    .or_else(|| call.get("toolCallId"))
                     .and_then(Value::as_str)
                     .map(str::to_string);
+                self.toolcall_args.borrow_mut().clear();
                 self.with_streaming(|m| {
-                    let mut tool = ToolCall::from_value(name, value.get("arguments"));
+                    let mut tool = ToolCall::from_value(name, call.get("arguments"));
                     tool.id = id.clone();
-                    // Replace the matching call (or the newest one, which is
-                    // what pi streams) but keep any result already captured.
+                    // Replace the matching call (by id; the placeholder from
+                    // `toolcall_start` carries it) but keep any result
+                    // already captured. Without an id, adopt the newest
+                    // id-less row for the same tool before falling back to
+                    // the newest row at all.
                     let step = m.steps.last_mut().expect("step");
                     let position = id
                         .as_deref()
-                        .and_then(|id| step.tools.iter().position(|t| t.id.as_deref() == Some(id)));
+                        .and_then(|id| step.tools.iter().position(|t| t.id.as_deref() == Some(id)))
+                        .or_else(|| {
+                            step.tools
+                                .iter()
+                                .rposition(|t| t.id.is_none() && t.name == name)
+                        });
                     match position {
                         Some(ix) => {
                             tool.output = step.tools[ix].output.take();
@@ -996,7 +1140,6 @@ impl Transcript {
                 }
                 _ => (false, false),
             },
-            _ => (false, false),
         };
         if changed {
             if created {
@@ -1971,6 +2114,59 @@ mod tests {
         assert!(messages[0].user);
     }
 
+    #[test]
+    fn injected_skill_blocks_are_reduced_to_the_command() {
+        let body = "<skill name=\"impeccable\" location=\"/x/SKILL.md\">\nBody.\n</skill>\n\npolish the retail page";
+        let (name, trailing) = injected_skill(body).expect("recognised");
+        assert_eq!(name, "impeccable");
+        assert_eq!(trailing, "polish the retail page");
+        assert_eq!(
+            compact_skill_prompt(&name, &trailing),
+            "/skill:impeccable polish the retail page"
+        );
+        // A bare command keeps just the slash command.
+        assert_eq!(compact_skill_prompt("impeccable", ""), "/skill:impeccable");
+        // Prose that merely opens with the tag (no close) is left alone.
+        assert!(injected_skill("<skill is a tag I am discussing").is_none());
+    }
+
+    #[test]
+    fn injected_skill_restatement_is_dropped_after_the_optimistic_prompt() {
+        let mut t = Transcript::new();
+        assert!(t.append_user_message("/skill:impeccable polish the retail page", Vec::new()));
+        // pi re-states the loaded skill as a second user message. Even though
+        // its compact form differs from the typed prompt, it must not stack a
+        // duplicate bubble on top of it.
+        t.apply_event(&Event::MessageStart {
+            value: json!({"type": "message_start", "message": {
+                "role": "user",
+                "content": [{"type": "text", "text":
+                    "<skill name=\"impeccable\" location=\"/x/SKILL.md\">body</skill>\n\npolish the retail page thoroughly"}]
+            }}),
+        });
+        let messages = t.messages.borrow();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].text(),
+            "/skill:impeccable polish the retail page"
+        );
+    }
+
+    #[test]
+    fn reloaded_injected_skill_renders_as_a_readable_prompt() {
+        // A session opened from disk holds only pi's injected block, so it is
+        // rebuilt as the slash command plus the user's trailing prompt — the
+        // skill body is never shown.
+        let message = ChatMessage::from_value(&json!({
+            "role": "user",
+            "content": [{"type": "text", "text":
+                "<skill name=\"impeccable\" location=\"/x/SKILL.md\">SKILL body\n</skill>\n\npolish the retail page"}]
+        }))
+        .expect("user message");
+        assert!(message.user);
+        assert_eq!(message.text(), "/skill:impeccable polish the retail page");
+    }
+
     /// Perf harness (P6): a 10k-message transcript is the documented scale
     /// (README/PRODUCT). This guards against accidental O(n²) regressions in
     /// the model layer; the virtualized list itself is count-agnostic.
@@ -2795,6 +2991,138 @@ mod tests {
         );
     }
 
+    /// Ground-truth capture from pi 0.85.1 (`pi --mode rpc`, docs:
+    /// pi.dev/docs/latest/rpc): `toolcall_start` carries the call id as `id`
+    /// (not `toolCallId`) and no arguments; arguments stream as raw JSON text
+    /// in `toolcall_delta`; `toolcall_end` nests the completed call under
+    /// `toolCall`. One call must produce ONE correctly-named row whose
+    /// arguments and result land on it — never a duplicate or a bare "tool".
+    #[test]
+    fn real_toolcall_wire_shape_produces_one_named_tool_row() {
+        let mut transcript = Transcript::new();
+        transcript.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": ""}),
+        });
+        transcript.apply_event(&Event::MessageUpdate {
+            usage: None,
+            assistant: Some(AssistantMessageEvent::ToolcallStart {
+                value: json!({"type": "toolcall_start", "contentIndex": 0, "id": "call_1", "toolName": "bash"}),
+            }),
+        });
+        transcript.apply_event(&Event::MessageUpdate {
+            usage: None,
+            assistant: Some(AssistantMessageEvent::ToolcallDelta {
+                value: json!({"type": "toolcall_delta", "contentIndex": 0, "delta": "{\"command\":\"echo hello-world\"}"}),
+            }),
+        });
+        transcript.apply_event(&Event::MessageUpdate {
+            usage: None,
+            assistant: Some(AssistantMessageEvent::ToolcallEnd {
+                value: json!({"type": "toolcall_end", "contentIndex": 0, "toolCall": {"type": "toolCall", "id": "call_1", "name": "bash", "arguments": {"command": "echo hello-world"}}}),
+            }),
+        });
+        transcript.apply_event(&Event::ToolExecutionStart {
+            value: json!({"type": "tool_execution_start", "toolCallId": "call_1", "toolName": "bash", "args": {"command": "echo hello-world"}}),
+        });
+        transcript.apply_event(&Event::ToolExecutionEnd {
+            value: json!({"type": "tool_execution_end", "toolCallId": "call_1", "toolName": "bash", "result": {"content": [{"type": "text", "text": "hello-world\n"}]}, "isError": false}),
+        });
+        let messages = transcript.messages.borrow();
+        let tools: Vec<_> = messages[0].tools().collect();
+        assert_eq!(tools.len(), 1, "one call must not duplicate the tool row");
+        let tool = tools[0];
+        assert_eq!(tool.name, "bash");
+        assert_eq!(tool.id.as_deref(), Some("call_1"));
+        assert_eq!(
+            tool.args
+                .as_ref()
+                .and_then(|args| args.get("command"))
+                .and_then(Value::as_str),
+            Some("echo hello-world")
+        );
+        assert_eq!(
+            tool.output.as_ref().and_then(Value::as_str),
+            Some("hello-world\n")
+        );
+        assert!(!tool.failed);
+    }
+
+    /// Two parallel calls in one step: each `toolcall_end` must replace its
+    /// own placeholder (matched by id), never clobber the sibling's row.
+    #[test]
+    fn parallel_toolcalls_keep_their_own_rows() {
+        let mut transcript = Transcript::new();
+        transcript.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": ""}),
+        });
+        for (ix, id, path) in [(0u8, "call_a", "src/a.rs"), (1u8, "call_b", "src/b.rs")] {
+            transcript.apply_event(&Event::MessageUpdate {
+                usage: None,
+                assistant: Some(AssistantMessageEvent::ToolcallStart {
+                    value: json!({"type": "toolcall_start", "contentIndex": ix, "id": id, "toolName": "read"}),
+                }),
+            });
+            transcript.apply_event(&Event::MessageUpdate {
+                usage: None,
+                assistant: Some(AssistantMessageEvent::ToolcallEnd {
+                    value: json!({"type": "toolcall_end", "contentIndex": ix, "toolCall": {"type": "toolCall", "id": id, "name": "read", "arguments": {"path": path}}}),
+                }),
+            });
+        }
+        let messages = transcript.messages.borrow();
+        let tools: Vec<_> = messages[0].tools().collect();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(
+            tools[0]
+                .args
+                .as_ref()
+                .and_then(|a| a.get("path"))
+                .and_then(Value::as_str),
+            Some("src/a.rs")
+        );
+        assert_eq!(
+            tools[1]
+                .args
+                .as_ref()
+                .and_then(|a| a.get("path"))
+                .and_then(Value::as_str),
+            Some("src/b.rs")
+        );
+    }
+
+    /// Arguments that stream in several chunks apply once the accumulated
+    /// buffer parses — the row shows the command before the call ends.
+    #[test]
+    fn toolcall_delta_applies_arguments_when_the_buffer_parses() {
+        let mut transcript = Transcript::new();
+        transcript.apply_event(&Event::MessageStart {
+            value: json!({"role": "assistant", "content": ""}),
+        });
+        transcript.apply_event(&Event::MessageUpdate {
+            usage: None,
+            assistant: Some(AssistantMessageEvent::ToolcallStart {
+                value: json!({"type": "toolcall_start", "contentIndex": 0, "id": "call_1", "toolName": "bash"}),
+            }),
+        });
+        for chunk in ["{\"comm", "and\":\"cargo", " test\"}"] {
+            transcript.apply_event(&Event::MessageUpdate {
+                usage: None,
+                assistant: Some(AssistantMessageEvent::ToolcallDelta {
+                    value: json!({"type": "toolcall_delta", "contentIndex": 0, "delta": chunk}),
+                }),
+            });
+        }
+        let messages = transcript.messages.borrow();
+        let tool = messages[0].tools().next().unwrap();
+        assert_eq!(
+            tool.args
+                .as_ref()
+                .and_then(|args| args.get("command"))
+                .and_then(Value::as_str),
+            Some("cargo test")
+        );
+    }
+
     #[test]
     fn structured_results_keep_their_json_form() {
         // A tool whose result has no text blocks (structured data) keeps the
@@ -2803,6 +3131,23 @@ mod tests {
         assert_eq!(value, json!({"rows": [1, 2, 3]}));
         let text = normalize_tool_result(&json!("plain"));
         assert_eq!(text, json!("plain"));
+    }
+
+    #[test]
+    fn empty_result_envelope_never_leaks_protocol_json() {
+        // pi streams `partialResult: {"content": []}` before the first chunk
+        // (real 0.85.1 capture). Normalizing must yield empty output — the
+        // detail card hides empty sections — never render the raw envelope.
+        let value = normalize_tool_result(&json!({"content": [], "details": {}}));
+        assert_eq!(value, json!(""));
+        // An image-only envelope (no text blocks) reads the same way.
+        let value = normalize_tool_result(
+            &json!({"content": [{"type": "image", "data": "…"}], "details": {}}),
+        );
+        assert_eq!(value, json!(""));
+        // Structured payloads without pi's `content` envelope are untouched.
+        let value = normalize_tool_result(&json!({"rows": []}));
+        assert_eq!(value, json!({"rows": []}));
     }
 
     #[test]

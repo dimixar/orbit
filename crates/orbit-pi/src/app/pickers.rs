@@ -393,7 +393,7 @@ impl OrbitApp {
             PaletteCommand::CopySessionId => {
                 if let Some(id) = self.session_id.clone() {
                     cx.write_to_clipboard(ClipboardItem::new_string(id));
-                    self.set_status("Session ID copied");
+                    self.toast_success("Session ID copied");
                     cx.notify();
                 }
             }
@@ -436,13 +436,13 @@ impl OrbitApp {
             None => return,
         };
         if !crate::git::is_repo(&cwd) {
-            self.set_status("Not a Git repository");
+            self.toast_warning("Not a Git repository");
             cx.notify();
             return;
         }
         let current = crate::git::current_branch(&cwd).unwrap_or_else(|| "HEAD".into());
         let branches = crate::git::list_branches(&cwd).unwrap_or_else(|err| {
-            self.set_status(format!("branch list failed: {err}"));
+            self.toast_error(format!("branch list failed: {err}"));
             vec![current.clone()]
         });
         let workspace_label = sessions::workspace_label(&cwd);
@@ -510,8 +510,8 @@ impl OrbitApp {
             let _ = this.update(cx, |app, cx| {
                 app.branch_operation_pending = false;
                 match result {
-                    Ok(()) => app.set_status(format!("Switched to {label}")),
-                    Err(err) => app.set_status(format!("Branch switch failed: {err}")),
+                    Ok(()) => app.toast_success(format!("Switched to {label}")),
+                    Err(err) => app.toast_error(format!("Branch switch failed: {err}")),
                 }
                 app.refresh_branch_status(cx);
                 cx.notify();
@@ -541,8 +541,8 @@ impl OrbitApp {
             let _ = this.update(cx, |app, cx| {
                 app.branch_operation_pending = false;
                 match result {
-                    Ok(()) => app.set_status(format!("Created and switched to {label}")),
-                    Err(err) => app.set_status(format!("Branch create failed: {err}")),
+                    Ok(()) => app.toast_success(format!("Created and switched to {label}")),
+                    Err(err) => app.toast_error(format!("Branch create failed: {err}")),
                 }
                 app.refresh_branch_status(cx);
                 cx.notify();

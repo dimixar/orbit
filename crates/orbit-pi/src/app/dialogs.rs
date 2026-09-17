@@ -16,6 +16,13 @@ impl OrbitApp {
     ) {
         match method {
             "select" | "confirm" | "input" | "editor" => {
+                // A committed questionnaire replays its buffered answers in
+                // place; while it does, its requests are answered directly
+                // rather than opening another surface.
+                if self.ask_replay.is_some() && matches!(method, "select" | "input") {
+                    self.ask_replay_reply(&id, method);
+                    return;
+                }
                 // The access guard's `select` is marked so it renders as the
                 // inline approval bar instead of the blocking modal.
                 if let Some(request) = ApprovalRequest::from_event(id.clone(), method, value) {
@@ -25,28 +32,20 @@ impl OrbitApp {
                 // A running `ask_user_question` owns its `select` / `input`
                 // primitives: answer them on the inline panel above the
                 // composer instead of the scrim modal.
-                if self.ask_is_live() {
-                    match method {
-                        "select" => {
-                            self.open_ask_select(id, value, cx);
-                            return;
-                        }
-                        "input" => {
-                            self.open_ask_input(id, value, cx);
-                            return;
-                        }
-                        _ => {}
-                    }
+                if self.ask_is_live() && matches!(method, "select" | "input") {
+                    self.open_ask(id, cx);
+                    return;
                 }
                 if let Some(request) = DialogRequest::from_event(id, method, value) {
                     self.open_dialog(request, cx);
                 }
             }
-            // `notify` is a user-facing toast; the status bar is Orbit's quiet
-            // equivalent. `setStatus` rides the same transient line.
+            // `notify` is a user-facing toast — render it as one. `setStatus`
+            // stays on the quiet transient status line.
             "notify" => {
                 if let Some(message) = value.get("message").and_then(Value::as_str) {
-                    self.set_status(message.to_owned());
+                    self.toast_info(message.to_owned());
+                    cx.notify();
                 }
             }
             "setStatus" => {
@@ -174,12 +173,24 @@ impl OrbitApp {
     pub(super) fn cancel_open_dialog(&mut self, cx: &mut Context<Self>) {
         self.cancel_open_approval();
         // The questionnaire belongs to the departing session too — decline it
-        // so its parked run can settle.
+        // so its parked run can settle. A committed questionnaire is mid-replay
+        // instead, so decline whatever request the replay is currently on.
         if let Some(prompt) = self.ask.take() {
-            self.respond_to_dialog(&prompt.id, &DialogResponse::Cancelled);
+            if prompt.submitted {
+                if let Some(id) = self
+                    .ask_replay
+                    .as_ref()
+                    .and_then(|replay| replay.current_id.clone())
+                {
+                    self.respond_to_dialog(&id, &DialogResponse::Cancelled);
+                }
+            } else {
+                self.respond_to_dialog(&prompt.id, &DialogResponse::Cancelled);
+            }
         }
         self.ask_tool_id = None;
         self.ask_questions.clear();
+        self.ask_replay = None;
         self.ask_focus_pending = false;
         let Some(dialog) = self.dialog.take() else {
             return;

@@ -750,7 +750,7 @@ impl OrbitApp {
         self.access_mode = mode;
         mode.persist();
         if self.extensions.guard().is_none() {
-            self.set_status(format!(
+            self.toast_warning(format!(
                 "Access mode set to {}, but the guard extension is unavailable",
                 mode.label()
             ));

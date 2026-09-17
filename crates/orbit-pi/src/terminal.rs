@@ -1333,7 +1333,12 @@ impl TerminalView {
                     let term = term.lock();
                     prepare_grid(&term, &current, &theme, &font, focused, blinking)
                 };
-                let force_width = px(f32::from(cell_width) * columns as f32);
+                // `force_width` is a per-glyph pitch, not the row width: gpui
+                // snaps each glyph to `glyph_index * force_width` so the grid
+                // stays column-aligned. The full row is `cell_width * columns`,
+                // but passing that would fling every glyph after the first a
+                // whole row off the edge.
+                let force_width = cell_width;
                 let lines = prepared
                     .rows
                     .into_iter()
@@ -1596,18 +1601,21 @@ impl TerminalPanel {
             .terminal
             .as_ref()
             .is_some_and(|terminal| terminal.read(cx).is_exited());
+        // The header names the project, not the shell's OSC title: a prompt
+        // that rewrites itself (`user@host: cwd`, a running command) is a
+        // noisy, unstable label, while the workspace path is what the panel
+        // actually follows. The shell title is only a stand-in until the app
+        // hands the panel a workspace.
         let title = self
-            .terminal
-            .as_ref()
-            .map(|terminal| terminal.read(cx).title())
-            .unwrap_or_else(|| SharedString::from("Terminal"));
-        // The shell's own directory, home-abbreviated. The panel is always
-        // handed a resolved path, so this is never a duplicate of the title.
-        let directory = self
             .workspace
             .as_ref()
             .map(|path| abbreviate_home(path))
-            .unwrap_or_default();
+            .or_else(|| {
+                self.terminal
+                    .as_ref()
+                    .map(|terminal| terminal.read(cx).title().to_string())
+            })
+            .unwrap_or_else(|| "Terminal".to_owned());
 
         let mut header = div()
             .id("terminal-panel-header")
@@ -1630,7 +1638,9 @@ impl TerminalPanel {
             ))
             .child(
                 div()
-                    .flex_none()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
                     .text_size(theme.ui_px(12.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(if exited { theme.text_2 } else { theme.text })
@@ -1650,15 +1660,6 @@ impl TerminalPanel {
             );
         }
         header
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(theme.ui_px(11.5))
-                    .text_color(theme.text_3)
-                    .child(directory),
-            )
             // Restart reads as the primary action once the shell has exited.
             .child(
                 div()
