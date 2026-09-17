@@ -1,3 +1,5 @@
+import Script from "next/script";
+
 import { Closer } from "@/components/sections/closer";
 import { Features } from "@/components/sections/features";
 import { Gallery } from "@/components/sections/gallery";
@@ -26,6 +28,11 @@ export default function Home() {
         <Closer />
       </main>
       <SiteFooter />
+      <Script
+        src="https://tracking.rajeshwar.tech/api/script.js"
+        data-site-id="8c362549e036"
+        strategy="afterInteractive"
+      />
     </>
   );
 }
