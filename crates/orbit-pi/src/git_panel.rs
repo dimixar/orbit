@@ -50,6 +50,20 @@ enum GitAction {
     CommitAndPush,
     Push,
     Pull,
+    Merge,
+}
+
+/// A failed Git operation shown on the page until dismissed.
+///
+/// `title` is a short human summary (usually including the fix); `detail`
+/// keeps the command's own output, including the multi-line `hint:` blocks
+/// that a rejected push or a merge conflict prints. Unlike the transient
+/// [`GitPanel::status`] line, a failure is never truncated and never expires
+/// on a timer, so push/pull/merge errors are actually readable.
+#[derive(Clone, Debug)]
+struct GitFailure {
+    title: String,
+    detail: String,
 }
 
 /// What to do once the user answers the "stage unstaged changes?" prompt.
@@ -80,6 +94,9 @@ pub struct GitPanel {
     unstaged: Vec<StatusRow>,
     changes_loading: bool,
     changes_error: Option<String>,
+    /// The last operation failure, painted as a persistent banner above the
+    /// tab body. Cleared by a later success or the dismiss button.
+    failure: Option<GitFailure>,
     /// Path awaiting a discard confirmation.
     pending_discard: Option<String>,
 
@@ -136,6 +153,7 @@ impl GitPanel {
             unstaged: Vec::new(),
             changes_loading: false,
             changes_error: None,
+            failure: None,
             pending_discard: None,
             history: Vec::new(),
             history_loading: false,
@@ -398,8 +416,11 @@ impl GitPanel {
 
     fn after_git(&mut self, result: Result<(), String>, success: &str, cx: &mut Context<Self>) {
         match result {
-            Ok(()) => self.set_status(success),
-            Err(err) => self.set_status(format!("Git error: {err}")),
+            Ok(()) => {
+                self.clear_failure();
+                self.set_status(success);
+            }
+            Err(err) => self.set_failure(err),
         }
         self.refresh_status(cx);
         self.refresh_branch(cx);
@@ -411,6 +432,21 @@ impl GitPanel {
 
     fn set_status(&mut self, message: impl Into<String>) {
         self.status = Some((message.into(), Instant::now()));
+    }
+
+    /// Record a Git failure so it survives on the page until dismissed or a
+    /// later action succeeds. The raw stderr is classified into a readable
+    /// title; both it and the full output are shown (and copyable).
+    fn set_failure(&mut self, raw: impl Into<String>) {
+        let raw = raw.into();
+        let (title, detail) = classify_git_failure(&raw);
+        self.failure = Some(GitFailure { title, detail });
+        // The transient success line and the failure banner never co-exist.
+        self.status = None;
+    }
+
+    fn clear_failure(&mut self) {
+        self.failure = None;
     }
 
     // ── commit flow ────────────────────────────────────────────────────
@@ -464,11 +500,12 @@ impl GitPanel {
             let _ = this.update(cx, |panel, cx| {
                 match result {
                     Ok(()) => {
+                        panel.clear_failure();
                         panel.set_status("Staged all changes");
                         panel.refresh_status(cx);
                         panel.perform_pending(pending, cx);
                     }
-                    Err(err) => panel.set_status(format!("Git error: {err}")),
+                    Err(err) => panel.set_failure(err),
                 }
                 cx.notify();
             });
@@ -543,7 +580,7 @@ impl GitPanel {
                             return;
                         }
                     }
-                    Err(err) => panel.set_status(err),
+                    Err(err) => panel.set_failure(err),
                 }
                 cx.notify();
             });
@@ -574,6 +611,7 @@ impl GitPanel {
                             .and_then(|_| git::push(&cwd)),
                         GitAction::Push => git::push(&cwd),
                         GitAction::Pull => git::pull(&cwd),
+                        GitAction::Merge => git::merge_upstream(&cwd),
                     }
                 })
                 .await;
@@ -581,18 +619,42 @@ impl GitPanel {
                 panel.pending = None;
                 match result {
                     Ok(note) => {
+                        panel.clear_failure();
                         panel.set_status(note);
                         if matches!(action, GitAction::Commit | GitAction::CommitAndPush) {
                             panel.message.update(cx, |input, cx| input.clear(cx));
                         }
                     }
-                    Err(err) => panel.set_status(format!("Git error: {err}")),
+                    Err(err) => {
+                        panel.set_failure(err);
+                        // A rejected push means the remote moved ahead of us:
+                        // refresh the remote-tracking refs so the commit bar
+                        // can offer Pull/Merge instead of another doomed push.
+                        if matches!(action, GitAction::Push | GitAction::CommitAndPush) {
+                            panel.fetch_remote(cx);
+                        }
+                    }
                 }
                 panel.refresh_all(cx);
                 cx.notify();
             });
         })
         .detach();
+    }
+
+    /// Best-effort `git fetch` after a rejected push. It only updates
+    /// remote-tracking refs, so the ahead/behind counts — and therefore the
+    /// Pull/Merge button — reflect what the remote actually has.
+    fn fetch_remote(&mut self, cx: &mut Context<Self>) {
+        let Some(cwd) = self.cwd() else { return };
+        self.spawn_data(
+            cx,
+            move || git::fetch(&cwd),
+            |panel, _result, cx| {
+                panel.refresh_branch(cx);
+                cx.notify();
+            },
+        );
     }
 
     fn checkout_branch(&mut self, branch: String, cx: &mut Context<Self>) {
@@ -606,8 +668,11 @@ impl GitPanel {
             |panel, result, cx| {
                 panel.branch_operation = false;
                 match result {
-                    Ok(()) => panel.set_status("Branch checked out"),
-                    Err(err) => panel.set_status(format!("Checkout failed: {err}")),
+                    Ok(()) => {
+                        panel.clear_failure();
+                        panel.set_status("Branch checked out");
+                    }
+                    Err(err) => panel.set_failure(err),
                 }
                 panel.refresh_branch(cx);
                 panel.refresh_status(cx);
@@ -832,6 +897,108 @@ impl GitPanel {
             .into_any_element()
     }
 
+    /// The persistent failure banner: a friendly title plus the raw command
+    /// output, wrapped in full and copyable. It sits under the tab bar on
+    /// every tab, so a push/pull/merge failure cannot be clipped to one
+    /// truncated line or expire before it is read.
+    fn failure_banner(&self, theme: Theme, cx: &Context<Self>) -> Option<AnyElement> {
+        let failure = self.failure.as_ref()?;
+        let copy_text = format!("{}: {}", failure.title, failure.detail);
+        Some(
+            div()
+                .id("git-failure")
+                .flex_none()
+                .mx(px(16.))
+                .mt(px(10.))
+                .bg(theme.crit.opacity(0.1))
+                .border_1()
+                .border_color(theme.crit.opacity(0.45))
+                .rounded_lg()
+                .px(px(12.))
+                .py(px(9.))
+                .flex()
+                .items_start()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_none()
+                        .mt(px(1.))
+                        .child(icon("icons/stop.svg", 15., theme.crit)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.))
+                        .child(
+                            div()
+                                .text_size(theme.ui_px(12.5))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .child(failure.title.clone()),
+                        )
+                        .child(
+                            div()
+                                .id("git-failure-detail")
+                                .max_h(px(160.))
+                                .overflow_y_scroll()
+                                .text_size(theme.ui_px(11.5))
+                                .line_height(theme.ui_px(16.))
+                                .text_color(theme.text_2)
+                                .whitespace_normal()
+                                .child(failure.detail.clone()),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("git-failure-copy")
+                        .flex_none()
+                        .size(px(20.))
+                        .rounded_md()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .text_color(theme.text_2)
+                        .hover(|s| s.bg(theme.overlay).text_color(theme.text))
+                        .on_mouse_up(
+                            gpui::MouseButton::Left,
+                            cx.listener(move |_, _, _, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    copy_text.clone(),
+                                ));
+                            }),
+                        )
+                        .child(icon("icons/copy.svg", 12., theme.text_2)),
+                )
+                .child(
+                    div()
+                        .id("git-failure-dismiss")
+                        .flex_none()
+                        .size(px(20.))
+                        .rounded_md()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .text_size(theme.ui_px(13.))
+                        .text_color(theme.text_2)
+                        .hover(|s| s.bg(theme.overlay).text_color(theme.text))
+                        .on_mouse_up(
+                            gpui::MouseButton::Left,
+                            cx.listener(|this, _, _, cx| {
+                                this.clear_failure();
+                                cx.notify();
+                            }),
+                        )
+                        .child("×"),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn changes_tab(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
         div()
             .flex_1()
@@ -1048,6 +1215,31 @@ impl GitPanel {
                                 theme,
                                 cx.listener(|this, _: &ClickEvent, _, cx| {
                                     this.run_git_action(GitAction::Pull, None, cx)
+                                }),
+                            ))
+                            .into_any_element(),
+                        BarActions::Merge { behind } => div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_size(theme.ui_px(11.5))
+                                    .text_color(theme.text_3)
+                                    .child(format!("diverged · {behind} behind")),
+                            )
+                            .child(action_button(
+                                "git-merge",
+                                "Merge",
+                                Some(
+                                    icon("icons/git-merge.svg", 13., theme.text_2)
+                                        .into_any_element(),
+                                ),
+                                false,
+                                busy,
+                                theme,
+                                cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.run_git_action(GitAction::Merge, None, cx)
                                 }),
                             ))
                             .into_any_element(),
@@ -1610,6 +1802,9 @@ impl Render for GitPanel {
             .flex_col()
             .child(self.header(theme, cx))
             .child(self.tab_bar(theme, cx))
+            // Failures stay pinned under the tabs (never inside the scrolling
+            // body) so push/pull/merge errors are readable on every tab.
+            .children(self.failure_banner(theme, cx))
             .child(content)
             .children(self.branch_menu(theme, cx))
             .children(self.stage_prompt_popup(theme, cx))
@@ -1627,6 +1822,9 @@ enum BarActions {
     Push { publish: bool },
     /// Clean and strictly behind the upstream: Pull.
     Pull { behind: usize },
+    /// Clean but diverged (ahead *and* behind): pushing is rejected and a
+    /// fast-forward pull cannot apply, so offer a real merge.
+    Merge { behind: usize },
     /// Clean and in sync: a quiet status label.
     UpToDate,
 }
@@ -1640,10 +1838,12 @@ fn bar_actions(
 ) -> BarActions {
     if has_changes {
         BarActions::Commit
-    } else if ahead > 0 || (!has_upstream && has_commits) {
-        BarActions::Push {
-            publish: !has_upstream,
-        }
+    } else if !has_upstream && has_commits {
+        BarActions::Push { publish: true }
+    } else if ahead > 0 && behind > 0 {
+        BarActions::Merge { behind }
+    } else if ahead > 0 {
+        BarActions::Push { publish: false }
     } else if behind > 0 {
         BarActions::Pull { behind }
     } else {
@@ -2284,6 +2484,86 @@ fn empty_note(theme: Theme, title: &str, detail: Option<&str>) -> AnyElement {
     column.into_any_element()
 }
 
+/// Map raw `git` stderr to a one-line title plus the (cleaned) raw detail.
+/// The title says what happened and, where possible, what to do next; the
+/// detail preserves the command's own words — including multi-line `hint:`
+/// blocks — so nothing is lost to truncation.
+fn classify_git_failure(raw: &str) -> (String, String) {
+    let detail = clean_git_detail(raw);
+    let haystack = raw.to_lowercase();
+    let title = if haystack.contains("[rejected]")
+        || haystack.contains("non-fast-forward")
+        || haystack.contains("failed to push some refs")
+        || haystack.contains("fetch first")
+    {
+        "Push rejected — pull or merge the remote changes first"
+    } else if haystack.contains("not possible to fast-forward")
+        || haystack.contains("divergent branches")
+        || haystack.contains("need to specify how to reconcile")
+    {
+        "Branches have diverged — a merge is required"
+    } else if haystack.contains("automatic merge failed")
+        || haystack.contains("merge conflict")
+        || haystack.contains("conflict")
+    {
+        "Merge conflicts — resolve them, then commit"
+    } else if haystack.contains("would be overwritten") || haystack.contains("your local changes") {
+        "Local changes would be overwritten"
+    } else if haystack.contains("authentication failed")
+        || haystack.contains("could not read username")
+        || haystack.contains("could not read password")
+        || haystack.contains("permission denied")
+        || haystack.contains("403 forbidden")
+        || haystack.contains("401 unauthorized")
+    {
+        "Authentication failed — check your Git credentials"
+    } else if haystack.contains("repository not found")
+        || haystack.contains("does not appear to be a git repository")
+        || haystack.contains("couldn't find remote ref")
+        || haystack.contains("no such remote")
+    {
+        "Remote not found — check the origin URL"
+    } else if haystack.contains("could not resolve host")
+        || haystack.contains("unable to access")
+        || haystack.contains("network is unreachable")
+        || haystack.contains("timed out")
+    {
+        "Network error — the remote could not be reached"
+    } else if haystack.contains("no upstream branch")
+        || haystack.contains("has no upstream branch")
+        || haystack.contains("no branch to push")
+    {
+        "No upstream branch to push to"
+    } else if haystack.contains("not a git repository") {
+        "Not a Git repository"
+    } else {
+        "Git error"
+    };
+    (title.to_string(), detail)
+}
+
+/// Tidy raw Git output for display: trim trailing whitespace, drop repeated
+/// blank lines, and never hand the banner an empty string.
+fn clean_git_detail(raw: &str) -> String {
+    let mut lines: Vec<&str> = Vec::new();
+    let mut prev_blank = false;
+    for line in raw.lines() {
+        let line = line.trim_end();
+        let blank = line.is_empty();
+        if blank && prev_blank {
+            continue;
+        }
+        lines.push(line);
+        prev_blank = blank;
+    }
+    let joined = lines.join("\n").trim().to_string();
+    if joined.is_empty() {
+        "git exited without an error message".to_string()
+    } else {
+        joined
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2310,7 +2590,61 @@ mod tests {
             bar_actions(false, 0, true, true, 4),
             BarActions::Pull { behind: 4 }
         );
+        // Clean but diverged (ahead and behind) → Merge, not a doomed push.
+        assert_eq!(
+            bar_actions(false, 2, true, true, 3),
+            BarActions::Merge { behind: 3 }
+        );
         // Empty repo (no commits, no upstream) is not a publish.
         assert_eq!(bar_actions(false, 0, false, false, 0), BarActions::UpToDate);
+    }
+
+    #[test]
+    fn rejected_push_is_explained() {
+        let raw = "To https://github.com/acme/repo.git\n \
+                   ! [rejected]        main -> main (fetch first)\n\
+                   error: failed to push some refs to 'https://github.com/acme/repo.git'\n\
+                   hint: Updates were rejected because the remote contains work\n\
+                   hint: that you do not have locally.";
+        let (title, detail) = classify_git_failure(raw);
+        assert!(title.contains("Push rejected"), "{title}");
+        // The full multi-line stderr survives for the banner to wrap.
+        assert!(detail.contains("failed to push some refs"));
+        assert!(detail.contains("Updates were rejected"));
+    }
+
+    #[test]
+    fn diverged_and_conflict_failures_are_recognized() {
+        let (diverged, _) = classify_git_failure("fatal: Not possible to fast-forward, aborting.");
+        assert!(diverged.contains("diverged"), "{diverged}");
+
+        let raw = "CONFLICT (content): Merge conflict in src/lib.rs\n\
+                   Automatic merge failed; fix conflicts and then commit the result.";
+        let (conflict, detail) = classify_git_failure(raw);
+        assert!(conflict.contains("Merge conflicts"), "{conflict}");
+        assert!(detail.contains("Automatic merge failed"));
+    }
+
+    #[test]
+    fn auth_and_network_failures_are_recognized() {
+        let (auth, _) = classify_git_failure(
+            "remote: Invalid username or password.\nfatal: Authentication failed for 'https://github.com/acme/repo.git/'",
+        );
+        assert!(auth.contains("Authentication failed"), "{auth}");
+
+        let (network, _) = classify_git_failure(
+            "fatal: unable to access 'https://github.com/acme/repo.git/': Could not resolve host: github.com",
+        );
+        assert!(network.contains("Network error"), "{network}");
+    }
+
+    #[test]
+    fn clean_git_detail_collapses_blank_runs_and_defaults() {
+        assert_eq!(clean_git_detail(""), "git exited without an error message");
+        assert_eq!(
+            clean_git_detail("  \n \n"),
+            "git exited without an error message"
+        );
+        assert_eq!(clean_git_detail("one\n\n\n\ntwo\n"), "one\n\ntwo",);
     }
 }

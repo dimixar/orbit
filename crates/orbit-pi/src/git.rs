@@ -136,10 +136,30 @@ pub fn push(cwd: &Path) -> Result<String, String> {
     }
 }
 
-/// Fast-forward the current branch from its upstream.
+/// Fast-forward the current branch from its upstream. Fails (with "not
+/// possible to fast-forward") when the branch has diverged; use
+/// [`merge_upstream`] for that case.
 pub fn pull(cwd: &Path) -> Result<String, String> {
     run_git(cwd, &["pull", "--ff-only"])?;
     Ok("Pulled".into())
+}
+
+/// Fetch and merge the upstream into the current branch, tolerating
+/// divergence. Unlike [`pull`], a real merge is performed, so conflicts are
+/// reported instead of the branch being left untouched. Conflict output is
+/// whatever `git` prints (surfaced in full by the Git page).
+pub fn merge_upstream(cwd: &Path) -> Result<String, String> {
+    // `--ff` overrides a `pull.ff = only` config that would otherwise refuse
+    // the merge; `--no-rebase` keeps this a merge, never a rebase.
+    run_git(cwd, &["pull", "--no-rebase", "--ff", "--no-edit"])?;
+    Ok("Merged".into())
+}
+
+/// Update remote-tracking refs without touching the working tree. Used after
+/// a rejected push so ahead/behind counts reflect the real remote state.
+pub fn fetch(cwd: &Path) -> Result<(), String> {
+    run_git(cwd, &["fetch", "--quiet"])?;
+    Ok(())
 }
 
 fn read_head_branch(cwd: &Path) -> Option<String> {

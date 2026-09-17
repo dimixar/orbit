@@ -151,10 +151,10 @@ the release. Notes come from `CHANGELOG.md`.
    unsigned DMG. Windows and Linux are `continue-on-error` while those platforms
    are validated.
 
-5. `.github/workflows/appcasts.yml` runs once the release is **published**: it
-   downloads the assets, signs each one, regenerates `appcasts/*.xml`, and
-   commits them to `main`. The app reads those from
-   `https://raw.githubusercontent.com/imrj05/orbit/main/appcasts/appcast-<os>-<arch>.xml`.
+5. The same job signs each artifact and attaches the update feeds to the
+   release itself (`scripts/appcast.py`), so a published release serves them at
+   `https://github.com/imrj05/orbit/releases/latest/download/appcast-<os>-<arch>.xml`.
+   Nothing is committed back to `main`.
 
 Assets and the bundled pi extensions are compiled into the binary
 (`include_dir!` / `include_str!`), so every artifact is self-contained.

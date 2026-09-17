@@ -68,26 +68,27 @@ const FEED_URL: &str = match option_env!("ORBIT_UPDATE_FEED_URL") {
     None => DEFAULT_FEED_URL,
 };
 
-// Appcasts are committed under `appcasts/` on `main` and served by GitHub's
-// raw CDN. Keep these paths in sync with `.github/workflows/appcasts.yml`.
+// Each release carries its signed appcasts as assets, and the app reads them
+// through GitHub's stable `releases/latest/download/` alias for the newest
+// published release. Keep these paths in sync with `.github/workflows/release.yml`.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const DEFAULT_FEED_URL: &str =
-    "https://raw.githubusercontent.com/imrj05/orbit/main/appcasts/appcast-macos-aarch64.xml";
+    "https://github.com/imrj05/orbit/releases/latest/download/appcast-macos-aarch64.xml";
 #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
 const DEFAULT_FEED_URL: &str =
-    "https://raw.githubusercontent.com/imrj05/orbit/main/appcasts/appcast-macos-x86_64.xml";
+    "https://github.com/imrj05/orbit/releases/latest/download/appcast-macos-x86_64.xml";
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const DEFAULT_FEED_URL: &str =
-    "https://raw.githubusercontent.com/imrj05/orbit/main/appcasts/appcast-linux-aarch64.xml";
+    "https://github.com/imrj05/orbit/releases/latest/download/appcast-linux-aarch64.xml";
 #[cfg(all(target_os = "linux", not(target_arch = "aarch64")))]
 const DEFAULT_FEED_URL: &str =
-    "https://raw.githubusercontent.com/imrj05/orbit/main/appcasts/appcast-linux-x86_64.xml";
+    "https://github.com/imrj05/orbit/releases/latest/download/appcast-linux-x86_64.xml";
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
 const DEFAULT_FEED_URL: &str =
-    "https://raw.githubusercontent.com/imrj05/orbit/main/appcasts/appcast-windows-aarch64.xml";
+    "https://github.com/imrj05/orbit/releases/latest/download/appcast-windows-aarch64.xml";
 #[cfg(all(target_os = "windows", not(target_arch = "aarch64")))]
 const DEFAULT_FEED_URL: &str =
-    "https://raw.githubusercontent.com/imrj05/orbit/main/appcasts/appcast-windows-x86_64.xml";
+    "https://github.com/imrj05/orbit/releases/latest/download/appcast-windows-x86_64.xml";
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 const DEFAULT_FEED_URL: &str = "";
 
@@ -658,16 +659,28 @@ fn run_install(flags: &HelperFlags) -> i32 {
         None => return helper_error(flags, "the running executable has no name"),
     };
 
-    // The staged directory is the extracted release with its archive root
-    // stripped, so it *is* the new install's contents.
-    if !flags.staged_dir.is_dir() {
-        return helper_error(flags, "the staged update is missing");
-    }
     if !flags.install_dir.is_dir() {
         return helper_error(flags, "the install directory is missing");
     }
-    if !staged_executable(&flags.staged_dir, &exe_name).is_file() {
-        return helper_error(flags, "the staged update is missing its executable");
+    // Only ever swap a namespaced staging sibling of this install, whose new
+    // executable really is executable. The staged directory is the extracted
+    // release with its archive root stripped, so it *is* the new install's
+    // contents.
+    if !is_staging_sibling(&flags.install_dir, &flags.staged_dir) {
+        return helper_error(flags, "the staged update is not a sibling of the install");
+    }
+    if !flags.staged_dir.is_dir() {
+        return helper_error(flags, "the staged update is missing");
+    }
+    // The helper is spawned directly by the app, so its real parent must be
+    // the process that asked for the swap.
+    if unsafe { libc::getppid() as u32 } != flags.parent_pid {
+        return helper_error(flags, "the update helper was not launched by the app");
+    }
+    use std::os::unix::fs::PermissionsExt as _;
+    match std::fs::metadata(staged_executable(&flags.staged_dir, &exe_name)) {
+        Ok(metadata) if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 => {}
+        _ => return helper_error(flags, "the staged update is missing its executable"),
     }
 
     // Acknowledge the handoff before waiting, so the app can run its normal
@@ -693,47 +706,90 @@ fn run_install(flags: &HelperFlags) -> i32 {
     let _ = std::fs::remove_dir_all(&backup);
 
     if let Err(error) = std::fs::rename(&flags.install_dir, &backup) {
+        let _ = spawn_install(&flags.install_dir, &exe_name, None);
         return helper_error(
             flags,
             &format!("could not move the running install aside: {error}"),
         );
     }
+    sync_directory(flags.parent_dir());
+
     if let Err(error) = std::fs::rename(&flags.staged_dir, &flags.install_dir) {
         let _ = std::fs::rename(&backup, &flags.install_dir);
+        sync_directory(flags.parent_dir());
+        let _ = spawn_install(&flags.install_dir, &exe_name, None);
         return helper_error(
             flags,
             &format!("could not move the update into place: {error}"),
         );
     }
+    sync_directory(flags.parent_dir());
 
-    let executable = relaunch_executable(&flags.install_dir, &exe_name);
-    let mut child = match std::process::Command::new(&executable)
-        .env(RELAUNCH_READY_ENV, &flags.ready_file)
-        .stdin(std::process::Stdio::null())
-        .spawn()
-    {
+    let mut child = match spawn_install(&flags.install_dir, &exe_name, Some(&flags.ready_file)) {
         Ok(child) => child,
         Err(error) => {
             let _ = std::fs::remove_dir_all(&flags.install_dir);
             let _ = std::fs::rename(&backup, &flags.install_dir);
+            sync_directory(flags.parent_dir());
+            let _ = spawn_install(&flags.install_dir, &exe_name, None);
             return helper_error(flags, &format!("could not relaunch the new build: {error}"));
         }
     };
 
-    if wait_for_ready(&flags.ready_file, RELAUNCH_READY_TIMEOUT) {
-        let _ = std::fs::remove_file(&flags.ready_file);
-        let _ = std::fs::remove_dir_all(&backup);
-        return 0;
+    match wait_for_relaunch(&mut child, &flags.ready_file, RELAUNCH_READY_TIMEOUT) {
+        RelaunchState::Ready => {
+            let _ = std::fs::remove_file(&flags.ready_file);
+            let _ = std::fs::remove_dir_all(&backup);
+            sync_directory(flags.parent_dir());
+            0
+        }
+        RelaunchState::Exited(status) => {
+            // The replacement died before it opened a window. Put the old
+            // build back and relaunch it, so a bad release cannot strand the
+            // user.
+            let _ = std::fs::remove_dir_all(&flags.install_dir);
+            let _ = std::fs::rename(&backup, &flags.install_dir);
+            sync_directory(flags.parent_dir());
+            let _ = spawn_install(&flags.install_dir, &exe_name, None);
+            helper_error(
+                flags,
+                &format!("the new build exited before its window opened ({status})"),
+            )
+        }
+        RelaunchState::TimedOut => {
+            // Never yank a process that may still be starting. Keep the new
+            // build in place and retain its rollback copy for manual
+            // recovery rather than destructively guessing.
+            eprintln!(
+                "Orbit updater: the new build stayed alive but did not acknowledge startup; retaining {}",
+                backup.display()
+            );
+            0
+        }
     }
+}
 
-    // The replacement never opened a window. Put the old build back and
-    // relaunch it, so a bad release cannot strand the user.
-    let _ = child.kill();
-    let _ = child.wait();
-    let _ = std::fs::remove_dir_all(&flags.install_dir);
-    let _ = std::fs::rename(&backup, &flags.install_dir);
-    let _ = std::process::Command::new(relaunch_executable(&flags.install_dir, &exe_name)).spawn();
-    helper_error(flags, "the new build did not open its main window")
+/// Relaunch an installed build, optionally arming the startup handshake.
+#[cfg(unix)]
+fn spawn_install(
+    install_dir: &Path,
+    exe_name: &str,
+    ready_file: Option<&Path>,
+) -> std::io::Result<std::process::Child> {
+    let mut command = std::process::Command::new(relaunch_executable(install_dir, exe_name));
+    command.stdin(std::process::Stdio::null());
+    if let Some(ready_file) = ready_file {
+        command.env(RELAUNCH_READY_ENV, ready_file);
+    }
+    command.spawn()
+}
+
+/// How the relaunched build resolved the startup handshake.
+#[cfg(unix)]
+enum RelaunchState {
+    Ready,
+    Exited(std::process::ExitStatus),
+    TimedOut,
 }
 
 #[cfg(unix)]
@@ -772,17 +828,36 @@ fn process_alive(pid: u32) -> bool {
 }
 
 #[cfg(unix)]
-fn wait_for_ready(path: &Path, timeout: std::time::Duration) -> bool {
+fn wait_for_relaunch(
+    child: &mut std::process::Child,
+    ready_file: &Path,
+    timeout: std::time::Duration,
+) -> RelaunchState {
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        if path.exists() {
-            return true;
+        if ready_file.exists() {
+            return RelaunchState::Ready;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => return RelaunchState::Exited(status),
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("Orbit updater: could not observe the relaunched app: {error}");
+                return RelaunchState::TimedOut;
+            }
         }
         if std::time::Instant::now() >= deadline {
-            return false;
+            return RelaunchState::TimedOut;
         }
         std::thread::sleep(POLL_INTERVAL);
     }
+}
+
+/// Flush a directory's entries so a completed rename survives a crash. Its
+/// failure is not fatal: the swap already happened, only durability is lost.
+#[cfg(unix)]
+fn sync_directory(directory: &Path) {
+    let _ = std::fs::File::open(directory).and_then(|directory| directory.sync_all());
 }
 
 /// The main executable inside an install's *contents* (an extracted archive
@@ -800,6 +875,25 @@ fn staged_executable(install_contents: &Path, exe_name: &str) -> PathBuf {
     {
         install_contents.join("bin").join(exe_name)
     }
+}
+
+/// Whether `staged_dir` is a namespaced staging sibling of `install_dir`: the
+/// only shape the helper will swap in. Everything else — an arbitrary
+/// directory, a path from another prefix, or the install itself — is rejected
+/// before anything is renamed.
+#[cfg(unix)]
+fn is_staging_sibling(install_dir: &Path, staged_dir: &Path) -> bool {
+    let Some(parent) = install_dir.parent() else {
+        return false;
+    };
+    let Some(prefix_name) = install_dir.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    staged_dir.parent() == Some(parent)
+        && staged_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(&format!(".{prefix_name}.update-")))
 }
 
 #[cfg(unix)]
@@ -890,12 +984,14 @@ fn install_dir_for(executable: &Path) -> Option<PathBuf> {
 
 #[cfg(unix)]
 fn fetch_and_stage(layout: &InstallLayout) -> anyhow::Result<Option<StagedUpdate>> {
-    fetch_and_stage_impl(|archive, directory| stage_artifact(archive, directory, layout))
+    fetch_and_stage_impl(|archive, directory, version| {
+        stage_artifact(archive, directory, version, layout)
+    })
 }
 
 #[cfg(not(unix))]
 fn fetch_and_stage() -> anyhow::Result<Option<StagedUpdate>> {
-    fetch_and_stage_impl(stage_artifact)
+    fetch_and_stage_impl(|archive, directory, _version| stage_artifact(archive, directory))
 }
 
 /// Fetch the feed, and when it names a newer release, download and verify the
@@ -903,7 +999,7 @@ fn fetch_and_stage() -> anyhow::Result<Option<StagedUpdate>> {
 /// platform's staged update.
 fn fetch_and_stage_impl<F>(stage: F) -> anyhow::Result<Option<StagedUpdate>>
 where
-    F: FnOnce(PathBuf, PathBuf) -> anyhow::Result<Option<StagedUpdate>>,
+    F: FnOnce(PathBuf, PathBuf, &str) -> anyhow::Result<Option<StagedUpdate>>,
 {
     let document = http_get(FEED_URL)?;
     let Some(item) = feed::newest_item(&document) else {
@@ -916,20 +1012,21 @@ where
     validate_download_url(&item.url)?;
     let declared_length = item
         .length
-        .filter(|length| *length > 0 && *length <= MAX_ARTIFACT_BYTES);
+        .filter(|length| *length > 0 && *length <= MAX_ARTIFACT_BYTES)
+        .ok_or_else(|| {
+            anyhow::anyhow!("the update feed does not declare a valid artifact length")
+        })?;
 
     let directory = unique_temp_directory("orbit-update")?;
     let archive = directory.join(artifact_name());
     download_to(&item.url, &archive, 600, MAX_ARTIFACT_BYTES)?;
     let actual_length = std::fs::metadata(&archive)?.len();
-    if let Some(declared_length) = declared_length {
-        anyhow::ensure!(
-            actual_length == declared_length,
-            "the update artifact does not match the length the feed declared"
-        );
-    }
+    anyhow::ensure!(
+        actual_length == declared_length,
+        "the update artifact does not match the length the feed declared"
+    );
     verify_artifact(&archive, &item)?;
-    let mut staged = stage(archive, directory)?;
+    let mut staged = stage(archive, directory, &item.version)?;
     if let Some(update) = staged.as_mut() {
         update.version = Some(item.version);
     }
@@ -957,14 +1054,14 @@ fn artifact_name() -> &'static str {
 fn stage_artifact(
     archive: PathBuf,
     temporary: PathBuf,
+    version: &str,
     layout: &InstallLayout,
 ) -> anyhow::Result<Option<StagedUpdate>> {
     let staging = create_unique_sibling(layout, "update")?;
-    let payload = staging.join("payload");
-    std::fs::create_dir_all(&payload)?;
-    let extracted = extract_release_archive(&archive, &payload).and_then(|_| {
+    let expected_root = expected_archive_root(layout, version);
+    let extracted = extract_release_archive(&archive, &staging, &expected_root).and_then(|_| {
         anyhow::ensure!(
-            staged_executable(&payload, &layout.exe_name).is_file(),
+            staged_executable(&staging, &layout.exe_name).is_file(),
             "the update archive is missing its executable"
         );
         Ok(())
@@ -974,7 +1071,43 @@ fn stage_artifact(
         let _ = std::fs::remove_dir_all(&staging);
         return Err(error);
     }
-    Ok(Some(StagedUpdate::new(payload, staging)))
+    Ok(Some(StagedUpdate::new(staging.clone(), staging)))
+}
+
+/// The single top-level directory a release archive must carry: the `.app`
+/// bundle name on macOS, the versioned package name on Linux. Anything else
+/// means the feed served an archive for a different build.
+#[cfg(unix)]
+fn expected_archive_root(layout: &InstallLayout, version: &str) -> std::ffi::OsString {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = version;
+        layout
+            .install_dir
+            .file_name()
+            .map(std::ffi::OsStr::to_os_string)
+            .unwrap_or_else(|| std::ffi::OsString::from("Orbit Pi.app"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::ffi::OsString::from(format!("orbit-pi-{version}-{}", target_triple()))
+    }
+}
+
+/// The host triple `scripts/bundle-linux.sh` packages releases under.
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+fn target_triple() -> &'static str {
+    "aarch64-unknown-linux-gnu"
+}
+
+#[cfg(all(target_os = "linux", not(target_arch = "aarch64")))]
+fn target_triple() -> &'static str {
+    "x86_64-unknown-linux-gnu"
+}
+
+#[cfg(all(unix, not(target_os = "linux"), not(target_os = "macos")))]
+fn target_triple() -> &'static str {
+    "unknown"
 }
 
 #[cfg(windows)]
@@ -1007,15 +1140,20 @@ fn create_unique_sibling(layout: &InstallLayout, kind: &str) -> anyhow::Result<P
 }
 
 /// Extract a signed release archive, stripping its single top-level directory
-/// and refusing anything that could escape the staging tree.
+/// and refusing anything that could escape the staging tree. The top-level
+/// entry must match `expected_root`, so an archive built for a different
+/// release or platform is rejected before anything is written.
 #[cfg(unix)]
-fn extract_release_archive(path: &Path, destination: &Path) -> anyhow::Result<()> {
+fn extract_release_archive(
+    path: &Path,
+    destination: &Path,
+    expected_root: &std::ffi::OsStr,
+) -> anyhow::Result<()> {
     use std::collections::HashSet;
-    use std::ffi::OsString;
 
     let decoder = flate2::read::GzDecoder::new(std::fs::File::open(path)?);
     let mut archive = tar::Archive::new(decoder);
-    let mut root: Option<OsString> = None;
+    let mut saw_root = false;
     let mut seen = HashSet::new();
     let mut unpacked_bytes = 0_u64;
     let mut entry_count = 0_usize;
@@ -1031,17 +1169,14 @@ fn extract_release_archive(path: &Path, destination: &Path) -> anyhow::Result<()
         let archived_path = entry.path()?.into_owned();
         let mut components = archived_path.components();
         let top = match components.next() {
-            Some(std::path::Component::Normal(top)) => top.to_os_string(),
+            Some(std::path::Component::Normal(top)) => top,
             _ => anyhow::bail!("the update archive contains an invalid path"),
         };
-        if let Some(expected) = &root {
-            anyhow::ensure!(
-                expected == &top,
-                "the update archive has more than one top-level directory"
-            );
-        } else {
-            root = Some(top);
-        }
+        anyhow::ensure!(
+            top == expected_root,
+            "the update archive has an unexpected top-level directory"
+        );
+        saw_root = true;
 
         let mut relative = PathBuf::new();
         for component in components {
@@ -1075,14 +1210,27 @@ fn extract_release_archive(path: &Path, destination: &Path) -> anyhow::Result<()
         );
 
         let output = destination.join(relative);
+        // Tarballs carry an explicit entry for every directory. Creating a
+        // file for one would turn `Contents/` into a regular file and the
+        // next entry beneath it would fail with `EEXIST`, so directory
+        // entries must stay directories.
+        if entry_type.is_dir() {
+            std::fs::create_dir_all(&output)?;
+            continue;
+        }
         if let Some(parent) = output.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let mut file = std::fs::File::create(&output)?;
         std::io::copy(&mut entry, &mut file)?;
+        // Preserve the release's mode; `File::create` drops the executable
+        // bit the swapped-in build needs to relaunch.
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = entry.header().mode()? & 0o7777;
+        std::fs::set_permissions(&output, std::fs::Permissions::from_mode(mode))?;
     }
 
-    anyhow::ensure!(root.is_some(), "the update archive is empty");
+    anyhow::ensure!(saw_root, "the update archive is empty");
     Ok(())
 }
 
@@ -1450,5 +1598,111 @@ mod tests {
                 .is_err(),
             "a modified download must not verify"
         );
+    }
+
+    /// A real release tarball carries an explicit entry for every directory.
+    /// Extraction must keep those entries directories (not empty files, which
+    /// used to fail the next nested entry with `EEXIST`) and preserve the
+    /// executable bit the swapped-in build relaunches with.
+    #[cfg(unix)]
+    #[test]
+    fn extraction_keeps_directory_entries_and_executable_modes() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = std::env::temp_dir().join(format!("orbit-extract-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let source = root.join("source").join("Contents");
+        std::fs::create_dir_all(source.join("MacOS")).expect("create source tree");
+        std::fs::write(source.join("Info.plist"), b"plist").expect("write plist");
+        let binary = source.join("MacOS").join("Orbit Pi");
+        std::fs::write(&binary, b"binary").expect("write binary");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let archive = root.join("release.tar.gz");
+        let file = std::fs::File::create(&archive).expect("create archive");
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        builder
+            .append_dir_all("Orbit Pi.app", root.join("source"))
+            .expect("append the release tree");
+        builder
+            .into_inner()
+            .expect("finish the archive")
+            .finish()
+            .expect("finish the gzip stream");
+
+        let destination = root.join("destination");
+        std::fs::create_dir_all(&destination).expect("create destination");
+        extract_release_archive(&archive, &destination, std::ffi::OsStr::new("Orbit Pi.app"))
+            .expect("extract the release");
+
+        assert!(
+            destination.join("Contents").is_dir(),
+            "a directory entry must extract as a directory"
+        );
+        let extracted = destination.join("Contents").join("MacOS").join("Orbit Pi");
+        assert!(extracted.is_file(), "the executable must extract as a file");
+        let mode = extracted.metadata().expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "the executable bit must survive extraction");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The helper must only ever swap in a staging directory this prefix
+    /// created — never an arbitrary path, another app's prefix, or the
+    /// install itself.
+    #[cfg(unix)]
+    #[test]
+    fn only_namespaced_staging_siblings_may_be_swapped_in() {
+        let parent = Path::new("/home/user/.local");
+        let install = parent.join("orbit-pi");
+        assert!(is_staging_sibling(
+            &install,
+            &parent.join(".orbit-pi.update-42-0")
+        ));
+        assert!(!is_staging_sibling(&install, &install));
+        assert!(!is_staging_sibling(
+            &install,
+            &parent.join(".other-app.update-42-0")
+        ));
+        assert!(!is_staging_sibling(
+            &install,
+            &parent.join("nested").join(".orbit-pi.update-42-0")
+        ));
+    }
+
+    /// An archive whose single top-level directory names another build must not
+    /// be extracted into the install's staging directory.
+    #[cfg(unix)]
+    #[test]
+    fn extraction_rejects_an_unexpected_root() {
+        let root = std::env::temp_dir().join(format!("orbit-extract-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let source = root.join("source").join("Contents");
+        std::fs::create_dir_all(&source).expect("create source tree");
+        std::fs::write(source.join("Info.plist"), b"plist").expect("write plist");
+
+        let archive = root.join("release.tar.gz");
+        let file = std::fs::File::create(&archive).expect("create archive");
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        builder
+            .append_dir_all("Other.app", root.join("source"))
+            .expect("append the release tree");
+        builder
+            .into_inner()
+            .expect("finish the archive")
+            .finish()
+            .expect("finish the gzip stream");
+
+        let destination = root.join("destination");
+        std::fs::create_dir_all(&destination).expect("create destination");
+        assert!(
+            extract_release_archive(&archive, &destination, std::ffi::OsStr::new("Orbit Pi.app"),)
+                .is_err(),
+            "an archive rooted at another name must be rejected"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
