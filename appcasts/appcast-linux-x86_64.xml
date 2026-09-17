@@ -3,6 +3,11 @@
   <channel>
     <title>Orbit Pi</title>
     <item>
+      <title>0.0.4</title>
+      <sparkle:shortVersionString>0.0.4</sparkle:shortVersionString>
+      <enclosure url="https://github.com/imrj05/orbit/releases/download/v0.0.4/orbit-pi-0.0.4-x86_64-unknown-linux-gnu.tar.gz" length="24968964" type="application/octet-stream" sparkle:edSignature="AvRvl6ie2FvoCYFPMjOaxeJgpaqNgP9jQvBuWqjPyivp0tHqUC9OzaHHj4WqEg9JABDkBqJMW0DUX4llub4mBw==" />
+    </item>
+<item>
       <title>0.0.3</title>
       <sparkle:shortVersionString>0.0.3</sparkle:shortVersionString>
       <enclosure url="https://github.com/imrj05/orbit/releases/download/v0.0.3/orbit-pi-0.0.3-x86_64-unknown-linux-gnu.tar.gz" length="24892955" type="application/octet-stream" sparkle:edSignature="HUee7jSg2uoCsuu04mav3N1UYWzdm5Nd/CF4DLEm7iPhufn6IEQE/fPaMtkQNABOc8H+In9u1TVwIADjt5lWBg==" />
