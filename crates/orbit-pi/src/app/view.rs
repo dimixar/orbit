@@ -2356,6 +2356,7 @@ impl OrbitApp {
             .child(
                 div()
                     .id("toggle-sidebar")
+                    .block_mouse_except_scroll()
                     .size(px(24.))
                     .rounded_sm()
                     .flex()
@@ -2369,6 +2370,7 @@ impl OrbitApp {
             .child(
                 div()
                     .id("history-back")
+                    .block_mouse_except_scroll()
                     .size(px(24.))
                     .rounded_sm()
                     .flex()
@@ -2392,6 +2394,7 @@ impl OrbitApp {
             .child(
                 div()
                     .id("history-forward")
+                    .block_mouse_except_scroll()
                     .size(px(24.))
                     .rounded_sm()
                     .flex()
