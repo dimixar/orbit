@@ -412,10 +412,7 @@ impl Updater {
         {
             command.arg(format!("/DIR={}", directory.display()));
         }
-        {
-            use std::os::windows::process::CommandExt as _;
-            command.creation_flags(0x0800_0000);
-        }
+        orbit_rpc::hide_console(&mut command);
         match command.spawn() {
             Ok(_) => {
                 // The installer owns the file now; leave the staging directory

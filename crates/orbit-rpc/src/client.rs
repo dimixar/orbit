@@ -164,6 +164,7 @@ impl PiClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        hide_console(&mut command);
         if let Some(dir) = session_dir {
             command.arg("--session-dir").arg(dir);
         }
@@ -369,6 +370,28 @@ impl Drop for PiClient {
         let _ = self.commands_tx.send(Outgoing {
             wire: String::new(),
         });
+    }
+}
+
+/// Suppress the console window Windows attaches to a console child process
+/// started by a GUI-subsystem parent.
+///
+/// Orbit's release build has no console of its own (`windows_subsystem`), so
+/// without `CREATE_NO_WINDOW` every `pi.cmd`, `git`, or `node` it spawns pops
+/// its own console window. `.cmd` shims (`pi.cmd`) are run through `cmd.exe`
+/// by `std`, which is why the flashing window shows a command prompt. Call
+/// this on a [`std::process::Command`] before spawning; it is a no-op on
+/// non-Windows targets.
+pub fn hide_console(command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        // `CREATE_NO_WINDOW`: run the child without a visible console.
+        command.creation_flags(0x0800_0000);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = command;
     }
 }
 

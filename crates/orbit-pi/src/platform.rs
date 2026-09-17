@@ -181,10 +181,12 @@ pub fn open_path_default(path: &Path) {
     // Windows has no `xdg-open`; the shell's `start` verb is the equivalent
     // (`""` is the window title `start` would otherwise read as the path).
     #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", "start", ""])
-        .arg(path)
-        .spawn();
+    {
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/C", "start", ""]).arg(path);
+        orbit_rpc::hide_console(&mut command);
+        let _ = command.spawn();
+    }
     #[cfg(not(target_os = "windows"))]
     let _ = std::process::Command::new("xdg-open").arg(path).spawn();
 }
@@ -276,8 +278,10 @@ pub fn open_terminal_command(command: &str) -> Result<(), String> {
     // gives it its own window instead of attaching to this process.
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "cmd", "/K", command])
+        let mut launcher = std::process::Command::new("cmd");
+        launcher.args(["/C", "start", "cmd", "/K", command]);
+        orbit_rpc::hide_console(&mut launcher);
+        launcher
             .spawn()
             .map(|_| ())
             .map_err(|err| format!("could not open a terminal: {err}"))
@@ -329,6 +333,7 @@ pub fn open_url(url: &str) -> Result<(), String> {
     } else {
         command.arg(url);
     }
+    orbit_rpc::hide_console(&mut command);
     command
         .spawn()
         .map(|_| ())
@@ -459,10 +464,10 @@ pub fn host() -> Host {
 
 /// Run `command args`, returning trimmed stdout when it succeeds.
 fn command_output(command: &str, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new(command)
-        .args(args)
-        .output()
-        .ok()?;
+    let mut command = std::process::Command::new(command);
+    command.args(args);
+    orbit_rpc::hide_console(&mut command);
+    let output = command.output().ok()?;
     if !output.status.success() {
         return None;
     }

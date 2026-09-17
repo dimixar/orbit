@@ -305,6 +305,7 @@ fn run_pi(
         command.args(["--model", model]);
     }
     command.arg("--").arg(prompt);
+    orbit_rpc::hide_console(&mut command);
 
     let mut child = command
         .spawn()

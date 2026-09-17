@@ -63,8 +63,9 @@ pub fn run_self_update() -> std::io::Result<Output> {
     command
         // The update run needs no startup notice of its own.
         .env("PI_SKIP_VERSION_CHECK", "1")
-        .args(["update", "self", "--no-approve"])
-        .output()
+        .args(["update", "self", "--no-approve"]);
+    orbit_rpc::hide_console(&mut command);
+    command.output()
 }
 
 /// Semver-ish ordering for dotted release numbers: `0.10.0` is newer than

@@ -478,14 +478,15 @@ fn run_introspection(
     package_dir: &Path,
     env_keys: &Path,
 ) -> Option<Vec<DynamicProvider>> {
-    let output = std::process::Command::new(node)
+    let mut command = std::process::Command::new(node);
+    command
         .arg("--input-type=module")
         .arg("-e")
         .arg(INTROSPECT_SCRIPT)
         .current_dir(package_dir)
-        .env("PI_AI_ENV_KEYS", env_keys)
-        .output()
-        .ok()?;
+        .env("PI_AI_ENV_KEYS", env_keys);
+    orbit_rpc::hide_console(&mut command);
+    let output = command.output().ok()?;
     if !output.status.success() {
         return None;
     }

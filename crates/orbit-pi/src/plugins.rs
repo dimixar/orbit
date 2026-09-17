@@ -344,6 +344,7 @@ fn run_pi(args: &[String], workspace: &Path) -> Result<String, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    orbit_rpc::hide_console(&mut command);
 
     let mut child = command
         .spawn()

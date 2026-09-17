@@ -280,7 +280,10 @@ fn home_dir() -> Option<PathBuf> {
 
 /// First line of `<bin> --version`, trimmed; `None` if it fails or is empty.
 pub(crate) fn version_of(bin: &Path) -> Option<String> {
-    let output = Command::new(bin).arg("--version").output().ok()?;
+    let mut command = Command::new(bin);
+    command.arg("--version");
+    orbit_rpc::hide_console(&mut command);
+    let output = command.output().ok()?;
     let text = if output.stdout.is_empty() {
         output.stderr
     } else {

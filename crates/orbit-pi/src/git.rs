@@ -41,6 +41,7 @@ pub(crate) fn command(cwd: &Path) -> Command {
     let mut command = Command::new("git");
     command.current_dir(cwd);
     command.env("GIT_OPTIONAL_LOCKS", "0");
+    orbit_rpc::hide_console(&mut command);
     command
 }
 
