@@ -13,6 +13,15 @@ pub(super) enum PluginAction {
     Refresh,
 }
 
+/// Toolbar vs. card button geometry. Settings' pinned toolbars size their
+/// controls to the 30px row used by Providers and Models; card actions stay
+/// compact at 28px.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum PluginButtonSize {
+    Compact,
+    Toolbar,
+}
+
 /// The operation a background plugin task runs.
 #[derive(Clone, Copy)]
 enum PluginOp {
@@ -155,6 +164,7 @@ impl OrbitApp {
             })
             // ── provider editor modals (models.json + API key) ──
             .children(self.provider_editor_layer(theme, this.clone(), cx))
+            .children(self.provider_usage_layer(theme, this.clone(), cx))
             .children(self.provider_key_layer(theme, this, cx))
     }
 
@@ -181,9 +191,23 @@ impl OrbitApp {
                     .max_w(px(CONTENT_MAX_W))
                     .mx_auto()
                     .flex_shrink_0()
-                    .px(px(24.))
-                    .pt(px(44.))
-                    .pb(px(12.))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .w_full()
+                            .px(px(24.))
+                            .pt(px(44.))
+                            .pb(px(12.))
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(self.settings_header(theme))
+                            .children(self.settings_toolbar(theme, this.clone(), cx)),
+                    )
+                    // The hairline inherits the same 24px gutter as the
+                    // search field and card grid, so it lines up with them
+                    // instead of overhanging the content by the page gutter.
                     .when(
                         matches!(
                             self.settings_section,
@@ -191,13 +215,15 @@ impl OrbitApp {
                                 | SettingsSection::Plugins
                                 | SettingsSection::Models
                         ),
-                        |header| header.border_b_1().border_color(theme.border),
-                    )
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .child(self.settings_header(theme))
-                    .children(self.settings_toolbar(theme, this.clone(), cx)),
+                        |header| {
+                            header.child(
+                                div()
+                                    .w_full()
+                                    .px(px(24.))
+                                    .child(div().w_full().h(px(1.)).bg(theme.border)),
+                            )
+                        },
+                    ),
             )
             .child(
                 div()
@@ -212,6 +238,7 @@ impl OrbitApp {
                         div()
                             .w_full()
                             .px(px(24.))
+                            .pt(px(16.))
                             .pb(px(12.))
                             .flex()
                             .flex_col()
@@ -841,28 +868,6 @@ impl OrbitApp {
             })
             .collect();
 
-        let installed = self
-            .plugins
-            .iter()
-            .filter(|package| package.installed)
-            .count();
-        rows.push(
-            div()
-                .w_full()
-                .text_size(theme.ui_px(12.))
-                .text_color(theme.text_3)
-                .child(if visible.len() == self.plugins.len() {
-                    format!("{} of {} installed", installed, self.plugins.len())
-                } else {
-                    format!(
-                        "{} of {} shown · {} installed",
-                        visible.len(),
-                        self.plugins.len(),
-                        installed
-                    )
-                })
-                .into_any_element(),
-        );
         if visible.is_empty() {
             rows.push(self.empty_resource_card(
                 theme,
@@ -871,6 +876,28 @@ impl OrbitApp {
                 "Try a different search — installed packages are unchanged.",
             ));
             return rows;
+        }
+        // The pinned toolbar already states the total; spell the count out
+        // only when a search narrows the list, on the rows it describes.
+        if !needle.is_empty() {
+            let installed = self
+                .plugins
+                .iter()
+                .filter(|package| package.installed)
+                .count();
+            rows.push(
+                div()
+                    .w_full()
+                    .text_size(theme.ui_px(12.))
+                    .text_color(theme.text_3)
+                    .child(format!(
+                        "{} of {} shown · {} installed",
+                        visible.len(),
+                        self.plugins.len(),
+                        installed
+                    ))
+                    .into_any_element(),
+            );
         }
         for package in visible {
             rows.push(self.plugin_card(package, theme, this.clone()));
@@ -888,11 +915,13 @@ impl OrbitApp {
         let project = package.scope == PackageScope::Project;
         let confirming = self.plugin_remove_confirm.as_deref() == Some(source.as_str());
 
+        // Badges get their own left-aligned row under the name (never
+        // right-aligned in the header) so a long source or version set can't
+        // squeeze the identity column on the settings column's fixed width.
         let mut badges = div()
             .flex()
             .flex_wrap()
             .items_center()
-            .justify_end()
             .gap_1p5()
             .child(self.provider_badge(
                 package.scope.label(),
@@ -967,8 +996,7 @@ impl OrbitApp {
                             .truncate()
                             .child(source.clone()),
                     ),
-            )
-            .child(badges);
+            );
 
         let actions: AnyElement = if confirming {
             div()
@@ -988,6 +1016,7 @@ impl OrbitApp {
                     format!("plugin-remove-confirm-{source}"),
                     "Remove",
                     false,
+                    PluginButtonSize::Compact,
                     Some("icons/trash.svg"),
                     theme,
                     this.clone(),
@@ -1000,6 +1029,7 @@ impl OrbitApp {
                     format!("plugin-remove-cancel-{source}"),
                     "Cancel",
                     false,
+                    PluginButtonSize::Compact,
                     None,
                     theme,
                     this,
@@ -1013,6 +1043,7 @@ impl OrbitApp {
                     format!("plugin-update-{source}"),
                     "Update",
                     false,
+                    PluginButtonSize::Compact,
                     Some("icons/refresh.svg"),
                     theme,
                     this.clone(),
@@ -1025,6 +1056,7 @@ impl OrbitApp {
                 format!("plugin-remove-{source}"),
                 "Remove",
                 false,
+                PluginButtonSize::Compact,
                 Some("icons/trash.svg"),
                 theme,
                 this,
@@ -1045,6 +1077,7 @@ impl OrbitApp {
             .flex_col()
             .gap_2p5()
             .child(header)
+            .child(badges)
             .child(
                 div()
                     .font_family(theme::code_font_family())
@@ -1058,8 +1091,8 @@ impl OrbitApp {
             .into_any_element()
     }
 
-    /// The pinned Plugins toolbar: install field + scope target + Install,
-    /// then the count and Refresh.
+    /// The pinned Plugins toolbar: the search field, then the install field,
+    /// scope target, and Install, then the status line and Refresh.
     pub(super) fn plugin_toolbar(
         &self,
         theme: Theme,
@@ -1105,6 +1138,7 @@ impl OrbitApp {
             "plugin-install".to_string(),
             "Install",
             true,
+            PluginButtonSize::Toolbar,
             Some("icons/plus.svg"),
             theme,
             this.clone(),
@@ -1115,6 +1149,7 @@ impl OrbitApp {
             "plugin-refresh".to_string(),
             "Refresh",
             false,
+            PluginButtonSize::Toolbar,
             Some("icons/refresh.svg"),
             theme,
             this,
@@ -1185,6 +1220,9 @@ impl OrbitApp {
             .flex()
             .flex_col()
             .gap_3()
+            // Search leads, like Providers and Models — the filter belongs
+            // with the list it narrows, above the controls that add to it.
+            .child(search)
             .child(
                 div()
                     .w_full()
@@ -1204,7 +1242,6 @@ impl OrbitApp {
                     .child(status)
                     .child(refresh),
             )
-            .child(search)
             .into_any_element()
     }
 
@@ -1222,13 +1259,13 @@ impl OrbitApp {
         );
         let mut chip = div()
             .id(ElementId::Name(id.into()))
-            .h(px(28.))
-            .px(px(9.))
+            .h(px(30.))
+            .px(px(12.))
             .rounded_md()
             .flex()
             .items_center()
             .cursor_pointer()
-            .text_size(theme.ui_px(11.5))
+            .text_size(theme.ui_px(12.))
             .font_weight(FontWeight::MEDIUM);
         chip = if active {
             chip.bg(theme.active).text_color(theme.active_fg)
@@ -1254,22 +1291,27 @@ impl OrbitApp {
         id: String,
         label: &str,
         primary: bool,
+        size: PluginButtonSize,
         icon_path: Option<&'static str>,
         theme: Theme,
         this: Entity<OrbitApp>,
         action: PluginAction,
     ) -> AnyElement {
+        let (height, pad_x, text_size, icon_size) = match size {
+            PluginButtonSize::Compact => (px(28.), px(10.), theme.ui_px(11.5), 12.),
+            PluginButtonSize::Toolbar => (px(30.), px(12.), theme.ui_px(12.), 13.),
+        };
         let base = div()
             .id(ElementId::Name(id.into()))
-            .h(px(28.))
-            .px(px(10.))
+            .h(height)
+            .px(pad_x)
             .rounded_md()
             .flex()
             .items_center()
             .justify_center()
             .gap_1p5()
             .cursor_pointer()
-            .text_size(theme.ui_px(11.5))
+            .text_size(text_size)
             .font_weight(FontWeight::MEDIUM);
         let (button, icon_color) = if primary {
             (
@@ -1290,7 +1332,7 @@ impl OrbitApp {
         };
         button
             .when_some(icon_path, |button, path| {
-                button.child(icon(path, 12., icon_color))
+                button.child(icon(path, icon_size, icon_color))
             })
             .child(div().child(label.to_string()))
             .on_mouse_up(MouseButton::Left, move |_, _, cx| {
@@ -2200,6 +2242,11 @@ impl OrbitApp {
         this: Entity<OrbitApp>,
     ) -> AnyElement {
         let confirming = self.provider_remove_confirm.as_deref() == Some(view.id.as_str());
+        // The card no longer renders quota inline: usage opens in a popup so a
+        // connected card stays compact (see `provider_usage_layer`).
+        let has_usage = view.quota.as_ref().is_some_and(|report| {
+            report.has_data() || report.error.is_some() || report.note.is_some()
+        });
         let session = self.auth.login_for(&view.id);
         let (status_label, status_color) = if let Some(session) = session {
             match session.phase {
@@ -2582,8 +2629,20 @@ impl OrbitApp {
                     },
                 ));
             }
+            if has_usage {
+                secondary = secondary.child(self.provider_button(
+                    format!("provider-usage-{}", view.id),
+                    "Usage",
+                    ProviderButtonStyle::Ghost,
+                    theme,
+                    this.clone(),
+                    ProviderAction::ShowUsage {
+                        id: view.id.clone(),
+                    },
+                ));
+            }
             let mut actions = div().w_full().flex().flex_col().gap_2().child(primary);
-            if view.custom || connected {
+            if view.custom || connected || has_usage {
                 actions = actions.child(secondary);
             }
             actions.into_any_element()
@@ -2603,9 +2662,6 @@ impl OrbitApp {
             .child(header)
             .child(badges)
             .child(facts)
-            .when_some(self.provider_quota_section(view, theme), |card, section| {
-                card.child(section)
-            })
             .child(base_url)
             .child(div().h(px(1.)).w_full().bg(theme.border))
             .child(actions)
@@ -2714,6 +2770,7 @@ impl OrbitApp {
             ProviderAction::AuthDismiss => Some("icons/check.svg"),
             ProviderAction::EditKey { .. } => Some("icons/at-sign.svg"),
             ProviderAction::EditOllamaSession { .. } => Some("icons/clock.svg"),
+            ProviderAction::ShowUsage { .. } => Some("icons/usage-total.svg"),
             ProviderAction::SignOut { .. } => Some("icons/stop.svg"),
             ProviderAction::Configure { .. } => Some("icons/settings.svg"),
             ProviderAction::Remove { .. } | ProviderAction::ConfirmRemove { .. } => {
@@ -2771,6 +2828,10 @@ impl OrbitApp {
                 cx,
             ),
             ProviderAction::SignOut { id } => self.provider_sign_out(id, cx),
+            ProviderAction::ShowUsage { id } => {
+                self.provider_usage_open = Some(id);
+                cx.notify();
+            }
             ProviderAction::Configure { id } => self.provider_editor_open(Some(id), window, cx),
             ProviderAction::Remove { id } => {
                 self.provider_remove_confirm = Some(id);
@@ -2784,6 +2845,146 @@ impl OrbitApp {
             ProviderAction::SaveKey => self.provider_key_save(window, cx),
             ProviderAction::Restart => self.provider_apply_credentials(cx),
         }
+    }
+
+    /// The provider usage/quota modal, or `None` when closed. The card keeps
+    /// only a Usage button; windows, balances, and spend render here so a
+    /// connected card stays compact.
+    pub(super) fn provider_usage_layer(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let id = self.provider_usage_open.as_deref()?;
+        let view = self
+            .provider_views()
+            .into_iter()
+            .find(|view| view.id == id)?;
+        let body = self.provider_quota_section(&view, theme)?;
+
+        let close = div()
+            .id("provider-usage-close")
+            .h(px(32.))
+            .px(px(14.))
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_raised)
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.bg_hover))
+            .on_mouse_up(MouseButton::Left, {
+                let this = this.clone();
+                move |_, _, cx| {
+                    this.update(cx, |app, cx| {
+                        app.provider_usage_open = None;
+                        cx.notify();
+                    });
+                }
+            })
+            .child(
+                div()
+                    .text_size(theme.ui_px(12.))
+                    .text_color(theme.text_2)
+                    .child("Close"),
+            );
+
+        let card = div()
+            .w_full()
+            .max_w(px(460.))
+            .max_h(relative(1.))
+            .rounded(px(14.))
+            .border_1()
+            .border_color(theme.border_strong)
+            .bg(theme.menu_bg)
+            .shadow(theme.popover_shadow())
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .occlude()
+            .font_family(theme::ui_font_family())
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_action(cx.listener(Self::provider_editor_cancel))
+            .child(
+                div()
+                    .px(px(18.))
+                    .py(px(14.))
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(theme.border)
+                    .child(
+                        div()
+                            .text_size(theme.ui_px(15.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(format!("Usage — {}", view.name)),
+                    )
+                    .child(
+                        div()
+                            .font_family(theme::code_font_family())
+                            .text_size(theme.code_px(11.))
+                            .text_color(theme.text_3)
+                            .child(view.id.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .id("provider-usage-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(px(18.))
+                    .py(px(16.))
+                    .child(body),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(18.))
+                    .py(px(12.))
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(close),
+            );
+
+        let scrim = match theme.mode {
+            ThemeMode::Dark => Hsla {
+                h: 0.,
+                s: 0.,
+                l: 0.,
+                a: 0.42,
+            },
+            ThemeMode::Light => Hsla {
+                h: 0.,
+                s: 0.,
+                l: 0.,
+                a: 0.22,
+            },
+        };
+        Some(
+            div()
+                .id("provider-usage-layer")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .bg(scrim)
+                .p(px(24.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_mouse_down(MouseButton::Left, cx.listener(Self::provider_editor_scrim))
+                .child(card)
+                .into_any_element(),
+        )
     }
 
     /// The API-key modal, or `None` when closed.
@@ -6029,8 +6230,9 @@ impl OrbitApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let closed =
-            self.provider_editor.take().is_some() | self.provider_key_editor.take().is_some();
+        let closed = self.provider_editor.take().is_some()
+            | self.provider_key_editor.take().is_some()
+            | self.provider_usage_open.take().is_some();
         if closed {
             cx.notify();
         }
@@ -6056,8 +6258,9 @@ impl OrbitApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let closed =
-            self.provider_editor.take().is_some() | self.provider_key_editor.take().is_some();
+        let closed = self.provider_editor.take().is_some()
+            | self.provider_key_editor.take().is_some()
+            | self.provider_usage_open.take().is_some();
         if closed {
             cx.notify();
         }

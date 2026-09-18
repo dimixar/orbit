@@ -864,10 +864,17 @@ pub(crate) fn thinking_icon(level: &str, theme: &Theme) -> (&'static str, gpui::
 
 /// Brand glyph for a pi provider — mono SVGs from [theSVG.org]
 /// (https://thesvg.org), embedded under `assets/icons/providers/` and named
-/// by provider id. Every pi built-in provider has a mark; unknown or
+/// by provider id. A few ids reuse another brand's mark (Ollama Cloud is
+/// still Ollama). Every pi built-in provider has a mark; unknown or
 /// user-defined providers (custom `models.json` entries) fall back to a
 /// neutral cloud glyph.
 pub(crate) fn provider_icon(provider: &str) -> SharedString {
+    // Provider id → the id whose mark it shares. The leading dot on
+    // `.manifest` is pi's catalog-index filename, not a real provider id.
+    const ALIASES: &[(&str, &str)] = &[("ollama-cloud", "ollama"), (".manifest", "manifest")];
+    if let Some((_, mark)) = ALIASES.iter().find(|(id, _)| *id == provider) {
+        return format!("icons/providers/{mark}.svg").into();
+    }
     const KNOWN: &[&str] = &[
         "amazon-bedrock",
         "ant-ling",
@@ -1621,6 +1628,27 @@ mod tests {
                 "{path} is not embedded"
             );
         }
+    }
+
+    #[test]
+    fn aliased_provider_ids_reuse_their_brand_mark() {
+        use gpui::AssetSource as _;
+        for (id, mark) in [("ollama-cloud", "ollama"), (".manifest", "manifest")] {
+            let path = provider_icon(id);
+            assert_eq!(path.as_ref(), format!("icons/providers/{mark}.svg"));
+            assert!(
+                crate::assets::Assets.load(&path).unwrap().is_some(),
+                "{path} is not embedded"
+            );
+        }
+        assert_eq!(
+            provider_icon("ollama").as_ref(),
+            "icons/providers/ollama.svg"
+        );
+        assert_eq!(
+            provider_icon("manifest").as_ref(),
+            "icons/providers/manifest.svg"
+        );
     }
 
     #[test]

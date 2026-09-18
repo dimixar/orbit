@@ -515,6 +515,8 @@ pub struct OrbitApp {
     provider_editor: Option<ProviderEditor>,
     /// Provider id awaiting inline remove confirmation.
     provider_remove_confirm: Option<String>,
+    /// Provider id whose usage/quota popup is open.
+    provider_usage_open: Option<String>,
     /// Refresh button spin state on the Providers page.
     providers_refreshing: bool,
     /// Search filter for the provider grid.
@@ -910,6 +912,7 @@ impl OrbitApp {
             provider_key_editor: None,
             provider_editor: None,
             provider_remove_confirm: None,
+            provider_usage_open: None,
             providers_refreshing: false,
             provider_filter: provider_filter.clone(),
             _provider_filter_sub: provider_filter_sub,
@@ -1448,6 +1451,10 @@ enum ProviderAction {
         name: String,
     },
     SignOut {
+        id: String,
+    },
+    /// Open the provider's usage/quota popup (windows, balances, spend).
+    ShowUsage {
         id: String,
     },
     Configure {
