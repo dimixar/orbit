@@ -743,6 +743,29 @@ impl UsageFilter {
         self.matches_scope(index, r.session, r.model)
     }
 
+    /// The calendar's match: the same scope and errors/cache tests as
+    /// [`Self::matches_request`], but against a caller-supplied window instead
+    /// of the date range. The activity calendar is a fixed trailing year, so it
+    /// does not read the range — and never the focus bucket, which lives inside
+    /// the range.
+    pub fn matches_request_window(
+        &self,
+        index: &UsageIndex,
+        r: &UsageRecord,
+        window: &DateRange,
+    ) -> bool {
+        if !window.contains(r.ts_ms) {
+            return false;
+        }
+        if self.errors_only && !r.outcome.is_error() {
+            return false;
+        }
+        if self.cached_only && r.tokens.cache_read == 0 {
+            return false;
+        }
+        self.matches_scope(index, r.session, r.model)
+    }
+
     pub fn matches_tool(&self, index: &UsageIndex, t: &ToolRun) -> bool {
         if !self.matches_time(t.ts_ms) {
             return false;

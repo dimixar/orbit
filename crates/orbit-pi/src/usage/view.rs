@@ -4,31 +4,35 @@
 //! computed elsewhere and formats it; the only logic allowed here is layout,
 //! interaction, and choosing which register a number is shown in.
 //!
-//! # Direction contract — Usage, card-stack redesign
+//! # Direction contract — Usage, minimal pass
 //!
-//! **THESIS.** The page is an instrument cluster, not a scroll of lists: each
-//! measure owns a bordered card so a metric's domain is spatial, refusing the
-//! undifferentiated hairline stack the category defaults to.
+//! **THESIS.** The page is a reading surface, not an instrument rack: the
+//! headline metrics are the one board, and every other measure sits on the
+//! canvas behind a hairline. Chrome is spent only where it earns its weight.
 //!
-//! **OWN-WORLD.** Orbit's instrument panel, inherited whole: canvas ground,
-//! `bg_raised` cards at 12px radius, one ember accent on the active series,
-//! hairlines only *inside* a card, tabular mono figures for every number.
+//! **OWN-WORLD.** Orbit's instrument panel, inherited whole: canvas ground, the
+//! summary metric board as the single card, one ember accent on the active
+//! series, hairlines for every other boundary, tabular mono figures.
 //!
-//! **STORY.** The operator scans the summary, reads the trend, ranks one
-//! dimension at a time, checks token health, then drills the record tables.
+//! **STORY.** The operator reads the four headline figures, reads the trend,
+//! scans the derived signals, then expands the calendar, the token-health
+//! panels, the breakdown, or the record tables only when the question asks.
 //! Every figure is pi's own session measurement; nothing is invented.
 //!
-//! **FIRST VIEWPORT.** 44px header + filter bar, then the Summary card: the
-//! metric grid first, the quieter secondary figures one click away. The Trend
-//! area chart follows as the first chart, so data starts above the fold.
+//! **FIRST VIEWPORT.** 44px header + filter bar, then the Summary board (four
+//! metric cells) and the Activity band (metric switcher, area chart, signals,
+//! and two collapsed disclosures). The default view is deliberately short: the
+//! page's secondary measures are one click away, never gone.
 //!
-//! **FORM.** Established world, brief-pinned structure — no concept tournament
-//! was run. Composition is a card stack on the canvas; the trend is an area
-//! chart, and both the Breakdown dimensions and the Details records are the
-//! same shared data table (search, columns, sorting, totals, pagination).
+//! **FORM.** Established world. Composition is a metric board over three
+//! hairline-separated bands — Activity, Breakdown, Details — with the daily
+//! calendar and the token-health panels demoted into disclosures inside
+//! Activity. The trend is an area chart; Breakdown and Details are the same
+//! shared data table (search, columns, sorting, totals, pagination).
 //!
-//! Sections: Summary (metric grid) · Signals · Trend (area) · Breakdown (four
-//! dimensions, each a data table) · Token composition · Cache · Details.
+//! Sections: Summary (metric board) · Activity (trend + signals + Daily
+//! activity + Token health) · Breakdown (four dimensions) · Details (Sessions /
+//! Daily / Failures).
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -45,6 +49,7 @@ use super::aggregate::{
 use super::chart;
 use super::filters::{self, FilterOption};
 use super::format;
+use super::heatmap;
 use super::model::{
     next_bucket, Granularity, RangePreset, TimeFocus, TokenCounts, UsageFilter, UsageIndex,
 };
@@ -155,7 +160,17 @@ impl UsagePage {
         div()
             .h(px(44.))
             .flex_none()
-            .px(px(12.))
+            // The page spans the window when the sessions sidebar is collapsed,
+            // so the leading inset clears the macOS traffic lights and the
+            // sidebar/history controls overlaid in the titlebar. The right end
+            // clears the app's own caption buttons on the platforms that draw
+            // them (see `platform::draws_window_controls`).
+            .pl(px(self.header_leading()))
+            .pr(px(if crate::platform::draws_window_controls() {
+                crate::platform::WINDOW_CONTROLS_W
+            } else {
+                12.
+            }))
             .flex()
             .items_center()
             .gap_2()
@@ -638,21 +653,157 @@ impl UsagePage {
         }
 
         let mut sections: Vec<AnyElement> = vec![self.summary_card(snapshot, theme, kpi_cols, cx)];
-        if !snapshot.insights.is_empty() {
-            sections.push(self.signals_card(&snapshot.insights, theme));
-        }
-        sections.push(self.trend_card(snapshot, theme, cx));
-        sections.push(self.breakdown_card(snapshot, theme, cx));
-        sections.push(self.health_section(snapshot, theme, wide, cx));
+        sections.push(self.activity_section(snapshot, theme, wide, cx));
+        sections.push(self.breakdown_section(snapshot, theme, cx));
         sections.push(self.details_section(snapshot, theme, window, cx));
 
         div()
             .w_full()
             .flex()
             .flex_col()
-            .gap(px(16.))
+            .gap(px(28.))
             .children(sections)
             .into_any_element()
+    }
+
+    /// The Activity band. The trend is the primary read; the daily calendar and
+    /// the token-health panels sit behind quiet disclosures, so the default view
+    /// stays calm without dropping any measurement.
+    fn activity_section(
+        &self,
+        snapshot: &UsageSnapshot,
+        theme: Theme,
+        wide: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let metric = self.metric();
+        let latency_metric = self.latency_metric();
+        let by = snapshot.series.granularity.label();
+        let meta = match metric {
+            ChartMetric::Cost => format!(
+                "{} total · by {by}",
+                format::cost(metric.total(&snapshot.summary.totals))
+            ),
+            ChartMetric::Latency => format!(
+                "{} per bucket · by {by}",
+                latency_metric.label().to_lowercase()
+            ),
+            _ => format!(
+                "{} total · by {by}",
+                format::compact(metric.total(&snapshot.summary.totals) as u64)
+            ),
+        };
+
+        let mut content = div().w_full().flex().flex_col().gap(px(20.));
+        content = content.child(self.trend_body(snapshot, theme, cx));
+
+        if !snapshot.insights.is_empty() {
+            content = content.child(self.signals_body(&snapshot.insights, theme));
+        }
+
+        let daily_meta = format!("{} per day · last 12 months", metric.label().to_lowercase());
+        let daily_open = self.is_daily_open();
+        let daily = self.heatmap_body(snapshot, theme, cx);
+        content = content.child(self.disclosure(
+            "usage-daily",
+            "Daily activity",
+            Some(daily_meta),
+            daily_open,
+            daily,
+            theme,
+            {
+                let entity = cx.entity();
+                move |_, cx| entity.update(cx, |page, cx| page.toggle_daily(cx))
+            },
+        ));
+
+        if snapshot.cache.is_available() || snapshot.summary.totals.tokens.total > 0 {
+            let health_open = self.is_health_open();
+            let health = self.health_body(snapshot, theme, wide, cx);
+            content = content.child(self.disclosure(
+                "usage-health",
+                "Token health",
+                Some("composition & cache".into()),
+                health_open,
+                health,
+                theme,
+                {
+                    let entity = cx.entity();
+                    move |_, cx| entity.update(cx, |page, cx| page.toggle_health(cx))
+                },
+            ));
+        }
+
+        section(
+            "usage-activity",
+            "Activity",
+            Some(meta),
+            None,
+            content.into_any_element(),
+            theme,
+        )
+    }
+
+    /// A collapsed/expanded block: a quiet toggle row with a chevron, then the
+    /// content only while open. Secondary material stays one click away without
+    /// wearing a card.
+    fn disclosure(
+        &self,
+        id: &'static str,
+        title: &str,
+        meta: Option<String>,
+        open: bool,
+        content: AnyElement,
+        theme: Theme,
+        on_toggle: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> AnyElement {
+        let header = div()
+            .id(SharedString::from(id))
+            .w_full()
+            .h(px(32.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .cursor_pointer()
+            .hover(|style| style.text_color(theme.text_2))
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                on_toggle(window, cx)
+            })
+            .child(icon(
+                if open {
+                    "icons/chevron-down.svg"
+                } else {
+                    "icons/chevron-right.svg"
+                },
+                13.,
+                theme.text_3,
+            ))
+            .child(
+                div()
+                    .text_size(theme.ui_px(11.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_3)
+                    .child(title.to_uppercase()),
+            )
+            .children(meta.map(|meta| {
+                div()
+                    .text_size(theme.ui_px(11.))
+                    .text_color(theme.text_3)
+                    .child(meta)
+            }))
+            .child(div().flex_1());
+
+        let mut root = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .border_t_1()
+            .border_color(theme.border)
+            .child(header);
+        if open {
+            root = root.child(div().w_full().pt(px(12.)).child(content));
+        }
+        root.into_any_element()
     }
 
     fn clear_filters_button(&self, theme: Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -729,7 +880,7 @@ impl UsagePage {
             .flex_wrap()
             .gap(px(1.))
             .bg(theme.border);
-        for _ in 0..8 {
+        for _ in 0..4 {
             grid = grid.child(
                 div()
                     .flex_1()
@@ -745,15 +896,25 @@ impl UsagePage {
             );
         }
 
-        // Trend: the switcher row, then the plot block.
-        let trend = div()
+        // Activity: the switcher row, the plot block, then two disclosure rules.
+        let activity = div()
             .p(px(14.))
             .w_full()
             .flex()
             .flex_col()
             .gap(px(12.))
             .child(bar(320., 26.))
-            .child(div().h(px(168.)).w_full().rounded(px(8.)).bg(theme.trough));
+            .child(div().h(px(168.)).w_full().rounded(px(8.)).bg(theme.trough))
+            .child(
+                div()
+                    .w_full()
+                    .pt(px(6.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.))
+                    .child(bar(130., 10.))
+                    .child(bar(130., 10.)),
+            );
 
         // Records: a header rule and a handful of rows.
         let mut records = div().w_full().pt(px(12.)).flex().flex_col();
@@ -773,14 +934,35 @@ impl UsagePage {
             );
         }
 
+        // The two secondary bands are sections, not cards: a quiet rule over
+        // the placeholder body.
+        let section_shell = |body: AnyElement| {
+            div()
+                .w_full()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap(px(12.))
+                .child(
+                    div()
+                        .w_full()
+                        .pb(px(12.))
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .child(bar(96., 10.)),
+                )
+                .child(body)
+                .into_any_element()
+        };
+
         div()
             .w_full()
             .flex()
             .flex_col()
-            .gap(px(16.))
+            .gap(px(28.))
             .child(shell(grid.into_any_element()))
-            .child(shell(trend.into_any_element()))
-            .child(shell(records.into_any_element()))
+            .child(section_shell(activity.into_any_element()))
+            .child(section_shell(records.into_any_element()))
             .into_any_element()
     }
 
@@ -899,7 +1081,6 @@ impl UsagePage {
                 let entity = cx.entity();
                 let tint = match cell.tone {
                     CellTone::Normal => theme.text,
-                    CellTone::Alert => theme.crit,
                     CellTone::Muted => theme.text_3,
                 };
                 let mut element = div()
@@ -942,14 +1123,10 @@ impl UsagePage {
                             .text_color(theme.text_3)
                             .child(cell.sub.clone()),
                     );
-                if let Some(click) = cell.click {
+                if let Some(metric) = cell.click {
                     element = element.on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                        entity.update(cx, |page, cx| match click {
-                            // Drill-down: jump to the failed requests, or point
-                            // the main chart at the metric the card names (§79).
-                            KpiClick::ErrorsOnly => page.set_errors_only(true, cx),
-                            KpiClick::Metric(metric) => page.set_metric(metric, cx),
-                        });
+                        // Point the main chart at the metric the card names (§79).
+                        entity.update(cx, |page, cx| page.set_metric(metric, cx));
                     });
                 }
                 row = row.child(element);
@@ -994,7 +1171,7 @@ impl UsagePage {
             value: format::count(totals.requests),
             sub: delta_sub(snapshot, ChartMetric::Requests, "model requests in range"),
             tone: CellTone::Normal,
-            click: Some(KpiClick::Metric(ChartMetric::Requests)),
+            click: Some(ChartMetric::Requests),
         });
         cells.push(KpiCell {
             label: "Total tokens".into(),
@@ -1004,24 +1181,7 @@ impl UsagePage {
                 None => "no requests".into(),
             },
             tone: CellTone::Normal,
-            click: Some(KpiClick::Metric(ChartMetric::Tokens)),
-        });
-        cells.push(KpiCell {
-            label: "Input tokens".into(),
-            value: format::compact(totals.tokens.input),
-            sub: share_sub(totals.tokens.input, totals.tokens.total),
-            tone: CellTone::Normal,
-            click: Some(KpiClick::Metric(ChartMetric::Input)),
-        });
-        cells.push(KpiCell {
-            label: "Output tokens".into(),
-            value: format::compact(totals.tokens.output),
-            sub: match totals.reasoning_reported {
-                0 => share_sub(totals.tokens.output, totals.tokens.total),
-                _ => format!("{} reasoning", format::compact(totals.reasoning)),
-            },
-            tone: CellTone::Normal,
-            click: Some(KpiClick::Metric(ChartMetric::Output)),
+            click: Some(ChartMetric::Tokens),
         });
         cells.push(match snapshot.cache.hit_rate {
             Some(rate) => KpiCell {
@@ -1034,7 +1194,7 @@ impl UsagePage {
                 ),
                 tone: CellTone::Normal,
                 // Focus the cache analytics: plot cache volume over time.
-                click: Some(KpiClick::Metric(ChartMetric::Cache)),
+                click: Some(ChartMetric::Cache),
             },
             None => KpiCell {
                 label: "Cache hit rate".into(),
@@ -1058,7 +1218,7 @@ impl UsagePage {
                     format!("{} measured", format::count(snapshot.latency.samples))
                 },
                 tone: CellTone::Normal,
-                click: Some(KpiClick::Metric(ChartMetric::Latency)),
+                click: Some(ChartMetric::Latency),
             },
             None => KpiCell {
                 label: "Avg response".into(),
@@ -1067,50 +1227,6 @@ impl UsagePage {
                 tone: CellTone::Muted,
                 click: None,
             },
-        });
-        cells.push(KpiCell {
-            label: "Failed requests".into(),
-            value: format::exact(totals.errors),
-            sub: match totals.error_rate() {
-                Some(_) if totals.errors == 0 => "none in this period".into(),
-                Some(rate) => format!(
-                    "{} of requests · {} stopped",
-                    format::percent(rate),
-                    format::count(totals.aborted)
-                ),
-                None => "no requests".into(),
-            },
-            tone: if totals.errors > 0 {
-                CellTone::Alert
-            } else {
-                CellTone::Normal
-            },
-            click: (totals.errors > 0).then_some(KpiClick::ErrorsOnly),
-        });
-        let coverage = totals.cost_coverage();
-        cells.push(KpiCell {
-            label: "Cost".into(),
-            value: if coverage == 0.0 {
-                "Unavailable".into()
-            } else {
-                format::cost(totals.cost_usd)
-            },
-            sub: if coverage == 0.0 {
-                "no pricing for these models".into()
-            } else if coverage < 0.999 {
-                format!("{} of requests priced", format::percent(coverage * 100.0))
-            } else {
-                match totals.cost_per_request() {
-                    Some(per) => format!("{} per request", format::cost(per)),
-                    None => "priced requests only".into(),
-                }
-            },
-            tone: if coverage == 0.0 {
-                CellTone::Muted
-            } else {
-                CellTone::Normal
-            },
-            click: (coverage > 0.0).then_some(KpiClick::Metric(ChartMetric::Cost)),
         });
         cells
     }
@@ -1128,16 +1244,36 @@ impl UsagePage {
     ) -> AnyElement {
         let totals = &snapshot.summary.totals;
         let headline: Vec<(String, String)> = vec![
-            ("Turns".into(), format::count(snapshot.summary.turns)),
+            ("Input tokens".into(), format::compact(totals.tokens.input)),
+            (
+                "Output tokens".into(),
+                format::compact(totals.tokens.output),
+            ),
+            (
+                "Cost".into(),
+                match (totals.cost_coverage(), totals.cost_per_request()) {
+                    (0.0, _) => "Unavailable".into(),
+                    (_, Some(per)) => format!(
+                        "{} · {} / req",
+                        format::cost(totals.cost_usd),
+                        format::cost(per)
+                    ),
+                    (_, None) => format::cost(totals.cost_usd),
+                },
+            ),
+            (
+                "Failed".into(),
+                if totals.errors > 0 {
+                    format::exact(totals.errors)
+                } else {
+                    "None".into()
+                },
+            ),
             ("Sessions".into(), format::count(snapshot.summary.sessions)),
+            ("Turns".into(), format::count(snapshot.summary.turns)),
             (
                 "Tool calls".into(),
                 format::count(snapshot.summary.tool_runs),
-            ),
-            ("Models".into(), format::count(snapshot.summary.models)),
-            (
-                "Workspaces".into(),
-                format::count(snapshot.summary.workspaces),
             ),
         ];
         let mut extra: Vec<(String, String)> = vec![(
@@ -1215,6 +1351,27 @@ impl UsagePage {
             );
         }
 
+        // Keep the failed-request drill-down available even though Errors is no
+        // longer a headline cell.
+        if totals.errors > 0 {
+            let fail_entity = cx.entity();
+            values.push(
+                div()
+                    .id("usage-summary-failures")
+                    .flex()
+                    .items_center()
+                    .cursor_pointer()
+                    .text_size(theme.ui_px(11.5))
+                    .text_color(theme.crit)
+                    .hover(|style| style.text_color(theme.text))
+                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        fail_entity.update(cx, |page, cx| page.set_errors_only(true, cx));
+                    })
+                    .child("View failures")
+                    .into_any_element(),
+            );
+        }
+
         div()
             .w_full()
             .flex()
@@ -1234,52 +1391,51 @@ impl UsagePage {
             .into_any_element()
     }
 
-    /// Derived findings, one line each. Their own card so a warning cannot be
-    /// mistaken for a metric.
-    fn signals_card(&self, insights: &[Insight], theme: Theme) -> AnyElement {
-        card(
-            "usage-signals",
-            "Signals",
-            Some("derived from this range".into()),
-            None,
-            div()
-                .p(px(14.))
-                .flex()
-                .flex_col()
-                .gap(px(7.))
-                .children(insights.iter().map(|insight| {
-                    let (path, color) = match insight.tone {
-                        Tone::Positive => ("icons/check.svg", theme.ok_green),
-                        Tone::Warning => ("icons/info.svg", theme.warn),
-                        Tone::Neutral => ("icons/spark.svg", theme.text_3),
-                    };
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap(px(8.))
-                        .text_size(theme.ui_px(12.))
-                        .child(div().pt(px(1.)).child(icon(path, 12., color)))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_color(theme.text_2)
-                                .child(insight.text.clone()),
-                        )
-                        .into_any_element()
-                }))
-                .into_any_element(),
-            theme,
-            false,
-        )
+    /// Derived findings, one line each, as a quiet list under the trend so a
+    /// warning cannot be mistaken for a metric.
+    fn signals_body(&self, insights: &[Insight], theme: Theme) -> AnyElement {
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .text_size(theme.ui_px(10.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text_3)
+                    .child("SIGNALS"),
+            )
+            .children(insights.iter().map(|insight| {
+                let (path, color) = match insight.tone {
+                    Tone::Positive => ("icons/check.svg", theme.ok_green),
+                    Tone::Warning => ("icons/info.svg", theme.warn),
+                    Tone::Neutral => ("icons/spark.svg", theme.text_3),
+                };
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(8.))
+                    .text_size(theme.ui_px(12.))
+                    .child(div().pt(px(1.)).child(icon(path, 12., color)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_color(theme.text_2)
+                            .child(insight.text.clone()),
+                    )
+                    .into_any_element()
+            }))
+            .into_any_element()
     }
 
     // ── trend ──────────────────────────────────────────────────────────────
 
-    /// The Trend card: one area chart across several measures. The metric
-    /// switcher lives in the card header; the chart is the card's whole body,
-    /// because the trend is this page's primary read.
-    fn trend_card(
+    /// The trend: one area chart across several measures, with the metric
+    /// switcher and the chart's data table in its own body. The `Activity`
+    /// section supplies the frame.
+    fn trend_body(
         &self,
         snapshot: &UsageSnapshot,
         theme: Theme,
@@ -1287,21 +1443,6 @@ impl UsagePage {
     ) -> AnyElement {
         let metric = self.metric();
         let latency_metric = self.latency_metric();
-        let by = snapshot.series.granularity.label();
-        let meta = match metric {
-            ChartMetric::Cost => format!(
-                "{} total · by {by}",
-                format::cost(metric.total(&snapshot.summary.totals))
-            ),
-            ChartMetric::Latency => format!(
-                "{} per bucket · by {by}",
-                latency_metric.label().to_lowercase()
-            ),
-            _ => format!(
-                "{} total · by {by}",
-                format::compact(metric.total(&snapshot.summary.totals) as u64)
-            ),
-        };
 
         // Metric switcher: one visualization, several measures (§19). A metric
         // with no source data stays visible but disabled, and the line under
@@ -1432,7 +1573,9 @@ impl UsagePage {
             .gap(px(8.))
             .flex_wrap()
             .child(tabs)
-            .children(latency_selector);
+            .children(latency_selector)
+            .child(div().flex_1())
+            .child(view_data);
 
         let hover = self.hover_bucket();
         let entity = cx.entity();
@@ -1477,7 +1620,6 @@ impl UsagePage {
         };
 
         let mut content = div()
-            .p(px(14.))
             .w_full()
             .flex()
             .flex_col()
@@ -1510,15 +1652,81 @@ impl UsagePage {
             );
         }
 
-        card(
-            "usage-trend",
-            "Usage over time",
-            Some(meta),
-            Some(view_data),
-            content.into_any_element(),
-            theme,
-            false,
-        )
+        content.into_any_element()
+    }
+
+    // ── daily activity (calendar heatmap) ──────────────────────────────────
+
+    /// The daily activity calendar: one cell per day, shaded by the active
+    /// metric. A second reading of the same activity — the trend shows the shape
+    /// across adaptive buckets, the calendar shows the day-of-week rhythm, the
+    /// streaks, and the quiet stretches at a glance. It is always a trailing
+    /// year (like a contribution graph), so it stays readable whatever the date
+    /// range is; the workspace / model / provider scope still applies to every
+    /// cell. Clicking a day scopes the whole page to it.
+    fn heatmap_body(
+        &self,
+        snapshot: &UsageSnapshot,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let metric = self.metric();
+        let calendar = &snapshot.calendar;
+
+        let hover = self.hover_day();
+        // The day the page is scoped to, when the range sits inside one day (a
+        // calendar click, or the Today preset). The calendar does not read the
+        // range for its window, so this is only the selection ring.
+        let range = &self.filter().range;
+        let selected = calendar.days.iter().position(|day| {
+            day.in_range
+                && range.start_ms >= day.start_ms
+                && range.end_ms > range.start_ms
+                && range.end_ms <= next_bucket(day.start_ms, Granularity::Day)
+        });
+
+        // Pre-compute each in-range day's start so the click handler (which
+        // must be `'static`) can scope the page without touching the snapshot.
+        let day_starts: Vec<Option<i64>> = calendar
+            .days
+            .iter()
+            .map(|day| day.in_range.then_some(day.start_ms))
+            .collect();
+
+        let entity = cx.entity();
+        let on_hover = move |day: Option<usize>, _: &mut Window, cx: &mut App| {
+            entity.update(cx, |page, cx| page.set_hover_day(day, cx));
+        };
+        let select_entity = cx.entity();
+        let on_select = move |ix: usize, _: &mut Window, cx: &mut App| {
+            let Some(Some(day_ms)) = day_starts.get(ix).copied() else {
+                return;
+            };
+            select_entity.update(cx, |page, cx| page.scope_to_day(day_ms, cx));
+        };
+
+        // The calendar keeps a subtle raised frame here (rather than the page
+        // canvas) so the empty-day cells, which paint `bg_main`, stay visible.
+        let width = (self.table_width() - 30.).max(240.);
+        div()
+            .w_full()
+            .p(px(14.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.bg_raised)
+            .child(heatmap::calendar(
+                "usage-calendar",
+                calendar,
+                metric,
+                hover,
+                selected,
+                theme,
+                width,
+                on_hover,
+                on_select,
+            ))
+            .into_any_element()
     }
 
     /// The chart's data as a compact, precise table (§52).
@@ -1682,7 +1890,7 @@ impl UsagePage {
     /// chart over a sortable data table. The chart reads the aggregate's own
     /// token ranking; the table sorts independently, so an operator can rank by
     /// requests or cache without disturbing the overview.
-    fn breakdown_card(
+    fn breakdown_section(
         &self,
         snapshot: &UsageSnapshot,
         theme: Theme,
@@ -1787,21 +1995,20 @@ impl UsagePage {
             .w_full()
             .flex()
             .flex_col()
-            .child(div().px(px(14.)).pt(px(14.)).pb(px(10.)).child(tabs))
+            .child(div().px(px(14.)).pb(px(10.)).child(tabs))
             .child(chart)
             .child(toolbar)
             .child(table)
             .child(totals)
             .child(footer);
 
-        card(
+        section(
             "usage-breakdowns",
             "Breakdown",
             Some(meta),
             None,
             body.into_any_element(),
             theme,
-            false,
         )
     }
 
@@ -2320,7 +2527,7 @@ impl UsagePage {
     /// Token composition: input / output / cache read / cache write, as one
     /// stacked bar plus its four rows. The four categories sum to the total,
     /// so nothing is double-counted (§23).
-    fn composition_panel(
+    fn composition_body(
         &self,
         snapshot: &UsageSnapshot,
         theme: Theme,
@@ -2349,11 +2556,6 @@ impl UsagePage {
                 ChartMetric::Cache,
             ),
         ];
-        let meta = if total == 0 {
-            "no tokens in range".to_string()
-        } else {
-            format!("{} tokens", format::compact(total))
-        };
 
         let mut stack = div()
             .w_full()
@@ -2445,21 +2647,13 @@ impl UsagePage {
                 }),
         );
 
-        card(
-            "usage-composition",
-            "Token composition",
-            Some(meta),
-            None,
-            div().p(px(14.)).child(content).into_any_element(),
-            theme,
-            false,
-        )
+        div().w_full().child(content).into_any_element()
     }
 
     // ── health panels ──────────────────────────────────────────────────────
 
     /// Cache performance, with the formula stated in the panel (§24/§25).
-    fn cache_panel(
+    fn cache_body(
         &self,
         snapshot: &UsageSnapshot,
         theme: Theme,
@@ -2468,25 +2662,13 @@ impl UsagePage {
         let cache = &snapshot.cache;
         let available = cache.is_available();
         let hit = cache.hit_rate;
-        let meta = match hit {
-            Some(rate) if available => format!("{} hit rate", format::percent(rate)),
-            _ => "unavailable".into(),
-        };
         let mut content = div().flex().flex_col().gap(px(10.));
         if !available {
             content = content.child(empty_line(
                 "Cache data unavailable — no cache tokens were reported in this range.",
                 theme,
             ));
-            return card(
-                "usage-cache",
-                "Cache performance",
-                Some(meta),
-                None,
-                div().p(px(14.)).child(content).into_any_element(),
-                theme,
-                false,
-            );
+            return div().w_full().child(content).into_any_element();
         }
 
         if let Some(rate) = hit {
@@ -2608,35 +2790,51 @@ impl UsagePage {
                 ),
         );
 
-        card(
-            "usage-cache",
-            "Cache performance",
-            Some(meta),
-            None,
-            div().p(px(14.)).child(content).into_any_element(),
-            theme,
-            false,
-        )
+        div().w_full().child(content).into_any_element()
     }
 
     // ── health ─────────────────────────────────────────────────────────────
 
-    /// Two token-health cards share one row on wide layouts: composition (what
-    /// the tokens were) beside cache performance (how much was reused). They
-    /// stay separate cards so neither reads as a subordinate of the other.
-    fn health_section(
+    /// Token composition beside cache performance, each in a quiet raised
+    /// sub-panel: a label and a hairline rather than a 42px card strip, so the
+    /// troughs keep their contrast on the canvas.
+    fn health_body(
         &self,
         snapshot: &UsageSnapshot,
         theme: Theme,
         wide: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let composition = self.composition_panel(snapshot, theme, cx);
-        let cache = self.cache_panel(snapshot, theme, cx);
+        let totals = &snapshot.summary.totals;
+        let tokens = totals.tokens;
+        let composition_meta = if tokens.total == 0 {
+            "no tokens in range".to_string()
+        } else {
+            format!("{} tokens", format::compact(tokens.total))
+        };
+        let cache_meta = match snapshot.cache.hit_rate {
+            Some(rate) if snapshot.cache.is_available() => {
+                format!("{} hit rate", format::percent(rate))
+            }
+            _ => "unavailable".into(),
+        };
+        let composition = subpanel(
+            "Token composition",
+            Some(composition_meta),
+            self.composition_body(snapshot, theme, cx),
+            theme,
+        );
+        let cache = subpanel(
+            "Cache performance",
+            Some(cache_meta),
+            self.cache_body(snapshot, theme, cx),
+            theme,
+        );
         if wide {
             div()
                 .w_full()
                 .flex()
+                .items_start()
                 .gap(px(16.))
                 .child(div().flex_1().min_w_0().child(composition))
                 .child(div().flex_1().min_w_0().child(cache))
@@ -2680,7 +2878,7 @@ impl UsagePage {
                 }
             },
         );
-        let tabs_row = div().px(px(14.)).pt(px(14.)).pb(px(10.)).child(tabs);
+        let tabs_row = div().px(px(14.)).pb(px(10.)).child(tabs);
 
         let (meta, content) = match tab {
             DetailTab::Sessions => {
@@ -2761,15 +2959,7 @@ impl UsagePage {
             }
         };
 
-        card(
-            "usage-details",
-            "Details",
-            Some(meta),
-            None,
-            content,
-            theme,
-            false,
-        )
+        section("usage-details", "Details", Some(meta), None, content, theme)
     }
 
     /// The sessions search field, as it appears in the details header.
@@ -3777,6 +3967,91 @@ fn context_separator(theme: Theme) -> AnyElement {
 /// a body, on a raised surface with a single hairline border. `clip` rounds the
 /// corners for cards whose content runs edge to edge; it stays off for a card
 /// that hosts a popover, which must escape the card to be usable.
+/// A top-level band on the canvas: a quiet uppercase label, an optional meta
+/// figure and action, a hairline rule, then the content. Used for every
+/// secondary section so the page reads as hairlines and whitespace rather than
+/// a stack of boxes (DESIGN.md: hairlines over boxes). The summary metric board
+/// is the one place that keeps a card.
+fn section(
+    id: &'static str,
+    title: &str,
+    meta: Option<String>,
+    right: Option<AnyElement>,
+    content: AnyElement,
+    theme: Theme,
+) -> AnyElement {
+    div()
+        .id(SharedString::from(id))
+        .flex_none()
+        .w_full()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .w_full()
+                .pb(px(12.))
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .border_b_1()
+                .border_color(theme.border)
+                .child(
+                    div()
+                        .text_size(theme.ui_px(11.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_3)
+                        .child(title.to_uppercase()),
+                )
+                .children(meta.map(|meta| {
+                    div()
+                        .text_size(theme.ui_px(11.))
+                        .text_color(theme.text_3)
+                        .child(meta)
+                }))
+                .child(div().flex_1())
+                .children(right),
+        )
+        .child(div().w_full().pt(px(14.)).child(content))
+        .into_any_element()
+}
+
+/// A quiet raised block inside a section: a small label and a hairline rather
+/// than a full card strip. Used for the token-health panels, whose troughs need
+/// a surface distinct from the canvas.
+fn subpanel(label: &str, meta: Option<String>, content: AnyElement, theme: Theme) -> AnyElement {
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(px(10.))
+        .p(px(14.))
+        .rounded(px(10.))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.bg_raised)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .text_size(theme.ui_px(11.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(theme.text_3)
+                        .child(label.to_uppercase()),
+                )
+                .children(meta.map(|meta| {
+                    div()
+                        .text_size(theme.ui_px(11.))
+                        .text_color(theme.text_3)
+                        .child(meta)
+                })),
+        )
+        .child(content)
+        .into_any_element()
+}
+
 fn card(
     id: &'static str,
     title: &str,
@@ -4230,13 +4505,6 @@ fn delta_sub(snapshot: &UsageSnapshot, metric: ChartMetric, fallback: &str) -> S
     }
 }
 
-fn share_sub(part: u64, total: u64) -> String {
-    if total == 0 {
-        return "no tokens".into();
-    }
-    format!("{} of tokens", format::share(part as f64 / total as f64))
-}
-
 /// Why a metric is not offered, phrased for the data that is missing.
 fn unavailable_reason(unavailable: &[&str]) -> String {
     let mut reasons: Vec<String> = Vec::new();
@@ -4263,22 +4531,13 @@ struct KpiCell {
     value: String,
     sub: String,
     tone: CellTone,
-    click: Option<KpiClick>,
+    click: Option<ChartMetric>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CellTone {
     Normal,
-    Alert,
     Muted,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum KpiClick {
-    /// Focus the failures: show only failed requests.
-    ErrorsOnly,
-    /// Point the main chart at the metric this card measures.
-    Metric(ChartMetric),
 }
 
 // ── export ─────────────────────────────────────────────────────────────────
@@ -4513,6 +4772,27 @@ pub fn export_json(index: &UsageIndex, snapshot: &UsageSnapshot, search: &str) -
         "workspaces": breakdown(&snapshot.workspaces.rows, "workspaces"),
         "sessions": sessions,
         "buckets": buckets,
+        // The calendar's days, in the same shape as the buckets/series so an
+        // export can be joined day by day. The calendar is a fixed trailing
+        // year, independent of the date range, and only the days it actually
+        // covers are exported.
+        "calendar": snapshot
+            .calendar
+            .in_range()
+            .map(|day| {
+                serde_json::json!({
+                    "start_ms": day.start_ms,
+                    "requests": day.totals.requests,
+                    "input": day.totals.tokens.input,
+                    "output": day.totals.tokens.output,
+                    "cache_read": day.totals.tokens.cache_read,
+                    "cache_write": day.totals.tokens.cache_write,
+                    "total": day.totals.tokens.total,
+                    "errors": day.totals.errors,
+                    "cost_usd": day.totals.cost_usd,
+                })
+            })
+            .collect::<Vec<_>>(),
         "tools": tools,
         "errors_detail": errors,
         "insights": snapshot.insights.iter().map(|insight| insight.text.clone()).collect::<Vec<_>>(),

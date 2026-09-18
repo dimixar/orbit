@@ -576,6 +576,10 @@ pub struct UsagePage {
     detail_tab: DetailTab,
     /// The secondary metrics under the KPI board are expanded.
     summary_open: bool,
+    /// The daily-activity calendar is expanded inside the Activity section.
+    daily_open: bool,
+    /// The token-health panels are expanded inside the Activity section.
+    health_open: bool,
 
     // ── controls ──
     /// The page's own scroll position. Opening the page always starts at the
@@ -592,12 +596,17 @@ pub struct UsagePage {
     /// Draft custom-range bounds, applied when both ends are chosen.
     custom_start: Option<i64>,
     custom_end: Option<i64>,
+    /// The date range in force before a calendar day click scoped the page to
+    /// that day, so a second click on the same day restores it.
+    calendar_restore: Option<DateRange>,
     /// When a popover was dismissed by an outside click; guards the same
     /// gesture's mouse-up from re-opening the menu it just closed.
     dismissed_at: Option<Instant>,
 
     // ── transient state ──
     hover_bucket: Option<usize>,
+    /// The day under the pointer on the calendar heatmap, if any.
+    hover_day: Option<usize>,
     loading: bool,
     refreshing: bool,
     last_request: Option<Instant>,
@@ -620,6 +629,12 @@ pub struct UsagePage {
     _breakdown_search_sub: Subscription,
     /// Width of the main area, refreshed by the shell each render.
     main_width: f32,
+    /// Leading inset for the page header, refreshed by the shell each render.
+    /// Wider when the sessions sidebar is collapsed: the page then owns the
+    /// window's left edge, so the header's Back affordance has to clear the OS
+    /// window buttons and the titlebar's left controls overlaid at the same
+    /// height.
+    header_leading: f32,
 
     on_open_session: Option<OpenSession>,
     on_close: Option<Close>,
@@ -703,6 +718,8 @@ impl UsagePage {
             breakdown_search,
             detail_tab: DetailTab::parse(&prefs.detail_tab).unwrap_or(DetailTab::Sessions),
             summary_open: prefs.summary_open,
+            daily_open: false,
+            health_open: false,
             scroll: ScrollHandle::new(),
             search,
             menu: None,
@@ -712,8 +729,10 @@ impl UsagePage {
             calendar_open: false,
             custom_start: prefs.custom_start,
             custom_end: prefs.custom_end,
+            calendar_restore: None,
             dismissed_at: None,
             hover_bucket: None,
+            hover_day: None,
             loading: true,
             refreshing: false,
             last_request: None,
@@ -727,6 +746,7 @@ impl UsagePage {
             _menu_query_sub: menu_query_sub,
             _breakdown_search_sub: breakdown_search_sub,
             main_width: 1000.,
+            header_leading: 12.,
             on_open_session: None,
             on_close: None,
         }
@@ -755,6 +775,7 @@ impl UsagePage {
         self.menu = None;
         self.context_row = None;
         self.hover_bucket = None;
+        self.hover_day = None;
     }
 
     /// The user asked for fresh numbers.
@@ -893,6 +914,23 @@ impl UsagePage {
     pub fn set_main_width(&mut self, width: f32, cx: &mut Context<Self>) {
         if (self.main_width - width).abs() > 0.5 {
             self.main_width = width;
+            cx.notify();
+        }
+    }
+
+    /// The header's leading inset. `OrbitApp` sets it each render.
+    pub fn header_leading(&self) -> f32 {
+        self.header_leading
+    }
+
+    /// Set by `OrbitApp` on every render: how far the header's leading edge
+    /// sits from the page's left edge. It widens when the sessions sidebar is
+    /// collapsed, because the page then spans the window and its own Back
+    /// affordance would otherwise sit under the macOS traffic lights (and the
+    /// overlaid sidebar/history controls).
+    pub fn set_header_leading(&mut self, leading: f32, cx: &mut Context<Self>) {
+        if (self.header_leading - leading).abs() > 0.5 {
+            self.header_leading = leading;
             cx.notify();
         }
     }
@@ -1039,6 +1077,11 @@ impl UsagePage {
         self.hover_bucket
     }
 
+    /// The calendar day under the pointer, if any.
+    pub fn hover_day(&self) -> Option<usize> {
+        self.hover_day
+    }
+
     pub fn menu(&self) -> Option<MenuKind> {
         self.menu
     }
@@ -1171,6 +1214,7 @@ impl UsagePage {
         filter.range = DateRange::for_preset(preset, now_ms());
         self.custom_start = None;
         self.custom_end = None;
+        self.calendar_restore = None;
         self.set_filter(filter, cx);
     }
 
@@ -1186,6 +1230,14 @@ impl UsagePage {
     pub fn set_hover_bucket(&mut self, bucket: Option<usize>, cx: &mut Context<Self>) {
         if self.hover_bucket != bucket {
             self.hover_bucket = bucket;
+            cx.notify();
+        }
+    }
+
+    /// The pointer entered a calendar day (or left the grid).
+    pub fn set_hover_day(&mut self, day: Option<usize>, cx: &mut Context<Self>) {
+        if self.hover_day != day {
+            self.hover_day = day;
             cx.notify();
         }
     }
@@ -1312,10 +1364,34 @@ impl UsagePage {
         if let (Some(start), Some(end)) = (self.custom_start, self.custom_end) {
             let mut filter = self.filter.clone();
             filter.range = DateRange::custom(start, end);
+            self.calendar_restore = None;
             self.set_filter(filter, cx);
             self.menu = None;
             self.calendar_open = false;
         }
+    }
+
+    /// A calendar day click: scope the whole page to that day, and scope back
+    /// to the range it came from on a second click. The activity calendar is
+    /// its own trailing year, so this is how a day is drilled into.
+    pub fn scope_to_day(&mut self, day_ms: i64, cx: &mut Context<Self>) {
+        let day_range = DateRange::custom(day_ms, day_ms);
+        let mut filter = self.filter.clone();
+        if filter.range == day_range {
+            let Some(previous) = self.calendar_restore.take() else {
+                return;
+            };
+            filter.range = previous;
+            self.custom_start = None;
+            self.custom_end = None;
+        } else {
+            self.calendar_restore = Some(filter.range.clone());
+            filter.range = day_range;
+            self.custom_start = Some(day_ms);
+            self.custom_end = Some(day_ms);
+        }
+        filter.focus = None;
+        self.set_filter(filter, cx);
     }
 
     pub fn set_menu_highlight(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -1380,6 +1456,7 @@ impl UsagePage {
     }
 
     pub fn clear_filters(&mut self, cx: &mut Context<Self>) {
+        self.calendar_restore = None;
         self.set_filter(self.filter.cleared(), cx);
     }
 
@@ -1744,6 +1821,26 @@ impl UsagePage {
     pub fn toggle_summary(&mut self, cx: &mut Context<Self>) {
         self.summary_open = !self.summary_open;
         self.persist();
+        cx.notify();
+    }
+
+    /// Whether the daily-activity calendar is showing in the Activity section.
+    pub fn is_daily_open(&self) -> bool {
+        self.daily_open
+    }
+
+    pub fn toggle_daily(&mut self, cx: &mut Context<Self>) {
+        self.daily_open = !self.daily_open;
+        cx.notify();
+    }
+
+    /// Whether the token-health panels are showing in the Activity section.
+    pub fn is_health_open(&self) -> bool {
+        self.health_open
+    }
+
+    pub fn toggle_health(&mut self, cx: &mut Context<Self>) {
+        self.health_open = !self.health_open;
         cx.notify();
     }
 

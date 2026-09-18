@@ -124,6 +124,11 @@ pub struct GitPanel {
     /// `origin` mapped to a commit-permalink base (GitHub/GitLab/Bitbucket),
     /// when the repo has one. `None` hides every commit link.
     remote_web: Option<git::RemoteWeb>,
+    /// Leading inset for the header, refreshed by the app each render. Wider
+    /// when the sessions sidebar is collapsed: the page then owns the window's
+    /// left edge, so its Back affordance has to clear the OS window buttons
+    /// and the titlebar's left controls overlaid at the same height.
+    chrome_leading: f32,
     /// Opens a changed file's diff in the Review pane (installed by the app).
     on_open_file: Option<OpenFile>,
     /// Leaves the Git page entirely (installed by the app).
@@ -169,6 +174,7 @@ impl GitPanel {
             branch_operation: false,
             status: None,
             remote_web: None,
+            chrome_leading: 12.,
             on_open_file: None,
             on_close: None,
         }
@@ -228,6 +234,18 @@ impl GitPanel {
     /// Install the callback that opens a changed file's diff in Review.
     pub fn set_open_file(&mut self, open: OpenFile) {
         self.on_open_file = Some(open);
+    }
+
+    /// Set by `OrbitApp` on every render: how far the header's leading edge sits
+    /// from the page's left edge. It widens when the sessions sidebar is
+    /// collapsed, because the page then spans the window and its own Back
+    /// affordance would otherwise sit under the macOS traffic lights (and the
+    /// overlaid sidebar/history controls).
+    pub fn set_chrome_leading(&mut self, leading: f32, cx: &mut Context<Self>) {
+        if (self.chrome_leading - leading).abs() > 0.5 {
+            self.chrome_leading = leading;
+            cx.notify();
+        }
     }
 
     /// Install the callback that leaves the Git page (Back button).
@@ -692,7 +710,11 @@ impl GitPanel {
         div()
             .h(px(44.))
             .flex_none()
-            .px(px(12.))
+            // The page spans the window when the sessions sidebar is collapsed,
+            // so the leading inset clears the macOS traffic lights and the
+            // sidebar/history controls overlaid in the titlebar.
+            .pl(px(self.chrome_leading))
+            .pr(px(12.))
             // The Git page spans the window, so its header's right end (branch
             // chip, ±stats, search) clears the app's caption buttons.
             .when(crate::platform::draws_window_controls(), |row| {

@@ -424,6 +424,112 @@ pub struct BucketTable {
     pub rows: Vec<BucketRow>,
 }
 
+// ── calendar (daily heatmap) ───────────────────────────────────────────────
+
+/// One day of the activity calendar.
+#[derive(Clone, PartialEq, Debug)]
+pub struct DayCell {
+    /// Local midnight of the day.
+    pub start_ms: i64,
+    pub totals: Totals,
+    /// False for the padding days that complete the first and last weeks — the
+    /// grid draws those blank rather than as a day of zero activity.
+    pub in_range: bool,
+}
+
+/// Daily usage for the calendar heatmap: one cell per local day, Monday-aligned
+/// and contiguous, so the grid has no holes and the day-of-week rows line up.
+///
+/// The grid is always a trailing year ([`CALENDAR_DAYS`]), independent of the
+/// date range — a contribution graph wants a year to read, and the range can be
+/// as short as a day. Scope filters (workspace / model / provider / session /
+/// errors / cache) still apply, so the calendar always says what the filter
+/// says; it just never narrows by date.
+#[derive(Clone, PartialEq, Debug)]
+pub struct DailyCalendar {
+    /// Local midnight of the first cell (a Monday, possibly before the first
+    /// day of the window).
+    pub start_ms: i64,
+    pub days: Vec<DayCell>,
+}
+
+/// How far back the calendar reaches, in days.
+pub const CALENDAR_DAYS: i64 = 365;
+
+impl DailyCalendar {
+    /// Week columns in the grid. Every week is a full seven cells.
+    pub fn weeks(&self) -> usize {
+        self.days.len() / 7
+    }
+
+    /// The cells inside the calendar's year (the padding days at the ends are
+    /// excluded).
+    pub fn in_range(&self) -> impl Iterator<Item = &DayCell> {
+        self.days.iter().filter(|day| day.in_range)
+    }
+}
+
+/// Build the calendar grid. The window is the trailing year ending at the most
+/// recent scan (or the newest record for a synthetic index), so the grid is
+/// stable across range changes and a day clicked in it can always be scoped.
+fn build_calendar(index: &UsageIndex, filter: &UsageFilter) -> DailyCalendar {
+    let end = if index.scanned_at_ms > 0 {
+        index.scanned_at_ms
+    } else {
+        index.span().map(|(_, newest)| newest).unwrap_or(0)
+    };
+    // The window covers whole local days, ending at the end of the scan's day,
+    // so the newest record is inside it (a half-open window that stopped at the
+    // record's own timestamp would exclude it).
+    let end_day = local_day_start(end);
+    let window = DateRange {
+        preset: RangePreset::Custom,
+        start_ms: end_day - CALENDAR_DAYS * 86_400_000,
+        end_ms: next_bucket(end_day, Granularity::Day),
+    };
+
+    let mut daily: HashMap<i64, Totals> = HashMap::new();
+    for record in &index.requests {
+        if !filter.matches_request_window(index, record, &window) {
+            continue;
+        }
+        index.add_request(
+            daily.entry(local_day_start(record.ts_ms)).or_default(),
+            record,
+        );
+    }
+
+    let first_day = local_day_start(window.start_ms);
+    let last_day = local_day_start((window.end_ms - 1).max(first_day));
+    let grid_start = local_week_start(first_day);
+    let day_after_last = next_bucket(last_day, Granularity::Day);
+
+    let mut days: Vec<DayCell> = Vec::new();
+    let mut cursor = grid_start;
+    // Bounded: the year plus the six days that complete the first week.
+    while cursor < day_after_last && days.len() < (CALENDAR_DAYS as usize / 7 + 2) * 7 {
+        days.push(DayCell {
+            start_ms: cursor,
+            totals: daily.remove(&cursor).unwrap_or_default(),
+            in_range: window.contains(cursor),
+        });
+        cursor = next_bucket(cursor, Granularity::Day);
+    }
+    // Pad the final week, so every row reads full height.
+    while !days.len().is_multiple_of(7) {
+        days.push(DayCell {
+            start_ms: cursor,
+            totals: Totals::default(),
+            in_range: false,
+        });
+        cursor = next_bucket(cursor, Granularity::Day);
+    }
+    DailyCalendar {
+        start_ms: grid_start,
+        days,
+    }
+}
+
 // ── cache, tools, errors, latency ──────────────────────────────────────────
 
 #[derive(Clone, Default, PartialEq, Debug)]
@@ -628,6 +734,9 @@ pub struct UsageSnapshot {
     /// history to compare against.
     pub previous: Option<UsageSummary>,
     pub series: TimeSeries,
+    /// Daily totals for the calendar heatmap: a fixed trailing year, independent
+    /// of the date range.
+    pub calendar: DailyCalendar,
     pub models: Breakdown,
     pub providers: Breakdown,
     pub workspaces: Breakdown,
@@ -933,6 +1042,8 @@ impl UsageSnapshot {
             guard += 1;
         }
 
+        let calendar = build_calendar(index, filter);
+
         // The day/week/month table uses a coarser granularity than the chart
         // for long ranges, so it stays readable (and doubles as the
         // weekly/monthly trend view).
@@ -986,6 +1097,7 @@ impl UsageSnapshot {
             summary,
             previous,
             series,
+            calendar,
             models,
             providers,
             workspaces,

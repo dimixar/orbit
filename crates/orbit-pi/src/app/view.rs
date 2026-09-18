@@ -131,8 +131,18 @@ impl Render for OrbitApp {
         let git_workspace = self.current_workspace.clone();
         let git_provider = self.model_provider.clone();
         let git_model = self.model_id.clone();
+        // Leading inset the full-window pages (Git/Usage) give their headers.
+        // With the sidebar open they start after it and only need the normal
+        // page padding; collapsed, they own the window's left edge and must
+        // clear the macOS traffic lights and the overlaid titlebar controls.
+        let page_leading = if self.sidebar_visible {
+            12.
+        } else {
+            TITLEBAR_LEADING
+        };
         self.git_panel.update(cx, |panel, cx| {
-            panel.set_context(git_workspace, git_provider, git_model, cx)
+            panel.set_context(git_workspace, git_provider, git_model, cx);
+            panel.set_chrome_leading(page_leading, cx);
         });
         let main_width = viewport.width
             - if self.sidebar_visible && !self.settings_open {
@@ -148,8 +158,10 @@ impl Render for OrbitApp {
         // its tables and grids never overflow the column it is given.
         if self.usage_open {
             let width = f32::from(main_width);
-            self.usage
-                .update(cx, |page, cx| page.set_main_width(width, cx));
+            self.usage.update(cx, |page, cx| {
+                page.set_main_width(width, cx);
+                page.set_header_leading(page_leading, cx);
+            });
         }
 
         // ── top-bar right controls ──
@@ -782,27 +794,24 @@ impl Render for OrbitApp {
             // ── titlebar controls ── a fixed overlay pinned just past the
             // macOS traffic lights, above both the sidebar and the main column,
             // so the toggle/history buttons hold their place while the sidebar
-            // slides underneath. Shown whenever the sidebar is open, and on the
-            // composer surface when it is closed (the Git/Usage pages carry
-            // their own headers, so they don't get the fallback). The container
-            // is not itself a hitbox, so the drag strip beneath still drags the
-            // window in the gaps between buttons while each button takes its
-            // own clicks.
-            .children(
-                (!self.settings_open
-                    && (self.sidebar_visible || (!self.git_open && !self.usage_open)))
-                    .then(|| {
-                        div()
-                            .absolute()
-                            .top_0()
-                            .left(px(TRAFFIC_LIGHT_CLEARANCE))
-                            .h(px(TOP_BAR_H))
-                            .flex()
-                            .items_center()
-                            .child(self.titlebar_left_controls(theme, cx))
-                            .into_any_element()
-                    }),
-            )
+            // slides underneath. Shown on every surface except Settings, which
+            // owns its own nav column — including the Git/Usage pages when the
+            // sidebar is collapsed, so the toggle (and history arrows) stay
+            // reachable; those pages inset their own headers to clear it. The
+            // container is not itself a hitbox, so the drag strip beneath still
+            // drags the window in the gaps between buttons while each button
+            // takes its own clicks.
+            .children((!self.settings_open).then(|| {
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(px(TRAFFIC_LIGHT_CLEARANCE))
+                    .h(px(TOP_BAR_H))
+                    .flex()
+                    .items_center()
+                    .child(self.titlebar_left_controls(theme, cx))
+                    .into_any_element()
+            }))
             // ── window caption buttons ── the app owns the caption on the
             // platforms where it draws it (`platform::draws_window_controls`),
             // so these sit above *every* surface — settings, git, usage,

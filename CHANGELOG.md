@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Usage page — a full-width **Daily activity** calendar heatmap: one cell per
+  day across a trailing 12 months, shaded by the active metric (tokens,
+  requests, cost, …), with month/weekday axes, a less→more legend, a hover
+  readout, and click-to-scope to a single day (click again to restore the
+  range). It is independent of the date range — a contribution graph needs a
+  year to read — but the active workspace / model / provider / errors filters
+  apply to every cell.
+
 ## [0.0.5] - 2026-09-17
 
 ### Added
