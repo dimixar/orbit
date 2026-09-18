@@ -18,8 +18,8 @@ use serde_json::Value;
 use crate::composer::ComposerInput;
 
 use super::aggregate::{
-    Breakdown, BucketRow, ChartMetric, GroupRow, LatencyMetric, SessionRow, ToolRow, Totals,
-    UsageSnapshot,
+    Breakdown, BucketRow, ChartMetric, GroupRow, LatencyMetric, SeriesPoint, SessionRow, ToolRow,
+    Totals, UsageSnapshot,
 };
 use super::collect::{now_ms, UsageScanner};
 use super::model::*;
@@ -289,6 +289,10 @@ pub enum BucketSort {
 }
 
 impl BucketSort {
+    pub fn id(self) -> &'static str {
+        self.label()
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Date => "Date",
@@ -308,6 +312,251 @@ impl BucketSort {
             Self::Errors => row.totals.errors as f64,
         }
     }
+
+    /// Hideable columns; Date is always shown.
+    pub const HIDEABLE: [Self; 4] = [Self::Requests, Self::Tokens, Self::Cache, Self::Errors];
+}
+
+/// One page of the Daily table plus the metadata the footer needs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BucketQueryResult {
+    pub rows: Vec<BucketRow>,
+    pub total: usize,
+    pub page: usize,
+    pub page_size: usize,
+    pub totals: Totals,
+}
+
+impl BucketQueryResult {
+    pub fn page_count(&self) -> usize {
+        self.total.div_ceil(self.page_size.max(1)).max(1)
+    }
+
+    pub fn first_row(&self) -> usize {
+        if self.total == 0 {
+            0
+        } else {
+            (self.page - 1) * self.page_size + 1
+        }
+    }
+
+    pub fn last_row(&self) -> usize {
+        (self.first_row() + self.rows.len()).saturating_sub(1)
+    }
+}
+
+/// Filter → search → sort → paginate the day/week/month buckets.
+pub fn query_buckets(
+    rows: &[BucketRow],
+    search: &str,
+    sort: BucketSort,
+    desc: bool,
+    page: usize,
+    page_size: usize,
+) -> BucketQueryResult {
+    let needle = search.trim().to_lowercase();
+    let mut rows: Vec<BucketRow> = rows
+        .iter()
+        .filter(|row| {
+            needle.is_empty()
+                || row.label.to_lowercase().contains(&needle)
+                || row.stamp.to_lowercase().contains(&needle)
+        })
+        .cloned()
+        .collect();
+    rows.sort_by(|a, b| {
+        let ordering = sort
+            .key(a)
+            .partial_cmp(&sort.key(b))
+            .unwrap_or(std::cmp::Ordering::Equal);
+        let ordering = if desc { ordering.reverse() } else { ordering };
+        ordering.then(a.start_ms.cmp(&b.start_ms))
+    });
+    let mut totals = Totals::default();
+    for row in &rows {
+        totals.add(&row.totals);
+    }
+    let (rows, page, total) = paginate(&rows, page, page_size);
+    BucketQueryResult {
+        rows,
+        total,
+        page,
+        page_size: page_size.max(1),
+        totals,
+    }
+}
+
+/// One page of the Failures table plus the metadata the footer needs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FailureQueryResult {
+    pub rows: Vec<FailureRow>,
+    pub total: usize,
+    pub page: usize,
+    pub page_size: usize,
+}
+
+impl FailureQueryResult {
+    pub fn page_count(&self) -> usize {
+        self.total.div_ceil(self.page_size.max(1)).max(1)
+    }
+
+    pub fn first_row(&self) -> usize {
+        if self.total == 0 {
+            0
+        } else {
+            (self.page - 1) * self.page_size + 1
+        }
+    }
+
+    pub fn last_row(&self) -> usize {
+        (self.first_row() + self.rows.len()).saturating_sub(1)
+    }
+}
+
+/// Filter → search → sort → paginate failure events.
+pub fn query_failures(
+    rows: &[FailureRow],
+    search: &str,
+    sort: FailureSort,
+    desc: bool,
+    page: usize,
+    page_size: usize,
+) -> FailureQueryResult {
+    let needle = search.trim().to_lowercase();
+    let mut rows: Vec<FailureRow> = rows
+        .iter()
+        .filter(|row| {
+            needle.is_empty()
+                || row.model.to_lowercase().contains(&needle)
+                || row.session_title.to_lowercase().contains(&needle)
+                || row.message.to_lowercase().contains(&needle)
+                || row.kind.label().to_lowercase().contains(&needle)
+                || super::table::failure_when(row.ts_ms)
+                    .to_lowercase()
+                    .contains(&needle)
+        })
+        .cloned()
+        .collect();
+    rows.sort_by(|a, b| {
+        let ordering = match sort {
+            FailureSort::When => a.ts_ms.cmp(&b.ts_ms),
+            FailureSort::Kind => a.kind.label().cmp(b.kind.label()),
+            FailureSort::Model => a.model.to_lowercase().cmp(&b.model.to_lowercase()),
+            FailureSort::Session => a
+                .session_title
+                .to_lowercase()
+                .cmp(&b.session_title.to_lowercase()),
+            FailureSort::Message => a.message.to_lowercase().cmp(&b.message.to_lowercase()),
+        };
+        let ordering = if desc { ordering.reverse() } else { ordering };
+        ordering.then(a.ts_ms.cmp(&b.ts_ms))
+    });
+    let (rows, page, total) = paginate(&rows, page, page_size);
+    FailureQueryResult {
+        rows,
+        total,
+        page,
+        page_size: page_size.max(1),
+    }
+}
+
+/// Which column the Usage-over-time data table sorts on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SeriesSort {
+    Time,
+    Value,
+    Requests,
+    Tokens,
+}
+
+impl SeriesSort {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Time => "time",
+            Self::Value => "value",
+            Self::Requests => "requests",
+            Self::Tokens => "tokens",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Time => "Time",
+            Self::Value => "Metric",
+            Self::Requests => "Requests",
+            Self::Tokens => "Tokens",
+        }
+    }
+
+    /// Hideable columns; Time is always shown.
+    pub const HIDEABLE: [Self; 3] = [Self::Value, Self::Requests, Self::Tokens];
+}
+
+/// One page of the usage-over-time table plus the metadata the footer needs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SeriesQueryResult {
+    pub rows: Vec<SeriesPoint>,
+    pub total: usize,
+    pub page: usize,
+    pub page_size: usize,
+}
+
+impl SeriesQueryResult {
+    pub fn page_count(&self) -> usize {
+        self.total.div_ceil(self.page_size.max(1)).max(1)
+    }
+
+    pub fn first_row(&self) -> usize {
+        if self.total == 0 {
+            0
+        } else {
+            (self.page - 1) * self.page_size + 1
+        }
+    }
+
+    pub fn last_row(&self) -> usize {
+        (self.first_row() + self.rows.len()).saturating_sub(1)
+    }
+}
+
+/// Filter → search → sort → paginate the usage-over-time buckets. Pure, so
+/// the ordering is unit-tested without GPUI.
+pub fn query_series(
+    points: &[SeriesPoint],
+    search: &str,
+    sort: SeriesSort,
+    desc: bool,
+    metric: ChartMetric,
+    latency: LatencyMetric,
+    page: usize,
+    page_size: usize,
+) -> SeriesQueryResult {
+    let needle = search.trim().to_lowercase();
+    let mut points: Vec<SeriesPoint> = points
+        .iter()
+        .filter(|point| {
+            needle.is_empty()
+                || point.stamp.to_lowercase().contains(&needle)
+                || point.label.to_lowercase().contains(&needle)
+        })
+        .cloned()
+        .collect();
+    points.sort_by(|a, b| {
+        let left = series_point_key(sort, metric, latency, a);
+        let right = series_point_key(sort, metric, latency, b);
+        let order = left
+            .partial_cmp(&right)
+            .unwrap_or(std::cmp::Ordering::Equal);
+        let order = if desc { order.reverse() } else { order };
+        order.then(a.start_ms.cmp(&b.start_ms))
+    });
+    let (rows, page, total) = paginate(&points, page, page_size);
+    SeriesQueryResult {
+        rows,
+        total,
+        page,
+        page_size: page_size.max(1),
+    }
 }
 
 /// The open filter popover, if any. One at a time, like the app's other
@@ -326,6 +575,18 @@ pub enum MenuKind {
     BreakdownColumns,
     /// The breakdown table's rows-per-page picker.
     BreakdownPageSize,
+    /// The usage-over-time table's column-visibility picker.
+    SeriesColumns,
+    /// The usage-over-time table's rows-per-page picker.
+    SeriesPageSize,
+    /// The Daily records table's column-visibility picker.
+    BucketColumns,
+    /// The Daily records table's rows-per-page picker.
+    BucketPageSize,
+    /// The Failures records table's column-visibility picker.
+    FailureColumns,
+    /// The Failures records table's rows-per-page picker.
+    FailurePageSize,
     /// The header's export popover.
     Export,
 }
@@ -474,6 +735,39 @@ impl DetailTab {
     }
 }
 
+/// Simple is the scan: headline figures and the trend. Details is the audit:
+/// ranked breakdowns and the session tables. The two never share a viewport,
+/// so the page stays short and each reading has its own hierarchy.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UsageMode {
+    Simple,
+    Details,
+}
+
+impl UsageMode {
+    pub const ALL: [Self; 2] = [Self::Simple, Self::Details];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Simple => "Simple",
+            Self::Details => "Details",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Simple => "simple",
+            Self::Details => "details",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|mode| mode.as_str() == raw.trim())
+    }
+}
+
 /// Per-tab view state for the breakdown table: each dimension remembers its
 /// own search, hidden columns, and page — parity with the sessions table,
 /// scoped per dimension because the columns and row sets differ.
@@ -534,6 +828,29 @@ fn paginate<T: Clone>(rows: &[T], page: usize, page_size: usize) -> (Vec<T>, usi
     (page_rows, page, total)
 }
 
+fn series_point_key(
+    sort: SeriesSort,
+    metric: ChartMetric,
+    latency: LatencyMetric,
+    point: &SeriesPoint,
+) -> f64 {
+    match sort {
+        SeriesSort::Time => point.start_ms as f64,
+        SeriesSort::Value => {
+            if metric == ChartMetric::Latency {
+                latency
+                    .value(&point.latency)
+                    .or_else(|| point.totals.avg_duration_ms())
+                    .unwrap_or(0.0)
+            } else {
+                metric.value(&point.totals)
+            }
+        }
+        SeriesSort::Requests => point.totals.requests as f64,
+        SeriesSort::Tokens => point.totals.tokens.total as f64,
+    }
+}
+
 /// Opens a session in the app's chat surface (installed by `OrbitApp`).
 pub type OpenSession = Rc<dyn Fn(&str, &mut Window, &mut App)>;
 /// Leaves the usage page (installed by `OrbitApp`).
@@ -553,8 +870,25 @@ pub struct UsagePage {
     session_sort_desc: bool,
     bucket_sort: BucketSort,
     bucket_sort_desc: bool,
+    series_sort: SeriesSort,
+    series_sort_desc: bool,
+    /// 1-based usage-over-time table page and its size.
+    series_page: usize,
+    series_page_size: usize,
+    /// Usage-over-time columns the user hid; Time is never in this list.
+    series_hidden_columns: Vec<&'static str>,
+    /// 1-based Daily table page and its size.
+    bucket_page: usize,
+    bucket_page_size: usize,
+    /// Daily columns the user hid; Date is never in this list.
+    bucket_hidden_columns: Vec<&'static str>,
     failure_sort: FailureSort,
     failure_sort_desc: bool,
+    /// 1-based Failures table page and its size.
+    failure_page: usize,
+    failure_page_size: usize,
+    /// Failures columns the user hid; When is never in this list.
+    failure_hidden_columns: Vec<&'static str>,
     /// 1-based session-table page and its size (§26).
     page: usize,
     page_size: usize,
@@ -562,8 +896,6 @@ pub struct UsagePage {
     hidden_columns: Vec<SessionSort>,
     /// Which latency register the response-time chart plots (§20).
     latency_metric: LatencyMetric,
-    /// The timeline's "View data" table is open (§52).
-    chart_data_open: bool,
     /// Which column the breakdown data table orders on, and its direction.
     breakdown_sort: BreakdownSort,
     breakdown_sort_desc: bool,
@@ -572,14 +904,13 @@ pub struct UsagePage {
     /// Per-tab breakdown table state: search, hidden columns, and page.
     breakdown_views: HashMap<BreakdownTab, BreakdownView>,
     breakdown_search: Entity<ComposerInput>,
+    series_search: Entity<ComposerInput>,
+    bucket_search: Entity<ComposerInput>,
+    failure_search: Entity<ComposerInput>,
     /// Which table the merged records section shows.
     detail_tab: DetailTab,
-    /// The secondary metrics under the KPI board are expanded.
-    summary_open: bool,
-    /// The daily-activity calendar is expanded inside the Activity section.
-    daily_open: bool,
-    /// The token-health panels are expanded inside the Activity section.
-    health_open: bool,
+    /// Simple (overview) vs Details (breakdown + records).
+    usage_mode: UsageMode,
 
     // ── controls ──
     /// The page's own scroll position. Opening the page always starts at the
@@ -627,6 +958,9 @@ pub struct UsagePage {
     _search_sub: Subscription,
     _menu_query_sub: Subscription,
     _breakdown_search_sub: Subscription,
+    _series_search_sub: Subscription,
+    _bucket_search_sub: Subscription,
+    _failure_search_sub: Subscription,
     /// Width of the main area, refreshed by the shell each render.
     main_width: f32,
     /// Leading inset for the page header, refreshed by the shell each render.
@@ -690,6 +1024,39 @@ impl UsagePage {
                 .with_max_lines(1)
         });
         let breakdown_search_sub = cx.observe(&breakdown_search, |_, _, cx| cx.notify());
+        let series_search = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("usage-series-search")
+                .with_placeholder("Search buckets…")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+        });
+        let series_search_sub = cx.observe(&series_search, |page: &mut Self, _, cx| {
+            page.series_page = 1;
+            cx.notify();
+        });
+        let bucket_search = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("usage-bucket-search")
+                .with_placeholder("Search buckets…")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+        });
+        let bucket_search_sub = cx.observe(&bucket_search, |page: &mut Self, _, cx| {
+            page.bucket_page = 1;
+            cx.notify();
+        });
+        let failure_search = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("usage-failure-search")
+                .with_placeholder("Search failures…")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+        });
+        let failure_search_sub = cx.observe(&failure_search, |page: &mut Self, _, cx| {
+            page.failure_page = 1;
+            cx.notify();
+        });
         Self {
             scanner: UsageScanner::start(),
             index: None,
@@ -701,14 +1068,24 @@ impl UsagePage {
             session_sort_desc: prefs.session_sort_desc,
             bucket_sort: BucketSort::Date,
             bucket_sort_desc: true,
+            series_sort: SeriesSort::Time,
+            series_sort_desc: false,
+            series_page: 1,
+            series_page_size: DEFAULT_BREAKDOWN_PAGE_SIZE,
+            series_hidden_columns: Vec::new(),
+            bucket_page: 1,
+            bucket_page_size: DEFAULT_PAGE_SIZE,
+            bucket_hidden_columns: Vec::new(),
             failure_sort: FailureSort::When,
             failure_sort_desc: true,
+            failure_page: 1,
+            failure_page_size: DEFAULT_PAGE_SIZE,
+            failure_hidden_columns: Vec::new(),
             page: 1,
             page_size: prefs.page_size,
             hidden_columns: prefs.hidden_columns.clone(),
             latency_metric: LatencyMetric::parse(&prefs.latency_metric)
                 .unwrap_or(LatencyMetric::Average),
-            chart_data_open: false,
             breakdown_sort: BreakdownSort::parse(&prefs.breakdown_sort)
                 .unwrap_or(BreakdownSort::Tokens),
             breakdown_sort_desc: prefs.breakdown_sort_desc,
@@ -716,10 +1093,11 @@ impl UsagePage {
                 .unwrap_or(BreakdownTab::Models),
             breakdown_views: HashMap::new(),
             breakdown_search,
+            series_search,
+            bucket_search,
+            failure_search,
             detail_tab: DetailTab::parse(&prefs.detail_tab).unwrap_or(DetailTab::Sessions),
-            summary_open: prefs.summary_open,
-            daily_open: false,
-            health_open: false,
+            usage_mode: UsageMode::parse(&prefs.usage_mode).unwrap_or(UsageMode::Simple),
             scroll: ScrollHandle::new(),
             search,
             menu: None,
@@ -745,6 +1123,9 @@ impl UsagePage {
             _search_sub: search_sub,
             _menu_query_sub: menu_query_sub,
             _breakdown_search_sub: breakdown_search_sub,
+            _series_search_sub: series_search_sub,
+            _bucket_search_sub: bucket_search_sub,
+            _failure_search_sub: failure_search_sub,
             main_width: 1000.,
             header_leading: 12.,
             on_open_session: None,
@@ -899,14 +1280,16 @@ impl UsagePage {
     }
 
     /// The width a table actually gets: the page column is capped at
-    /// [`super::view::CONTENT_MAX_W`] and padded, and every table now sits
-    /// inside a card that spends a hairline on each side — budgeting against the
-    /// raw main-area width would over-commit by the difference and squeeze the
-    /// last column into a horizontal scrollbar.
+    /// [`super::view::CONTENT_MAX_W`] and padded, and every table sits inside a
+    /// section card (hairline + inner pad). Budgeting against the raw main-area
+    /// width would over-commit and squeeze the last column into a scrollbar.
     pub(super) fn table_width(&self) -> f32 {
         /// The card's own left and right borders.
         const CARD_EDGE: f32 = 2.;
-        (self.main_width.min(super::view::CONTENT_MAX_W) - super::view::PAGE_PAD - CARD_EDGE)
+        (self.main_width.min(super::view::CONTENT_MAX_W)
+            - super::view::PAGE_PAD
+            - CARD_EDGE
+            - super::view::SECTION_PAD * 2.)
             .max(360.)
     }
 
@@ -983,13 +1366,13 @@ impl UsagePage {
         }
     }
 
-    /// Failures in the range, resolved against the index and ordered by the
-    /// table's current sort.
-    pub fn failure_rows(&self) -> Vec<FailureRow> {
+    /// Failures in the range, resolved against the index. Search, sort, and
+    /// pagination happen in [`query_failures`].
+    fn resolved_failure_rows(&self) -> Vec<FailureRow> {
         let (Some(index), Some(snapshot)) = (self.index.as_ref(), self.snapshot.as_ref()) else {
             return Vec::new();
         };
-        let mut rows: Vec<FailureRow> = snapshot
+        snapshot
             .errors
             .rows
             .iter()
@@ -1008,22 +1391,18 @@ impl UsagePage {
                 },
                 message: row.message.clone(),
             })
-            .collect();
-        let desc = self.failure_sort_desc;
-        rows.sort_by(|a, b| {
-            let ordering = match self.failure_sort {
-                FailureSort::When => a.ts_ms.cmp(&b.ts_ms),
-                FailureSort::Kind => a.kind.label().cmp(b.kind.label()),
-                FailureSort::Model => a.model.to_lowercase().cmp(&b.model.to_lowercase()),
-                FailureSort::Session => a
-                    .session_title
-                    .to_lowercase()
-                    .cmp(&b.session_title.to_lowercase()),
-            };
-            let ordering = if desc { ordering.reverse() } else { ordering };
-            ordering.then_with(|| a.ts_ms.cmp(&b.ts_ms))
-        });
-        rows
+            .collect()
+    }
+
+    pub fn failure_result(&self, cx: &App) -> FailureQueryResult {
+        query_failures(
+            &self.resolved_failure_rows(),
+            &self.failure_search.read(cx).text(),
+            self.failure_sort,
+            self.failure_sort_desc,
+            self.failure_page,
+            self.failure_page_size,
+        )
     }
 
     /// A header click on the failures table.
@@ -1033,6 +1412,7 @@ impl UsagePage {
         }
         self.failure_sort = sort;
         self.failure_sort_desc = desc;
+        self.failure_page = 1;
         cx.notify();
     }
 
@@ -1143,10 +1523,6 @@ impl UsagePage {
         !self.hidden_columns.contains(&column)
     }
 
-    pub fn is_chart_data_open(&self) -> bool {
-        self.chart_data_open
-    }
-
     pub fn latency_metric(&self) -> LatencyMetric {
         self.latency_metric
     }
@@ -1176,25 +1552,15 @@ impl UsagePage {
         rows
     }
 
-    pub fn bucket_rows(&self) -> Vec<BucketRow> {
-        let Some(snapshot) = &self.snapshot else {
-            return Vec::new();
-        };
-        let mut rows = snapshot.buckets.rows.clone();
-        let sort = self.bucket_sort;
-        let desc = self.bucket_sort_desc;
-        rows.sort_by(|a, b| {
-            let ordering = sort
-                .key(a)
-                .partial_cmp(&sort.key(b))
-                .unwrap_or(std::cmp::Ordering::Equal);
-            if desc {
-                ordering.reverse()
-            } else {
-                ordering
-            }
-        });
-        rows
+    pub fn bucket_result(&self, snapshot: &UsageSnapshot, cx: &App) -> BucketQueryResult {
+        query_buckets(
+            &snapshot.buckets.rows,
+            &self.bucket_search.read(cx).text(),
+            self.bucket_sort,
+            self.bucket_sort_desc,
+            self.bucket_page,
+            self.bucket_page_size,
+        )
     }
 
     // ── mutations ──────────────────────────────────────────────────────────
@@ -1203,6 +1569,9 @@ impl UsagePage {
         self.filter = filter;
         // A narrower or different result set invalidates the current page (§28).
         self.page = 1;
+        self.series_page = 1;
+        self.bucket_page = 1;
+        self.failure_page = 1;
         self.dirty = true;
         self.recompute();
         self.persist();
@@ -1413,7 +1782,13 @@ impl UsagePage {
             | MenuKind::PageSize
             | MenuKind::Columns
             | MenuKind::BreakdownColumns
-            | MenuKind::BreakdownPageSize => return,
+            | MenuKind::BreakdownPageSize
+            | MenuKind::SeriesColumns
+            | MenuKind::SeriesPageSize
+            | MenuKind::BucketColumns
+            | MenuKind::BucketPageSize
+            | MenuKind::FailureColumns
+            | MenuKind::FailurePageSize => return,
         };
         if let Some(ix) = list.iter().position(|value| *value == id) {
             list.remove(ix);
@@ -1434,7 +1809,13 @@ impl UsagePage {
             | MenuKind::PageSize
             | MenuKind::Columns
             | MenuKind::BreakdownColumns
-            | MenuKind::BreakdownPageSize => return,
+            | MenuKind::BreakdownPageSize
+            | MenuKind::SeriesColumns
+            | MenuKind::SeriesPageSize
+            | MenuKind::BucketColumns
+            | MenuKind::BucketPageSize
+            | MenuKind::FailureColumns
+            | MenuKind::FailurePageSize => return,
         }
         self.set_filter(filter, cx);
     }
@@ -1450,7 +1831,13 @@ impl UsagePage {
             | MenuKind::PageSize
             | MenuKind::Columns
             | MenuKind::BreakdownColumns
-            | MenuKind::BreakdownPageSize => return,
+            | MenuKind::BreakdownPageSize
+            | MenuKind::SeriesColumns
+            | MenuKind::SeriesPageSize
+            | MenuKind::BucketColumns
+            | MenuKind::BucketPageSize
+            | MenuKind::FailureColumns
+            | MenuKind::FailurePageSize => return,
         }
         self.set_filter(filter, cx);
     }
@@ -1507,6 +1894,214 @@ impl UsagePage {
         }
         self.bucket_sort = sort;
         self.bucket_sort_desc = desc;
+        self.bucket_page = 1;
+        cx.notify();
+    }
+
+    pub fn set_series_sort(&mut self, sort: SeriesSort, desc: bool, cx: &mut Context<Self>) {
+        if self.series_sort == sort && self.series_sort_desc == desc {
+            return;
+        }
+        self.series_sort = sort;
+        self.series_sort_desc = desc;
+        self.series_page = 1;
+        cx.notify();
+    }
+
+    pub fn series_search(&self) -> &Entity<ComposerInput> {
+        &self.series_search
+    }
+
+    pub fn series_page_size(&self) -> usize {
+        self.series_page_size
+    }
+
+    pub fn series_hidden_columns(&self) -> &[&'static str] {
+        &self.series_hidden_columns
+    }
+
+    pub fn series_column_visible(&self, column: SeriesSort) -> bool {
+        column == SeriesSort::Time || !self.series_hidden_columns.contains(&column.id())
+    }
+
+    pub fn toggle_series_column(&mut self, column: SeriesSort, cx: &mut Context<Self>) {
+        if column == SeriesSort::Time {
+            return;
+        }
+        let id = column.id();
+        match self
+            .series_hidden_columns
+            .iter()
+            .position(|hidden| *hidden == id)
+        {
+            Some(ix) => {
+                self.series_hidden_columns.remove(ix);
+            }
+            None => self.series_hidden_columns.push(id),
+        }
+        cx.notify();
+    }
+
+    pub fn show_all_series_columns(&mut self, cx: &mut Context<Self>) {
+        if self.series_hidden_columns.is_empty() {
+            return;
+        }
+        self.series_hidden_columns.clear();
+        cx.notify();
+    }
+
+    pub fn set_series_page(&mut self, page: usize, cx: &mut Context<Self>) {
+        let page = page.max(1);
+        if self.series_page == page {
+            return;
+        }
+        self.series_page = page;
+        cx.notify();
+    }
+
+    pub fn set_series_page_size(&mut self, size: usize, cx: &mut Context<Self>) {
+        if !PAGE_SIZES.contains(&size) || self.series_page_size == size {
+            return;
+        }
+        self.series_page_size = size;
+        self.series_page = 1;
+        self.menu = None;
+        cx.notify();
+    }
+
+    /// Filter → sort → paginate the usage-over-time buckets.
+    pub fn series_result(&self, snapshot: &UsageSnapshot, cx: &App) -> SeriesQueryResult {
+        query_series(
+            &snapshot.series.points,
+            &self.series_search.read(cx).text(),
+            self.series_sort,
+            self.series_sort_desc,
+            self.metric,
+            self.latency_metric,
+            self.series_page,
+            self.series_page_size,
+        )
+    }
+
+    pub fn bucket_search(&self) -> &Entity<ComposerInput> {
+        &self.bucket_search
+    }
+
+    pub fn bucket_page_size(&self) -> usize {
+        self.bucket_page_size
+    }
+
+    pub fn bucket_hidden_columns(&self) -> &[&'static str] {
+        &self.bucket_hidden_columns
+    }
+
+    pub fn bucket_column_visible(&self, column: BucketSort) -> bool {
+        column == BucketSort::Date || !self.bucket_hidden_columns.contains(&column.id())
+    }
+
+    pub fn toggle_bucket_column(&mut self, column: BucketSort, cx: &mut Context<Self>) {
+        if column == BucketSort::Date {
+            return;
+        }
+        let id = column.id();
+        match self
+            .bucket_hidden_columns
+            .iter()
+            .position(|hidden| *hidden == id)
+        {
+            Some(ix) => {
+                self.bucket_hidden_columns.remove(ix);
+            }
+            None => self.bucket_hidden_columns.push(id),
+        }
+        cx.notify();
+    }
+
+    pub fn show_all_bucket_columns(&mut self, cx: &mut Context<Self>) {
+        if self.bucket_hidden_columns.is_empty() {
+            return;
+        }
+        self.bucket_hidden_columns.clear();
+        cx.notify();
+    }
+
+    pub fn set_bucket_page(&mut self, page: usize, cx: &mut Context<Self>) {
+        let page = page.max(1);
+        if self.bucket_page == page {
+            return;
+        }
+        self.bucket_page = page;
+        cx.notify();
+    }
+
+    pub fn set_bucket_page_size(&mut self, size: usize, cx: &mut Context<Self>) {
+        if !PAGE_SIZES.contains(&size) || self.bucket_page_size == size {
+            return;
+        }
+        self.bucket_page_size = size;
+        self.bucket_page = 1;
+        self.menu = None;
+        cx.notify();
+    }
+
+    pub fn failure_search(&self) -> &Entity<ComposerInput> {
+        &self.failure_search
+    }
+
+    pub fn failure_page_size(&self) -> usize {
+        self.failure_page_size
+    }
+
+    pub fn failure_hidden_columns(&self) -> &[&'static str] {
+        &self.failure_hidden_columns
+    }
+
+    pub fn failure_column_visible(&self, column: FailureSort) -> bool {
+        column == FailureSort::When || !self.failure_hidden_columns.contains(&column.id())
+    }
+
+    pub fn toggle_failure_column(&mut self, column: FailureSort, cx: &mut Context<Self>) {
+        if column == FailureSort::When {
+            return;
+        }
+        let id = column.id();
+        match self
+            .failure_hidden_columns
+            .iter()
+            .position(|hidden| *hidden == id)
+        {
+            Some(ix) => {
+                self.failure_hidden_columns.remove(ix);
+            }
+            None => self.failure_hidden_columns.push(id),
+        }
+        cx.notify();
+    }
+
+    pub fn show_all_failure_columns(&mut self, cx: &mut Context<Self>) {
+        if self.failure_hidden_columns.is_empty() {
+            return;
+        }
+        self.failure_hidden_columns.clear();
+        cx.notify();
+    }
+
+    pub fn set_failure_page(&mut self, page: usize, cx: &mut Context<Self>) {
+        let page = page.max(1);
+        if self.failure_page == page {
+            return;
+        }
+        self.failure_page = page;
+        cx.notify();
+    }
+
+    pub fn set_failure_page_size(&mut self, size: usize, cx: &mut Context<Self>) {
+        if !PAGE_SIZES.contains(&size) || self.failure_page_size == size {
+            return;
+        }
+        self.failure_page_size = size;
+        self.failure_page = 1;
+        self.menu = None;
         cx.notify();
     }
 
@@ -1524,6 +2119,10 @@ impl UsagePage {
     /// The breakdown table's current sort key and direction.
     pub fn bucket_sort_state(&self) -> (BucketSort, bool) {
         (self.bucket_sort, self.bucket_sort_desc)
+    }
+
+    pub fn series_sort_state(&self) -> (SeriesSort, bool) {
+        (self.series_sort, self.series_sort_desc)
     }
 
     /// The failures table's current sort key and direction.
@@ -1585,11 +2184,6 @@ impl UsagePage {
         let mut filter = self.filter.clone();
         filter.focus = focus;
         self.set_filter(filter, cx);
-    }
-
-    pub fn toggle_chart_data(&mut self, cx: &mut Context<Self>) {
-        self.chart_data_open = !self.chart_data_open;
-        cx.notify();
     }
 
     pub fn set_latency_metric(&mut self, metric: LatencyMetric, cx: &mut Context<Self>) {
@@ -1813,34 +2407,17 @@ impl UsagePage {
         cx.notify();
     }
 
-    /// Whether the secondary metrics under the board are showing.
-    pub fn is_summary_open(&self) -> bool {
-        self.summary_open
+    pub fn usage_mode(&self) -> UsageMode {
+        self.usage_mode
     }
 
-    pub fn toggle_summary(&mut self, cx: &mut Context<Self>) {
-        self.summary_open = !self.summary_open;
+    pub fn set_usage_mode(&mut self, mode: UsageMode, cx: &mut Context<Self>) {
+        if self.usage_mode == mode {
+            return;
+        }
+        self.usage_mode = mode;
+        self.scroll.set_offset(point(px(0.), px(0.)));
         self.persist();
-        cx.notify();
-    }
-
-    /// Whether the daily-activity calendar is showing in the Activity section.
-    pub fn is_daily_open(&self) -> bool {
-        self.daily_open
-    }
-
-    pub fn toggle_daily(&mut self, cx: &mut Context<Self>) {
-        self.daily_open = !self.daily_open;
-        cx.notify();
-    }
-
-    /// Whether the token-health panels are showing in the Activity section.
-    pub fn is_health_open(&self) -> bool {
-        self.health_open
-    }
-
-    pub fn toggle_health(&mut self, cx: &mut Context<Self>) {
-        self.health_open = !self.health_open;
         cx.notify();
     }
 
@@ -1927,7 +2504,7 @@ impl UsagePage {
             breakdown_sort: self.breakdown_sort.as_str().to_string(),
             breakdown_sort_desc: self.breakdown_sort_desc,
             detail_tab: self.detail_tab.as_str().to_string(),
-            summary_open: self.summary_open,
+            usage_mode: self.usage_mode.as_str().to_string(),
         }
         .persist();
     }
@@ -1949,7 +2526,7 @@ struct Prefs {
     breakdown_sort: String,
     breakdown_sort_desc: bool,
     detail_tab: String,
-    summary_open: bool,
+    usage_mode: String,
 }
 
 impl Default for Prefs {
@@ -1968,7 +2545,7 @@ impl Default for Prefs {
             breakdown_sort: String::new(),
             breakdown_sort_desc: true,
             detail_tab: String::new(),
-            summary_open: false,
+            usage_mode: String::new(),
         }
     }
 }
@@ -2033,10 +2610,7 @@ impl Prefs {
                 .and_then(Value::as_bool)
                 .unwrap_or(true),
             detail_tab: text("detail_tab").unwrap_or_default(),
-            summary_open: value
-                .get("summary_open")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+            usage_mode: text("usage_mode").unwrap_or_default(),
         }
     }
 
@@ -2063,7 +2637,7 @@ impl Prefs {
             "breakdown_sort": self.breakdown_sort,
             "breakdown_sort_desc": self.breakdown_sort_desc,
             "detail_tab": self.detail_tab,
-            "summary_open": self.summary_open,
+            "usage_mode": self.usage_mode,
         });
         let _ = std::fs::write(path, payload.to_string());
     }

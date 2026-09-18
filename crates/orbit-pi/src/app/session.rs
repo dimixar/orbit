@@ -531,6 +531,7 @@ impl OrbitApp {
         self.busy = false;
         self.transcript.clear();
         self.current_title = None;
+        self.reset_session_name(cx);
         self.current_session_path = None;
         self.added = 0;
         self.removed = 0;
@@ -699,6 +700,8 @@ impl OrbitApp {
             }
         }
         self.current_title = Some(session.title.clone());
+        self.reset_session_name(cx);
+        self.seed_session_name_input(cx);
         // Opening a session keeps its folder in Orbit's own sidebar list.
         self.add_workspace(session.cwd.clone());
         self.current_workspace = Some(session.cwd.clone());
@@ -803,6 +806,10 @@ impl OrbitApp {
         // Only one top-bar popover is meaningful at a time.
         if self.session_details_open {
             self.quota_popup_open = false;
+            // Seed the rename field from the live title so the input isn't
+            // empty when pi auto-titled via `session_info_changed` and hasn't
+            // echoed `sessionName` yet.
+            self.seed_session_name_input(cx);
         }
         cx.notify();
     }
@@ -901,6 +908,38 @@ impl OrbitApp {
         cx.notify();
     }
 
+    /// Forget a previous session's display name so it cannot leak into a
+    /// new or switched session before `get_state` arrives.
+    pub(super) fn reset_session_name(&mut self, cx: &mut Context<Self>) {
+        self.session_name = None;
+        self.session_name_input
+            .update(cx, |input, cx| input.set_text(String::new(), cx));
+    }
+
+    /// Fill the rename field from the live title. Used when the popover
+    /// opens, and when switching sessions, so the input matches the header
+    /// instead of a stale (or empty) `sessionName`.
+    pub(super) fn seed_session_name_input(&mut self, cx: &mut Context<Self>) {
+        let text = self
+            .session_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                self.current_title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|title| !title.is_empty())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_default();
+        if self.session_name_input.read(cx).text() != text {
+            self.session_name_input
+                .update(cx, |input, cx| input.set_text(text, cx));
+        }
+    }
+
     /// The top-bar info popover: active session's environment + identifiers.
     pub(super) fn render_session_details_popup(&self, cx: &Context<Self>) -> Option<AnyElement> {
         if !self.session_details_open {
@@ -908,10 +947,6 @@ impl OrbitApp {
         }
         let theme = *theme::get(cx);
         let this = cx.entity();
-        let title = self
-            .current_title
-            .clone()
-            .unwrap_or_else(|| "New task".into());
         let session_id = self.session_id.clone().unwrap_or_default();
         let session_file = self
             .current_session_path
@@ -930,68 +965,124 @@ impl OrbitApp {
         let model = self.model_label.clone();
         let thinking = self.thinking_label.clone();
 
-        // The header names the active session. With one live, the name is the
-        // rename field itself: pi owns the name, `get_state` keeps the field
-        // in step, and Enter or the button commits it (`set_session_name`).
-        let title_row: AnyElement = if session_id.is_empty() {
+        // Header names the surface. The rename field lives in its own block
+        // below so the title isn't competing with a 28px control for 2px of
+        // gap — the previous stack read as one jammed row.
+        let header = div()
+            .px(px(12.))
+            .py(px(10.))
+            .border_b_1()
+            .border_color(theme.border)
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(
+                div()
+                    .text_size(theme.ui_px(12.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child("Session details"),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(theme.ui_px(11.))
+                    .text_color(theme.text_3)
+                    .child(if session_id.is_empty() {
+                        "No active session".to_string()
+                    } else {
+                        session_display_title(
+                            self.session_name.as_deref(),
+                            self.current_title.as_deref(),
+                        )
+                    }),
+            );
+
+        // pi owns the name; Enter or Update commits it (`set_session_name`).
+        let name_block = (!session_id.is_empty()).then(|| {
             div()
-                .text_size(theme.ui_px(12.))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme.text)
-                .child(title)
-                .into_any_element()
-        } else {
-            div()
-                .w_full()
+                .px(px(12.))
+                .py(px(10.))
+                .border_b_1()
+                .border_color(theme.border)
                 .flex()
-                .items_center()
+                .flex_col()
                 .gap(px(6.))
                 .child(
                     div()
-                        .flex_1()
-                        .min_w_0()
-                        .h(px(26.))
-                        .px(px(8.))
-                        .rounded_md()
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.bg_raised)
-                        .flex()
-                        .items_center()
-                        .child(self.session_name_input.clone()),
+                        .text_size(theme.ui_px(11.))
+                        .text_color(theme.text_3)
+                        .child("Name"),
                 )
                 .child(
                     div()
-                        .id("sess-rename")
-                        .flex_none()
-                        .h(px(26.))
-                        .px(px(10.))
-                        .rounded_md()
-                        .border_1()
-                        .border_color(theme.border)
-                        .bg(theme.bg_raised)
+                        .w_full()
                         .flex()
                         .items_center()
-                        .cursor_pointer()
-                        .text_size(theme.ui_px(11.5))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.text_2)
-                        .hover(|s| s.bg(theme.bg_hover))
-                        .on_click({
-                            let this = this.clone();
-                            move |_, _, cx| {
-                                this.update(cx, |app, cx| app.rename_session(cx));
-                            }
-                        })
-                        .child("Rename"),
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .min_h(px(28.))
+                                .px(px(8.))
+                                .py(px(4.))
+                                .rounded(px(8.))
+                                .border_1()
+                                .border_color(theme.border)
+                                .bg(theme.bg_main)
+                                .overflow_hidden()
+                                .flex()
+                                .items_center()
+                                .text_size(theme.ui_px(12.))
+                                .child(self.session_name_input.clone()),
+                        )
+                        .child(
+                            div()
+                                .id("sess-rename")
+                                .flex_none()
+                                .h(px(28.))
+                                .px(px(10.))
+                                .rounded(px(8.))
+                                .bg(theme.bg_raised)
+                                .border_1()
+                                .border_color(theme.border)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .text_size(theme.ui_px(12.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.text)
+                                .hover(|s| s.bg(theme.bg_hover))
+                                .on_mouse_up(MouseButton::Left, {
+                                    let this = this.clone();
+                                    move |_, _, cx| {
+                                        this.update(cx, |app, cx| app.rename_session(cx));
+                                    }
+                                })
+                                .child("Update"),
+                        ),
                 )
-                .into_any_element()
+        });
+
+        let section_label = |label: &'static str| {
+            div()
+                .px(px(12.))
+                .pt(px(10.))
+                .pb(px(4.))
+                .text_size(theme.ui_px(11.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text_3)
+                .child(label)
         };
 
         let popup = div()
-            .w(px(300.))
+            .id("session-details-popup")
+            .w(px(320.))
             .font_family(theme::ui_font_family())
-            .rounded(px(8.))
+            .rounded(px(12.))
             .border_1()
             .border_color(theme.border_strong)
             .bg(theme.menu_bg)
@@ -1000,6 +1091,10 @@ impl OrbitApp {
             .flex_col()
             .overflow_hidden()
             .occlude()
+            // Clicks inside the card (the rename field, Update, copy) must
+            // not bubble to the info button that toggles this popover.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down_out({
                 let this = this.clone();
                 move |_: &MouseDownEvent, _, cx: &mut App| {
@@ -1015,35 +1110,9 @@ impl OrbitApp {
                     });
                 }
             })
-            .child(
-                div()
-                    .px(px(12.))
-                    .py(px(10.))
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .child(title_row)
-                    .child(
-                        div()
-                            .text_size(theme.ui_px(11.))
-                            .text_color(theme.text_3)
-                            .child(if session_id.is_empty() {
-                                "No active session".to_string()
-                            } else {
-                                "Session details".to_string()
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .px(px(12.))
-                    .py(px(6.))
-                    .text_size(theme.ui_px(11.))
-                    .text_color(theme.text_3)
-                    .child("Environment"),
-            )
+            .child(header)
+            .children(name_block)
+            .child(section_label("Environment"))
             .child(
                 div()
                     .id(ElementId::Name("sess-commit-push".into()))
@@ -1100,11 +1169,19 @@ impl OrbitApp {
                     )
                     .child(icon("icons/chevron-right.svg", 11., theme.text_3)),
             )
+            .child(
+                div()
+                    .mt(px(4.))
+                    .border_t_1()
+                    .border_color(theme.border)
+                    .child(section_label("Details")),
+            )
             .child(self.session_detail_row(0, "Session ID", &session_id, theme))
             .child(self.session_detail_row(1, "Session file", &session_file, theme))
             .child(self.session_detail_row(2, "Workspace", &workspace, theme))
             .child(self.session_detail_row(3, "Model", &model, theme))
-            .child(self.session_detail_row(4, "Thinking", &thinking, theme));
+            .child(self.session_detail_row(4, "Thinking", &thinking, theme))
+            .child(div().h(px(6.)));
 
         Some(
             div()
@@ -1116,7 +1193,7 @@ impl OrbitApp {
                     anchored()
                         .position_mode(AnchoredPositionMode::Local)
                         .anchor(Corner::TopRight)
-                        .offset(point(px(0.), px(4.)))
+                        .offset(point(px(0.), px(6.)))
                         .snap_to_window()
                         .child(deferred(popup)),
                 )
@@ -1131,7 +1208,11 @@ impl OrbitApp {
     /// out first. It stays provider-independent: everything comes from the
     /// normalized [`QuotaReport`] list, so a new adapter needs no UI change.
     /// `None` (hidden) when pi lacks `quota.*` or nothing has been reported.
-    pub(super) fn render_quota_pill(&self, cx: &Context<Self>) -> Option<AnyElement> {
+    pub(super) fn render_quota_pill(
+        &self,
+        compact: bool,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
         if self.quota.reports().is_empty() {
             return None;
         }
@@ -1172,18 +1253,23 @@ impl OrbitApp {
 
         match self.quota.headline(&self.model_provider) {
             QuotaHeadline::Window { report, window } => {
-                pill = pill.child(provider_head(report)).child(
-                    div()
-                        .max_w(px(72.))
-                        .truncate()
-                        .text_size(theme.ui_px(10.5))
-                        .text_color(theme.text_3)
-                        .child(if is_five_hour_window(window) {
-                            "5h".to_string()
-                        } else {
-                            window.label.clone()
-                        }),
-                );
+                pill = pill.child(provider_head(report));
+                // Drop the window label when the title bar is tight so the
+                // session name still has room to truncate instead of colliding.
+                if !compact {
+                    pill = pill.child(
+                        div()
+                            .max_w(px(72.))
+                            .truncate()
+                            .text_size(theme.ui_px(10.5))
+                            .text_color(theme.text_3)
+                            .child(if is_five_hour_window(window) {
+                                "5h".to_string()
+                            } else {
+                                window.label.clone()
+                            }),
+                    );
+                }
                 if let Some(fraction) = window.fraction() {
                     pill = pill
                         .child(
@@ -1377,7 +1463,7 @@ impl OrbitApp {
         let v = value.clone();
         div()
             .px(px(12.))
-            .py(px(8.))
+            .py(px(7.))
             .flex()
             .items_center()
             .gap(px(8.))

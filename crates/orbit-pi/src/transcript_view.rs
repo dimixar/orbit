@@ -4795,9 +4795,10 @@ fn workspace_relative_path(path: &str, workspace: Option<&Path>) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-/// Waku `ChangedFilesCard`: raised tile, "Changed N files" with a ±delta
-/// underneath, a Review affordance, and roomy file rows with right-aligned
-/// line counts. Shows 3 rows; expanded shows up to 12 with a clip note.
+/// End-of-task changed-files summary: a hairlined group on the transcript
+/// canvas (canvas fill — not a raised/shadowed slab), "Changed N files"
+/// with a ±delta underneath, a Review chip, and roomy file rows. Shows 3
+/// rows; expanded shows up to 12 with a clip note.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_changed_files(
     files: &[(String, u64, u64)],
@@ -4873,10 +4874,10 @@ pub(crate) fn render_changed_files(
             ))
             .h(px(28.))
             .px(px(10.))
-            .rounded(px(7.))
+            .rounded(px(8.))
             .border_1()
-            .border_color(theme.border_strong)
-            .bg(theme.overlay)
+            .border_color(theme.border)
+            .bg(theme.bg_raised)
             .flex()
             .items_center()
             .gap(px(4.))
@@ -4884,7 +4885,7 @@ pub(crate) fn render_changed_files(
             .text_size(theme.ui_px(11.5))
             .font_weight(FontWeight::MEDIUM)
             .text_color(theme.text_2)
-            .hover(|style| style.bg(theme.overlay_strong).text_color(theme.text))
+            .hover(|style| style.bg(theme.bg_hover).text_color(theme.text))
             .child(glyph("icons/file-diff.svg", 12., theme.text_3))
             .child("Review")
             .on_click(move |_, window, cx| review(window, cx))
@@ -4899,14 +4900,16 @@ pub(crate) fn render_changed_files(
         .gap(px(10.))
         .child(
             div()
-                .size(px(34.))
+                .size(px(28.))
                 .flex_none()
-                .rounded(px(9.))
-                .bg(theme.accent.opacity(0.14))
+                .rounded(px(8.))
+                .bg(theme.bg_raised)
+                .border_1()
+                .border_color(theme.border)
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(glyph("icons/file-diff.svg", 15., theme.accent)),
+                .child(glyph("icons/file-diff.svg", 14., theme.text_2)),
         )
         .child(
             div()
@@ -4951,9 +4954,8 @@ pub(crate) fn render_changed_files(
         .min_w_0()
         .rounded(px(12.))
         .border_1()
-        .border_color(theme.border_strong)
-        .bg(theme.bg_raised)
-        .shadow(theme.card_shadow())
+        .border_color(theme.border)
+        .bg(theme.bg_main)
         .overflow_hidden()
         .child(header)
         .child(rows);
@@ -5127,10 +5129,7 @@ mod tests {
         // The last step has no following timestamp to measure against.
         assert_eq!(step_thinking_duration(&reload, 1), None);
         // A step without reasoning has no duration at all.
-        let no_think = vec![
-            step("", Some(1_000), None),
-            step("b", Some(2_000), None),
-        ];
+        let no_think = vec![step("", Some(1_000), None), step("b", Some(2_000), None)];
         assert_eq!(step_thinking_duration(&no_think, 0), None);
     }
 
@@ -5170,7 +5169,6 @@ mod tests {
             args: None,
             output: None,
             failed: false,
-            duration: None,
         };
         // Two steps' worth of work lands on one summary line — counts span
         // every step instead of one "Ran …" row per step.
@@ -5326,7 +5324,6 @@ mod tests {
             args: Some(serde_json::json!({ "command": "ls -la" })),
             output: None,
             failed: false,
-            duration: None,
         };
         assert_eq!(tool_command(&bash).as_deref(), Some("ls -la"));
         // The header preview shows the command, not the raw JSON summary.
@@ -5378,7 +5375,6 @@ mod tests {
             })),
             output: None,
             failed: false,
-            duration: None,
         };
         let rows = build_edit_diff(&tool).expect("diff");
         assert_eq!(rows.len(), 2);
@@ -5405,7 +5401,6 @@ mod tests {
             args: Some(serde_json::json!({ "path": "src/new.rs", "content": "a\nb\n" })),
             output: None,
             failed: false,
-            duration: None,
         };
         let rows = build_edit_diff(&tool).expect("diff");
         assert_eq!(rows.len(), 2);
@@ -5784,7 +5779,6 @@ mod tests {
             args: Some(serde_json::json!({ "command": "cargo test" })),
             output: None,
             failed: false,
-            duration: None,
         };
         let step = Step {
             tools: vec![bash],
@@ -5805,7 +5799,6 @@ mod tests {
             args: Some(serde_json::json!({ "path": "src/auth.rs" })),
             output: None,
             failed: false,
-            duration: None,
         };
         let step = Step {
             tools: vec![read],

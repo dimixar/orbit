@@ -165,14 +165,18 @@ impl Render for OrbitApp {
         }
 
         // ── top-bar right controls ──
-        let mut top_controls = div().flex().items_center().gap_2();
+        // When Review owns the right edge, or the chat column is tight, the
+        // title and the chips collide. Compact the quota label and drop the
+        // +/− chip (Review already shows the same stats).
+        let compact_chrome = pane_visible || f32::from(main_width) < 720.;
+        let mut top_controls = div().flex_none().flex().items_center().gap_2();
         // Provider quota — a compact, provider-independent headroom meter.
         // Hidden entirely on a pi without `quota.*` (or when no provider
         // reports anything), so the bar never shows a fabricated value.
-        top_controls = top_controls.children(self.render_quota_pill(cx));
+        top_controls = top_controls.children(self.render_quota_pill(compact_chrome, cx));
         top_controls = top_controls.children(self.render_open_in_control(cx));
-        top_controls = top_controls
-            .child(
+        if (self.added > 0 || self.removed > 0) && !pane_visible {
+            top_controls = top_controls.child(
                 div()
                     .id("top-diff-stats")
                     .h(px(26.))
@@ -199,18 +203,27 @@ impl Render for OrbitApp {
                             .text_color(theme.del_red)
                             .child(format!("-{}", self.removed)),
                     ),
-            )
+            );
+        }
+        top_controls = top_controls
             .child(
+                // Popup is a sibling of the info chip, not a child: clicks
+                // inside the rename field must not bubble to the chip's
+                // toggle (which would close the popover before Update runs).
                 div()
-                    .id("info")
                     .relative()
-                    .p_1()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.bg_hover))
-                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_info_click))
                     .children(self.render_session_details_popup(cx))
-                    .child(icon("icons/info.svg", 16., theme.text_2)),
+                    .child(
+                        div()
+                            .id("info")
+                            .p_1()
+                            .rounded_sm()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.bg_hover))
+                            .when(self.session_details_open, |s| s.bg(theme.bg_hover))
+                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_info_click))
+                            .child(icon("icons/info.svg", 16., theme.text_2)),
+                    ),
             )
             // side-pane toggle sits right after the about (info) button
             .child(
@@ -593,19 +606,26 @@ impl Render for OrbitApp {
                             }))
                             .child(
                                 window_drag_region(
-                                    div().flex_1().min_w_0().h_full().flex().items_center(),
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .h_full()
+                                        .flex()
+                                        .items_center(),
                                 )
                                 .child(
                                     div()
+                                        .flex_1()
                                         .min_w_0()
+                                        .overflow_hidden()
                                         .truncate()
                                         .text_size(theme.ui_px(13.))
                                         .text_color(theme.text_2)
-                                        .child(
-                                            self.current_title
-                                                .clone()
-                                                .unwrap_or_else(|| "New task".into()),
-                                        ),
+                                        .child(session_display_title(
+                                            self.session_name.as_deref(),
+                                            self.current_title.as_deref(),
+                                        )),
                                 ),
                             )
                             .child(top_controls);
@@ -1592,23 +1612,24 @@ impl OrbitApp {
                             .flex_col()
                             .items_center()
                             .gap(px(20.))
-                            // Rocket mark (HugeIcons start-up-02) — hero-size
-                            // disc over the dot grid; soft accent wash, no
-                            // heavy card chrome. `flex_none` keeps the disc a
-                            // true circle when a larger UI font makes the
-                            // column shrink its children.
+                            // Mark over the dot grid: a quiet raised disc,
+                            // not an accent wash. Ember is reserved for the
+                            // open picker and the caret, not decoration.
                             .child(
                                 div()
                                     .flex_none()
-                                    .size(px(72.))
+                                    .size(px(56.))
                                     .rounded_full()
-                                    .bg(theme.accent.opacity(0.12))
+                                    .bg(theme.bg_raised)
+                                    .border_1()
+                                    .border_color(theme.border)
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .child(icon("icons/start-up.svg", 36., theme.accent)),
+                                    .child(icon("icons/start-up.svg", 24., theme.text_2)),
                             )
                             // Title block — one idea, one line of guidance.
+                            // 20px is the scale's display step (DESIGN.md).
                             .child(
                                 div()
                                     .flex()
@@ -1617,10 +1638,10 @@ impl OrbitApp {
                                     .gap(px(6.))
                                     .child(
                                         div()
-                                            .text_size(theme.ui_px(22.))
+                                            .text_size(theme.ui_px(20.))
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(theme.text)
-                                            .child("What should we build?"),
+                                            .child("Start a task"),
                                     )
                                     .child(
                                         div()
@@ -1690,17 +1711,17 @@ impl OrbitApp {
                                                     )
                                                     .child(
                                                         div()
-                                                            .size(px(34.))
+                                                            .size(px(28.))
                                                             .flex_none()
-                                                            .rounded(px(9.))
-                                                            .bg(theme.accent.opacity(0.12))
+                                                            .rounded(px(8.))
+                                                            .bg(theme.overlay)
                                                             .flex()
                                                             .items_center()
                                                             .justify_center()
                                                             .child(icon(
                                                                 "icons/folder.svg",
-                                                                16.,
-                                                                theme.accent,
+                                                                14.,
+                                                                theme.text_2,
                                                             )),
                                                     )
                                                     .child(
@@ -1751,19 +1772,6 @@ impl OrbitApp {
         onboarding::all_required_installed(&self.deps)
     }
 
-    /// Re-run the dependency probe and, if `pi` just became available, spawn
-    /// the agent client. Runs the probe off the main thread and spins the
-    /// setup page's Refresh button while it's in flight.
-    /// Open the setup page on request (Settings → About → Requirements),
-    /// off the settings surface so the page owns the main area.
-    pub(super) fn open_setup(&mut self, cx: &mut Context<Self>) {
-        self.settings_open = false;
-        self.setup_open = true;
-        // The page reports what is on disk right now, so re-probe on open.
-        self.refresh_setup(cx);
-        cx.notify();
-    }
-
     /// Leave the setup page. Only reachable on request: the page also shows
     /// when something is missing, and then there is nothing to go back to.
     pub(super) fn close_setup(&mut self, cx: &mut Context<Self>) {
@@ -1771,6 +1779,9 @@ impl OrbitApp {
         cx.notify();
     }
 
+    /// Re-run the dependency probe and, if `pi` just became available, spawn
+    /// the agent client. Runs the probe off the main thread and spins the
+    /// setup page's Refresh button while it's in flight.
     pub(super) fn refresh_setup(&mut self, cx: &mut Context<Self>) {
         if self.refreshing {
             return; // ignore double-clicks while a refresh is running

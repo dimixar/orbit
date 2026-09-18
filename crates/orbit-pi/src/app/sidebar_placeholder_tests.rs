@@ -108,3 +108,20 @@ fn empty_store_with_draft_session_shows_empty_state() {
     );
     assert!(rows.is_empty());
 }
+
+#[test]
+fn preview_is_redundant_when_it_repeats_the_title() {
+    assert!(sidebar_preview_redundant(
+        "fix the login bug",
+        "fix the login bug"
+    ));
+    assert!(sidebar_preview_redundant(
+        "fix the login",
+        "fix the login bug in auth.rs"
+    ));
+    assert!(sidebar_preview_redundant("", "   "));
+    assert!(!sidebar_preview_redundant(
+        "login session",
+        "the oauth redirect is looping"
+    ));
+}

@@ -6,9 +6,16 @@
 //! (determinism). Everything is built on a hand-made [`UsageIndex`], so the
 //! math is tested without touching the disk.
 
-use super::aggregate::{ChartMetric, Direction, LatencyMetric, LatencyStats, UsageSnapshot};
+use super::aggregate::{
+    BucketRow, ChartMetric, Direction, LatencyMetric, LatencyStats, SeriesPoint, Totals,
+    UsageSnapshot,
+};
 use super::model::*;
-use super::page::{query_sessions, SessionQuery, SessionSort};
+use super::page::{
+    query_buckets, query_failures, query_series, query_sessions, BucketSort, SeriesSort,
+    SessionQuery, SessionSort,
+};
+use super::table::{FailureRow, FailureSort};
 
 /// A tiny builder for synthetic indexes.
 #[derive(Default)]
@@ -1306,4 +1313,123 @@ fn calendar_drops_records_older_than_a_year() {
     // The snapshot itself still counts both — the calendar is a calendar, not
     // the page's totals.
     assert_eq!(snapshot.summary.totals.requests, 2);
+}
+
+#[test]
+fn series_query_filters_sorts_then_paginates() {
+    let point = |stamp: &str, start: i64, tokens: u64| SeriesPoint {
+        start_ms: start,
+        label: stamp.to_string(),
+        stamp: stamp.to_string(),
+        totals: Totals {
+            requests: 1,
+            tokens: TokenCounts {
+                total: tokens,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        latency: LatencyStats::default(),
+    };
+    let points = [
+        point("Mon", 1, 100),
+        point("Tue", 2, 300),
+        point("Wed", 3, 200),
+    ];
+    let query = |page, search: &str| {
+        query_series(
+            &points,
+            search,
+            SeriesSort::Tokens,
+            true,
+            ChartMetric::Tokens,
+            LatencyMetric::Average,
+            page,
+            1,
+        )
+    };
+
+    let first = query(1, "");
+    assert_eq!(first.total, 3);
+    assert_eq!(first.rows[0].stamp, "Tue");
+    assert_eq!((first.first_row(), first.last_row()), (1, 1));
+    let second = query(2, "");
+    assert_eq!(second.rows[0].stamp, "Wed");
+
+    let past = query(99, "");
+    assert_eq!(past.page, 3);
+    assert_eq!(past.rows[0].stamp, "Mon");
+
+    let searched = query(1, "wed");
+    assert_eq!(searched.total, 1);
+    assert_eq!(searched.rows[0].stamp, "Wed");
+}
+
+#[test]
+fn bucket_query_filters_sorts_then_paginates() {
+    let row = |label: &str, start: i64, tokens: u64| BucketRow {
+        start_ms: start,
+        label: label.to_string(),
+        stamp: label.to_string(),
+        totals: Totals {
+            requests: 1,
+            tokens: TokenCounts {
+                total: tokens,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    };
+    let rows = [row("Mon", 1, 100), row("Tue", 2, 300), row("Wed", 3, 200)];
+    let query =
+        |page, search: &str| query_buckets(&rows, search, BucketSort::Tokens, true, page, 1);
+
+    let first = query(1, "");
+    assert_eq!(first.total, 3);
+    assert_eq!(first.rows[0].label, "Tue");
+    assert_eq!(first.totals.tokens.total, 600);
+    let second = query(2, "");
+    assert_eq!(second.rows[0].label, "Wed");
+
+    let past = query(99, "");
+    assert_eq!(past.page, 3);
+    assert_eq!(past.rows[0].label, "Mon");
+
+    let searched = query(1, "wed");
+    assert_eq!(searched.total, 1);
+    assert_eq!(searched.rows[0].label, "Wed");
+    assert_eq!(searched.totals.tokens.total, 200);
+}
+
+#[test]
+fn failure_query_filters_sorts_then_paginates() {
+    let row = |title: &str, ts: i64, message: &str| FailureRow {
+        ts_ms: ts,
+        session: 0,
+        kind: ErrorKind::Provider,
+        model: "claude".into(),
+        session_title: title.to_string(),
+        message: message.to_string(),
+    };
+    let rows = [
+        row("alpha", 1, "timeout"),
+        row("beta", 2, "overloaded"),
+        row("gamma", 3, "rate limit"),
+    ];
+    let query =
+        |page, search: &str| query_failures(&rows, search, FailureSort::When, true, page, 1);
+
+    let first = query(1, "");
+    assert_eq!(first.total, 3);
+    assert_eq!(first.rows[0].session_title, "gamma");
+    let second = query(2, "");
+    assert_eq!(second.rows[0].session_title, "beta");
+
+    let past = query(99, "");
+    assert_eq!(past.page, 3);
+    assert_eq!(past.rows[0].session_title, "alpha");
+
+    let searched = query(1, "over");
+    assert_eq!(searched.total, 1);
+    assert_eq!(searched.rows[0].session_title, "beta");
 }

@@ -719,8 +719,11 @@ mod tests {
 
     #[test]
     fn plain_select_and_confirm_are_not_approvals() {
-        let plain =
-            ApprovalRequest::from_event("id".into(), "select", &json!({"title": "Pick", "options": []}));
+        let plain = ApprovalRequest::from_event(
+            "id".into(),
+            "select",
+            &json!({"title": "Pick", "options": []}),
+        );
         assert!(plain.is_none(), "an unmarked select is a normal dialog");
         let confirm =
             ApprovalRequest::from_event("id".into(), "confirm", &json!({"title": "Sure?"}));

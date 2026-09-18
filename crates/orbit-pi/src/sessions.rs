@@ -180,9 +180,7 @@ fn next_session_id() -> String {
     // 12 bits for the v7 `rand_a` field, 48 for `rand_b`; the process id and
     // the counter keep concurrent writers in separate id spaces.
     let rand_a = ((seq << 4) ^ nanos) & 0x0fff;
-    let rand_b = (nanos << 32)
-        ^ (std::process::id() as u64).rotate_left(17)
-        ^ seq.rotate_left(31);
+    let rand_b = (nanos << 32) ^ (std::process::id() as u64).rotate_left(17) ^ seq.rotate_left(31);
 
     format!(
         "{:08x}-{:04x}-7{:03x}-{:04x}-{:012x}",

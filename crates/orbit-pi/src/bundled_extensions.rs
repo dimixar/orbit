@@ -21,8 +21,7 @@ use std::path::{Path, PathBuf};
 use orbit_rpc::PiClient;
 
 const QUOTA_INDEX_JS: &str = include_str!("../../../contrib/orbit-quota-extension/index.js");
-const QUOTA_ADAPTERS_JS: &str =
-    include_str!("../../../contrib/orbit-quota-extension/adapters.js");
+const QUOTA_ADAPTERS_JS: &str = include_str!("../../../contrib/orbit-quota-extension/adapters.js");
 const GUARD_INDEX_JS: &str = include_str!("../../../contrib/orbit-guard-extension/index.js");
 const GUARD_POLICY_JS: &str = include_str!("../../../contrib/orbit-guard-extension/policy.js");
 
@@ -102,10 +101,7 @@ fn install_guard() -> Option<PathBuf> {
     install_extension(
         &home_dir()?,
         "guard-extension",
-        &[
-            ("index.js", GUARD_INDEX_JS),
-            ("policy.js", GUARD_POLICY_JS),
-        ],
+        &[("index.js", GUARD_INDEX_JS), ("policy.js", GUARD_POLICY_JS)],
     )
 }
 

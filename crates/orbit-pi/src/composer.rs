@@ -93,7 +93,7 @@ impl ComposerInput {
         Self {
             focus_handle: cx_focus_handle(_cx),
             content: String::new(),
-            placeholder: "Do anything…".into(),
+            placeholder: "Describe the task…".into(),
             element_id: "composer-input".into(),
             key_context: "Composer".into(),
             selected_range: 0..0,
@@ -971,6 +971,19 @@ fn line_range_at(text: &str, offset: usize) -> Range<usize> {
     start..end
 }
 
+/// Overlay scrollbar thumb height. `Ord::clamp` panics when min > max, so
+/// the 24px minimum is lowered when the track itself is shorter — a
+/// one-line form field is typically ~18px and used to abort if a wrapped
+/// session name overflowed it.
+fn scrollbar_thumb_height(track: Pixels, visible_rows: usize, total_rows: usize) -> Pixels {
+    if track <= px(0.) || total_rows == 0 {
+        return px(0.);
+    }
+    let ratio = (visible_rows as f32 / total_rows as f32).clamp(0.0, 1.0);
+    let min_thumb = px(24.).min(track);
+    (track * ratio).clamp(min_thumb, track)
+}
+
 /// Split the composer text into paint runs: the base ink plus the
 /// `/command` and `@file` token colors. Gaps keep `base`'s color. Runs span
 /// the whole text (newlines included) so `shape_text` never runs dry.
@@ -1251,11 +1264,12 @@ impl Element for TextElement {
 
         // Overlay scrollbar: a thin thumb at the right edge, sized to the
         // visible share of the text and positioned by the scroll offset. Only
-        // painted while the content overflows `max_lines`.
-        let scrollbar = (max_scroll > px(0.)).then(|| {
-            let track = bounds.size.height;
-            let thumb_height =
-                (track * (visible_rows as f32 / total_rows as f32)).clamp(px(24.), track);
+        // painted while the content overflows `max_lines` *and* the track is
+        // tall enough — a one-line form field is shorter than the 24px
+        // minimum thumb, and `Ord::clamp(24, track)` panics when min > max.
+        let track = bounds.size.height;
+        let scrollbar = (max_scroll > px(0.) && track >= px(24.)).then(|| {
+            let thumb_height = scrollbar_thumb_height(track, visible_rows, total_rows);
             let travel = track - thumb_height;
             let thumb_top = (scroll_offset / max_scroll) * travel;
             let width = px(4.);
@@ -1406,7 +1420,8 @@ impl Render for ComposerInput {
 
 #[cfg(test)]
 mod tests {
-    use super::{line_at_offset, line_range_at, word_range_at};
+    use super::{line_at_offset, line_range_at, scrollbar_thumb_height, word_range_at};
+    use gpui::px;
 
     /// A caret on the newline byte (`"abc\n"` at offset 3) must resolve to
     /// the end of the preceding line, not underflow into the next line's
@@ -1474,6 +1489,17 @@ mod tests {
         assert_eq!(line_range_at(text, 9), 8..13);
         // An offset at the end still selects the last line.
         assert_eq!(line_range_at(text, text.len()), 8..13);
+    }
+
+    /// A one-line form field is shorter than the 24px thumb minimum.
+    /// `Ord::clamp(24, track)` panics when min > max — the crash opening
+    /// the session-details rename field with a wrapped title.
+    #[test]
+    fn scrollbar_thumb_fits_a_short_track() {
+        assert_eq!(scrollbar_thumb_height(px(18.), 1, 8), px(18.));
+        assert_eq!(scrollbar_thumb_height(px(0.), 1, 8), px(0.));
+        assert_eq!(scrollbar_thumb_height(px(100.), 1, 8), px(24.));
+        assert_eq!(scrollbar_thumb_height(px(100.), 8, 8), px(100.));
     }
 }
 

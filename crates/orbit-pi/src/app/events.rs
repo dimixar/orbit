@@ -123,9 +123,16 @@ impl OrbitApp {
                 }
                 Event::SessionInfoChanged { name } => {
                     // pi names the session after the first user message;
-                    // forward it live the way Waku does.
+                    // forward it live the way Waku does. An explicit
+                    // `set_session_name` already owns the header, so don't
+                    // clobber the rename field while the user is editing.
                     if let Some(name) = name {
                         self.current_title = Some(name.clone());
+                        if self.session_name.is_none() {
+                            let name = name.clone();
+                            self.session_name_input
+                                .update(cx, |input, cx| input.set_text(name, cx));
+                        }
                     }
                     refresh_sessions = true;
                 }
@@ -504,6 +511,7 @@ impl OrbitApp {
             "clone" => {
                 self.transcript.clear();
                 self.current_title = None;
+                self.reset_session_name(cx);
                 self.current_session_path = None;
                 self.added = 0;
                 self.removed = 0;
@@ -581,8 +589,7 @@ impl OrbitApp {
                     }
                     None if self.session_name.is_some() => {
                         self.session_name = None;
-                        self.session_name_input
-                            .update(cx, |input, cx| input.set_text(String::new(), cx));
+                        self.seed_session_name_input(cx);
                     }
                     _ => {}
                 }
@@ -672,6 +679,7 @@ impl OrbitApp {
             "new_session" => {
                 self.transcript.clear();
                 self.current_title = None;
+                self.reset_session_name(cx);
                 self.current_session_path = None;
                 self.added = 0;
                 self.removed = 0;
@@ -895,7 +903,10 @@ impl OrbitApp {
                 self.push_toast(
                     kind,
                     title,
-                    Some(notifications::preview(body, notifications::BODY_PREVIEW_CHARS)),
+                    Some(notifications::preview(
+                        body,
+                        notifications::BODY_PREVIEW_CHARS,
+                    )),
                 );
             }
             return;

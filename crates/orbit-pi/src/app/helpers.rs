@@ -352,6 +352,26 @@ pub(crate) fn runtime_error(theme: Theme, text: String) -> AnyElement {
         .into_any_element()
 }
 
+/// The title shown in the top bar and session lists. An explicit
+/// `set_session_name` value wins over pi's live auto-title; neither
+/// present is a new, unnamed task.
+pub(crate) fn session_display_title(
+    session_name: Option<&str>,
+    current_title: Option<&str>,
+) -> String {
+    session_name
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            current_title
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "New task".into())
+}
+
 /// "42s" / "3m 12s" / "2h 5m" / "4d 3h" for the Runtime uptime readout.
 pub(crate) fn format_uptime(elapsed: Duration) -> String {
     let seconds = elapsed.as_secs();

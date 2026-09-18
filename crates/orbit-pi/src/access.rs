@@ -31,11 +31,7 @@ pub enum AccessMode {
 
 impl AccessMode {
     /// Every mode, in picker order.
-    pub const ALL: [AccessMode; 3] = [
-        Self::Supervised,
-        Self::AutoAcceptEdits,
-        Self::FullAccess,
-    ];
+    pub const ALL: [AccessMode; 3] = [Self::Supervised, Self::AutoAcceptEdits, Self::FullAccess];
 
     /// The wire/persistence id. Kept in sync with `MODES` in the extension's
     /// `policy.js`.
@@ -131,7 +127,10 @@ mod tests {
 
     #[test]
     fn unknown_wire_falls_back_to_default() {
-        assert_eq!(AccessMode::from_wire("bypass-everything"), AccessMode::default());
+        assert_eq!(
+            AccessMode::from_wire("bypass-everything"),
+            AccessMode::default()
+        );
         assert_eq!(AccessMode::from_wire(""), AccessMode::default());
     }
 

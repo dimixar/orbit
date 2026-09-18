@@ -86,21 +86,22 @@ impl OrbitApp {
                     .child(window_drag_region(
                         div().h(px(super::view::TOP_BAR_H)).w_full(),
                     ))
-                    // Back — inset like the sessions nav, breathing room below
+                    // Back — same 28px row language as the section list.
                     .child(
-                        div().px_2().pt_1().pb_3().child(
+                        div().px_2().pt_1().pb_2().child(
                             div()
+                                .id("settings-back")
                                 .w_full()
-                                .px_2()
-                                .py(px(5.))
+                                .h(px(28.))
+                                .px(px(10.))
                                 .rounded_md()
                                 .flex()
                                 .items_center()
-                                .gap_1p5()
+                                .gap_2()
                                 .cursor_pointer()
                                 .hover(|s| s.bg(theme.bg_hover))
                                 .on_mouse_up(MouseButton::Left, cx.listener(Self::on_settings_back))
-                                .child(icon("icons/arrow-left.svg", 14., theme.text_2))
+                                .child(icon("icons/arrow-left.svg", 13., theme.text_3))
                                 .child(
                                     div()
                                         .text_size(theme.ui_px(13.))
@@ -109,28 +110,29 @@ impl OrbitApp {
                                 ),
                         ),
                     )
-                    // section rows — inset wrapper so hover/selected pills
-                    // don't bleed to the window edge (matches sessions nav)
+                    // Section rows — 28px pills, selected fill matches the
+                    // sessions sidebar (`active` + `active_fg`).
                     .child(
                         div()
                             .px_2()
                             .flex()
                             .flex_col()
-                            .gap_0p5()
+                            .gap(px(2.))
                             .children(sections.map(|(section, section_icon, label)| {
                                 let this = this.clone();
                                 let selected = self.settings_section == section;
                                 div()
+                                    .id(ElementId::Name(format!("settings-nav-{label}").into()))
                                     .w_full()
-                                    .px_2()
-                                    .py(px(5.))
+                                    .h(px(28.))
+                                    .px(px(10.))
                                     .rounded_md()
                                     .text_size(theme.ui_px(13.))
                                     .flex()
                                     .items_center()
                                     .gap_2()
                                     .cursor_pointer()
-                                    .when(selected, |row| row.bg(theme.bg_raised))
+                                    .when(selected, |row| row.bg(theme.active))
                                     .when(!selected, |row| row.hover(|s| s.bg(theme.bg_hover)))
                                     .on_mouse_up(MouseButton::Left, move |_, _, cx| {
                                         this.update(cx, |app, cx| {
@@ -139,13 +141,17 @@ impl OrbitApp {
                                     })
                                     .child(icon(
                                         section_icon,
-                                        15.,
-                                        if selected { theme.text } else { theme.text_3 },
+                                        13.,
+                                        if selected {
+                                            theme.active_fg
+                                        } else {
+                                            theme.text_3
+                                        },
                                     ))
                                     .child(
                                         div()
                                             .text_color(if selected {
-                                                theme.text
+                                                theme.active_fg
                                             } else {
                                                 theme.text_2
                                             })
@@ -197,7 +203,7 @@ impl OrbitApp {
                         div()
                             .w_full()
                             .px(px(24.))
-                            .pt(px(44.))
+                            .pt(px(20.))
                             .pb(px(12.))
                             .flex()
                             .flex_col()
@@ -205,24 +211,11 @@ impl OrbitApp {
                             .child(self.settings_header(theme))
                             .children(self.settings_toolbar(theme, this.clone(), cx)),
                     )
-                    // The hairline inherits the same 24px gutter as the
-                    // search field and card grid, so it lines up with them
-                    // instead of overhanging the content by the page gutter.
-                    .when(
-                        matches!(
-                            self.settings_section,
-                            SettingsSection::Providers
-                                | SettingsSection::Plugins
-                                | SettingsSection::Models
-                        ),
-                        |header| {
-                            header.child(
-                                div()
-                                    .w_full()
-                                    .px(px(24.))
-                                    .child(div().w_full().h(px(1.)).bg(theme.border)),
-                            )
-                        },
+                    .child(
+                        div()
+                            .w_full()
+                            .px(px(24.))
+                            .child(div().w_full().h(px(1.)).bg(theme.border)),
                     ),
             )
             .child(
@@ -238,11 +231,11 @@ impl OrbitApp {
                         div()
                             .w_full()
                             .px(px(24.))
-                            .pt(px(16.))
-                            .pb(px(12.))
+                            .pt(px(20.))
+                            .pb(px(28.))
                             .flex()
                             .flex_col()
-                            .gap(theme.space(12.))
+                            .gap(theme.space(20.))
                             .children(self.error_banner(theme, cx))
                             .children(self.settings_rows(&this, theme, cx)),
                     ),
@@ -252,10 +245,7 @@ impl OrbitApp {
 
     pub(super) fn settings_header(&self, theme: Theme) -> impl IntoElement + use<> {
         let (title, subtitle) = match self.settings_section {
-            SettingsSection::General => (
-                "General",
-                "App behavior, local data, and notifications.",
-            ),
+            SettingsSection::General => ("General", "App behavior, local data, and notifications."),
             SettingsSection::Runtime => (
                 "Runtime",
                 "The pi agent process Orbit spawns — stdio transport, no host or port.",
@@ -286,22 +276,22 @@ impl OrbitApp {
         div()
             .flex()
             .flex_col()
-            .gap_1()
-            .pb_1()
+            .gap(px(4.))
             .when(self.settings_section == SettingsSection::About, |header| {
-                header.child(embedded_image(crate::app_icon::ASSET, 72.))
+                header.child(embedded_image(crate::app_icon::ASSET, 48.))
             })
             .child(
                 div()
-                    .text_size(theme.ui_px(20.))
+                    .text_size(theme.ui_px(15.))
                     .font_weight(FontWeight::MEDIUM)
+                    .line_height(px(20.))
                     .text_color(theme.text)
                     .child(title.to_string()),
             )
             .child(
                 div()
-                    .text_size(theme.ui_px(12.5))
-                    .text_color(theme.text_2)
+                    .text_size(theme.ui_px(12.))
+                    .text_color(theme.text_3)
                     .child(subtitle.to_string()),
             )
     }
@@ -317,36 +307,45 @@ impl OrbitApp {
     ) -> Vec<AnyElement> {
         match self.settings_section {
             SettingsSection::General => {
-                let mut rows = vec![
-                    self.card(
-                        theme,
-                        "pi agent",
-                        "Spawned as a child process — newline-delimited JSON over stdio.",
-                        Some(self.connection_status(theme)),
-                    ),
-                    self.card_with_path(
-                        theme,
-                        "Local by default",
-                        "Sessions live in pi's own store on this computer — no daemon, no cloud.",
-                        Some(&sessions::sessions_dir().to_string_lossy()),
-                        None,
-                    ),
-                    self.card_with_path(
-                        theme,
-                        "Workspace",
-                        "New tasks start in this directory.",
-                        Some(
-                            &self
-                                .current_workspace
-                                .clone()
-                                .or_else(|| std::env::current_dir().ok())
-                                .unwrap_or_default()
-                                .to_string_lossy(),
+                let workspace = self
+                    .current_workspace
+                    .clone()
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_default();
+                let mut rows = vec![self.settings_section(
+                    theme,
+                    "This machine",
+                    vec![
+                        self.setting_row(
+                            theme,
+                            "pi agent",
+                            Some(
+                                "Spawned as a child process — newline-delimited JSON over stdio.",
+                            ),
+                            None,
+                            Some(self.connection_status(theme)),
                         ),
-                        None,
-                    ),
-                ];
-                rows.extend(self.updater_rows(theme, this.clone(), cx));
+                        self.setting_row(
+                            theme,
+                            "Local by default",
+                            Some(
+                                "Sessions live in pi's own store on this computer — no daemon, no cloud.",
+                            ),
+                            Some(&sessions::sessions_dir().to_string_lossy()),
+                            None,
+                        ),
+                        self.setting_row(
+                            theme,
+                            "Workspace",
+                            Some("New tasks start in this directory."),
+                            Some(&workspace.to_string_lossy()),
+                            None,
+                        ),
+                    ],
+                )];
+                if let Some(updates) = self.updater_section(theme, this.clone(), cx) {
+                    rows.push(updates);
+                }
                 rows.push(self.notification_rows(theme, this.clone()));
                 rows
             }
@@ -359,10 +358,11 @@ impl OrbitApp {
             SettingsSection::Appearance => self.appearance_rows(theme, this.clone(), cx),
             SettingsSection::Providers => self.provider_rows(theme, this.clone(), cx),
             SettingsSection::About => {
-                let mut rows = vec![self.card(
+                let mut about = vec![self.setting_row(
                     theme,
                     "Orbit Pi",
-                    "Native workbench for the pi coding agent.",
+                    Some("Native workbench for the pi coding agent."),
+                    None,
                     Some(
                         div()
                             .text_size(theme.ui_px(12.))
@@ -371,14 +371,15 @@ impl OrbitApp {
                             .into_any_element(),
                     ),
                 )];
-                // The app-menu "About Orbit Pi" lands here, so the update
-                // check lives beside the version it would replace.
-                rows.extend(self.about_update_row(theme, this.clone(), cx));
-                rows.push(
-                    self.card(
+                if let Some(update) = self.about_update_row(theme, this.clone(), cx) {
+                    about.push(update);
+                }
+                about.push(
+                    self.setting_row(
                         theme,
                         "GPUI",
-                        "GPU-accelerated UI framework (pinned; runtime shaders).",
+                        Some("GPU-accelerated UI framework (pinned; runtime shaders)."),
+                        None,
                         Some(
                             div()
                                 .text_size(theme.ui_px(12.))
@@ -388,19 +389,23 @@ impl OrbitApp {
                         ),
                     ),
                 );
-                rows.push(self.card(
+                about.push(self.setting_row(
                     theme,
                     "pi CLI",
-                    "The only agent runtime — pi speaks its own RPC protocol over stdio.",
+                    Some("The only agent runtime — pi speaks its own RPC protocol over stdio."),
+                    None,
                     Some(self.connection_status(theme)),
                 ));
-                rows.push(self.card(
+                about.push(self.setting_row(
                     theme,
                     "Source",
-                    "Open source under Apache-2.0 — code, issues, and release notes live on GitHub.",
+                    Some(
+                        "Open source under Apache-2.0 — code, issues, and release notes live on GitHub.",
+                    ),
+                    None,
                     Some(self.about_github_button(theme)),
                 ));
-                rows
+                vec![self.settings_section(theme, "About", about)]
             }
         }
     }
@@ -458,9 +463,7 @@ impl OrbitApp {
         let shown = self
             .available_models
             .iter()
-            .filter(|model| {
-                model_visible(model, &needle, self.models_favorites_only, &favorites)
-            })
+            .filter(|model| model_visible(model, &needle, self.models_favorites_only, &favorites))
             .count();
 
         // A filter chip in the toolbar's button language: `bg_raised` + a
@@ -741,16 +744,16 @@ impl OrbitApp {
                     .h(px(20.))
                     .px(px(7.))
                     .rounded(px(6.))
-                    .bg(theme.accent.opacity(0.12))
+                    .bg(theme.overlay_strong)
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    .child(icon("icons/check.svg", 11., theme.accent))
+                    .child(icon("icons/check.svg", 11., theme.active_fg))
                     .child(
                         div()
                             .text_size(theme.ui_px(10.5))
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.accent)
+                            .text_color(theme.active_fg)
                             .child("Active"),
                     ),
             );
@@ -778,9 +781,17 @@ impl OrbitApp {
             .group("model-card")
             .w_full()
             .min_w_0()
-            .bg(if active { theme.active } else { theme.bg_composer })
+            .bg(if active {
+                theme.active
+            } else {
+                theme.bg_composer
+            })
             .border_1()
-            .border_color(if active { theme.accent } else { theme.border })
+            .border_color(if active {
+                theme.border_strong
+            } else {
+                theme.border
+            })
             .rounded_lg()
             .p(theme.space(12.))
             .flex()
@@ -899,9 +910,11 @@ impl OrbitApp {
                     .into_any_element(),
             );
         }
+        let mut cards = Vec::new();
         for package in visible {
-            rows.push(self.plugin_card(package, theme, this.clone()));
+            cards.push(self.plugin_card(package, theme, this.clone()));
         }
+        rows.push(self.settings_group(theme, cards));
         rows
     }
 
@@ -915,22 +928,16 @@ impl OrbitApp {
         let project = package.scope == PackageScope::Project;
         let confirming = self.plugin_remove_confirm.as_deref() == Some(source.as_str());
 
-        // Badges get their own left-aligned row under the name (never
-        // right-aligned in the header) so a long source or version set can't
-        // squeeze the identity column on the settings column's fixed width.
         let mut badges = div()
             .flex()
             .flex_wrap()
             .items_center()
             .gap_1p5()
+            .pl(px(40.))
             .child(self.provider_badge(
                 package.scope.label(),
-                if project { theme.accent } else { theme.text_3 },
-                if project {
-                    theme.accent.opacity(0.12)
-                } else {
-                    theme.overlay_strong
-                },
+                theme.text_3,
+                theme.overlay_strong,
                 theme,
             ))
             .child(self.provider_badge(
@@ -956,58 +963,13 @@ impl OrbitApp {
             ));
         }
 
-        let tile = div()
-            .size(px(38.))
-            .flex_none()
-            .rounded(px(10.))
-            .bg(theme.bg_raised)
-            .border_1()
-            .border_color(theme.border)
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(icon("icons/extensions.svg", 18., theme.text_2));
-
-        let header = div()
-            .flex()
-            .items_center()
-            .gap_3()
-            .child(tile)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap_0p5()
-                    .child(
-                        div()
-                            .text_size(theme.ui_px(13.5))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .truncate()
-                            .child(package.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .font_family(theme::code_font_family())
-                            .text_size(theme.code_px(10.5))
-                            .text_color(theme.text_3)
-                            .truncate()
-                            .child(source.clone()),
-                    ),
-            );
-
         let actions: AnyElement = if confirming {
             div()
-                .w_full()
                 .flex()
                 .items_center()
                 .gap_2()
                 .child(
                     div()
-                        .flex_1()
-                        .min_w_0()
                         .text_size(theme.ui_px(11.5))
                         .text_color(theme.crit)
                         .child("Remove this plugin?"),
@@ -1037,7 +999,7 @@ impl OrbitApp {
                 ))
                 .into_any_element()
         } else {
-            let mut actions = div().flex().items_center().gap_2();
+            let mut actions = div().flex_none().flex().items_center().gap_2();
             if package.installed {
                 actions = actions.child(self.plugin_button(
                     format!("plugin-update-{source}"),
@@ -1060,7 +1022,9 @@ impl OrbitApp {
                 Some("icons/trash.svg"),
                 theme,
                 this,
-                PluginAction::Remove { source },
+                PluginAction::Remove {
+                    source: source.clone(),
+                },
             ));
             actions.into_any_element()
         };
@@ -1068,26 +1032,66 @@ impl OrbitApp {
         div()
             .w_full()
             .min_w_0()
-            .bg(theme.bg_composer)
-            .border_1()
-            .border_color(theme.border)
-            .rounded_lg()
-            .p(px(14.))
+            .px(theme.space(16.))
+            .py(theme.space(12.))
             .flex()
             .flex_col()
-            .gap_2p5()
-            .child(header)
-            .child(badges)
+            .gap_2()
             .child(
                 div()
-                    .font_family(theme::code_font_family())
-                    .text_size(theme.code_px(10.5))
-                    .text_color(theme.text_3)
-                    .truncate()
-                    .child(package.install_path.to_string_lossy().into_owned()),
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .size(px(28.))
+                            .flex_none()
+                            .rounded(px(8.))
+                            .bg(theme.overlay)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon("icons/extensions.svg", 14., theme.text_2)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_size(theme.ui_px(13.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text)
+                                    .truncate()
+                                    .child(package.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .font_family(theme::code_font_family())
+                                    .text_size(theme.code_px(10.5))
+                                    .text_color(theme.text_3)
+                                    .truncate()
+                                    .child(source),
+                            ),
+                    )
+                    .child(actions),
             )
-            .child(div().h(px(1.)).w_full().bg(theme.border))
-            .child(actions)
+            .child(badges)
+            .when(!package.install_path.as_os_str().is_empty(), |row| {
+                row.child(
+                    div()
+                        .pl(px(40.))
+                        .font_family(theme::code_font_family())
+                        .text_size(theme.code_px(10.5))
+                        .text_color(theme.text_3)
+                        .truncate()
+                        .child(package.install_path.to_string_lossy().into_owned()),
+                )
+            })
             .into_any_element()
     }
 
@@ -3566,69 +3570,6 @@ impl OrbitApp {
         )
     }
 
-    /// A setting card: title + description on the left, optional control on
-    /// the right.
-    pub(super) fn card(
-        &self,
-        theme: Theme,
-        title: &str,
-        desc: &str,
-        control: Option<AnyElement>,
-    ) -> AnyElement {
-        self.card_with_path(theme, title, desc, None, control)
-    }
-
-    /// Same as [`card`] with an optional dimmed third line (paths).
-    pub(super) fn card_with_path(
-        &self,
-        theme: Theme,
-        title: &str,
-        desc: &str,
-        path: Option<&str>,
-        control: Option<AnyElement>,
-    ) -> AnyElement {
-        div()
-            .bg(theme.bg_composer)
-            .border_1()
-            .border_color(theme.border)
-            .rounded_lg()
-            .px(theme.space(14.))
-            .py(theme.space(12.))
-            .flex()
-            .items_center()
-            .gap_3()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(theme.ui_px(13.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text)
-                            .child(title.to_string()),
-                    )
-                    .child(
-                        div()
-                            .text_size(theme.ui_px(12.))
-                            .text_color(theme.text_2)
-                            .child(desc.to_string()),
-                    )
-                    .children(path.map(|p| {
-                        div()
-                            .text_size(theme.ui_px(11.5))
-                            .text_color(theme.text_3)
-                            .truncate()
-                            .child(p.to_string())
-                    })),
-            )
-            .children(control)
-            .into_any_element()
-    }
-
     /// A settings section: an 11px uppercase label over one grouped board.
     /// The label sits closer to its board than to the section above it.
     pub(super) fn settings_section(
@@ -3995,13 +3936,6 @@ impl OrbitApp {
             ));
         }
 
-        let mut rows = vec![self.card(
-            theme,
-            "Active process",
-            description,
-            Some(controls.into_any_element()),
-        )];
-
         let pid = self
             .client
             .as_ref()
@@ -4036,91 +3970,115 @@ impl OrbitApp {
             )
             .into_any_element();
 
-        let mut details = div()
-            .bg(theme.bg_composer)
-            .border_1()
-            .border_color(theme.border)
-            .rounded_lg()
-            .px(px(14.))
-            .py(px(12.))
-            .flex()
-            .flex_col()
-            .gap(px(9.))
-            .child(self.runtime_detail(theme, "Status", status))
-            .child(self.runtime_detail(theme, "Process ID", runtime_text(theme, pid)))
-            .child(self.runtime_detail(
+        let mut process = vec![self.setting_row(
+            theme,
+            "Status",
+            Some(description),
+            None,
+            Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(status)
+                    .child(controls)
+                    .into_any_element(),
+            ),
+        )];
+        process.push(self.setting_row(
+            theme,
+            "Process ID",
+            None,
+            None,
+            Some(runtime_text(theme, pid)),
+        ));
+        process.push(self.setting_row(
+            theme,
+            "Binary",
+            None,
+            None,
+            Some(runtime_path(theme, orbit_rpc::pi_binary())),
+        ));
+        process.push(self.setting_row(
+            theme,
+            "Uptime",
+            None,
+            None,
+            Some(runtime_text(theme, uptime)),
+        ));
+        process.push(self.setting_row(
+            theme,
+            "Transport",
+            None,
+            None,
+            Some(runtime_text(
                 theme,
-                "Binary",
-                runtime_path(theme, orbit_rpc::pi_binary()),
-            ))
-            .child(self.runtime_detail(theme, "Uptime", runtime_text(theme, uptime)))
-            .child(self.runtime_detail(
+                "stdio — newline-delimited JSON (no host or port)".to_string(),
+            )),
+        ));
+        process.push(self.setting_row(
+            theme,
+            "Workspace",
+            None,
+            None,
+            Some(runtime_path(theme, workspace)),
+        ));
+        process.push(self.setting_row(
+            theme,
+            "Session store",
+            None,
+            None,
+            Some(runtime_path(
                 theme,
-                "Transport",
-                runtime_text(
-                    theme,
-                    "stdio — newline-delimited JSON (no host or port)".to_string(),
-                ),
-            ))
-            .child(self.runtime_detail(theme, "Workspace", runtime_path(theme, workspace)))
-            .child(self.runtime_detail(
-                theme,
-                "Session store",
-                runtime_path(
-                    theme,
-                    sessions::sessions_dir().to_string_lossy().into_owned(),
-                ),
-            ));
+                sessions::sessions_dir().to_string_lossy().into_owned(),
+            )),
+        ));
         if let Some(error) = &self.runtime.error {
-            details = details.child(self.runtime_detail(
+            process.push(self.setting_row(
                 theme,
                 "Last error",
-                runtime_error(theme, error.clone()),
+                None,
+                None,
+                Some(runtime_error(theme, error.clone())),
             ));
         }
-        rows.push(details.into_any_element());
+
+        let mut rows = vec![self.settings_section(theme, "Process", process)];
 
         // Background sessions — each owns its own pi process.
         if !self.lives.is_empty() {
             let count = self.lives.len();
             let noun = if count == 1 { "session" } else { "sessions" };
-            let mut card = div()
-                .bg(theme.bg_composer)
-                .border_1()
-                .border_color(theme.border)
-                .rounded_lg()
-                .px(px(14.))
-                .py(px(12.))
-                .flex()
-                .flex_col()
-                .gap(px(9.))
-                .child(
-                    div()
-                        .text_size(theme.ui_px(12.))
-                        .text_color(theme.text_2)
-                        .child(format!(
-                            "{count} background {noun} running in their own pi processes"
-                        )),
-                );
+            let parked_desc =
+                format!("{count} background {noun} running in their own pi processes");
+            let mut background = vec![self.setting_row(
+                theme,
+                "Parked processes",
+                Some(parked_desc.as_str()),
+                None,
+                None,
+            )];
             for (path, parked) in &self.lives {
                 let name = path
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| path.to_string_lossy().into_owned());
-                card = card.child(self.runtime_detail(
+                background.push(self.setting_row(
                     theme,
                     &name,
-                    runtime_text(
+                    None,
+                    None,
+                    Some(runtime_text(
                         theme,
                         format!(
                             "pid {} · {}",
                             parked.client.child_pid(),
                             if parked.busy { "busy" } else { "idle" }
                         ),
-                    ),
+                    )),
                 ));
             }
-            rows.push(card.into_any_element());
+            rows.push(self.settings_section(theme, "Background", background));
         }
 
         // Recent stderr — visible failures for "if any issue, show status".
@@ -4131,6 +4089,8 @@ impl OrbitApp {
             .unwrap_or_default();
         let body: AnyElement = if stderr.is_empty() {
             div()
+                .px(theme.space(16.))
+                .py(theme.space(12.))
                 .text_size(theme.ui_px(12.))
                 .text_color(theme.text_3)
                 .child("No output from the pi process.")
@@ -4151,31 +4111,25 @@ impl OrbitApp {
             }
             div()
                 .bg(theme.code_bg)
-                .border_1()
-                .border_color(theme.border)
                 .rounded_md()
-                .px(px(10.))
-                .py(px(8.))
+                .px(px(12.))
+                .py(px(10.))
                 .child(block)
                 .into_any_element()
         };
         rows.push(
             div()
-                .bg(theme.bg_composer)
-                .border_1()
-                .border_color(theme.border)
-                .rounded_lg()
-                .px(px(14.))
-                .py(px(12.))
+                .w_full()
                 .flex()
                 .flex_col()
-                .gap(px(8.))
+                .gap(theme.space(8.))
                 .child(
                     div()
-                        .text_size(theme.ui_px(13.))
+                        .px(theme.space(4.))
+                        .text_size(theme.ui_px(10.5))
                         .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .child("Recent stderr"),
+                        .text_color(theme.text_3)
+                        .child("RECENT STDERR"),
                 )
                 .child(body)
                 .into_any_element(),
@@ -4196,17 +4150,23 @@ impl OrbitApp {
         this: Entity<OrbitApp>,
         _cx: &Context<Self>,
     ) -> Vec<AnyElement> {
-        let mut rows = vec![
-            self.card(
+        let behavior = vec![
+            self.setting_row(
                 theme,
                 "Follow-up messages",
-                "Messages sent while the agent is running wait in the queue above the composer and are delivered once the current task finishes. All delivers the whole queue at once; One at a time delivers one per run.",
+                Some(
+                    "Messages sent while the agent is running wait in the queue above the composer and are delivered once the current task finishes.",
+                ),
+                None,
                 Some(self.follow_up_mode_toggle(theme, this.clone())),
             ),
-            self.card(
+            self.setting_row(
                 theme,
                 "Auto-compaction",
-                "Compact conversation context automatically when it nears the model's window.",
+                Some(
+                    "Compact conversation context automatically when it nears the model's window.",
+                ),
+                None,
                 Some(self.settings_toggle(
                     "auto-compaction-toggle",
                     self.auto_compaction,
@@ -4215,10 +4175,13 @@ impl OrbitApp {
                     Self::toggle_auto_compaction,
                 )),
             ),
-            self.card(
+            self.setting_row(
                 theme,
                 "Auto-retry",
-                "Retry automatically on transient errors (overloaded, rate limit, 5xx). pi does not report this setting back, so the switch reflects the last value Orbit sent.",
+                Some(
+                    "Retry automatically on transient errors (overloaded, rate limit, 5xx). pi does not report this setting back, so the switch reflects the last value Orbit sent.",
+                ),
+                None,
                 Some(self.settings_toggle(
                     "auto-retry-toggle",
                     self.auto_retry,
@@ -4229,13 +4192,16 @@ impl OrbitApp {
             ),
         ];
 
+        let mut sections = Vec::new();
         if self.retrying {
-            rows.insert(
-                0,
-                self.card(
+            sections.push(self.settings_section(
+                theme,
+                "Status",
+                vec![self.setting_row(
                     theme,
                     "Retrying",
-                    "pi is waiting out a transient provider error before retrying.",
+                    Some("pi is waiting out a transient provider error before retrying."),
+                    None,
                     Some(self.runtime_button(
                         "abort-retry",
                         "Abort retry",
@@ -4244,22 +4210,24 @@ impl OrbitApp {
                         this.clone(),
                         Self::abort_retry,
                     )),
-                ),
-            );
+                )],
+            ));
         }
-
         if self.client.is_none() {
-            rows.insert(
-                0,
-                self.card(
+            sections.push(self.settings_section(
+                theme,
+                "Status",
+                vec![self.setting_row(
                     theme,
                     "pi is not connected",
-                    "Start the runtime from Settings → Runtime to change agent behavior.",
+                    Some("Start the runtime from Settings → Runtime to change agent behavior."),
                     None,
-                ),
-            );
+                    None,
+                )],
+            ));
         }
-        rows
+        sections.push(self.settings_section(theme, "Behavior", behavior));
+        sections
     }
 
     /// Two-button segmented control for the follow-up delivery mode.
@@ -4274,15 +4242,19 @@ impl OrbitApp {
                     .h(px(28.))
                     .px(px(10.))
                     .rounded_md()
+                    .border_1()
                     .flex()
                     .items_center()
                     .text_size(theme.ui_px(12.))
                     .font_weight(FontWeight::MEDIUM)
                     .cursor_pointer()
-                    .when(active, |b| b.bg(theme.send_bg).text_color(theme.send_fg))
+                    .when(active, |b| {
+                        b.border_color(theme.border)
+                            .bg(theme.active)
+                            .text_color(theme.active_fg)
+                    })
                     .when(!active, |b| {
-                        b.border_1()
-                            .border_color(theme.border)
+                        b.border_color(theme.border)
                             .bg(theme.bg_raised)
                             .text_color(theme.text_2)
                             .hover(|s| s.bg(theme.bg_hover))
@@ -4331,6 +4303,7 @@ impl OrbitApp {
             .cursor_pointer()
             .when(on, |t| t.bg(theme.accent).justify_end())
             .when(!on, |t| t.bg(theme.bg_raised).justify_start())
+            .hover(|t| t.border_color(theme.border_strong))
             .on_mouse_up(MouseButton::Left, move |_, _, cx| {
                 this.update(cx, action);
             })
@@ -4416,35 +4389,23 @@ impl OrbitApp {
             cx.notify();
             return;
         }
+        if !self.send(
+            CommandBody::SetSessionName { name: name.clone() },
+            "set_session_name",
+        ) {
+            return;
+        }
+        // The header (and the open session's sidebar row) read this name
+        // immediately; `session_info_changed` is not guaranteed on rename.
         self.session_name = Some(name.clone());
-        self.send(CommandBody::SetSessionName { name }, "set_session_name");
+        self.current_title = Some(name.clone());
+        if let Some(path) = &self.current_session_path {
+            if let Some(session) = self.sessions.iter_mut().find(|s| &s.path == path) {
+                session.title = name;
+            }
+        }
         self.toast_success("Session renamed");
         cx.notify();
-    }
-
-    /// One label/value row inside a Runtime card.
-    pub(super) fn runtime_detail(
-        &self,
-        theme: Theme,
-        label: &str,
-        value: AnyElement,
-    ) -> AnyElement {
-        div()
-            .flex()
-            .items_center()
-            .gap_3()
-            .child(
-                div()
-                    .w(px(110.))
-                    .flex_none()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(theme.ui_px(12.))
-                    .text_color(theme.text_3)
-                    .child(label.to_string()),
-            )
-            .child(div().flex_1().min_w_0().child(value))
-            .into_any_element()
     }
 
     /// A Runtime action button (Start / Stop / Restart).
@@ -4504,38 +4465,36 @@ impl OrbitApp {
         cx: &Context<Self>,
     ) -> Vec<AnyElement> {
         let background = crate::dither::configured_label();
+        // The empty 84px strip is a hole: Theme already has live swatches,
+        // and the default dot grid is visible on the new-task page. Preview
+        // the processed image only once there is one to judge.
+        let mut theme_rows = Vec::new();
+        if background.is_some() {
+            theme_rows.push(self.backdrop_preview(theme));
+        }
+        theme_rows.push(self.setting_row(
+            theme,
+            "Theme",
+            Some("Pick a Zed-compatible palette for the workbench."),
+            None,
+            Some(self.theme_control(theme, this.clone(), cx)),
+        ));
+        theme_rows.push(self.setting_row(
+            theme,
+            "Background image",
+            Some("A dithered image behind the new-task page."),
+            background.as_deref(),
+            Some(self.background_controls(theme, this.clone())),
+        ));
+        theme_rows.push(self.setting_row(
+            theme,
+            "Language",
+            Some("Choose the language used throughout Orbit."),
+            None,
+            Some(self.language_select(theme, this.clone(), cx)),
+        ));
         let mut sections = vec![
-            self.settings_section(
-                theme,
-                "Theme & background",
-                vec![
-                    // The backdrop only paints on the new-task page, so the
-                    // section leads with the processed result; without it a
-                    // tuning change could only be judged by leaving Settings.
-                    self.backdrop_preview(theme),
-                    self.setting_row(
-                        theme,
-                        "Theme",
-                        Some("Pick a Zed-compatible palette for the workbench."),
-                        None,
-                        Some(self.theme_control(theme, this.clone(), cx)),
-                    ),
-                    self.setting_row(
-                        theme,
-                        "Background image",
-                        Some("A dithered image behind the new-task page."),
-                        background.as_deref(),
-                        Some(self.background_controls(theme, this.clone())),
-                    ),
-                    self.setting_row(
-                        theme,
-                        "Language",
-                        Some("Choose the language used throughout Orbit."),
-                        None,
-                        Some(self.language_select(theme, this.clone(), cx)),
-                    ),
-                ],
-            ),
+            self.settings_section(theme, "Theme & background", theme_rows),
             self.settings_section(
                 theme,
                 "Type & density",
@@ -4625,13 +4584,6 @@ impl OrbitApp {
                         Some("Show the sessions sidebar. Also toggleable from the top bar."),
                         None,
                         Some(self.sidebar_toggle(theme, this.clone())),
-                    ),
-                    self.setting_row(
-                        theme,
-                        "GPU-rendered streaming",
-                        Some("Stream commits are coalesced (~8 Hz) and highlighting is paint-only, so long tasks never reflow the transcript."),
-                        None,
-                        None,
                     ),
                     self.setting_row(
                         theme,
@@ -4767,9 +4719,7 @@ impl OrbitApp {
             .flex_1()
             .px(theme.space(14.))
             .py(theme.space(12.))
-            .rounded_lg()
-            .border_1()
-            .border_color(theme.border)
+            .rounded_md()
             .bg(theme.bg_main)
             .flex()
             .flex_col()
@@ -4911,10 +4861,9 @@ impl OrbitApp {
     }
 
     /// Appearance → the backdrop's live preview: the real processed image
-    /// (blur + dither cell) under the real bottom fade, at strip scale. The
-    /// backdrop only paints on the new-task page, so without this a tuning
-    /// change could only be judged by leaving Settings. With no image
-    /// configured it previews the dot grid, which is what Reset returns to.
+    /// (blur + dither cell) under the real bottom fade, at strip scale.
+    /// Only mounted when an image is configured — without one the Theme
+    /// swatches already show the palette, and the empty strip was a hole.
     pub(super) fn backdrop_preview(&self, theme: Theme) -> AnyElement {
         let image = crate::dither::background();
         let dithered = image.is_some();
@@ -6074,9 +6023,7 @@ impl OrbitApp {
                 ));
             }
             Err(err) => {
-                self.toast_warning(format!(
-                    "Could not open Terminal: {err} — run `{command}`"
-                ));
+                self.toast_warning(format!("Could not open Terminal: {err} — run `{command}`"));
             }
         }
         cx.notify();

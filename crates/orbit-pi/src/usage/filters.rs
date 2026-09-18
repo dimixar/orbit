@@ -19,7 +19,10 @@ use super::format;
 use super::model::{
     local_day_start, local_month_start, next_bucket, Granularity, RangePreset, UsageIndex,
 };
-use super::page::{ExportFormat, MenuKind, SessionSort, UsagePage, PAGE_SIZES};
+use super::page::{
+    BucketSort, ExportFormat, MenuKind, SeriesSort, SessionSort, UsagePage, PAGE_SIZES,
+};
+use super::table::FailureSort;
 use crate::theme::Theme;
 use crate::{app::icon, composer::ComposerInput};
 
@@ -602,6 +605,215 @@ pub fn breakdown_page_size_menu(
     )
 }
 
+/// The usage-over-time table's column-visibility picker. Time is fixed.
+pub fn series_columns_menu(
+    page: &UsagePage,
+    cx: &mut gpui::Context<UsagePage>,
+    theme: Theme,
+) -> AnyElement {
+    let mut children: Vec<AnyElement> = vec![menu_title("Columns", theme)];
+    for column in SeriesSort::HIDEABLE {
+        let selected = page.series_column_visible(column);
+        let label = if column == SeriesSort::Value {
+            page.metric().label()
+        } else {
+            column.label()
+        };
+        let entity = cx.entity();
+        children.push(row(
+            ElementId::Name(SharedString::from(format!(
+                "usage-series-col-{}",
+                column.id()
+            ))),
+            label,
+            None,
+            selected,
+            false,
+            theme,
+            move |_, _, cx| {
+                entity.update(cx, |page, cx| page.toggle_series_column(column, cx));
+            },
+            |_, _, _| {},
+        ));
+    }
+    let entity = cx.entity();
+    let show_all = footer_row(
+        "usage-series-columns-all",
+        "Show all",
+        theme,
+        move |_, _, cx| {
+            entity.update(cx, |page, cx| page.show_all_series_columns(cx));
+        },
+    );
+    children.push(menu_footer(theme, show_all, div().into_any_element()));
+    let page = cx.entity();
+    panel("usage-series-columns-menu", 220., theme, children, page)
+}
+
+/// The usage-over-time table's rows-per-page picker.
+pub fn series_page_size_menu(
+    page: &UsagePage,
+    cx: &mut gpui::Context<UsagePage>,
+    theme: Theme,
+) -> AnyElement {
+    let current = page.series_page_size();
+    let mut children: Vec<AnyElement> = vec![menu_title("Rows per page", theme)];
+    for size in PAGE_SIZES {
+        let selected = size == current;
+        let entity = cx.entity();
+        children.push(row(
+            ElementId::NamedInteger("usage-series-page-size".into(), size as u64),
+            &size.to_string(),
+            None,
+            selected,
+            false,
+            theme,
+            move |_, _, cx| {
+                entity.update(cx, |page, cx| page.set_series_page_size(size, cx));
+            },
+            |_, _, _| {},
+        ));
+    }
+    let page = cx.entity();
+    panel("usage-series-page-size-menu", 180., theme, children, page)
+}
+
+/// The Daily records table's column-visibility picker. Date is fixed.
+pub fn bucket_columns_menu(
+    page: &UsagePage,
+    cx: &mut gpui::Context<UsagePage>,
+    theme: Theme,
+) -> AnyElement {
+    let mut children: Vec<AnyElement> = vec![menu_title("Columns", theme)];
+    for column in BucketSort::HIDEABLE {
+        let selected = page.bucket_column_visible(column);
+        let entity = cx.entity();
+        children.push(row(
+            ElementId::Name(SharedString::from(format!(
+                "usage-bucket-col-{}",
+                column.id()
+            ))),
+            column.label(),
+            None,
+            selected,
+            false,
+            theme,
+            move |_, _, cx| {
+                entity.update(cx, |page, cx| page.toggle_bucket_column(column, cx));
+            },
+            |_, _, _| {},
+        ));
+    }
+    let entity = cx.entity();
+    let show_all = footer_row(
+        "usage-bucket-columns-all",
+        "Show all",
+        theme,
+        move |_, _, cx| {
+            entity.update(cx, |page, cx| page.show_all_bucket_columns(cx));
+        },
+    );
+    children.push(menu_footer(theme, show_all, div().into_any_element()));
+    let page = cx.entity();
+    panel("usage-bucket-columns-menu", 220., theme, children, page)
+}
+
+/// The Daily records table's rows-per-page picker.
+pub fn bucket_page_size_menu(
+    page: &UsagePage,
+    cx: &mut gpui::Context<UsagePage>,
+    theme: Theme,
+) -> AnyElement {
+    let current = page.bucket_page_size();
+    let mut children: Vec<AnyElement> = vec![menu_title("Rows per page", theme)];
+    for size in PAGE_SIZES {
+        let selected = size == current;
+        let entity = cx.entity();
+        children.push(row(
+            ElementId::NamedInteger("usage-bucket-page-size".into(), size as u64),
+            &size.to_string(),
+            None,
+            selected,
+            false,
+            theme,
+            move |_, _, cx| {
+                entity.update(cx, |page, cx| page.set_bucket_page_size(size, cx));
+            },
+            |_, _, _| {},
+        ));
+    }
+    let page = cx.entity();
+    panel("usage-bucket-page-size-menu", 180., theme, children, page)
+}
+
+/// The Failures records table's column-visibility picker. When is fixed.
+pub fn failure_columns_menu(
+    page: &UsagePage,
+    cx: &mut gpui::Context<UsagePage>,
+    theme: Theme,
+) -> AnyElement {
+    let mut children: Vec<AnyElement> = vec![menu_title("Columns", theme)];
+    for column in FailureSort::HIDEABLE {
+        let selected = page.failure_column_visible(column);
+        let entity = cx.entity();
+        children.push(row(
+            ElementId::Name(SharedString::from(format!(
+                "usage-failure-col-{}",
+                column.id()
+            ))),
+            column.label(),
+            None,
+            selected,
+            false,
+            theme,
+            move |_, _, cx| {
+                entity.update(cx, |page, cx| page.toggle_failure_column(column, cx));
+            },
+            |_, _, _| {},
+        ));
+    }
+    let entity = cx.entity();
+    let show_all = footer_row(
+        "usage-failure-columns-all",
+        "Show all",
+        theme,
+        move |_, _, cx| {
+            entity.update(cx, |page, cx| page.show_all_failure_columns(cx));
+        },
+    );
+    children.push(menu_footer(theme, show_all, div().into_any_element()));
+    let page = cx.entity();
+    panel("usage-failure-columns-menu", 220., theme, children, page)
+}
+
+/// The Failures records table's rows-per-page picker.
+pub fn failure_page_size_menu(
+    page: &UsagePage,
+    cx: &mut gpui::Context<UsagePage>,
+    theme: Theme,
+) -> AnyElement {
+    let current = page.failure_page_size();
+    let mut children: Vec<AnyElement> = vec![menu_title("Rows per page", theme)];
+    for size in PAGE_SIZES {
+        let selected = size == current;
+        let entity = cx.entity();
+        children.push(row(
+            ElementId::NamedInteger("usage-failure-page-size".into(), size as u64),
+            &size.to_string(),
+            None,
+            selected,
+            false,
+            theme,
+            move |_, _, cx| {
+                entity.update(cx, |page, cx| page.set_failure_page_size(size, cx));
+            },
+            |_, _, _| {},
+        ));
+    }
+    let page = cx.entity();
+    panel("usage-failure-page-size-menu", 180., theme, children, page)
+}
+
 /// A small heading at the top of a menu.
 fn menu_title(label: &str, theme: Theme) -> AnyElement {
     div()
@@ -944,6 +1156,40 @@ pub fn text_button(
                 .on_mouse_down(MouseButton::Left, on_click)
         })
         .children(icon_path.map(|path| icon(path, 12., color)))
+        .child(label.to_string())
+        .into_any_element()
+}
+
+/// Outlined pager control: Previous / Next sit under the table card.
+pub fn outline_button(
+    id: &'static str,
+    label: &str,
+    enabled: bool,
+    theme: Theme,
+    on_click: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(ElementId::Name(SharedString::from(id)))
+        .h(px(28.))
+        .px(px(12.))
+        .rounded(px(8.))
+        .border_1()
+        .border_color(theme.border)
+        .bg(if enabled {
+            theme.bg_main
+        } else {
+            theme.overlay
+        })
+        .flex()
+        .items_center()
+        .text_size(theme.ui_px(12.))
+        .text_color(if enabled { theme.text } else { theme.text_3 })
+        .when(enabled, |button| {
+            button
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.bg_hover).border_color(theme.border_strong))
+                .on_mouse_down(MouseButton::Left, on_click)
+        })
         .child(label.to_string())
         .into_any_element()
 }

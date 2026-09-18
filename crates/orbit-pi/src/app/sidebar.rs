@@ -408,11 +408,12 @@ pub(crate) fn render_side_row(
             // title (shadcn's Marker + `shimmer`); row actions stay available
             // on hover.
             let title = session_title(*ix, session.title.clone().into(), theme, active, running);
-            // Two-line row (title + actions, then preview · age),
-            // indented under its workspace group so the list reads as a
+            // Indented under its workspace group so the list reads as a
             // tree. The open session takes the `active` fill with `active_fg`
             // ink — the same selected-destination grammar as the nav rows;
-            // row actions are revealed on hover.
+            // row actions are revealed on hover. A unique first-message
+            // preview adds a second line; a title that already is the prompt
+            // stays one line.
             // Outer item carries the inter-row spacing (padding) and the click
             // handler; the inner card holds the background/hover so the gap
             // between cards stays clear. Padding (not margin) is used because
@@ -440,8 +441,11 @@ pub(crate) fn render_side_row(
                 .gap(px(6.))
                 .when(active, |card| card.bg(theme.active))
                 .when(!active, |card| card.hover(|s| s.bg(theme.bg_hover)));
-            // Two-line text column: title + actions on top, then the
-            // preview with the age pinned to its right end.
+            // Text column: title + actions, then a preview only when it
+            // adds something the title does not already say. Age is always
+            // pinned to the last line.
+            let age = sessions::relative_time(session.modified);
+            let show_preview = !sidebar_preview_redundant(&session.title, &session.first_message);
             card = card.child(
                 div()
                     .flex_1()
@@ -472,40 +476,68 @@ pub(crate) fn render_side_row(
                                 deletable,
                                 this_for_menu,
                                 theme,
-                            )),
+                            ))
+                            .when(!show_preview, |line| {
+                                line.child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(theme.ui_px(10.5))
+                                        .text_color(theme.text_3)
+                                        .child(age.clone()),
+                                )
+                            }),
                     )
                     // Line 2 — first-message preview with the age at the very
                     // end, both tertiary metadata (accent is reserved for the
                     // running signal, not timestamps).
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(theme.ui_px(11.))
-                                    .line_height(px(14.))
-                                    .text_color(theme.text_3)
-                                    .child(session.first_message.clone()),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_size(theme.ui_px(10.5))
-                                    .text_color(theme.text_3)
-                                    .child(sessions::relative_time(session.modified)),
-                            ),
-                    ),
+                    .when(show_preview, |col| {
+                        col.child(
+                            div()
+                                .w_full()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(theme.ui_px(11.))
+                                        .line_height(px(14.))
+                                        .text_color(theme.text_3)
+                                        .child(session.first_message.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(theme.ui_px(10.5))
+                                        .text_color(theme.text_3)
+                                        .child(age),
+                                ),
+                        )
+                    }),
             );
             row = row.child(card);
             row.into_any_element()
         }
     }
+}
+
+/// The sidebar's second line is the first user message. Skip it when that
+/// text is empty or already the title (pi often names a session after the
+/// prompt), so rows don't print the same truncated sentence twice.
+pub(crate) fn sidebar_preview_redundant(title: &str, first_message: &str) -> bool {
+    let preview = first_message.trim();
+    if preview.is_empty() {
+        return true;
+    }
+    let title = title.trim();
+    if title.is_empty() {
+        return false;
+    }
+    let title = title.to_lowercase();
+    let preview = preview.to_lowercase();
+    preview == title || preview.starts_with(&title) || title.starts_with(&preview)
 }
 
 /// The hover-revealed '…' button on a quiet session row. Clicking it opens
@@ -1123,7 +1155,9 @@ impl OrbitApp {
         if let Some(menu) = self.session_menu.take() {
             // Defensive: a warm parked process would recreate the file.
             if self.lives.contains_key(&menu.path) {
-                self.toast_warning("Session has a live process — switch away and wait, then delete");
+                self.toast_warning(
+                    "Session has a live process — switch away and wait, then delete",
+                );
                 cx.notify();
                 return;
             }

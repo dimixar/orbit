@@ -187,35 +187,45 @@ impl OrbitApp {
 
     /// Settings → General rows for the updater, empty when this build cannot
     /// update itself (so debug and bare binaries never show a dead control).
-    pub(super) fn updater_rows(
+    pub(super) fn updater_section(
         &self,
         theme: Theme,
         this: Entity<OrbitApp>,
         cx: &Context<Self>,
-    ) -> Vec<AnyElement> {
+    ) -> Option<AnyElement> {
         if !self.updater_available(cx) {
-            return Vec::new();
+            return None;
         }
-        vec![
-            self.card(
-                theme,
-                "Automatic updates",
-                "Check for a newer signed release once at launch. Updates install after Orbit quits.",
-                Some(self.automatic_updates_toggle(theme, this.clone())),
-            ),
-            self.card(
-                theme,
-                "Check for updates",
-                "Verify a new release now; a staged update downloads, verifies, and installs after Orbit quits.",
-                Some(self.update_action_button(theme, this)),
-            ),
-        ]
+        Some(self.settings_section(
+            theme,
+            "Updates",
+            vec![
+                self.setting_row(
+                    theme,
+                    "Automatic updates",
+                    Some(
+                        "Check for a newer signed release once at launch. Updates install after Orbit quits.",
+                    ),
+                    None,
+                    Some(self.automatic_updates_toggle(theme, this.clone())),
+                ),
+                self.setting_row(
+                    theme,
+                    "Check for updates",
+                    Some(
+                        "Verify a new release now; a staged update downloads, verifies, and installs after Orbit quits.",
+                    ),
+                    None,
+                    Some(self.update_action_button(theme, this)),
+                ),
+            ],
+        ))
     }
 
     /// Settings → About's update row: the General control with a description
     /// that names the release once one is staged, so the app-menu About page
     /// can check for and install an update. `None` when this build cannot
-    /// update itself (matching [`Self::updater_rows`]).
+    /// update itself (matching [`Self::updater_section`]).
     pub(super) fn about_update_row(
         &self,
         theme: Theme,
@@ -241,10 +251,11 @@ impl OrbitApp {
                     .to_owned()
             }
         };
-        Some(self.card(
+        Some(self.setting_row(
             theme,
             "Updates",
-            &desc,
+            Some(&desc),
+            None,
             Some(self.update_action_button(theme, this)),
         ))
     }
@@ -269,6 +280,7 @@ impl OrbitApp {
             .cursor_pointer()
             .when(on, |track| track.bg(theme.accent).justify_end())
             .when(!on, |track| track.bg(theme.bg_raised).justify_start())
+            .hover(|track| track.border_color(theme.border_strong))
             .on_mouse_up(MouseButton::Left, move |_, _, cx| {
                 this.update(cx, |app, cx| {
                     let next = !app.automatic_updates_enabled;

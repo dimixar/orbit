@@ -240,7 +240,7 @@ pub struct OrbitApp {
     /// Text of the last optimistic follow-up. Cleared once pi confirms it in
     /// `queue_update`; restored to the composer if the command fails.
     pending_follow_up: Option<String>,
-    /// The Agent section's session rename field.
+    /// Rename field in the session-details popover.
     session_name_input: Entity<ComposerInput>,
     status: String,
     /// When the current `status` message was set; the status bar shows it
@@ -1045,7 +1045,7 @@ impl OrbitApp {
     /// Only sessions inside Orbit's own project list reach the sidebar (and
     /// the ⌘P palette); everything else pi has on disk is left where it is.
     pub(super) fn sidebar_sessions(&self) -> Vec<SessionInfo> {
-        let listed: Vec<SessionInfo> = self
+        let mut listed: Vec<SessionInfo> = self
             .sessions
             .iter()
             .filter(|session| {
@@ -1054,10 +1054,26 @@ impl OrbitApp {
             })
             .cloned()
             .collect();
+        // An explicit rename lives in memory until the next disk scan; keep
+        // the open row in step with the header so the sidebar doesn't lag.
+        if let Some(name) = self
+            .session_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            if let Some(path) = &self.current_session_path {
+                if let Some(session) = listed.iter_mut().find(|s| &s.path == path) {
+                    session.title = name.to_string();
+                }
+            }
+        }
         sessions_with_placeholder(
             &listed,
             self.current_session_path.as_deref(),
-            self.current_title.as_deref(),
+            self.session_name
+                .as_deref()
+                .or(self.current_title.as_deref()),
             self.current_workspace.as_deref(),
             !self.transcript.is_empty(),
         )
@@ -1526,8 +1542,8 @@ mod dialogs;
 mod events;
 mod helpers;
 mod open_in;
-mod pickers;
 mod pi_update_ui;
+mod pickers;
 mod runtime;
 mod search;
 mod session;

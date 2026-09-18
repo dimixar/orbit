@@ -128,10 +128,6 @@ pub struct ToolCall {
     pub output: Option<Value>,
     /// The tool execution reported `isError`.
     pub failed: bool,
-    /// Wall-clock time the tool took, measured client-side between
-    /// `tool_execution_start` and `tool_execution_end` (live runs only —
-    /// snapshots carry no timing). The header shows it once settled.
-    pub duration: Option<Duration>,
 }
 
 impl ToolCall {
@@ -153,7 +149,6 @@ impl ToolCall {
             },
             output: None,
             failed: false,
-            duration: None,
         }
     }
 }

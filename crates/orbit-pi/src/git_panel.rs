@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     canvas, div, fill, hsla, img, point, prelude::*, px, radians, size, Animation, AnimationExt,
-    AnyElement, Background, Bounds, ClickEvent, Context, Entity, FontWeight, Hsla, MouseDownEvent,
-    ObjectFit, PathBuilder, Pixels, Render, Transformation, Window,
+    AnyElement, Background, Bounds, ClickEvent, Context, Entity, Focusable, FontWeight, Hsla,
+    MouseDownEvent, ObjectFit, PathBuilder, Pixels, Render, Transformation, Window,
 };
 
 use crate::app::{icon, nerd_font_family};
@@ -117,6 +117,9 @@ pub struct GitPanel {
     has_commits: bool,
     branches: Vec<String>,
     branch_menu_open: bool,
+    /// Set when the branch menu is dismissed by an outside mouse-down so the
+    /// chip's following mouse-up does not toggle it straight back open.
+    menu_dismissed_at: Option<Instant>,
     branch_operation: bool,
 
     /// One-line feedback (success/failure) with a short TTL.
@@ -171,6 +174,7 @@ impl GitPanel {
             has_commits: false,
             branches: Vec::new(),
             branch_menu_open: false,
+            menu_dismissed_at: None,
             branch_operation: false,
             status: None,
             remote_web: None,
@@ -675,9 +679,31 @@ impl GitPanel {
         );
     }
 
+    fn toggle_branch_menu(&mut self, cx: &mut Context<Self>) {
+        // mouse-down-out closes the menu; the chip's mouse-up would otherwise
+        // toggle it open again on the same click (see AGENT.md popovers).
+        const GESTURE: Duration = Duration::from_millis(200);
+        if let Some(dismissed) = self.menu_dismissed_at.take() {
+            if dismissed.elapsed() < GESTURE {
+                return;
+            }
+        }
+        self.branch_menu_open = !self.branch_menu_open;
+        cx.notify();
+    }
+
+    fn dismiss_branch_menu(&mut self, cx: &mut Context<Self>) {
+        if self.branch_menu_open {
+            self.branch_menu_open = false;
+            self.menu_dismissed_at = Some(Instant::now());
+            cx.notify();
+        }
+    }
+
     fn checkout_branch(&mut self, branch: String, cx: &mut Context<Self>) {
         let Some(cwd) = self.cwd() else { return };
         self.branch_menu_open = false;
+        self.menu_dismissed_at = Some(Instant::now());
         self.branch_operation = true;
         cx.notify();
         self.spawn_data(
@@ -722,7 +748,7 @@ impl GitPanel {
             })
             .flex()
             .items_center()
-            .gap_2()
+            .gap(theme.space(8.))
             .border_b_1()
             .border_color(theme.border)
             .child(
@@ -777,17 +803,28 @@ impl GitPanel {
                     .rounded_md()
                     .border_1()
                     .border_color(theme.border)
-                    .bg(theme.bg_raised)
+                    .bg(if self.branch_menu_open {
+                        theme.active
+                    } else {
+                        theme.bg_raised
+                    })
                     .flex()
                     .items_center()
                     .gap(px(6.))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.bg_hover))
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.branch_menu_open = !this.branch_menu_open;
-                        cx.notify();
+                        this.toggle_branch_menu(cx);
                     }))
-                    .child(icon("icons/branch.svg", 12., theme.text_2))
+                    .child(icon(
+                        "icons/branch.svg",
+                        12.,
+                        if self.branch_menu_open {
+                            theme.active_fg
+                        } else {
+                            theme.text_2
+                        },
+                    ))
                     .child(
                         div()
                             .max_w(px(180.))
@@ -863,21 +900,21 @@ impl GitPanel {
             (GitTab::Graph, "icons/git-fork.svg", "Graph"),
         ];
         div()
-            .h(px(38.))
+            .h(px(40.))
             .flex_none()
-            .px(px(12.))
+            .px(theme.space(16.))
             .flex()
             .items_center()
-            .gap_1()
+            .gap(theme.space(6.))
             .border_b_1()
             .border_color(theme.border)
             .children(tabs.map(|(tab, tab_icon, label)| {
                 let selected = self.tab == tab;
                 div()
                     .id(gpui::ElementId::Name(format!("git-tab-{label}").into()))
-                    .h(px(26.))
+                    .h(px(28.))
                     .px(px(10.))
-                    .rounded_md()
+                    .rounded(px(8.))
                     .flex()
                     .items_center()
                     .gap(px(6.))
@@ -889,7 +926,7 @@ impl GitPanel {
                         FontWeight::NORMAL
                     })
                     .when(selected, |tab| {
-                        tab.bg(theme.bg_raised).text_color(theme.text)
+                        tab.bg(theme.active).text_color(theme.active_fg)
                     })
                     .when(!selected, |tab| {
                         tab.text_color(theme.text_3)
@@ -906,7 +943,11 @@ impl GitPanel {
                     .child(icon(
                         tab_icon,
                         13.,
-                        if selected { theme.text } else { theme.text_3 },
+                        if selected {
+                            theme.active_fg
+                        } else {
+                            theme.text_3
+                        },
                     ))
                     .child(label.to_string())
             }))
@@ -935,8 +976,8 @@ impl GitPanel {
             div()
                 .id("git-failure")
                 .flex_none()
-                .mx(px(16.))
-                .mt(px(10.))
+                .mx(theme.space(20.))
+                .mt(theme.space(12.))
                 .bg(theme.crit.opacity(0.1))
                 .border_1()
                 .border_color(theme.crit.opacity(0.45))
@@ -1026,13 +1067,13 @@ impl GitPanel {
         )
     }
 
-    fn changes_tab(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn changes_tab(&self, theme: Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         div()
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
-            .child(self.commit_bar(theme, cx))
+            .child(self.commit_bar(theme, window, cx))
             .child(
                 div()
                     .id("git-changes-scroll")
@@ -1041,12 +1082,13 @@ impl GitPanel {
                     .overflow_y_scroll()
                     .flex()
                     .flex_col()
+                    .pb(theme.space(20.))
                     .children(self.changes_body(theme, cx)),
             )
             .into_any_element()
     }
 
-    fn commit_bar(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+    fn commit_bar(&self, theme: Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let busy = self.pending.is_some() || self.generating;
         let has_changes = !self.staged.is_empty() || !self.unstaged.is_empty();
         let can_commit = !busy
@@ -1057,16 +1099,17 @@ impl GitPanel {
         };
         let behind = self.ahead_behind.map(|(_, behind)| behind).unwrap_or(0);
         let actions = bar_actions(has_changes, ahead, has_upstream, self.has_commits, behind);
+        let message_focused = self.message.read(cx).focus_handle(cx).is_focused(window);
         div()
             .flex_none()
-            .px(px(16.))
-            .pt(px(14.))
-            .pb(px(12.))
+            .px(theme.space(20.))
+            .pt(theme.space(16.))
+            .pb(theme.space(16.))
             .border_b_1()
             .border_color(theme.border)
             .flex()
             .flex_col()
-            .gap(px(10.))
+            .gap(theme.space(12.))
             .child(
                 // The message field: wraps and grows to a few rows, then
                 // scrolls internally. A fixed min height keeps the bar stable,
@@ -1075,13 +1118,17 @@ impl GitPanel {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .min_h(px(52.))
-                    .px(px(10.))
-                    .py(px(8.))
-                    .rounded_md()
+                    .min_h(px(56.))
+                    .px(theme.space(12.))
+                    .py(theme.space(10.))
+                    .rounded(px(8.))
                     .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.bg_raised)
+                    .border_color(if message_focused {
+                        theme.border_strong
+                    } else {
+                        theme.border
+                    })
+                    .bg(theme.bg_composer)
                     .flex()
                     .child(div().flex_1().min_w_0().child(self.message.clone())),
             )
@@ -1090,20 +1137,24 @@ impl GitPanel {
                     .flex()
                     .flex_wrap()
                     .items_center()
-                    .gap(px(10.))
+                    .gap(theme.space(12.))
                     .children((!self.unstaged.is_empty()).then(|| {
                         div()
+                            .id("git-include-unstaged-row")
+                            .h(px(28.))
+                            .px(px(6.))
+                            .ml(px(-6.))
+                            .rounded(px(8.))
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .child(
-                                check_box(self.include_unstaged, theme).on_click(cx.listener(
-                                    |this, _: &ClickEvent, _, cx| {
-                                        this.include_unstaged = !this.include_unstaged;
-                                        cx.notify();
-                                    },
-                                )),
-                            )
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.bg_hover))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.include_unstaged = !this.include_unstaged;
+                                cx.notify();
+                            }))
+                            .child(check_box(self.include_unstaged, theme))
                             .child(
                                 div()
                                     .text_size(theme.ui_px(12.))
@@ -1130,23 +1181,26 @@ impl GitPanel {
                             }))
                     }))
                     .child(div().flex_1())
-                    .child(
+                    .children(has_changes.then(|| {
                         // Generate sits left of the commit actions on the
                         // footer row, where it no longer competes with the
                         // message field for horizontal space.
                         div()
                             .id("git-generate")
-                            .h(px(30.))
+                            .h(px(28.))
                             .px(px(10.))
-                            .rounded_md()
+                            .rounded(px(8.))
                             .border_1()
                             .border_color(theme.border)
-                            .bg(theme.bg_raised)
+                            .bg(if self.generating {
+                                theme.overlay
+                            } else {
+                                theme.bg_raised
+                            })
                             .flex_none()
                             .flex()
                             .items_center()
                             .gap(px(5.))
-                            .cursor_pointer()
                             .text_size(theme.ui_px(12.))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(if self.generating {
@@ -1155,25 +1209,33 @@ impl GitPanel {
                                 theme.text
                             })
                             .when(!self.generating, |button| {
-                                button.hover(|s| s.bg(theme.bg_hover))
+                                button
+                                    .cursor_pointer()
+                                    .hover(|s| {
+                                        s.bg(theme.bg_hover).border_color(theme.border_strong)
+                                    })
+                                    .on_click(
+                                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                                            this.generate(cx)
+                                        }),
+                                    )
                             })
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.generate(cx)))
                             .child(if self.generating {
                                 spinner("git-generate-spinner", 12., theme)
                             } else {
-                                icon("icons/magic-wand.svg", 12., theme.accent).into_any_element()
+                                icon("icons/magic-wand.svg", 12., theme.text_2).into_any_element()
                             })
                             .child(if self.generating {
                                 "Generating…"
                             } else {
                                 "Generate"
-                            }),
-                    )
+                            })
+                    }))
                     .child(match actions {
                         BarActions::Commit => div()
                             .flex()
                             .items_center()
-                            .gap(px(8.))
+                            .gap(theme.space(8.))
                             .child(action_button(
                                 "git-commit-push",
                                 "Commit and push",
@@ -1198,8 +1260,16 @@ impl GitPanel {
                                 Some(if self.generating {
                                     spinner("git-commit-spinner", 13., theme)
                                 } else {
-                                    icon("icons/git-commit.svg", 13., theme.send_fg)
-                                        .into_any_element()
+                                    icon(
+                                        "icons/git-commit.svg",
+                                        13.,
+                                        if can_commit {
+                                            theme.send_fg
+                                        } else {
+                                            theme.text_3
+                                        },
+                                    )
+                                    .into_any_element()
                                 }),
                                 true,
                                 !can_commit,
@@ -1212,7 +1282,14 @@ impl GitPanel {
                         BarActions::Push { publish } => action_button(
                             "git-push",
                             if publish { "Publish branch" } else { "Push" },
-                            Some(icon("icons/upload.svg", 13., theme.send_fg).into_any_element()),
+                            Some(
+                                icon(
+                                    "icons/upload.svg",
+                                    13.,
+                                    if busy { theme.text_3 } else { theme.send_fg },
+                                )
+                                .into_any_element(),
+                            ),
                             true,
                             busy,
                             theme,
@@ -1288,14 +1365,25 @@ impl GitPanel {
 
     fn changes_body(&self, theme: Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
         if let Some(error) = &self.changes_error {
-            return vec![empty_note(theme, "Git unavailable", Some(error))];
+            return vec![empty_note(
+                theme,
+                "icons/stop.svg",
+                "Git unavailable",
+                Some(error),
+            )];
         }
         if self.changes_loading && self.staged.is_empty() && self.unstaged.is_empty() {
-            return vec![empty_note(theme, "Reading working tree…", None)];
+            return vec![empty_note(
+                theme,
+                "icons/git-compare.svg",
+                "Reading working tree…",
+                None,
+            )];
         }
         if self.staged.is_empty() && self.unstaged.is_empty() {
             return vec![empty_note(
                 theme,
+                "icons/check.svg",
                 "Working tree clean",
                 Some("There is nothing to commit."),
             )];
@@ -1310,9 +1398,7 @@ impl GitPanel {
                 true,
                 Some(cx.listener(|this, _: &ClickEvent, _, cx| this.unstage_all(cx))),
             ));
-            for row in self.staged.clone() {
-                out.push(self.change_row(row, true, theme, cx));
-            }
+            out.push(self.change_rows(self.staged.clone(), true, theme, cx));
         }
         if !self.unstaged.is_empty() {
             out.push(self.section_header(
@@ -1323,11 +1409,30 @@ impl GitPanel {
                 false,
                 Some(cx.listener(|this, _: &ClickEvent, _, cx| this.stage_all(cx))),
             ));
-            for row in self.unstaged.clone() {
-                out.push(self.change_row(row, false, theme, cx));
-            }
+            out.push(self.change_rows(self.unstaged.clone(), false, theme, cx));
         }
         out
+    }
+
+    fn change_rows(
+        &self,
+        files: Vec<StatusRow>,
+        staged: bool,
+        theme: Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut rows = div()
+            .flex()
+            .flex_col()
+            .pt(theme.space(4.))
+            .pb(theme.space(4.));
+        for (ix, row) in files.into_iter().enumerate() {
+            if ix > 0 {
+                rows = rows.child(changes_separator(theme));
+            }
+            rows = rows.child(self.change_row(row, staged, theme, cx));
+        }
+        rows.into_any_element()
     }
 
     fn section_header(
@@ -1340,12 +1445,14 @@ impl GitPanel {
         action: Option<impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static>,
     ) -> AnyElement {
         let mut row = div()
-            .px(px(16.))
-            .pt(px(14.))
-            .pb(px(6.))
+            .px(theme.space(20.))
+            .pt(theme.space(20.))
+            .pb(theme.space(8.))
+            .border_b_1()
+            .border_color(theme.border)
             .flex()
             .items_center()
-            .gap(px(8.))
+            .gap(theme.space(8.))
             .child(
                 div()
                     .text_size(theme.ui_px(11.))
@@ -1360,16 +1467,16 @@ impl GitPanel {
                     .id(gpui::ElementId::Name(
                         format!("git-section-action-{label}").into(),
                     ))
-                    .h(px(24.))
-                    .px(px(8.))
-                    .rounded_md()
+                    .h(px(28.))
+                    .px(theme.space(8.))
+                    .rounded(px(8.))
                     .flex()
                     .items_center()
-                    .gap(px(4.))
+                    .gap(theme.space(4.))
                     .cursor_pointer()
                     .text_size(theme.ui_px(11.5))
                     .text_color(theme.text_2)
-                    .hover(|s| s.bg(theme.bg_hover))
+                    .hover(|s| s.bg(theme.bg_hover).text_color(theme.text))
                     .on_click(action)
                     .child(if staged_section {
                         "Unstage all"
@@ -1411,17 +1518,23 @@ impl GitPanel {
         let confirm = self.pending_discard.as_deref() == Some(path.as_str());
         let row_path = path.clone();
 
-        let mut actions = div().flex().items_center().gap(px(4.)).flex_none();
+        let mut actions = div()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .flex_none()
+            .opacity(if confirm { 1. } else { 0. })
+            .group_hover("git-row", |s| s.opacity(1.));
         if staged {
             actions = actions.child(row_button(
-                "unstage",
+                format!("git-unstage-{path}"),
                 "icons/minus.svg",
                 theme,
                 cx.listener(move |this, _: &ClickEvent, _, cx| this.unstage(row_path.clone(), cx)),
             ));
         } else {
             actions = actions.child(row_button(
-                "stage",
+                format!("git-stage-{path}"),
                 "icons/plus.svg",
                 theme,
                 cx.listener(move |this, _: &ClickEvent, _, cx| this.stage(row_path.clone(), cx)),
@@ -1435,7 +1548,7 @@ impl GitPanel {
                             ))
                             .h(px(22.))
                             .px(px(6.))
-                            .rounded_md()
+                            .rounded(px(6.))
                             .bg(theme.crit)
                             .text_size(theme.ui_px(11.))
                             .font_weight(FontWeight::MEDIUM)
@@ -1445,7 +1558,10 @@ impl GitPanel {
                             .cursor_pointer()
                             .on_click(cx.listener({
                                 let p = path.clone();
-                                move |this, _: &ClickEvent, _, cx| this.discard(p.clone(), cx)
+                                move |this, _: &ClickEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.discard(p.clone(), cx)
+                                }
                             }))
                             .child("Discard"),
                     )
@@ -1456,14 +1572,15 @@ impl GitPanel {
                             ))
                             .h(px(22.))
                             .px(px(6.))
-                            .rounded_md()
+                            .rounded(px(6.))
                             .text_size(theme.ui_px(11.))
                             .text_color(theme.text_3)
                             .flex()
                             .items_center()
                             .cursor_pointer()
-                            .hover(|s| s.bg(theme.bg_hover))
+                            .hover(|s| s.bg(theme.overlay))
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
                                 this.pending_discard = None;
                                 cx.notify();
                             }))
@@ -1471,7 +1588,7 @@ impl GitPanel {
                     );
             } else {
                 actions = actions.child(row_button(
-                    "discard",
+                    format!("git-discard-{path}"),
                     "icons/trash.svg",
                     theme,
                     cx.listener({
@@ -1487,13 +1604,14 @@ impl GitPanel {
 
         div()
             .id(gpui::ElementId::Name(format!("git-row-{path}").into()))
-            .mx(px(12.))
+            .group("git-row")
+            .mx(theme.space(12.))
             .h(px(32.))
-            .px(px(8.))
-            .rounded_md()
+            .px(theme.space(8.))
+            .rounded(px(8.))
             .flex()
             .items_center()
-            .gap(px(8.))
+            .gap(theme.space(10.))
             .cursor_pointer()
             .hover(|s| s.bg(theme.bg_hover))
             .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
@@ -1543,14 +1661,15 @@ impl GitPanel {
 
     fn history_tab(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
         if let Some(error) = &self.history_error {
-            return empty_note(theme, "History unavailable", Some(error));
+            return empty_note(theme, "icons/stop.svg", "History unavailable", Some(error));
         }
         if self.history.is_empty() && self.history_loading {
-            return empty_note(theme, "Reading history…", None);
+            return empty_note(theme, "icons/clock.svg", "Reading history…", None);
         }
         if self.history.is_empty() {
             return empty_note(
                 theme,
+                "icons/clock.svg",
                 "No commits yet",
                 Some("Commits on this branch will show up here."),
             );
@@ -1583,14 +1702,15 @@ impl GitPanel {
 
     fn graph_tab(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
         if let Some(error) = &self.graph_error {
-            return empty_note(theme, "Graph unavailable", Some(error));
+            return empty_note(theme, "icons/stop.svg", "Graph unavailable", Some(error));
         }
         if self.graph.is_empty() && self.graph_loading {
-            return empty_note(theme, "Reading history…", None);
+            return empty_note(theme, "icons/git-fork.svg", "Reading history…", None);
         }
         if self.graph.is_empty() {
             return empty_note(
                 theme,
+                "icons/git-fork.svg",
                 "No commits yet",
                 Some("Commits across your local branches will show up here."),
             );
@@ -1643,8 +1763,7 @@ impl GitPanel {
             .flex_col()
             .occlude()
             .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                this.branch_menu_open = false;
-                cx.notify();
+                this.dismiss_branch_menu(cx);
             }));
         for branch in &self.branches {
             let selected = self.branch.as_deref() == Some(branch.as_str());
@@ -1798,7 +1917,7 @@ impl GitPanel {
 // (The `OpenFile` callback type is declared near the top of the module.)
 
 impl Render for GitPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.open {
             return div().into_any_element();
         }
@@ -1812,7 +1931,7 @@ impl Render for GitPanel {
             self.status = None;
         }
         let content = match self.tab {
-            GitTab::Changes => self.changes_tab(theme, cx),
+            GitTab::Changes => self.changes_tab(theme, window, cx),
             GitTab::History => self.history_tab(theme, cx),
             GitTab::Graph => self.graph_tab(theme, cx),
         };
@@ -1890,9 +2009,8 @@ fn status_color(badge: char, theme: Theme) -> Hsla {
     }
 }
 
-fn check_box(checked: bool, theme: Theme) -> gpui::Stateful<gpui::Div> {
+fn check_box(checked: bool, theme: Theme) -> gpui::Div {
     div()
-        .id("git-include-unstaged")
         .size(px(16.))
         .rounded(px(4.))
         .border_1()
@@ -1901,11 +2019,14 @@ fn check_box(checked: bool, theme: Theme) -> gpui::Stateful<gpui::Div> {
         } else {
             theme.border_strong
         })
-        .bg(if checked { theme.accent } else { theme.bg_main })
+        .bg(if checked {
+            theme.accent
+        } else {
+            theme.bg_composer
+        })
         .flex()
         .items_center()
         .justify_center()
-        .cursor_pointer()
         .when(checked, |box_| {
             box_.child(icon("icons/check.svg", 10., theme.send_fg))
         })
@@ -1941,33 +2062,37 @@ fn action_button(
 ) -> AnyElement {
     let mut button = div()
         .id(id)
-        .h(px(30.))
-        .px(px(12.))
-        .rounded_md()
+        .h(px(28.))
+        .px(px(10.))
+        .rounded(px(8.))
         .flex()
         .items_center()
         .justify_center()
         .gap(px(5.))
         .text_size(theme.ui_px(12.))
-        .font_weight(FontWeight::MEDIUM);
-    if primary {
-        button = button.bg(theme.send_bg).text_color(theme.send_fg);
+        .font_weight(FontWeight::MEDIUM)
+        .border_1();
+    if disabled {
+        button = button
+            .border_color(theme.border)
+            .bg(theme.overlay)
+            .text_color(theme.text_3);
+    } else if primary {
+        button = button
+            .border_color(gpui::transparent_black())
+            .bg(theme.send_bg)
+            .text_color(theme.send_fg)
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.send_bg_hover))
+            .on_click(listener);
     } else {
         button = button
-            .border_1()
             .border_color(theme.border)
             .bg(theme.bg_raised)
-            .text_color(theme.text_2);
-    }
-    if disabled {
-        button = button.opacity(0.5);
-    } else {
-        button = button.cursor_pointer().on_click(listener);
-        button = if primary {
-            button.hover(|s| s.bg(theme.send_bg_hover))
-        } else {
-            button.hover(|s| s.bg(theme.bg_hover))
-        };
+            .text_color(theme.text)
+            .cursor_pointer()
+            .hover(|s| s.bg(theme.bg_hover).border_color(theme.border_strong))
+            .on_click(listener);
     }
     if let Some(leading) = leading {
         button = button.child(leading);
@@ -1976,7 +2101,7 @@ fn action_button(
 }
 
 fn row_button(
-    id: &'static str,
+    id: impl Into<gpui::SharedString>,
     icon_path: &'static str,
     theme: Theme,
     listener: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
@@ -1984,13 +2109,16 @@ fn row_button(
     div()
         .id(gpui::ElementId::Name(id.into()))
         .size(px(22.))
-        .rounded_sm()
+        .rounded(px(6.))
         .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .hover(|s| s.bg(theme.bg_raised))
-        .on_click(listener)
+        .hover(|s| s.bg(theme.overlay))
+        .on_click(move |event, window, cx| {
+            cx.stop_propagation();
+            listener(event, window, cx);
+        })
         .child(icon(icon_path, 12., theme.text_3))
         .into_any_element()
 }
@@ -2436,6 +2564,16 @@ fn avatar_hue(email: &str, name: &str) -> f32 {
     HUES[(hash % HUES.len() as u64) as usize] / 360.
 }
 
+/// A hairline between changed-file rows, inset to the 20px page gutter so it
+/// lines up with the section label and the path — not a full-bleed rule.
+fn changes_separator(theme: Theme) -> AnyElement {
+    div()
+        .mx(theme.space(20.))
+        .h(px(1.))
+        .bg(theme.border)
+        .into_any_element()
+}
+
 /// A hairline between History rows, inset to the row content the way a commit
 /// list separates entries without boxing each one.
 fn commit_separator(theme: Theme) -> AnyElement {
@@ -2478,7 +2616,7 @@ fn load_more(
         .into_any_element()
 }
 
-fn empty_note(theme: Theme, title: &str, detail: Option<&str>) -> AnyElement {
+fn empty_note(theme: Theme, glyph: &'static str, title: &str, detail: Option<&str>) -> AnyElement {
     let mut column = div()
         .flex_1()
         .min_h_0()
@@ -2491,6 +2629,19 @@ fn empty_note(theme: Theme, title: &str, detail: Option<&str>) -> AnyElement {
         .py(px(60.))
         .child(
             div()
+                .size(px(32.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.bg_raised)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(icon(glyph, 16., theme.text_2)),
+        )
+        .child(
+            div()
+                .mt(px(12.))
                 .text_size(theme.ui_px(13.))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.text)

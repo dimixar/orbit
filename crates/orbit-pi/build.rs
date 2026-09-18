@@ -67,7 +67,10 @@ fn embed_windows_resources() {
     let resources = root.join("resources");
     let icons = root.join("../../assets/icons");
 
-    println!("cargo:rerun-if-changed={}", icons.join("icon.ico").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        icons.join("icon.ico").display()
+    );
     println!(
         "cargo:rerun-if-changed={}",
         resources.join("windows.manifest").display()
@@ -129,7 +132,10 @@ END
     );
     std::fs::write(&script, body).expect("failed to write the generated Windows resource script");
 
-    embed_resource::compile(&script, embed_resource::ParamsIncludeDirs([icons, resources]))
-        .manifest_optional()
-        .expect("failed to embed Windows resources into orbit-pi.exe");
+    embed_resource::compile(
+        &script,
+        embed_resource::ParamsIncludeDirs([icons, resources]),
+    )
+    .manifest_optional()
+    .expect("failed to embed Windows resources into orbit-pi.exe");
 }

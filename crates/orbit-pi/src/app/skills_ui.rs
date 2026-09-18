@@ -203,11 +203,7 @@ impl OrbitApp {
     fn skill_row(&self, skill: &Skill, theme: Theme, this: Entity<OrbitApp>) -> AnyElement {
         let selected = self.selected_skill.as_deref() == Some(skill.file.as_path());
         let file = skill.file.clone();
-        let description = if skill.description.trim().is_empty() {
-            "No description".to_string()
-        } else {
-            skill.description.clone()
-        };
+        let description = skill.description.trim();
         div()
             .id(ElementId::Name(format!("skill-row-{}", skill.name).into()))
             .mx(px(10.))
@@ -244,13 +240,15 @@ impl OrbitApp {
                             .truncate()
                             .child(skill.name.clone()),
                     )
-                    .child(
-                        div()
-                            .text_size(theme.ui_px(11.5))
-                            .text_color(theme.text_3)
-                            .truncate()
-                            .child(description),
-                    ),
+                    .when(!description.is_empty(), |col| {
+                        col.child(
+                            div()
+                                .text_size(theme.ui_px(11.5))
+                                .text_color(theme.text_3)
+                                .truncate()
+                                .child(description.to_string()),
+                        )
+                    }),
             )
             .into_any_element()
     }

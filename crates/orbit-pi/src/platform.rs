@@ -659,6 +659,7 @@ pub fn draws_window_controls() -> bool {
 /// path entirely — no move loop, and no caption-button commands. So the press
 /// hands the move to the OS itself (`WM_NCLBUTTONDOWN` + `HTCAPTION`), which
 /// is the standard way a custom titlebar drags a Windows window.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub fn start_window_drag(window: &Window) {
     #[cfg(windows)]
     windows_chrome::start_drag(window);

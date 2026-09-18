@@ -129,6 +129,7 @@ impl OrbitApp {
         }
         self.transcript.clear();
         self.current_title = None;
+        self.reset_session_name(cx);
         // The parked run's busy state lives with the parked session; this
         // view starts idle.
         self.busy = false;

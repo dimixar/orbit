@@ -374,7 +374,10 @@ fn parse_message(raw: &str) -> Option<String> {
 /// it followed instructions: one subject line, a blank line, then past-tense
 /// body bullets that each start with `- ` and end with a period.
 fn normalize(message: &str) -> String {
-    let mut lines = message.lines().map(str::trim).filter(|line| !line.is_empty());
+    let mut lines = message
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
     let Some(subject) = lines.next() else {
         return String::new();
     };
@@ -403,7 +406,10 @@ fn strip_bullet(line: &str) -> &str {
     let trimmed = line
         .trim_start_matches(['-', '*', '•', '–', '—'])
         .trim_start();
-    let digits = trimmed.len() - trimmed.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let digits = trimmed.len()
+        - trimmed
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .len();
     if digits > 0 {
         let rest = &trimmed[digits..];
         if let Some(rest) = rest.strip_prefix('.').or_else(|| rest.strip_prefix(')')) {
@@ -519,7 +525,10 @@ mod tests {
 
     #[test]
     fn normalize_keeps_a_subject_only_message() {
-        assert_eq!(normalize("fix: guard empty input."), "fix: guard empty input");
+        assert_eq!(
+            normalize("fix: guard empty input."),
+            "fix: guard empty input"
+        );
         assert_eq!(normalize("   \n "), "");
     }
 
@@ -544,7 +553,10 @@ mod tests {
         // New rule set: subject + blank line + one bullet per change, style matching.
         assert!(prompt.contains("<type>: <summary>"), "{prompt}");
         assert!(prompt.contains("ui"), "{prompt}");
-        assert!(prompt.contains("bulleted list with one line per change"), "{prompt}");
+        assert!(
+            prompt.contains("bulleted list with one line per change"),
+            "{prompt}"
+        );
         assert!(prompt.contains("- Past-tense sentence"), "{prompt}");
         assert!(prompt.contains("past tense"), "{prompt}");
         assert!(prompt.contains("Recent commits on this branch"), "{prompt}");
