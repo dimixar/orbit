@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6] - 2026-09-19
+
 ### Added
 
 - Clone a session straight from the sidebar — each session row's `…` menu
@@ -71,9 +73,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In-transcript find (⌘F) and a full-window image lightbox.
 - Native macOS app bundle, Developer-ID signed and notarizable.
 
-[Unreleased]: https://github.com/imrj05/orbit/compare/v0.0.5...HEAD
+[Unreleased]: https://github.com/imrj05/orbit/compare/v0.0.6...HEAD
 [0.0.1]: https://github.com/imrj05/orbit/releases/tag/v0.0.1
 [0.0.2]: https://github.com/imrj05/orbit/releases/tag/v0.0.2
 [0.0.3]: https://github.com/imrj05/orbit/releases/tag/v0.0.3
 [0.0.4]: https://github.com/imrj05/orbit/releases/tag/v0.0.4
 [0.0.5]: https://github.com/imrj05/orbit/releases/tag/v0.0.5
+[0.0.6]: https://github.com/imrj05/orbit/releases/tag/v0.0.6
