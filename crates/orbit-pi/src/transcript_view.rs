@@ -26,8 +26,8 @@ use gpui::{
     deferred, div, img, linear_color_stop, linear_gradient, list, point, prelude::*, px, svg,
     Animation, AnimationExt, AnyElement, App, ClipboardItem, ElementId, Font, FontFeatures,
     FontStyle, FontWeight, Hsla, Image, ImageSource, InteractiveText, ObjectFit, Pixels,
-    ScrollHandle, SharedString, StrikethroughStyle, StyledText, TextAlign, TextRun, UnderlineStyle,
-    Window,
+    ScrollHandle, ScrollWheelEvent, SharedString, StrikethroughStyle, StyledText, TextAlign,
+    TextRun, UnderlineStyle, Window,
 };
 
 use std::ops::Range;
@@ -93,6 +93,14 @@ const OUTPUT_TEXT_CAP: usize = 100_000;
 const OUTPUT_COLLAPSE_LINES: usize = 16;
 /// …showing this many lines collapsed.
 const OUTPUT_PREVIEW_LINES: usize = 12;
+/// Reasoning is bounded by height, not characters: a "Thought" card taller
+/// than this scrolls, so a long chain of thought stays readable without
+/// burying the answer below it.
+const THINKING_MAX_HEIGHT: f32 = 260.0;
+/// Reasoning budget once the card scrolls — far larger than
+/// [`DETAIL_TEXT_CAP`], since the max height keeps the virtualized row
+/// bounded regardless of how much text is retained.
+const THINKING_TEXT_CAP: usize = 40_000;
 /// Even expanded, one virtualized row paints at most this many output lines
 /// (the copy button always carries the full captured text).
 const OUTPUT_EXPANDED_PAINT_LINES: usize = 400;
@@ -127,6 +135,14 @@ type ExpandedSections = Rc<RefCell<HashSet<(usize, usize, u8)>>>;
 /// Code blocks expanded past their collapsed preview, keyed
 /// `(message_ix, prose_salt, block_ix)`.
 type ExpandedBlocks = Rc<RefCell<HashSet<(usize, u64, usize)>>>;
+/// Persistent scroll handles for expandable "Thought" cards, keyed
+/// `(message_ix, step_ix)`. The handle lets the card read its own
+/// offset/limit so a wheel that no longer scrolls the card can be chained
+/// to the transcript (rather than swallowed by `occlude`).
+pub(crate) type ThinkingScrolls = Rc<RefCell<HashMap<(usize, usize), ScrollHandle>>>;
+/// "Thought" cards collapsed by the reader, keyed `(message_ix, step_ix)`.
+/// Missing means expanded — the default once the activity group is open.
+pub(crate) type CollapsedThoughts = Rc<RefCell<HashSet<(usize, usize)>>>;
 
 pub(crate) struct TranscriptView {
     pub messages: Rc<RefCell<Vec<ChatMessage>>>,
@@ -145,6 +161,10 @@ pub(crate) struct TranscriptView {
     pub expanded_sections: ExpandedSections,
     /// Code blocks expanded past their collapsed preview.
     pub expanded_blocks: ExpandedBlocks,
+    /// Persistent scroll handles for the "Thought" cards.
+    pub thinking_scrolls: ThinkingScrolls,
+    /// "Thought" cards collapsed by the reader.
+    pub collapsed_thoughts: CollapsedThoughts,
     /// Rail tick currently hovered (drives the turn preview card).
     pub hovered_turn: Rc<Cell<Option<usize>>>,
     /// Assistant row whose footer usage metric is hovered (drives the
@@ -207,6 +227,8 @@ struct RowPaint {
     copied_sections: CopiedSections,
     expanded_sections: ExpandedSections,
     expanded_blocks: ExpandedBlocks,
+    thinking_scrolls: ThinkingScrolls,
+    collapsed_thoughts: CollapsedThoughts,
     hovered_usage: Rc<Cell<Option<usize>>>,
     image_opener: Option<ImageOpener>,
     search_hit: bool,
@@ -233,6 +255,8 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
     let copied_sections = view.copied_sections.clone();
     let expanded_sections = view.expanded_sections.clone();
     let expanded_blocks = view.expanded_blocks.clone();
+    let thinking_scrolls = view.thinking_scrolls.clone();
+    let collapsed_thoughts = view.collapsed_thoughts.clone();
     let hovered_turn = view.hovered_turn.clone();
     let hovered_usage = view.hovered_usage.clone();
     let rail_hint_dismissed = view.rail_hint_dismissed.clone();
@@ -397,6 +421,8 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
             copied_sections: copied_sections.clone(),
             expanded_sections: expanded_sections.clone(),
             expanded_blocks: expanded_blocks.clone(),
+            thinking_scrolls: thinking_scrolls.clone(),
+            collapsed_thoughts: collapsed_thoughts.clone(),
             hovered_usage: hovered_usage.clone(),
             image_opener: image_opener.clone(),
             search_hit: search_hits
@@ -968,51 +994,52 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
         ));
     }
 
-    // Steps render in sequence: each step's thought/tool group sits directly
-    // above the text it produced (Waku's interleaved activity rows).
+    // Every thought and tool call of the turn collects into ONE collapsible
+    // activity group: a tool-heavy turn reads as a single summary line
+    // ("Ran 2 commands · 3 file reads · 4 thoughts") that expands into all
+    // of its cards, instead of a stack of per-step "Ran …" rows.
     let answer_start = message
         .steps
         .iter()
         .position(|step| !step.text.trim().is_empty());
-    let last_step = message.steps.len().saturating_sub(1);
-    // Running count of tools across the message's steps — the flat index
-    // space the per-tool detail/copy keys use (stable across steps).
-    let mut tool_base = 0usize;
+    let work_start = message
+        .steps
+        .iter()
+        .position(|step| !step.thinking.is_empty() || !step.tools.is_empty());
+    let live_elapsed = paint.live_elapsed.unwrap_or(Duration::ZERO);
 
     for (step_ix, step) in message.steps.iter().enumerate() {
-        let before_answer = answer_start.is_none_or(|answer| step_ix < answer);
-        let is_live_step = paint.live && step_ix == last_step;
-        let has_work = !step.thinking.is_empty() || !step.tools.is_empty();
-
-        if has_work {
-            // Pre-answer work hides behind the turn fold; later bursts stay
-            // visible as collapsed, expandable groups.
+        // The group sits where the turn's first work happened, so any text
+        // that preceded it stays above; the rest of the text follows below.
+        if Some(step_ix) == work_start {
+            let before_answer = answer_start.is_none_or(|answer| step_ix < answer);
+            // Pre-answer work hides behind the turn fold; later work stays
+            // visible as a collapsed, expandable group.
             let show_work = paint.live || paint.fold_open || !before_answer;
             if show_work {
                 let open = paint
                     .expanded_activities
                     .borrow()
-                    .get(&(ix, step_ix))
+                    .get(&(ix, 0))
                     .copied()
-                    .unwrap_or(is_live_step);
-                content = content.child(render_step_group(
+                    .unwrap_or(paint.live);
+                content = content.child(render_activity_group(
                     ix,
-                    step_ix,
-                    tool_base,
-                    step,
+                    &message.steps,
                     open,
-                    is_live_step,
-                    paint.live_elapsed.unwrap_or(Duration::ZERO),
+                    paint.live,
+                    live_elapsed,
                     theme,
                     paint.expanded_activities.clone(),
                     paint.expanded_tools.clone(),
                     paint.copied_sections.clone(),
                     paint.expanded_sections.clone(),
                     paint.scroller.clone(),
+                    paint.thinking_scrolls.clone(),
+                    paint.collapsed_thoughts.clone(),
                 ));
             }
         }
-        tool_base += step.tools.len();
 
         if !step.text.is_empty() {
             // Live rows never collapse code blocks — a growing block's tail
@@ -1126,23 +1153,24 @@ fn render_assistant_error(error: &str, theme: Theme) -> AnyElement {
         .into_any_element()
 }
 
-/// Waku reasoning row: "Thinking" while live, "Thought for <duration>" once
-/// settled; the raw reasoning text is expandable detail (auto-open live).
-#[allow(clippy::too_many_arguments)]
-/// One step's activity group: a collapsed "Ran 7 commands · 4 thoughts"
-/// summary line (Waku) that expands into the thought card and the step's
-/// tool rows.
-/// Waku's activity summary: counts the step's tool kinds and thoughts —
-/// "Ran 7 commands · 4 thoughts", "Ran 1 file read · 1 thought".
-fn step_activity_title(step: &Step, live: bool) -> String {
+/// The turn's activity summary: counts every tool kind and every thought
+/// across the turn's steps — "Ran 7 commands · 4 thoughts", "Ran 1 file
+/// read · 1 thought", "Ran 2 commands · 3 file reads · 1 file edit".
+fn activity_title(steps: &[Step], live: bool) -> String {
     let mut parts: Vec<String> = Vec::new();
-    let (mut commands, mut reads, mut edits, mut other) = (0usize, 0usize, 0usize, 0usize);
-    for tool in &step.tools {
-        match tool.name.as_str() {
-            "bash" | "shell" => commands += 1,
-            "read" | "grep" | "find" | "glob" | "search" => reads += 1,
-            "edit" | "write" => edits += 1,
-            _ => other += 1,
+    let (mut commands, mut reads, mut edits, mut other, mut thoughts) =
+        (0usize, 0usize, 0usize, 0usize, 0usize);
+    for step in steps {
+        for tool in &step.tools {
+            match tool.name.as_str() {
+                "bash" | "shell" => commands += 1,
+                "read" | "grep" | "find" | "glob" | "search" => reads += 1,
+                "edit" | "write" => edits += 1,
+                _ => other += 1,
+            }
+        }
+        if !step.thinking.is_empty() {
+            thoughts += 1;
         }
     }
     let units = |n: usize, word: &str| format!("{} {}{}", n, word, if n == 1 { "" } else { "s" });
@@ -1158,11 +1186,11 @@ fn step_activity_title(step: &Step, live: bool) -> String {
     if other > 0 {
         parts.push(format!("Ran {}", units(other, "tool")));
     }
-    if !step.thinking.is_empty() {
+    if thoughts > 0 {
         parts.push(if live {
             "Thinking".to_string()
         } else {
-            units(1, "thought")
+            units(thoughts, "thought")
         });
     }
     if parts.is_empty() {
@@ -1175,12 +1203,14 @@ fn step_activity_title(step: &Step, live: bool) -> String {
     parts.join(" \u{b} ")
 }
 
+/// The turn's activity group: a single collapsed summary line ("Ran 2
+/// commands · 3 file reads · 4 thoughts") that expands into every thought
+/// and tool card the turn produced. Keyed once per message so a tool-heavy
+/// turn is one row, never a stack of per-step "Ran …" rows.
 #[allow(clippy::too_many_arguments)]
-fn render_step_group(
+fn render_activity_group(
     ix: usize,
-    step_ix: usize,
-    tool_base: usize,
-    step: &Step,
+    steps: &[Step],
     open: bool,
     live: bool,
     elapsed: Duration,
@@ -1190,9 +1220,13 @@ fn render_step_group(
     copied_sections: CopiedSections,
     expanded_sections: ExpandedSections,
     scroller: MessageScrollerState,
+    thinking_scrolls: ThinkingScrolls,
+    collapsed_thoughts: CollapsedThoughts,
 ) -> impl IntoElement {
-    let title = step_activity_title(step, live);
-    let last = step.tools.len().saturating_sub(1);
+    let title = activity_title(steps, live);
+    let total_tools = steps.iter().map(|step| step.tools.len()).sum::<usize>();
+    let last_tool = total_tools.saturating_sub(1);
+    let key = (ix, 0usize);
     let mut group = div()
         .w_full()
         .min_w_0()
@@ -1201,10 +1235,7 @@ fn render_step_group(
         .gap(px(4.))
         .child(
             div()
-                .id(ElementId::NamedInteger(
-                    "activity-toggle".into(),
-                    (ix as u64) << 16 | step_ix as u64,
-                ))
+                .id(ElementId::NamedInteger("activity-toggle".into(), ix as u64))
                 .w_full()
                 .min_w_0()
                 .h(px(26.))
@@ -1236,7 +1267,6 @@ fn render_step_group(
                     let expanded_activities = expanded_activities.clone();
                     let scroller = scroller.clone();
                     move |_, _, cx| {
-                        let key = (ix, step_ix);
                         let mut map = expanded_activities.borrow_mut();
                         let next = !map.get(&key).copied().unwrap_or(false);
                         map.insert(key, next);
@@ -1258,41 +1288,97 @@ fn render_step_group(
             .flex()
             .flex_col()
             .gap(px(8.));
-        if !step.thinking.is_empty() {
-            body = body.child(render_thinking_body(&step.thinking, live, theme));
+        let mut tool_base = 0usize;
+        for (step_ix, step) in steps.iter().enumerate() {
+            if !step.thinking.is_empty() {
+                let duration = step_thinking_duration(steps, step_ix);
+                body = body.child(render_thinking_body(
+                    &step.thinking,
+                    live,
+                    duration,
+                    theme,
+                    (ix, step_ix),
+                    scroller.clone(),
+                    thinking_scrolls.clone(),
+                    collapsed_thoughts.clone(),
+                ));
+            }
+            body = body.children(step.tools.iter().enumerate().map(|(tool_ix, tool)| {
+                let flat = tool_base + tool_ix;
+                render_activity_card(
+                    tool,
+                    live && flat == last_tool,
+                    !live,
+                    elapsed,
+                    theme,
+                    (ix, flat),
+                    expanded_tools.borrow().contains(&(ix, flat)),
+                    expanded_tools.clone(),
+                    copied_sections.clone(),
+                    expanded_sections.clone(),
+                    scroller.clone(),
+                )
+            }));
+            tool_base += step.tools.len();
         }
-        body = body.children(step.tools.iter().enumerate().map(|(tool_ix, tool)| {
-            let flat = tool_base + tool_ix;
-            render_activity_card(
-                tool,
-                live && tool_ix == last,
-                !live,
-                elapsed,
-                theme,
-                (ix, flat),
-                expanded_tools.borrow().contains(&(ix, flat)),
-                expanded_tools.clone(),
-                copied_sections.clone(),
-                expanded_sections.clone(),
-                scroller.clone(),
-            )
-        }));
         group = group.child(body);
     }
 
     group
 }
 
-/// The reasoning card body inside a step group ("Thinking" live, "Thought
-/// for <duration>" settled).
-fn render_thinking_body(thinking: &str, live: bool, theme: Theme) -> impl IntoElement {
-    let title = if live {
-        "Thinking".to_string()
-    } else {
-        "Thought".to_string()
-    };
-    let detail = cap_chars(thinking, DETAIL_TEXT_CAP);
-    div()
+/// How long a step's reasoning took. Live runs carry the measured value on
+/// the step; reloaded sessions have no timing, so estimate it from pi's
+/// per-step timestamps — the gap to the next step's message covers this
+/// step's LLM call (reasoning + call generation) plus the tools it ran.
+fn step_thinking_duration(steps: &[Step], step_ix: usize) -> Option<Duration> {
+    let step = steps.get(step_ix)?;
+    if let Some(duration) = step.thinking_duration {
+        return Some(duration);
+    }
+    if step.thinking.is_empty() {
+        return None;
+    }
+    let start = step.timestamp?;
+    let end = steps.get(step_ix + 1).and_then(|next| next.timestamp)?;
+    let millis = end.checked_sub(start)?;
+    (millis > 0).then(|| Duration::from_millis(millis as u64))
+}
+
+/// The reasoning card body inside a turn's activity group ("Thinking" live,
+/// "Thought" settled). The header collapses/expands the reasoning; tall
+/// reasoning scrolls inside a height-capped card so a long chain of thought
+/// never pushes the answer off-screen.
+#[allow(clippy::too_many_arguments)]
+fn render_thinking_body(
+    thinking: &str,
+    live: bool,
+    duration: Option<Duration>,
+    theme: Theme,
+    key: (usize, usize),
+    scroller: MessageScrollerState,
+    thinking_scrolls: ThinkingScrolls,
+    collapsed_thoughts: CollapsedThoughts,
+) -> impl IntoElement {
+    let label = if live { "Thinking" } else { "Thought" };
+    // The label stays the bold accent anchor; the timing is secondary —
+    // normal weight and muted, like the other metric text in the row.
+    let timing = duration.map(|duration| {
+        if live {
+            format!("for {}", format_working_elapsed(duration))
+        } else {
+            format!("for {}", format_duration(duration))
+        }
+    });
+    let detail = cap_chars(thinking, THINKING_TEXT_CAP);
+    let collapsed = collapsed_thoughts.borrow().contains(&key);
+    let handle = thinking_scrolls
+        .borrow_mut()
+        .entry(key)
+        .or_default()
+        .clone();
+    let id = (key.0 as u64) << 16 | key.1 as u64;
+    let mut card = div()
         .rounded(px(9.))
         .border_1()
         .border_color(theme.border_strong)
@@ -1304,28 +1390,154 @@ fn render_thinking_body(thinking: &str, live: bool, theme: Theme) -> impl IntoEl
         .gap(px(5.))
         .child(
             div()
+                .id(ElementId::NamedInteger("thought-toggle".into(), id))
+                .w_full()
+                .min_w_0()
                 .flex()
                 .items_center()
                 .gap(px(8.))
+                .cursor_pointer()
                 .text_size(theme.ui_px(13.))
                 .line_height(theme.ui_px(17.))
+                .hover(|style| style.text_color(theme.text))
                 .child(glyph("icons/spark.svg", 13., theme.text_3))
                 .child(
                     div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.accent)
-                        .child(title),
-                ),
-        )
-        .child(
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(5.))
+                        .child(
+                            div()
+                                .flex_none()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme.accent)
+                                .child(label),
+                        )
+                        .when_some(timing, |row, timing| {
+                            row.child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_weight(FontWeight::NORMAL)
+                                    .text_color(theme.text_3)
+                                    .child(timing),
+                            )
+                        }),
+                )
+                .child(glyph(
+                    if collapsed {
+                        "icons/chevron-right.svg"
+                    } else {
+                        "icons/chevron-down.svg"
+                    },
+                    11.,
+                    theme.text_3,
+                ))
+                .on_click({
+                    let collapsed_thoughts = collapsed_thoughts.clone();
+                    let scroller = scroller.clone();
+                    move |_, _, cx| {
+                        let mut set = collapsed_thoughts.borrow_mut();
+                        if !set.remove(&key) {
+                            set.insert(key);
+                        }
+                        drop(set);
+                        scroller.remeasure_toggle(key.0);
+                        cx.refresh_windows();
+                    }
+                }),
+        );
+    if !collapsed {
+        card = card.child(
             div()
+                // A stable id lets GPUI remember the scroll offset across
+                // re-renders (element-state keyed scrolling).
+                .id(ElementId::NamedInteger("thinking-scroll".into(), id))
+                .w_full()
+                .min_w_0()
+                .max_h(px(THINKING_MAX_HEIGHT))
+                .overflow_y_scroll()
+                // A tracked handle lets `chain_thinking_scroll` read the
+                // card's offset and limit once it bottoms out.
+                .track_scroll(&handle)
+                // The transcript is a virtualized list whose wheel handler
+                // bubbles and claims the event whenever its hitbox is under
+                // the cursor — so a long thought would scroll the page
+                // instead of the card. `occlude` blocks hitboxes behind it,
+                // which flips the list's `should_handle_scroll` to false and
+                // leaves the wheel to this card.
+                .occlude()
+                // `occlude` also stops the page from ever scrolling while
+                // the card is at its end, so hand the leftover wheel back to
+                // the transcript (a card too short to scroll forwards the
+                // whole delta, so the page still moves normally).
+                .on_scroll_wheel({
+                    let handle = handle.clone();
+                    let scroller = scroller.clone();
+                    move |event, window, cx| {
+                        chain_thinking_scroll(&handle, &scroller, event, window.line_height(), cx);
+                    }
+                })
                 .font_family(theme::code_font_family())
                 .text_size(theme.code_px(12.))
                 .line_height(theme.code_px(18.))
                 .text_color(theme.tool_meta)
                 .whitespace_normal()
                 .child(detail),
-        )
+        );
+    }
+    card
+}
+
+/// Chain a wheel event from a "Thought" card to the transcript once the card
+/// has scrolled as far as it can. The card's own `overflow_y_scroll` listener
+/// is registered *after* this one and GPUI dispatches bubble listeners in
+/// reverse, so it runs first and adds the raw delta to the handle
+/// *unclamped* — the offset read here is therefore the pre-clamp value. The
+/// part a clamp would discard is exactly what the transcript should consume.
+fn chain_thinking_scroll(
+    handle: &ScrollHandle,
+    scroller: &MessageScrollerState,
+    event: &ScrollWheelEvent,
+    line_height: Pixels,
+    cx: &mut App,
+) {
+    let raw = event.delta.pixel_delta(line_height);
+    // The card only scrolls on Y; mirror the built-in listener's fallback (a
+    // purely horizontal delta over a vertical scroller is applied to Y).
+    let delta_y = if raw.y != px(0.) { raw.y } else { raw.x };
+    if delta_y == px(0.) {
+        return;
+    }
+    let offset = handle.offset();
+    let max = handle.max_offset().height;
+    // The built-in listener already added `delta_y` without clamping, so the
+    // pre-event offset is this event's offset minus the delta it applied.
+    let previous = offset.y - delta_y;
+    let (clamped, residual) = split_thinking_scroll(previous, max, delta_y);
+    if clamped != offset.y {
+        handle.set_offset(point(offset.x, clamped));
+        cx.refresh_windows();
+    }
+    if residual != px(0.) {
+        // `ListState::scroll_by` is positive towards the live edge; the wheel
+        // delta is negative in that direction.
+        scroller.scroll_by(-residual);
+        cx.refresh_windows();
+    }
+}
+
+/// Split a wheel delta between a "Thought" card and the transcript: clamp the
+/// card to its scrollable range and return `(card_offset, residual)`, where
+/// `residual` is the part the card could not consume and the transcript
+/// should. `previous` is the card's offset before this event; `max` is its
+/// scrollable extent (positive pixels).
+fn split_thinking_scroll(previous: Pixels, max: Pixels, delta: Pixels) -> (Pixels, Pixels) {
+    let unclamped = previous + delta;
+    let clamped = unclamped.clamp(-max, px(0.));
+    (clamped, unclamped - clamped)
 }
 
 /// The `ask_user_question` card: a compact question record for the transcript.
@@ -4887,6 +5099,102 @@ mod tests {
             fold_label(Some(Duration::from_secs(341))),
             "Worked for 5 minutes 41 seconds"
         );
+    }
+
+    #[test]
+    fn step_thinking_duration_prefers_live_and_estimates_on_reload() {
+        let step = |thinking: &str, timestamp: Option<i64>, duration: Option<Duration>| Step {
+            thinking: thinking.into(),
+            timestamp,
+            thinking_duration: duration,
+            ..Step::default()
+        };
+        // A measured duration always wins over the timestamp estimate.
+        let live = vec![
+            step("a", Some(1_000), Some(Duration::from_millis(2_500))),
+            step("b", Some(9_999), None),
+        ];
+        assert_eq!(
+            step_thinking_duration(&live, 0),
+            Some(Duration::from_millis(2_500))
+        );
+        // Reload: estimated from the gap to the next step's timestamp.
+        let reload = vec![step("a", Some(1_000), None), step("b", Some(4_500), None)];
+        assert_eq!(
+            step_thinking_duration(&reload, 0),
+            Some(Duration::from_millis(3_500))
+        );
+        // The last step has no following timestamp to measure against.
+        assert_eq!(step_thinking_duration(&reload, 1), None);
+        // A step without reasoning has no duration at all.
+        let no_think = vec![
+            step("", Some(1_000), None),
+            step("b", Some(2_000), None),
+        ];
+        assert_eq!(step_thinking_duration(&no_think, 0), None);
+    }
+
+    #[test]
+    fn split_thinking_scroll_chains_only_past_the_edges() {
+        // Mid-card: the full delta stays on the card, nothing forwarded.
+        assert_eq!(
+            split_thinking_scroll(px(-40.), px(100.), px(-10.)),
+            (px(-50.), px(0.))
+        );
+        // At the bottom: the overshoot is clamped off and forwarded whole.
+        assert_eq!(
+            split_thinking_scroll(px(-95.), px(100.), px(-10.)),
+            (px(-100.), px(-5.))
+        );
+        // At the top scrolling up: the overshoot goes back to the transcript.
+        assert_eq!(
+            split_thinking_scroll(px(-5.), px(100.), px(10.)),
+            (px(0.), px(5.))
+        );
+        // A card that cannot scroll forwards everything (short content).
+        assert_eq!(
+            split_thinking_scroll(px(0.), px(0.), px(-10.)),
+            (px(0.), px(-10.))
+        );
+    }
+
+    #[test]
+    fn activity_title_aggregates_every_step() {
+        let tool = |name: &str| ToolCall {
+            name: name.to_string(),
+            summary: String::new(),
+            path: None,
+            added: 0,
+            removed: 0,
+            id: None,
+            args: None,
+            output: None,
+            failed: false,
+            duration: None,
+        };
+        // Two steps' worth of work lands on one summary line — counts span
+        // every step instead of one "Ran …" row per step.
+        let steps = vec![
+            Step {
+                thinking: "first".into(),
+                tools: vec![tool("edit")],
+                ..Step::default()
+            },
+            Step {
+                thinking: "second".into(),
+                tools: vec![tool("bash"), tool("read")],
+                ..Step::default()
+            },
+        ];
+        assert_eq!(
+            activity_title(&steps, false),
+            "Ran 1 command \u{b} Ran 1 file read \u{b} Ran 1 file edit \u{b} 2 thoughts"
+        );
+        assert_eq!(
+            activity_title(&steps, true),
+            "Ran 1 command \u{b} Ran 1 file read \u{b} Ran 1 file edit \u{b} Thinking"
+        );
+        assert_eq!(activity_title(&[], false), "Worked");
     }
 
     #[test]

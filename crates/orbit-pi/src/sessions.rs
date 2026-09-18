@@ -8,7 +8,7 @@
 
 use std::{
     fs,
-    io::{BufRead, BufReader, Read, Seek, SeekFrom},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -91,6 +91,107 @@ fn load_sessions_in(dir: &Path) -> Vec<SessionInfo> {
 /// Only session files matter — header/group-directory events are ignored.
 fn is_session_file(path: &Path) -> bool {
     path.extension().is_some_and(|ext| ext == "jsonl")
+}
+
+/// Duplicate a session file as a brand-new session — the on-disk equivalent of
+/// pi's `/clone`: a fresh session id, pi's `<timestamp>_<id>.jsonl` filename
+/// convention, and the source's entries copied through verbatim.
+///
+/// The whole file is copied rather than one branch, so the clone is exactly as
+/// loadable as its source; the header carries `parentSession` for provenance,
+/// as pi's own branched sessions do. A trailing partial line — the source may
+/// be mid-append while a run is in flight — is dropped so the copy never ends
+/// on an unparseable entry. The source is only ever read, so cloning a session
+/// with a live pi process is safe. Returns the new session's path.
+pub fn clone_session_file(source: &Path) -> anyhow::Result<PathBuf> {
+    let bytes = fs::read(source)?;
+    let content = complete_lines(&bytes);
+
+    // The first line is the session header; rewrite its identity, keep the rest
+    // (version, cwd, any field a future pi adds) untouched.
+    let first_break = content
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .ok_or_else(|| anyhow::anyhow!("session file has no header line"))?;
+    let mut header: Value = serde_json::from_slice(&content[..first_break])?;
+    if header.get("type").and_then(Value::as_str) != Some("session") {
+        anyhow::bail!("not a pi session file");
+    }
+
+    let id = next_session_id();
+    let timestamp = now_iso_millis();
+    header["id"] = Value::String(id.clone());
+    header["timestamp"] = Value::String(timestamp.clone());
+    header["parentSession"] = Value::String(source.to_string_lossy().into_owned());
+
+    let dir = source.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = format!("{}_{id}.jsonl", timestamp.replace([':', '.'], "-"));
+    let target = dir.join(file_name);
+
+    let mut out = Vec::with_capacity(content.len() + 160);
+    out.extend_from_slice(header.to_string().as_bytes());
+    out.push(b'\n');
+    out.extend_from_slice(&content[first_break + 1..]);
+
+    // `create_new` so a clone can never clobber a session file that already
+    // exists (ids are unique, so this only fires on a genuine collision).
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)?;
+    file.write_all(&out)?;
+    Ok(target)
+}
+
+/// Everything up to and including the final newline. pi appends whole JSONL
+/// lines, but a read can catch the writer mid-line; an incomplete trailing line
+/// would make the copy end on unparseable JSON. An empty slice (no complete
+/// line at all) is left for the caller to reject as a missing header.
+fn complete_lines(bytes: &[u8]) -> &[u8] {
+    match bytes.iter().rposition(|byte| *byte == b'\n') {
+        Some(last) => &bytes[..=last],
+        None => &[],
+    }
+}
+
+/// pi names session files after an ISO-8601 instant with `:` and `.` swapped
+/// for `-`.
+fn now_iso_millis() -> String {
+    chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string()
+}
+
+/// A UUIDv7-shaped session id, matching pi's `createSessionId` (uuid v7)
+/// without adding a uuid dependency. Time-ordered so clones sort sensibly,
+/// with the clock plus a per-process counter supplying the entropy — two
+/// clones in the same millisecond, and two Orbit processes, cannot collide.
+fn next_session_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let millis = now.as_millis() as u64;
+    let nanos = now.subsec_nanos() as u64;
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    // 12 bits for the v7 `rand_a` field, 48 for `rand_b`; the process id and
+    // the counter keep concurrent writers in separate id spaces.
+    let rand_a = ((seq << 4) ^ nanos) & 0x0fff;
+    let rand_b = (nanos << 32)
+        ^ (std::process::id() as u64).rotate_left(17)
+        ^ seq.rotate_left(31);
+
+    format!(
+        "{:08x}-{:04x}-7{:03x}-{:04x}-{:012x}",
+        (millis >> 16) & 0xffff_ffff,
+        millis & 0xffff,
+        rand_a,
+        0x8000 | (rand_b & 0x3fff),
+        rand_b & 0xffff_ffff_ffff,
+    )
 }
 
 /// Debounced watcher over pi's session store.
@@ -457,6 +558,118 @@ mod tests {
 
         assert!(read_messages_payload(&dir.join("missing.jsonl")).is_none());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clone_session_regenerates_identity_and_preserves_entries() {
+        let dir = std::env::temp_dir().join("orbit-clone-session-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("2026-01-01T00-00-00-000Z_original.jsonl");
+        fs::write(
+            &source,
+            "{\"type\":\"session\",\"version\":3,\"id\":\"original\",\"timestamp\":\"2026-01-01T00:00:00.000Z\",\"cwd\":\"/tmp/ws\"}\n\
+             {\"type\":\"message\",\"id\":\"a\",\"parentId\":null,\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n\
+             {\"type\":\"message\",\"id\":\"b\",\"parentId\":\"a\",\"message\":{\"role\":\"assistant\",\"content\":\"yo\"}}\n",
+        )
+        .unwrap();
+
+        let copy = clone_session_file(&source).unwrap();
+        assert_ne!(copy, source, "clone must be its own file");
+        assert_eq!(copy.parent(), source.parent(), "clone stays in the store");
+        assert!(copy.exists());
+
+        let header = fs::read_to_string(&copy)
+            .unwrap()
+            .lines()
+            .next()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .unwrap();
+        assert_eq!(header["type"], "session");
+        assert_eq!(
+            header["version"].as_u64(),
+            Some(3),
+            "header fields pi owns are kept"
+        );
+        assert_eq!(header["cwd"], "/tmp/ws");
+        assert_ne!(header["id"], "original", "id must be regenerated");
+        assert_eq!(header["parentSession"], source.to_string_lossy().as_ref());
+
+        // pi's own discovery must see the copy as an independent session with
+        // the same content.
+        let listed = read_session(&copy).expect("clone is a loadable session");
+        assert_eq!(listed.title, "hi");
+        assert_eq!(listed.id, header["id"].as_str().unwrap());
+        let source_entries = fs::read_to_string(&source).unwrap().lines().count();
+        assert_eq!(
+            fs::read_to_string(&copy).unwrap().lines().count(),
+            source_entries,
+            "every source line is carried over"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clone_session_drops_a_partial_trailing_line() {
+        // A run in flight can be caught mid-append; the copy must not end on
+        // unparseable JSON.
+        let dir = std::env::temp_dir().join("orbit-clone-partial-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("2026-01-01T00-00-00-000Z_partial.jsonl");
+        fs::write(
+            &source,
+            concat!(
+                "{\"type\":\"session\",\"id\":\"partial\",\"cwd\":\"/tmp/ws\"}\n",
+                "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n",
+                // No trailing newline: the writer was caught mid-line.
+                "{\"type\":\"message\",\"message\":{\"role\":\"assist",
+            ),
+        )
+        .unwrap();
+
+        let copy = clone_session_file(&source).unwrap();
+        let text = fs::read_to_string(&copy).unwrap();
+        assert!(text.ends_with('\n'));
+        assert!(!text.contains("assist"));
+        for line in text.lines() {
+            assert!(serde_json::from_str::<Value>(line).is_ok(), "{line}");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clone_session_rejects_a_file_that_is_not_a_session() {
+        let dir = std::env::temp_dir().join("orbit-clone-reject-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("not-a-session.jsonl");
+        fs::write(&path, "{\"type\":\"message\"}\n").unwrap();
+        assert!(clone_session_file(&path).is_err());
+        // No stray file is left behind by the failed clone.
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_ids_are_uuid_v7_shaped_and_unique() {
+        let a = next_session_id();
+        let b = next_session_id();
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 36, "{a}");
+        assert_eq!(a.as_bytes()[8], b'-');
+        assert_eq!(a.as_bytes()[13], b'-');
+        assert_eq!(a.as_bytes()[18], b'-');
+        assert_eq!(a.as_bytes()[23], b'-');
+        assert_eq!(a.as_bytes()[14], b'7', "v7 version nibble: {a}");
+        assert!(
+            matches!(a.as_bytes()[19], b'8' | b'9' | b'a' | b'b'),
+            "RFC 4122 variant: {a}"
+        );
+        assert!(a
+            .chars()
+            .enumerate()
+            .all(|(ix, c)| matches!(ix, 8 | 13 | 18 | 23) || c.is_ascii_hexdigit()));
     }
 
     #[test]

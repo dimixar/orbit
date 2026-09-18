@@ -39,7 +39,7 @@ pub fn generate(
 }
 
 /// A no-model fallback: a Conventional Commit `type(scope): description` plus a
-/// short prose body built from the changed file names — never a bare file count.
+/// bulleted body built from the changed file names — never a bare file count.
 pub fn heuristic(rows: &[StatusRow]) -> String {
     let total = rows.len();
     let mut added = 0usize;
@@ -92,8 +92,8 @@ fn describe_change(rows: &[StatusRow], verb: &str) -> String {
     }
 }
 
-/// The fallback's body: one capitalized line per change group, matching the
-/// generated shape (subject, blank line, then short lines with no trailing
+/// The fallback's body: one past-tense bullet per change group, matching the
+/// generated shape (subject, blank line, then `- ` bullets ending with a
 /// period).
 fn describe_body(rows: &[StatusRow]) -> Option<String> {
     let mut added = Vec::new();
@@ -113,13 +113,13 @@ fn describe_body(rows: &[StatusRow]) -> Option<String> {
     }
     let mut lines: Vec<String> = Vec::new();
     if !changed.is_empty() {
-        lines.push(format!("Updates {}", join_names(&changed)));
+        lines.push(format!("- Updated {}.", join_names(&changed)));
     }
     if !added.is_empty() {
-        lines.push(format!("Adds {}", join_names(&added)));
+        lines.push(format!("- Added {}.", join_names(&added)));
     }
     if !removed.is_empty() {
-        lines.push(format!("Removes {}", join_names(&removed)));
+        lines.push(format!("- Removed {}.", join_names(&removed)));
     }
     if lines.is_empty() {
         return None;
@@ -217,23 +217,23 @@ fn build_prompt(staged: &str, unstaged: &str, rows: &[StatusRow], recent: &[Stri
     let mut prompt = String::from(
         "Analyze the staged changes below and write ONE commit message.\n\
          The changed-files list and the unified diff together are the source of truth.\n\
-         Return the message in exactly this shape — a subject line, a blank line, then one\n\
-         line per change:\n\n\
+         Return the message in exactly this shape — a subject line, a blank line, then a\n\
+         bulleted list with one line per change:\n\n\
          <type>: <summary>\n\n\
-         A complete sentence describing one change\n\
-         Another complete sentence describing another change\n\n\
+         - Past-tense sentence describing one change.\n\
+         - Past-tense sentence describing another change.\n\n\
          Rules:\n\
          - Inspect the actual diff before generating the message.\n\
          - Identify the primary purpose of the changes.\n\
-         - Subject: one line, concise and preferably under 72 characters, with no trailing period.\n\
-         - Use lowercase for the subject and imperative language (\"add\", not \"added\" or \"adds\").\n\
+         - Subject: one line, concise and preferably under 72 characters, lowercase imperative\n\
+           language (\"add\", not \"added\" or \"adds\"), with no trailing period.\n\
          - Match the type prefix and scope style of the recent commits below when they are consistent.\n\
          - When there is no consistent style, use <type>: <summary>, where type is one of feat, fix,\n\
            refactor, perf, ui, style, docs, test, build, chore, ci, revert.\n\
-         - Body: 1-3 lines, each a complete sentence starting with a capital letter and ending with\n\
-           no period.\n\
-         - Write one line per user-facing change or effect; do not use bullets, dashes, numbers, or\n\
-           markdown.\n\
+         - Body: one `- ` bullet per user-facing change, each a complete sentence starting with a\n\
+           capital letter, written in the past tense (\"Added\", \"Updated\", \"Fixed\"), and ending\n\
+           with a period.\n\
+         - Start every body line with `- `; never write body prose without the bullet marker.\n\
          - Do not repeat the subject in the body, and never report a file count or list files line\n\
            by line.\n\
          - Do not include issue numbers unless they are present in the changes/context.\n\
@@ -371,8 +371,8 @@ fn parse_message(raw: &str) -> Option<String> {
 }
 
 /// Force the model output into the app's commit shape regardless of how closely
-/// it followed instructions: one subject line, a blank line, then capitalized
-/// body lines with no bullet markers and no trailing periods.
+/// it followed instructions: one subject line, a blank line, then past-tense
+/// body bullets that each start with `- ` and end with a period.
 fn normalize(message: &str) -> String {
     let mut lines = message.lines().map(str::trim).filter(|line| !line.is_empty());
     let Some(subject) = lines.next() else {
@@ -381,10 +381,15 @@ fn normalize(message: &str) -> String {
     let subject = strip_bullet(subject).trim_end_matches('.').trim();
     let mut body: Vec<String> = Vec::new();
     for line in lines {
-        let line = strip_bullet(line).trim_end_matches('.').trim();
-        if !line.is_empty() {
-            body.push(capitalize(line));
+        let line = strip_bullet(line).trim();
+        if line.is_empty() {
+            continue;
         }
+        let mut sentence = capitalize(line);
+        if !sentence.ends_with(['.', '!', '?']) {
+            sentence.push('.');
+        }
+        body.push(format!("- {sentence}"));
     }
     if body.is_empty() {
         subject.to_string()
@@ -491,9 +496,9 @@ mod tests {
             message.lines().next().unwrap(),
             "feat(src): update git panel and commit message"
         );
-        // One line per change group, no trailing period, no raw per-file bullet list.
+        // One past-tense bullet per change group, each ending with a period.
         assert!(
-            message.contains("\n\nUpdates git panel\nAdds commit message"),
+            message.contains("\n\n- Updated git panel.\n- Added commit message."),
             "{message}"
         );
         assert!(!message.contains("- M "), "{message}");
@@ -506,9 +511,9 @@ mod tests {
         assert_eq!(
             normalize(raw),
             "feat: animate the sidebar\n\n\
-             The sidebar now slides open\n\
-             The toggle floats above\n\
-             Git status no longer marks unstaged edits as staged"
+             - The sidebar now slides open.\n\
+             - The toggle floats above.\n\
+             - Git status no longer marks unstaged edits as staged."
         );
     }
 
@@ -536,10 +541,12 @@ mod tests {
         assert!(prompt.contains("  M src/lib.rs (+2 -0)"), "{prompt}");
         assert!(prompt.contains("never report a file count"), "{prompt}");
         assert!(prompt.contains("Staged diff:"), "{prompt}");
-        // New rule set: subject + blank line + one line per change, style matching.
+        // New rule set: subject + blank line + one bullet per change, style matching.
         assert!(prompt.contains("<type>: <summary>"), "{prompt}");
         assert!(prompt.contains("ui"), "{prompt}");
-        assert!(prompt.contains("one\nline per change"), "{prompt}");
+        assert!(prompt.contains("bulleted list with one line per change"), "{prompt}");
+        assert!(prompt.contains("- Past-tense sentence"), "{prompt}");
+        assert!(prompt.contains("past tense"), "{prompt}");
         assert!(prompt.contains("Recent commits on this branch"), "{prompt}");
         assert!(prompt.contains("feat: add the review pane"), "{prompt}");
         assert!(prompt.contains("Do not invent functionality"), "{prompt}");

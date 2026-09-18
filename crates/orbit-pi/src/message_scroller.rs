@@ -13,7 +13,7 @@ use std::{cell::Cell, ops::Range, rc::Rc};
 
 use gpui::{
     div, linear_color_stop, linear_gradient, prelude::*, px, rems, svg, ElementId, ListAlignment,
-    ListOffset, ListScrollEvent, ListState,
+    ListOffset, ListScrollEvent, ListState, Pixels,
 };
 
 use crate::theme::Theme;
@@ -216,6 +216,24 @@ impl MessageScrollerState {
             item_ix: self.item_count(),
             offset_in_item: px(0.),
         });
+    }
+
+    /// Scroll the transcript by `distance` pixels — positive moves toward the
+    /// live edge, negative back through history. Used to chain a wheel event
+    /// from a nested scroll area (the "Thought" card) once it bottoms out.
+    pub fn scroll_by(&self, distance: Pixels) {
+        if distance == px(0.) {
+            return;
+        }
+        // `ListState::scroll_by` always materializes an explicit offset, even
+        // at the end, which would drop tail-following. While we're pinned to
+        // the live edge a downward nudge just stays pinned.
+        if distance > px(0.) && self.is_following_tail() {
+            self.scroll_to_end();
+            return;
+        }
+        self.following_tail.set(false);
+        self.list.scroll_by(distance);
     }
 
     fn stick_if_following(&self) {

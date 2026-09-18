@@ -772,6 +772,15 @@ pub(crate) fn session_menu_popup(
                 false,
                 |app, cx| app.on_menu_reveal(cx),
             ))
+            .child(menu_item(
+                "menu-clone",
+                "icons/git-fork.svg",
+                "Clone session",
+                theme,
+                this.clone(),
+                false,
+                |app, cx| app.on_menu_clone_session(cx),
+            ))
             .when(deletable, |menu| {
                 menu.child(div().h(px(1.)).w_full().bg(theme.border).my(px(4.)))
                     .child(menu_item(
@@ -1081,6 +1090,23 @@ impl OrbitApp {
             reveal_in_file_manager(menu.path.clone());
         }
         self.session_menu = None;
+        cx.notify();
+    }
+
+    /// Duplicate the session the open row menu belongs to, so it shows up as
+    /// its own row to branch off. The source is only read, so — unlike Delete —
+    /// this is safe for a session with a live pi process.
+    pub(super) fn on_menu_clone_session(&mut self, cx: &mut Context<Self>) {
+        let Some(menu) = self.session_menu.take() else {
+            return;
+        };
+        match sessions::clone_session_file(&menu.path) {
+            Ok(_) => {
+                self.sessions = sessions::load_sessions();
+                self.toast_success("Session cloned");
+            }
+            Err(err) => self.toast_error(format!("clone failed: {err}")),
+        }
         cx.notify();
     }
 

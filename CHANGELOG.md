@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Clone a session straight from the sidebar — each session row's `…` menu
+  gained **Clone session**, which duplicates that session on disk (fresh id,
+  pi's `<timestamp>_<id>.jsonl` naming, entries copied verbatim) and drops the
+  copy into the list to branch off. Unlike Delete, it only reads the source, so
+  it works on any row — including one with a live pi process — without
+  switching away from what you're doing. The ⌘P "Clone Session" command still
+  clones the open session through pi.
 - Usage page — a full-width **Daily activity** calendar heatmap: one cell per
   day across a trailing 12 months, shaded by the active metric (tokens,
   requests, cost, …), with month/weekday axes, a less→more legend, a hover
