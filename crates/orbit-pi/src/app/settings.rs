@@ -110,54 +110,152 @@ impl OrbitApp {
                                 ),
                         ),
                     )
-                    // Section rows — 28px pills, selected fill matches the
-                    // sessions sidebar (`active` + `active_fg`).
+                    // Eyebrow: a small tracked caps label gives the flat
+                    // list a heading to read under, the way a sidebar in a
+                    // crafted app does. One accent-tinted dot echoes the
+                    // selection treatment below.
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .pl(px(13.))
+                            .pb(px(6.))
+                            .child(
+                                div()
+                                    .size(px(5.))
+                                    .rounded_full()
+                                    .bg(theme.accent.opacity(0.65)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(theme.ui_px(10.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.text_3)
+                                    .child("SETTINGS"),
+                            ),
+                    )
+                    // Section rows — 30px pills grouped by what they belong
+                    // to (app / pi resources / personalisation), separated
+                    // by hairlines. Selection is a quiet accent wash with a
+                    // leading bar and semibold label, not a hard fill: the
+                    // row stays readable as part of the list rather than a
+                    // button that took over.
                     .child(
                         div()
                             .px_2()
                             .flex()
                             .flex_col()
-                            .gap(px(2.))
-                            .children(sections.map(|(section, section_icon, label)| {
-                                let this = this.clone();
-                                let selected = self.settings_section == section;
-                                div()
-                                    .id(ElementId::Name(format!("settings-nav-{label}").into()))
-                                    .w_full()
-                                    .h(px(28.))
-                                    .px(px(10.))
-                                    .rounded_md()
-                                    .text_size(theme.ui_px(13.))
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .cursor_pointer()
-                                    .when(selected, |row| row.bg(theme.active))
-                                    .when(!selected, |row| row.hover(|s| s.bg(theme.bg_hover)))
-                                    .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-                                        this.update(cx, |app, cx| {
-                                            app.set_settings_section(section, cx);
-                                        });
-                                    })
-                                    .child(icon(
-                                        section_icon,
-                                        13.,
-                                        if selected {
-                                            theme.active_fg
-                                        } else {
-                                            theme.text_3
-                                        },
-                                    ))
-                                    .child(
-                                        div()
-                                            .text_color(if selected {
-                                                theme.active_fg
+                            .gap(px(3.))
+                            .children(sections.iter().map(
+                                |&(section, section_icon, label)| {
+                                    let this = this.clone();
+                                    let selected = self.settings_section == section;
+                                    // Group starts: Skills opens the pi
+                                    // resources block, Appearance opens
+                                    // personalisation + About.
+                                    let group_start =
+                                        matches!(section, SettingsSection::Skills | SettingsSection::Appearance);
+                                    let row = div()
+                                        .id(ElementId::Name(
+                                            format!("settings-nav-{label}").into(),
+                                        ))
+                                        .relative()
+                                        .w_full()
+                                        .h(px(30.))
+                                        .pl(px(12.))
+                                        .pr(px(10.))
+                                        .rounded_md()
+                                        .text_size(theme.ui_px(13.))
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .cursor_pointer()
+                                        .when(selected, |row| {
+                                            row.bg(theme.accent.opacity(0.10))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                        })
+                                        .when(!selected, |row| {
+                                            row.hover(|s| s.bg(theme.bg_hover))
+                                        })
+                                        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                                            this.update(cx, |app, cx| {
+                                                app.set_settings_section(section, cx);
+                                            });
+                                        })
+                                        .when(selected, |row| {
+                                            row.child(
+                                                div()
+                                                    .absolute()
+                                                    .left_0()
+                                                    .top(px(8.))
+                                                    .w(px(2.))
+                                                    .h(px(14.))
+                                                    .rounded_full()
+                                                    .bg(theme.accent),
+                                            )
+                                        })
+                                        .child(icon(
+                                            section_icon,
+                                            13.,
+                                            if selected {
+                                                theme.accent
                                             } else {
-                                                theme.text_2
-                                            })
-                                            .child(label.to_string()),
-                                    )
-                            })),
+                                                theme.text_3
+                                            },
+                                        ))
+                                        .child(
+                                            div()
+                                                .text_color(if selected {
+                                                    theme.text
+                                                } else {
+                                                    theme.text_2
+                                                })
+                                                .child(label.to_string()),
+                                        );
+                                    if group_start {
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(3.))
+                                            .pt(px(7.))
+                                            .mt(px(4.))
+                                            .border_t_1()
+                                            .border_color(theme.border)
+                                            .child(row)
+                                            .into_any_element()
+                                    } else {
+                                        row.into_any_element()
+                                    }
+                                },
+                            )),
+                    )
+                    // Footer: the build identity, pinned bottom-left in the
+                    // same tertiary register the About page uses — a quiet
+                    // closer for the column.
+                    .child(
+                        div()
+                            .mt_auto()
+                            .w_full()
+                            .px(px(13.))
+                            .py(px(10.))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(
+                                div()
+                                    .text_size(theme.ui_px(11.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.text_3)
+                                    .child("Orbit"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(theme.ui_px(11.))
+                                    .font(crate::usage::view::num_font())
+                                    .text_color(theme.text_3.opacity(0.7))
+                                    .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
+                            ),
                     ),
             )
             // ── content column ──

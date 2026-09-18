@@ -1218,19 +1218,41 @@ impl OrbitApp {
         }
         let theme = *theme::get(cx);
 
+        // A persistent glass chip rather than an invisible hit target: the
+        // hairline border and ink wash read as a dedicated meter surface at
+        // rest, and the hover/open state lifts it (deeper fill, stronger
+        // border) instead of the chip appearing from nothing.
         let mut pill = div()
             .id("top-quota")
             .relative()
             .h(px(26.))
-            .px(px(8.))
-            .rounded_md()
+            .pl(px(9.))
+            .pr(px(7.))
+            .rounded_full()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.overlay)
             .flex()
             .items_center()
             .gap(px(6.))
             .cursor_pointer()
-            .hover(|s| s.bg(theme.bg_hover))
+            .hover(|s| s.bg(theme.bg_hover).border_color(theme.border_strong))
+            .when(self.quota_popup_open, |s| {
+                s.bg(theme.bg_hover).border_color(theme.border_strong)
+            })
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_quota_click))
             .children(self.render_quota_popup(cx));
+
+        // Hairline between the account identity and the meter block: the
+        // two halves of the chip answer different questions (whose usage /
+        // how much is left) and deserve a visible seam.
+        let divider = || {
+            div()
+                .flex_none()
+                .w(px(1.))
+                .h(px(13.))
+                .bg(theme.border)
+        };
 
         // The provider mark and name anchor every headline: the meter is
         // only truthful if the account it belongs to is named beside it.
@@ -1253,7 +1275,7 @@ impl OrbitApp {
 
         match self.quota.headline(&self.model_provider) {
             QuotaHeadline::Window { report, window } => {
-                pill = pill.child(provider_head(report));
+                pill = pill.child(provider_head(report)).child(divider());
                 // Drop the window label when the title bar is tight so the
                 // session name still has room to truncate instead of colliding.
                 if !compact {
@@ -1271,19 +1293,22 @@ impl OrbitApp {
                     );
                 }
                 if let Some(fraction) = window.fraction() {
+                    // Tabular figures keep the number from jittering as
+                    // usage ticks during a run, and the state tint (green →
+                    // amber → red) makes the ring's verdict readable even
+                    // without the gauge — the same pairing the composer's
+                    // context meter uses.
+                    let tint = quota_tint(fraction, theme);
                     pill = pill
                         .child(
                             div()
+                                .font(crate::usage::view::num_font())
                                 .text_size(theme.ui_px(11.5))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.text)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(tint)
                                 .child(format!("{}%", (fraction * 100.0).round() as i32)),
                         )
-                        .child(context_ring(
-                            fraction,
-                            quota_tint(fraction, theme),
-                            theme.ring_track,
-                        ));
+                        .child(context_ring(fraction, tint, theme.ring_track));
                 }
             }
             // A balance-only account (DeepSeek, OpenRouter) has no window to
@@ -1294,13 +1319,17 @@ impl OrbitApp {
                 } else {
                     format!("{} {}", quota_amount(balance.amount), balance.currency)
                 };
-                pill = pill.child(provider_head(report)).child(
-                    div()
-                        .text_size(theme.ui_px(11.5))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .child(text),
-                );
+                pill = pill
+                    .child(provider_head(report))
+                    .child(divider())
+                    .child(
+                        div()
+                            .font(crate::usage::view::num_font())
+                            .text_size(theme.ui_px(11.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.text)
+                            .child(text),
+                    );
             }
             // Nothing metered anywhere (notes, errors): a quiet label keeps
             // the popover reachable.

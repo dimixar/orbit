@@ -4808,7 +4808,7 @@ fn hit_rate_bars(series: &TimeSeries, theme: Theme) -> AnyElement {
 
 /// Tabular figures for numeric columns (§54). Both bundled faces carry `tnum`,
 /// and requesting it is what stops columns from jittering as digits change.
-pub(super) fn num_font() -> Font {
+pub(crate) fn num_font() -> Font {
     let mut font = gpui::font(theme::ui_font_family());
     font.features = FontFeatures(Arc::new(vec![
         ("tnum".to_string(), 1),
