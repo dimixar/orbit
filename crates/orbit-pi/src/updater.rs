@@ -285,7 +285,7 @@ impl Updater {
                     Err(error) => {
                         publish(UpdateStatus::Idle);
                         if report {
-                            let _ = events.send(UpdaterEvent::Failed(error.to_string()));
+                            let _ = events.send(UpdaterEvent::Failed(format!("{error:#}")));
                         } else {
                             eprintln!("Orbit updater: {error:#}");
                         }
@@ -1283,16 +1283,18 @@ fn validate_download_url(value: &str) -> anyhow::Result<()> {
 fn http_client(timeout_seconds: u64) -> anyhow::Result<reqwest::blocking::Client> {
     Ok(reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_seconds))
+        .user_agent(concat!("Orbit/", env!("CARGO_PKG_VERSION")))
         .build()?)
 }
 
 fn http_get(url: &str) -> anyhow::Result<String> {
     let response = http_client(30)?
         .get(url)
-        .header("User-Agent", concat!("Orbit/", env!("CARGO_PKG_VERSION")))
-        .send()?
-        .error_for_status()?;
-    let bytes = response.bytes()?;
+        .send()
+        .map_err(http_failure)?
+        .error_for_status()
+        .map_err(http_failure)?;
+    let bytes = response.bytes().map_err(http_failure)?;
     anyhow::ensure!(
         bytes.len() as u64 <= MAX_FEED_BYTES,
         "the update feed is implausibly large"
@@ -1310,9 +1312,10 @@ fn download_to(
 
     let mut response = http_client(timeout_seconds)?
         .get(url)
-        .header("User-Agent", concat!("Orbit/", env!("CARGO_PKG_VERSION")))
-        .send()?
-        .error_for_status()?;
+        .send()
+        .map_err(http_failure)?
+        .error_for_status()
+        .map_err(http_failure)?;
     let mut file = std::fs::File::create(destination)?;
     let copied = std::io::copy(&mut response.by_ref().take(limit + 1), &mut file)?;
     anyhow::ensure!(
@@ -1321,6 +1324,23 @@ fn download_to(
     );
     file.sync_all()?;
     Ok(())
+}
+
+/// Prefer the rustls/IO cause over reqwest's "error sending request for url"
+/// wrapper. The URL is already known, and a truncated banner otherwise hides
+/// whether this was TLS, DNS, or a blocked socket.
+fn http_failure(error: reqwest::Error) -> anyhow::Error {
+    anyhow::anyhow!("{}", deepest_cause(&error))
+}
+
+fn deepest_cause(error: &dyn std::error::Error) -> String {
+    let mut cause = error.to_string();
+    let mut current = error.source();
+    while let Some(err) = current {
+        cause = err.to_string();
+        current = err.source();
+    }
+    cause
 }
 
 // ── preferences and errors ──────────────────────────────────────────────
@@ -1569,6 +1589,39 @@ mod tests {
         assert!(validate_release_version("../../tmp/payload").is_err());
         assert!(validate_release_version("1.2.3/evil").is_err());
         assert!(validate_release_version("").is_err());
+    }
+
+    #[test]
+    fn http_failure_prefers_the_root_cause() {
+        #[derive(Debug)]
+        struct Leaf;
+        impl std::fmt::Display for Leaf {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("invalid peer certificate: UnknownIssuer")
+            }
+        }
+        impl std::error::Error for Leaf {}
+
+        #[derive(Debug)]
+        struct Wrapper(Leaf);
+        impl std::fmt::Display for Wrapper {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(
+                    f,
+                    "error sending request for url (https://github.com/example/feed.xml)"
+                )
+            }
+        }
+        impl std::error::Error for Wrapper {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        assert_eq!(
+            deepest_cause(&Wrapper(Leaf)),
+            "invalid peer certificate: UnknownIssuer"
+        );
     }
 
     /// The interop the whole update path rests on: a signature produced by

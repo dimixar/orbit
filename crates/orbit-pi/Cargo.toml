@@ -63,7 +63,14 @@ image = "0.25"
 futures = "0.3"
 reqwest = { version = "0.12.15-zed", package = "zed-reqwest", default-features = false, features = [
     "blocking",
+    "charset",
+    "http2",
+    "macos-system-configuration",
+    # Native roots cover corporate/MITM CAs. webpki-roots is the fallback
+    # when macOS SecTrustSettings is empty (common in a hardened .app),
+    # which otherwise makes GitHub update checks fail while curl still works.
     "rustls-tls-native-roots",
+    "rustls-tls-webpki-roots",
 ] }
 # Parsing/validation for the update feed's download URL (`updater.rs`) and the
 # `termy://` deep link (`platform.rs`). The updater path is compiled on every
