@@ -9,6 +9,31 @@
 // diagnostics stay visible while developing.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// Compile every `locales/<locale>.yml` into the binary and make `en` the
+// fallback for any key a translation is still missing. Must precede the
+// `tr!` macro and every `mod` below so child modules inherit the macros.
+rust_i18n::i18n!("locales", fallback = "en");
+
+/// Translate a key in the active locale, returning an owned `String`.
+///
+/// Prefer [`tr_cow!`] on hot render paths — a literal lookup borrows when the
+/// active locale is the fallback and only allocates for a real translation.
+macro_rules! tr {
+    ($key:expr) => {
+        $crate::i18n::translate($key)
+    };
+    ($key:expr, $($args:tt)*) => {
+        rust_i18n::t!($key, $($args)*).into_owned()
+    };
+}
+
+/// Borrowed translation for hot render paths (no interpolation).
+macro_rules! tr_cow {
+    ($key:literal) => {
+        rust_i18n::t!($key)
+    };
+}
+
 mod access;
 mod app;
 mod app_icon;
@@ -29,6 +54,7 @@ mod git;
 mod git_panel;
 mod highlight;
 mod http;
+mod i18n;
 mod mentions;
 mod message_scroller;
 mod model_selector;
@@ -310,51 +336,61 @@ fn bind_keys(cx: &mut App) {
 /// submenu — there is no selector for the standard Hide/Hide Others/Show All
 /// or Window items — so this is deliberately the smallest set that matches the
 /// real commands the app can perform.
-fn app_menus() -> Vec<Menu> {
+///
+/// Rebuilt (see `set_app_menus`) whenever the interface language changes, so
+/// the labels always read in the active locale.
+pub(crate) fn app_menus() -> Vec<Menu> {
+    let app = tr!("app.name");
     vec![
         Menu {
-            name: "Orbit".into(),
+            name: app.clone().into(),
             items: vec![
-                MenuItem::action("About Orbit Pi", OpenAbout),
-                MenuItem::action("Check for Updates…", CheckForUpdates),
+                MenuItem::action(tr!("menu.about", app = app.clone()), OpenAbout),
+                MenuItem::action(tr!("menu.check_for_updates"), CheckForUpdates),
                 MenuItem::separator(),
-                MenuItem::action("Settings…", OpenSettings),
+                MenuItem::action(tr!("menu.settings"), OpenSettings),
                 MenuItem::separator(),
-                MenuItem::os_submenu("Services", SystemMenuType::Services),
+                MenuItem::os_submenu(tr!("menu.services"), SystemMenuType::Services),
                 MenuItem::separator(),
-                MenuItem::action("Quit Orbit Pi", Quit),
+                MenuItem::action(tr!("menu.quit", app = app.clone()), Quit),
             ],
         },
         Menu {
-            name: "File".into(),
+            name: tr!("menu.file").into(),
             items: vec![
-                MenuItem::action("New Task", NewSession),
-                MenuItem::action("Refresh Sessions", RefreshSessions),
+                MenuItem::action(tr!("menu.new_task"), NewSession),
+                MenuItem::action(tr!("menu.refresh_sessions"), RefreshSessions),
             ],
         },
         // Editing keys ride the `Composer` context, so these enable while a
         // text field owns focus and grey out elsewhere.
         Menu {
-            name: "Edit".into(),
+            name: tr!("menu.edit").into(),
             items: vec![
-                MenuItem::action("Cut", Cut),
-                MenuItem::action("Copy", Copy),
-                MenuItem::action("Paste", Paste),
-                MenuItem::action("Select All", SelectAll),
+                MenuItem::action(tr!("menu.cut"), Cut),
+                MenuItem::action(tr!("menu.copy"), Copy),
+                MenuItem::action(tr!("menu.paste"), Paste),
+                MenuItem::action(tr!("menu.select_all"), SelectAll),
             ],
         },
         Menu {
-            name: "View".into(),
+            name: tr!("menu.view").into(),
             items: vec![
-                MenuItem::action("Command Palette…", ToggleCommandPalette),
-                MenuItem::action("Find in Transcript…", ToggleSearch),
+                MenuItem::action(tr!("menu.command_palette"), ToggleCommandPalette),
+                MenuItem::action(tr!("menu.find_in_transcript"), ToggleSearch),
                 MenuItem::separator(),
-                MenuItem::action("Toggle Terminal", ToggleTerminal),
+                MenuItem::action(tr!("menu.toggle_terminal"), ToggleTerminal),
                 MenuItem::separator(),
-                MenuItem::action("Usage", ToggleUsage),
+                MenuItem::action(tr!("menu.usage"), ToggleUsage),
             ],
         },
     ]
+}
+
+/// Install the native menu bar for the active locale. Called once at startup
+/// and again whenever the interface language changes.
+pub(crate) fn set_app_menus(cx: &mut App) {
+    cx.set_menus(app_menus());
 }
 
 fn main() {
@@ -375,10 +411,13 @@ fn main() {
         // application menu "Orbit" instead of the executable (`orbit-pi`).
         platform::set_process_name("Orbit");
         bind_keys(cx);
+        theme::init(cx);
+        // Adopt the persisted interface language before the first paint (and
+        // before the menu bar below reads its labels).
+        i18n::set_language(theme::get(cx).ui.language);
         // Install the native menu bar after the keymap exists so each item
         // picks up its key equivalent.
-        cx.set_menus(app_menus());
-        theme::init(cx);
+        set_app_menus(cx);
         // Arm the background updater before the app reads its global. Debug
         // builds, a keyless build, and a bare `cargo run` binary all leave it
         // dormant. The launch check runs on its own thread.

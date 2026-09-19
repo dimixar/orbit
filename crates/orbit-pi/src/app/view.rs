@@ -418,7 +418,7 @@ impl Render for OrbitApp {
                                             .text_size(theme.ui_px(11.))
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(theme.text_3)
-                                            .child("Projects"),
+                                            .child(tr!("sidebar.projects")),
                                     )
                                     .child(
                                         div()
@@ -483,7 +483,7 @@ impl Render for OrbitApp {
                                                 div()
                                                     .text_size(theme.ui_px(12.))
                                                     .text_color(theme.text_2)
-                                                    .child("Settings"),
+                                                    .child(tr!("common.settings")),
                                             ),
                                     )
                                     .child(div().flex_1())
@@ -510,9 +510,9 @@ impl Render for OrbitApp {
                                                     .text_size(theme.ui_px(11.))
                                                     .text_color(theme.text_3)
                                                     .child(if self.client.is_some() {
-                                                        "Connected"
+                                                        tr!("status.connected")
                                                     } else {
-                                                        "Offline"
+                                                        tr!("status.offline")
                                                     }),
                                             ),
                                     ),
@@ -782,7 +782,7 @@ impl Render for OrbitApp {
                                                             .text_size(theme.ui_px(12.5))
                                                             .font_weight(FontWeight::MEDIUM)
                                                             .text_color(theme.accent)
-                                                            .child("Drop to attach"),
+                                                            .child(tr!("composer.drop_to_attach")),
                                                     );
                                                 if theme::reduce_motion(cx) {
                                                     overlay.into_any_element()

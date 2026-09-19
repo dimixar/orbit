@@ -33,9 +33,13 @@ gpui = { version = "0.2.2", default-features = false, features = [
     "wayland",
     "x11",
 ] }
+# Compile-time locale loading (YAML) and the global `t!` lookup used by the
+# `tr!`/`tr_cow!` macros. Locales live in `crates/orbit-pi/locales/`.
+rust-i18n = "4.2"
 # Native open/folder dialogs (NSOpenPanel on macOS) for folder selection
 rfd = "0.15"
 orbit-rpc = { path = "../orbit-rpc" }
+serde = { workspace = true }
 serde_json = { workspace = true }
 unicode-segmentation = "1"
 include_dir = "0.7"
@@ -105,6 +109,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSArray",
     "NSBundle",
     "NSDictionary",
+    "NSLocale",
     "NSString",
     "NSURL",
 ] }

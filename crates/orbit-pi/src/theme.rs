@@ -342,38 +342,10 @@ pub struct Theme {
 
 impl Global for Theme {}
 
-/// Interface language for the workbench chrome. English strings ship
-/// today; `System` follows macOS's preferred language once more locales
-/// land (the setting persists either way).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Language {
-    System,
-    English,
-}
-
-impl Language {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::System => "system",
-            Self::English => "en",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::System => "System",
-            Self::English => "English",
-        }
-    }
-
-    pub fn parse(raw: &str) -> Option<Self> {
-        match raw.trim() {
-            "system" => Some(Self::System),
-            "en" => Some(Self::English),
-            _ => None,
-        }
-    }
-}
+/// Interface language for the workbench chrome. Re-exported from
+/// [`crate::i18n`] so every persisted pref reads as a locale id while the
+/// `Language` name stays stable for the settings surface.
+pub use crate::i18n::AppLanguage as Language;
 
 /// Waku General-settings customization: language, type sizes, and density.
 /// Every size is px with the Waku defaults (UI 14, terminal / editor 13);
@@ -2405,6 +2377,11 @@ pub fn set_ui_prefs(cx: &mut App, ui: UiPrefs) {
     if get(cx).ui == ui {
         return;
     }
+    // Adopt the new locale before the theme global changes so the repaint
+    // driven by that change already reads the right strings, then rebuild
+    // the native menu bar (which only GPUI can refresh).
+    crate::i18n::set_language(ui.language);
+    crate::set_app_menus(cx);
     ui.persist();
     let id = get(cx).theme_id;
     cx.set_global(Theme::for_id(id).with_ui(ui));
@@ -2671,7 +2648,9 @@ mod tests {
     fn parse_language() {
         assert_eq!(Language::parse("system"), Some(Language::System));
         assert_eq!(Language::parse("en"), Some(Language::English));
-        assert_eq!(Language::parse("fr"), None);
+        assert_eq!(Language::parse("zh-CN"), Some(Language::SimplifiedChinese));
+        assert_eq!(Language::parse("fr"), Some(Language::French));
+        assert_eq!(Language::parse("xx"), None);
         assert_eq!(Language::English.label(), "English");
     }
 

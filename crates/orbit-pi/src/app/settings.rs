@@ -4586,8 +4586,8 @@ impl OrbitApp {
         ));
         theme_rows.push(self.setting_row(
             theme,
-            "Language",
-            Some("Choose the language used throughout Orbit."),
+            &tr!("language.title"),
+            Some(&tr!("language.description")),
             None,
             Some(self.language_select(theme, this.clone(), cx)),
         ));
@@ -5116,22 +5116,24 @@ impl OrbitApp {
 
     // ── Waku General-settings selects (language / font sizes) ──────────
 
-    /// The Language dropdown (System / English).
+    /// The Language dropdown, listing every shipped locale (autonyms) plus
+    /// `System`.
     pub(super) fn language_select(
         &self,
         theme: Theme,
         this: Entity<OrbitApp>,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let selected = match theme.ui.language {
-            crate::theme::Language::System => 0,
-            crate::theme::Language::English => 1,
-        };
+        use crate::theme::Language;
+        let selected = Language::ALL
+            .iter()
+            .position(|language| *language == theme.ui.language)
+            .unwrap_or(0);
         self.select_control(
             "language-select",
             SettingsSelect::Language,
-            theme.ui.language.label().to_string(),
-            vec!["System".to_string(), "English".to_string()],
+            theme.ui.language.label(),
+            Language::ALL.iter().map(|language| language.label()).collect(),
             selected,
             theme,
             this,
@@ -5640,11 +5642,7 @@ impl OrbitApp {
         let mut ui = theme::get(cx).ui;
         match kind {
             SettingsSelect::Language => {
-                ui.language = if ix == 1 {
-                    Language::English
-                } else {
-                    Language::System
-                };
+                ui.language = Language::ALL.get(ix).copied().unwrap_or(Language::System);
             }
             SettingsSelect::UiFontSize => {
                 ui.ui_font_size = FONT_SIZES.get(ix).copied().unwrap_or(14.);
