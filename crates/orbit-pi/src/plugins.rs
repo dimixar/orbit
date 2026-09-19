@@ -338,6 +338,8 @@ fn run_pi(args: &[String], workspace: &Path) -> Result<String, String> {
     command
         .args(args)
         .env("PI_SKIP_VERSION_CHECK", "1")
+        // `pi` is `#!/usr/bin/env node`; a bundled `.app` PATH lacks `node`.
+        .env("PATH", orbit_rpc::augmented_path(Path::new(&bin).parent()))
         .env("NO_COLOR", "1")
         .env("CI", "1")
         .current_dir(workspace)
@@ -349,8 +351,8 @@ fn run_pi(args: &[String], workspace: &Path) -> Result<String, String> {
     let mut child = command
         .spawn()
         .map_err(|err| tr!("errors.failed_to_run", bin = bin, error = err))?;
-    let stdout = child.stdout.take().ok_or("pi stdout unavailable")?;
-    let stderr = child.stderr.take().ok_or("pi stderr unavailable")?;
+    let stdout = child.stdout.take().ok_or_else(|| tr!("plugins.stdout_unavailable"))?;
+    let stderr = child.stderr.take().ok_or_else(|| tr!("plugins.stderr_unavailable"))?;
     let out_handle = std::thread::spawn(move || read_to_end(stdout));
     let err_handle = std::thread::spawn(move || read_to_end(stderr));
 

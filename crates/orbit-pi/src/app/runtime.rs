@@ -56,7 +56,7 @@ impl OrbitApp {
         if command == "parse" {
             self.set_error(tr!(
                 "runtime.protocol_error",
-                error = error.unwrap_or("pi could not parse the request")
+                error = error.unwrap_or(&tr!("runtime.parse_failed"))
             ));
             return;
         }
@@ -72,7 +72,8 @@ impl OrbitApp {
                 }
             }
         }
-        let detail = error.unwrap_or("pi reported an unspecified error");
+        let fallback = tr!("runtime.unspecified_error");
+        let detail = error.unwrap_or(&fallback);
         self.set_error(tr!(
             "helpers.command_failed_detail",
             label = humanize_command(command),

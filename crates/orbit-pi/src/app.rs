@@ -115,11 +115,11 @@ const QUOTA_ENTRY_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const QUOTA_ENTRY_BOOTSTRAP_INTERVAL: Duration = Duration::from_secs(3);
 const QUOTA_ENTRY_BOOTSTRAP_POLLS: u8 = 10;
 
-/// Rows in the composer's "+" add menu (icon, label, trailing hint).
+/// Rows in the composer's "+" add menu (icon, label key, trailing hint).
 const ADD_MENU_ITEMS: [(&str, &str, &str); 3] = [
-    ("icons/image.svg", "Attach image…", ""),
-    ("icons/file.svg", "Attach file…", ""),
-    ("icons/at-sign.svg", "Mention file", "@"),
+    ("icons/image.svg", "composer.attach_image", ""),
+    ("icons/file.svg", "composer.attach_file", ""),
+    ("icons/at-sign.svg", "composer.mention_file", "@"),
 ];
 
 /// Maximum sessions kept alive in the background. Beyond this, the
@@ -218,6 +218,9 @@ pub struct OrbitApp {
     /// Settings → Agent: `set_auto_retry` value. pi's `get_state` does not
     /// expose this, so it reflects the last value Orbit sent.
     auto_retry: bool,
+    /// Settings → Agent: auto session titles. Persisted to
+    /// `~/.orbit-pi/auto-title.json`, which the bundled title extension reads.
+    auto_title: crate::auto_title::AutoTitleConfig,
     /// Display name pi reports for the session (`get_state.sessionName`).
     session_name: Option<String>,
     /// pi is compacting right now (`get_state` / `compaction_*`).
@@ -794,6 +797,7 @@ impl OrbitApp {
             follow_up_mode: "one-at-a-time".into(),
             auto_compaction: true,
             auto_retry: true,
+            auto_title: crate::auto_title::AutoTitleConfig::load(),
             session_name: None,
             is_compacting: false,
             retrying: false,
@@ -1068,12 +1072,14 @@ impl OrbitApp {
                 }
             }
         }
+        let first_message = self.transcript.first_user_message();
         sessions_with_placeholder(
             &listed,
             self.current_session_path.as_deref(),
             self.session_name
                 .as_deref()
                 .or(self.current_title.as_deref()),
+            first_message.as_deref(),
             self.current_workspace.as_deref(),
             !self.transcript.is_empty(),
         )
@@ -1416,12 +1422,12 @@ fn method_label(id: &str, label: &str, connected: bool) -> String {
     match id {
         "browser" | "oauth" => {
             if connected {
-                "Reconnect".to_string()
+                tr!("settings.reconnect")
             } else {
-                "Sign in".to_string()
+                tr!("settings.sign_in")
             }
         }
-        "device_code" => "Use device code".to_string(),
+        "device_code" => tr!("settings.use_device_code"),
         other => {
             let mut chars = other.replace(['_', '-'], " ").chars().collect::<Vec<_>>();
             if let Some(first) = chars.first_mut() {
@@ -1530,6 +1536,8 @@ enum SettingsSelect {
     BackdropBlur,
     BackdropCell,
     BackdropFade,
+    /// The model the auto-title extension asks (Settings → Agent).
+    TitleModel,
 }
 
 // ── feature modules ───────────────────────────────────────────────────────

@@ -369,7 +369,7 @@ pub(crate) fn session_display_title(
                 .filter(|title| !title.is_empty())
                 .map(str::to_owned)
         })
-        .unwrap_or_else(|| "New task".into())
+        .unwrap_or_else(|| tr!("settings.new_task"))
 }
 
 /// "42s" / "3m 12s" / "2h 5m" / "4d 3h" for the Runtime uptime readout.

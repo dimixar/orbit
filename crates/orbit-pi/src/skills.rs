@@ -371,10 +371,7 @@ fn write_override(skill: &Skill, workspace: &Path, enabled: bool) -> Result<(), 
 
     if root.get("skills").is_some_and(|value| !value.is_array()) {
         // An older pi schema stored `skills` as an object — never clobber it.
-        return Err(
-            "settings.json has a non-array `skills` value; edit it by hand or run `pi config`"
-                .into(),
-        );
+        return Err(tr!("skills.settings_not_array"));
     }
     let mut entries: Vec<Value> = root
         .get("skills")
@@ -420,7 +417,7 @@ fn write_override(skill: &Skill, workspace: &Path, enabled: bool) -> Result<(), 
 /// a discovery root, just its `SKILL.md`), then drop any override.
 pub(crate) fn delete(skill: &Skill, workspace: &Path) -> Result<(), String> {
     let Some(dir) = skill.dir() else {
-        return Err("skill has no parent directory".into());
+        return Err(tr!("skills.no_parent_dir"));
     };
     // Never remove a discovery root itself — only the skill folder under it.
     if dir.file_name().and_then(|name| name.to_str()) == Some("skills") {

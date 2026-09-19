@@ -3,6 +3,7 @@ use super::*;
 
 use gpui::point;
 
+use crate::sessions::cap_chars;
 use crate::shimmer::ShimmerText;
 
 /// Whether a workspace group is collapsed in the sidebar. The active
@@ -74,6 +75,7 @@ pub(crate) fn sessions_with_placeholder(
     sessions: &[SessionInfo],
     current_path: Option<&Path>,
     current_title: Option<&str>,
+    current_first_message: Option<&str>,
     current_workspace: Option<&Path>,
     session_started: bool,
 ) -> Vec<SessionInfo> {
@@ -90,6 +92,20 @@ pub(crate) fn sessions_with_placeholder(
     let workspace = current_workspace
         .map(Path::to_path_buf)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    // The placeholder carries the same two lines a disk row would: pi's live
+    // title (or the first message when pi hasn't named it yet) over the first
+    // message preview.
+    let first_message = cap_chars(current_first_message.unwrap_or_default(), 110);
+    let title = current_title
+        .filter(|title| !title.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if first_message.is_empty() {
+                tr!("menu.new_task")
+            } else {
+                cap_chars(current_first_message.unwrap_or_default(), 80)
+            }
+        });
     rows.insert(
         0,
         SessionInfo {
@@ -100,11 +116,8 @@ pub(crate) fn sessions_with_placeholder(
                 .to_string_lossy()
                 .into_owned(),
             cwd: workspace,
-            title: current_title
-                .filter(|title| !title.is_empty())
-                .unwrap_or("New Task")
-                .to_string(),
-            first_message: String::new(),
+            title,
+            first_message,
             modified: SystemTime::now(),
         },
     );
@@ -441,11 +454,13 @@ pub(crate) fn render_side_row(
                 .gap(px(6.))
                 .when(active, |card| card.bg(theme.active))
                 .when(!active, |card| card.hover(|s| s.bg(theme.bg_hover)));
-            // Text column: title + actions, then a preview only when it
-            // adds something the title does not already say. Age is always
-            // pinned to the last line.
+            // Text column: title + actions, then the first-message preview
+            // with the age. Every row with a message keeps the same two-line
+            // shape — even when the title repeats it — so the list scans
+            // evenly. Only a row without a message (a just-named session pi
+            // has not flushed) keeps the age on the title line.
             let age = sessions::relative_time(session.modified);
-            let show_preview = !sidebar_preview_redundant(&session.title, &session.first_message);
+            let show_preview = !session.first_message.trim().is_empty();
             card = card.child(
                 div()
                     .flex_1()
@@ -521,23 +536,6 @@ pub(crate) fn render_side_row(
             row.into_any_element()
         }
     }
-}
-
-/// The sidebar's second line is the first user message. Skip it when that
-/// text is empty or already the title (pi often names a session after the
-/// prompt), so rows don't print the same truncated sentence twice.
-pub(crate) fn sidebar_preview_redundant(title: &str, first_message: &str) -> bool {
-    let preview = first_message.trim();
-    if preview.is_empty() {
-        return true;
-    }
-    let title = title.trim();
-    if title.is_empty() {
-        return false;
-    }
-    let title = title.to_lowercase();
-    let preview = preview.to_lowercase();
-    preview == title || preview.starts_with(&title) || title.starts_with(&preview)
 }
 
 /// The hover-revealed '…' button on a quiet session row. Clicking it opens

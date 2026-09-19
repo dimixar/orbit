@@ -50,10 +50,14 @@ pub fn chip_with_menu(
         .items_start()
         .child(chip)
         .children(open.then(|| {
+            // The anchor corner sits at the chip's own top edge, so the offset
+            // must clear the full 28px chip before the 5px gap — otherwise the
+            // panel hangs over the chip that opened it (and a second click
+            // lands inside the popup). See the same fix in `settings.rs`.
             anchored()
                 .position_mode(gpui::AnchoredPositionMode::Local)
                 .anchor(corner)
-                .offset(point(px(-1.), px(5.)))
+                .offset(point(px(-1.), px(33.)))
                 .snap_to_window()
                 .child(deferred(panel()))
         }))
@@ -342,7 +346,7 @@ pub fn multi_menu(
 
     let mut children: Vec<AnyElement> = vec![search_row(page.menu_query(), theme)];
     let list: Vec<AnyElement> =
-        std::iter::once((None, "All".to_string(), None::<String>, selected.is_empty()))
+        std::iter::once((None, tr!("usage.all"), None::<String>, selected.is_empty()))
             .chain(rows.iter().map(|option| {
                 (
                     Some(option.id),
@@ -549,7 +553,7 @@ pub fn breakdown_columns_menu(
         let entity = cx.entity();
         children.push(row(
             ElementId::Name(SharedString::from(format!("usage-breakdown-col-{id}"))),
-            label,
+            &label,
             None,
             selected,
             false,
@@ -563,7 +567,7 @@ pub fn breakdown_columns_menu(
     let entity = cx.entity();
     let show_all = footer_row(
         "usage-breakdown-columns-all",
-        "Show all",
+        &tr!("usage.show_all"),
         theme,
         move |_, _, cx| {
             entity.update(cx, |page, cx| page.show_all_breakdown_columns(cx));
@@ -642,7 +646,7 @@ pub fn series_columns_menu(
     let entity = cx.entity();
     let show_all = footer_row(
         "usage-series-columns-all",
-        "Show all",
+        &tr!("usage.show_all"),
         theme,
         move |_, _, cx| {
             entity.update(cx, |page, cx| page.show_all_series_columns(cx));
@@ -710,7 +714,7 @@ pub fn bucket_columns_menu(
     let entity = cx.entity();
     let show_all = footer_row(
         "usage-bucket-columns-all",
-        "Show all",
+        &tr!("usage.show_all"),
         theme,
         move |_, _, cx| {
             entity.update(cx, |page, cx| page.show_all_bucket_columns(cx));
@@ -778,7 +782,7 @@ pub fn failure_columns_menu(
     let entity = cx.entity();
     let show_all = footer_row(
         "usage-failure-columns-all",
-        "Show all",
+        &tr!("usage.show_all"),
         theme,
         move |_, _, cx| {
             entity.update(cx, |page, cx| page.show_all_failure_columns(cx));
@@ -846,7 +850,7 @@ pub fn range_menu(page: &UsagePage, cx: &mut gpui::Context<UsagePage>, theme: Th
                 preset.as_str()
             ))),
             &label,
-            preset_summary(preset),
+            preset_summary(preset).as_deref(),
             selected,
             false,
             theme,
@@ -888,14 +892,14 @@ pub fn range_menu(page: &UsagePage, cx: &mut gpui::Context<UsagePage>, theme: Th
 }
 
 /// The hint shown on the right of each preset row.
-fn preset_summary(preset: RangePreset) -> Option<&'static str> {
+fn preset_summary(preset: RangePreset) -> Option<String> {
     match preset {
-        RangePreset::Today => Some("compare with yesterday"),
-        RangePreset::Last7 => Some("vs previous 7 days"),
-        RangePreset::Last14 => Some("vs previous 14 days"),
-        RangePreset::Last30 => Some("vs previous 30 days"),
-        RangePreset::PreviousMonth => Some("complete month"),
-        RangePreset::All => Some("no comparison"),
+        RangePreset::Today => Some(tr!("usage.compare_with_yesterday")),
+        RangePreset::Last7 => Some(tr!("usage.vs_previous_7_days")),
+        RangePreset::Last14 => Some(tr!("usage.vs_previous_14_days")),
+        RangePreset::Last30 => Some(tr!("usage.vs_previous_30_days")),
+        RangePreset::PreviousMonth => Some(tr!("usage.complete_month")),
+        RangePreset::All => Some(tr!("usage.no_comparison")),
         _ => None,
     }
 }

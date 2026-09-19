@@ -42,6 +42,7 @@ mod app_icon;
 mod ask;
 mod assets;
 mod auth;
+mod auto_title;
 mod branch_picker;
 mod bundled_extensions;
 mod checkpoint;

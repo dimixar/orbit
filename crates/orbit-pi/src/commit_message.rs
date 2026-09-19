@@ -34,7 +34,7 @@ pub fn generate(
         .collect();
     let prompt = build_prompt(staged, unstaged, rows, &recent);
     let raw = run_pi(cwd, provider, model, &prompt)?;
-    let message = parse_message(&raw).ok_or_else(|| "pi returned no commit message".to_string())?;
+    let message = parse_message(&raw).ok_or_else(|| tr!("commit_message.no_message"))?;
     Ok(normalize(&message))
 }
 
@@ -292,6 +292,8 @@ fn run_pi(
             "--no-approve",
         ])
         .env("PI_SKIP_VERSION_CHECK", "1")
+        // `pi` is `#!/usr/bin/env node`; a bundled `.app` PATH lacks `node`.
+        .env("PATH", orbit_rpc::augmented_path(Path::new(&bin).parent()))
         .env("NO_COLOR", "1")
         .env("CI", "1")
         .current_dir(cwd)
@@ -354,7 +356,7 @@ fn first_line(text: &str) -> String {
     text.lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
-        .unwrap_or("no error output")
+        .unwrap_or(&tr!("commit_message.no_error_output"))
         .to_string()
 }
 

@@ -1713,10 +1713,18 @@ impl OrbitApp {
         }
 
         if let Some(error) = &self.custom_providers_error {
-            rows.push(self.provider_error_card(theme, "models.json could not be read", error));
+            rows.push(self.provider_error_card(
+                theme,
+                &tr!("settings.models_json_read_error"),
+                error,
+            ));
         }
         if let Some(error) = &self.provider_auth_error {
-            rows.push(self.provider_error_card(theme, "auth.json could not be read", error));
+            rows.push(self.provider_error_card(
+                theme,
+                &tr!("settings.auth_json_read_error"),
+                error,
+            ));
         }
 
         // ── grid ──
@@ -2461,7 +2469,7 @@ impl OrbitApp {
         }
         if view.api_key {
             badges = badges.child(self.provider_badge(
-                "API key",
+                &tr!("settings.api_key"),
                 theme.text_3,
                 theme.overlay_strong,
                 theme,
@@ -2541,7 +2549,7 @@ impl OrbitApp {
             if view.note.is_empty() {
                 tr!("settings.pi_default_endpoint")
             } else {
-                view.note.to_string()
+                providers::localize_note(view.note)
             }
         } else if view.api.is_empty() {
             view.base_url.clone()
@@ -3168,7 +3176,7 @@ impl OrbitApp {
                 div()
                     .text_size(theme.ui_px(11.))
                     .text_color(theme.text_3)
-                    .child(editor.note.to_string()),
+                    .child(providers::localize_note(editor.note)),
             );
         }
         if editor.oauth && editor.kind == ProviderKeyKind::ApiKey {
@@ -3914,7 +3922,7 @@ impl OrbitApp {
                     None,
                     Some(self.runtime_button(
                         "notification-open-settings",
-                        "Open System Settings",
+                        &tr!("settings.open_system_settings"),
                         false,
                         theme,
                         this,
@@ -4270,7 +4278,7 @@ impl OrbitApp {
         &self,
         theme: Theme,
         this: Entity<OrbitApp>,
-        _cx: &Context<Self>,
+        cx: &Context<Self>,
     ) -> Vec<AnyElement> {
         let behavior = vec![
             self.setting_row(
@@ -4343,7 +4351,86 @@ impl OrbitApp {
             ));
         }
         sections.push(self.settings_section(theme, &tr!("settings.behavior"), behavior));
+
+        // Auto session titles: the extension asks a model for a short title
+        // from the first exchange; these two rows own whether and which.
+        sections.push(self.settings_section(
+            theme,
+            &tr!("settings.session_titles"),
+            vec![
+                self.setting_row(
+                    theme,
+                    &tr!("settings.auto_session_titles"),
+                    Some(&tr!(
+                        "settings.name_each_session_from_its_first_exchange_so"
+                    )),
+                    None,
+                    Some(self.settings_toggle(
+                        "auto-title-toggle",
+                        self.auto_title.enabled,
+                        theme,
+                        this.clone(),
+                        Self::toggle_auto_title,
+                    )),
+                ),
+                self.setting_row(
+                    theme,
+                    &tr!("settings.title_model"),
+                    Some(&tr!(
+                        "settings.model_that_writes_the_title_defaults_to_the_a"
+                    )),
+                    None,
+                    Some(self.title_model_select(theme, this.clone(), cx)),
+                ),
+            ],
+        ));
         sections
+    }
+
+    /// Flip auto session titles on/off and persist it for the extension.
+    pub(super) fn toggle_auto_title(&mut self, cx: &mut Context<Self>) {
+        self.auto_title.enabled = !self.auto_title.enabled;
+        self.auto_title.persist();
+        cx.notify();
+    }
+
+    /// Settings → Agent: the model the auto-title extension asks. The first
+    /// option is the live session model; the rest is the reported catalog.
+    pub(super) fn title_model_select(
+        &self,
+        theme: Theme,
+        this: Entity<OrbitApp>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let mut options: Vec<String> = vec![tr!("settings.active_session_model")];
+        options.extend(self.available_models.iter().map(|model| {
+            format!(
+                "{} · {}",
+                crate::providers::provider_display_name(&model.provider),
+                model.name
+            )
+        }));
+        let selected = self
+            .auto_title
+            .model
+            .as_ref()
+            .and_then(|wanted| {
+                self.available_models
+                    .iter()
+                    .position(|model| model.provider == wanted.provider && model.id == wanted.id)
+            })
+            .map(|ix| ix + 1)
+            .unwrap_or(0);
+        self.select_control(
+            "title-model-select",
+            SettingsSelect::TitleModel,
+            options[selected].clone(),
+            options,
+            selected,
+            theme,
+            this,
+            cx,
+        )
     }
 
     /// Two-button segmented control for the follow-up delivery mode.
@@ -5188,7 +5275,8 @@ impl OrbitApp {
             | SettingsSelect::CodeFontFamily
             | SettingsSelect::BackdropBlur
             | SettingsSelect::BackdropCell
-            | SettingsSelect::BackdropFade => unreachable!(),
+            | SettingsSelect::BackdropFade
+            | SettingsSelect::TitleModel => unreachable!(),
         };
         let selected = values
             .iter()
@@ -5625,6 +5713,22 @@ impl OrbitApp {
                 theme::set_font_prefs(prefs);
                 return;
             }
+            SettingsSelect::TitleModel => {
+                let model = if ix == 0 {
+                    None
+                } else {
+                    self.available_models.get(ix - 1).map(|model| {
+                        crate::auto_title::TitleModel {
+                            provider: model.provider.clone(),
+                            id: model.id.clone(),
+                        }
+                    })
+                };
+                self.auto_title.model = model;
+                self.auto_title.persist();
+                cx.notify();
+                return;
+            }
             SettingsSelect::BackdropBlur
             | SettingsSelect::BackdropCell
             | SettingsSelect::BackdropFade => {
@@ -5682,7 +5786,8 @@ impl OrbitApp {
             | SettingsSelect::CodeFontFamily
             | SettingsSelect::BackdropBlur
             | SettingsSelect::BackdropCell
-            | SettingsSelect::BackdropFade => unreachable!(),
+            | SettingsSelect::BackdropFade
+            | SettingsSelect::TitleModel => unreachable!(),
         }
         theme::set_ui_prefs(cx, ui);
     }

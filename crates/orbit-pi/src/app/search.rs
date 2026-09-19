@@ -169,9 +169,9 @@ impl OrbitApp {
         let theme = *theme::get(cx);
         let count = search.matches.len();
         let label = if search.query.is_empty() {
-            "Type to find".to_string()
+            tr!("search.type_to_find")
         } else if count == 0 {
-            "No matches".to_string()
+            tr!("search.no_matches")
         } else {
             format!("{} of {}", search.index + 1, count)
         };

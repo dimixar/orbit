@@ -55,20 +55,20 @@ impl AccessMode {
     }
 
     /// Short label for the composer chip and picker rows.
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Supervised => "Supervised",
-            Self::AutoAcceptEdits => "Auto-accept edits",
-            Self::FullAccess => "Full access",
+            Self::Supervised => tr!("access.supervised"),
+            Self::AutoAcceptEdits => tr!("access.auto_accept_edits"),
+            Self::FullAccess => tr!("access.full_access"),
         }
     }
 
     /// One-line explanation shown under the label in the picker.
-    pub fn description(self) -> &'static str {
+    pub fn description(self) -> String {
         match self {
-            Self::Supervised => "Ask before commands and file changes",
-            Self::AutoAcceptEdits => "Auto-approve edits, ask before other actions",
-            Self::FullAccess => "Allow commands and edits without prompts",
+            Self::Supervised => tr!("access.supervised_hint"),
+            Self::AutoAcceptEdits => tr!("access.auto_accept_edits_hint"),
+            Self::FullAccess => tr!("access.full_access_hint"),
         }
     }
 

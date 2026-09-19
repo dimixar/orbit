@@ -589,7 +589,7 @@ impl OrbitApp {
                     files: false,
                     directories: true,
                     multiple: false,
-                    prompt: Some("Choose a folder for this task".into()),
+                    prompt: Some(tr!("session.choose_folder").into()),
                 })
             });
             let Ok(receiver) = receiver else {
@@ -990,7 +990,7 @@ impl OrbitApp {
                     .text_size(theme.ui_px(11.))
                     .text_color(theme.text_3)
                     .child(if session_id.is_empty() {
-                        "No active session".to_string()
+                        tr!("session.no_active")
                     } else {
                         session_display_title(
                             self.session_name.as_deref(),
@@ -1067,7 +1067,7 @@ impl OrbitApp {
                 )
         });
 
-        let section_label = |label: &'static str| {
+        let section_label = |label: &str| {
             div()
                 .px(px(12.))
                 .pt(px(10.))
@@ -1075,7 +1075,7 @@ impl OrbitApp {
                 .text_size(theme.ui_px(11.))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.text_3)
-                .child(label)
+                .child(label.to_string())
         };
 
         let popup = div()
@@ -1112,7 +1112,7 @@ impl OrbitApp {
             })
             .child(header)
             .children(name_block)
-            .child(section_label("Environment"))
+            .child(section_label(&tr!("session.environment")))
             .child(
                 div()
                     .id(ElementId::Name("sess-commit-push".into()))
@@ -1174,13 +1174,13 @@ impl OrbitApp {
                     .mt(px(4.))
                     .border_t_1()
                     .border_color(theme.border)
-                    .child(section_label("Details")),
+                    .child(section_label(&tr!("session.details"))),
             )
-            .child(self.session_detail_row(0, "Session ID", &session_id, theme))
-            .child(self.session_detail_row(1, "Session file", &session_file, theme))
-            .child(self.session_detail_row(2, "Workspace", &workspace, theme))
-            .child(self.session_detail_row(3, "Model", &model, theme))
-            .child(self.session_detail_row(4, "Thinking", &thinking, theme))
+            .child(self.session_detail_row(0, &tr!("session.detail_id"), &session_id, theme))
+            .child(self.session_detail_row(1, &tr!("session.detail_file"), &session_file, theme))
+            .child(self.session_detail_row(2, &tr!("session.detail_workspace"), &workspace, theme))
+            .child(self.session_detail_row(3, &tr!("session.detail_model"), &model, theme))
+            .child(self.session_detail_row(4, &tr!("session.detail_thinking"), &thinking, theme))
             .child(div().h(px(6.)));
 
         Some(

@@ -2362,21 +2362,21 @@ impl UsagePage {
     }
 
     /// The hideable columns of the open breakdown dimension, as `(id, label)`.
-    pub fn breakdown_column_options(&self) -> Vec<(&'static str, &'static str)> {
+    pub fn breakdown_column_options(&self) -> Vec<(&'static str, String)> {
         match self.breakdown_tab {
             BreakdownTab::Tools => vec![
-                ("calls", "Calls"),
-                ("errors", "Errors"),
-                ("avg", "Avg"),
-                ("max", "Max"),
+                ("calls", tr!("usage.col_calls")),
+                ("errors", tr!("usage.metric_errors")),
+                ("avg", tr!("usage.col_avg")),
+                ("max", tr!("usage.col_max")),
             ],
             _ => vec![
-                ("requests", "Requests"),
-                ("input", "Input"),
-                ("output", "Output"),
-                ("cache", "Cache"),
-                ("tokens", "Tokens"),
-                ("share", "Share"),
+                ("requests", tr!("usage.metric_requests")),
+                ("input", tr!("usage.slice_input")),
+                ("output", tr!("usage.slice_output")),
+                ("cache", tr!("usage.metric_cache")),
+                ("tokens", tr!("usage.metric_tokens")),
+                ("share", tr!("usage.col_share")),
             ],
         }
     }

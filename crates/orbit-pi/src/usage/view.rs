@@ -1790,7 +1790,7 @@ impl UsagePage {
             columns,
             rows,
             height,
-            empty_cell("No buckets match this search.", theme),
+            empty_cell(&tr!("usage.no_buckets_match_search"), theme),
             theme,
             Rc::new(
                 move |page, ix, sort, cx| match (keys.get(ix).copied(), sort) {
@@ -1825,7 +1825,7 @@ impl UsagePage {
         let entity = cx.entity();
         let chip = filters::chip(
             "usage-series-columns-chip",
-            "Columns".to_string(),
+            tr!("usage.columns"),
             None,
             !self.series_hidden_columns().is_empty(),
             true,
@@ -1951,7 +1951,7 @@ impl UsagePage {
         let entity = cx.entity();
         let chip = filters::chip(
             "usage-bucket-columns-chip",
-            "Columns".to_string(),
+            tr!("usage.columns"),
             None,
             !self.bucket_hidden_columns().is_empty(),
             true,
@@ -2069,7 +2069,7 @@ impl UsagePage {
         let entity = cx.entity();
         let chip = filters::chip(
             "usage-failure-columns-chip",
-            "Columns".to_string(),
+            tr!("usage.columns"),
             None,
             !self.failure_hidden_columns().is_empty(),
             true,
@@ -2355,7 +2355,7 @@ impl UsagePage {
         let entity = cx.entity();
         let chip = filters::chip(
             "usage-breakdown-columns-chip",
-            "Columns".to_string(),
+            tr!("usage.columns"),
             None,
             !self.breakdown_hidden_columns().is_empty(),
             true,
@@ -3970,7 +3970,7 @@ impl UsagePage {
         let entity = cx.entity();
         let chip = filters::chip(
             "usage-columns-chip",
-            "Columns".to_string(),
+            tr!("usage.columns"),
             None,
             !self.hidden_columns().is_empty(),
             true,

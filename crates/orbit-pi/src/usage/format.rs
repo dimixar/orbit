@@ -146,8 +146,8 @@ pub fn share(fraction: f64) -> String {
 /// A signed percentage for a comparison: `+12.4%`, `-8.2%`, `no change`.
 pub fn delta(pct: Option<f64>) -> String {
     match pct {
-        None => "no change".into(),
-        Some(pct) if pct.abs() < 0.05 => "no change".into(),
+        None => tr!("usage.no_change"),
+        Some(pct) if pct.abs() < 0.05 => tr!("usage.no_change"),
         Some(pct) => format!("{:+.1}%", pct),
     }
 }

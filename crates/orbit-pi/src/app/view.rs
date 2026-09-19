@@ -998,42 +998,64 @@ impl OrbitApp {
                     .child(icon(self.access_mode.icon(), 12., theme.text_3))
                     .child(
                         div()
-                            .text_color(theme.text_2)
+                            .text_color(if self.access_menu_open {
+                                theme.active_fg
+                            } else {
+                                theme.text_2
+                            })
                             .child(self.access_mode.label()),
                     )
-                    .child(self.access_caret(cx)),
+                    .child(Self::chip_caret(
+                        self.access_menu_open,
+                        theme.active_fg,
+                        "access-caret-turn",
+                        cx,
+                    ))
             )
     }
 
-    /// The chip's caret. It turns a half-turn when the picker opens — animated
-    /// on open (reduce-motion aware) so the turn reads as a transition, and
-    /// resting flat when closed so there is no reverse flicker.
-    fn access_caret(&self, cx: &Context<Self>) -> AnyElement {
+    /// The shared chip caret. It turns a half-turn when the picker opens —
+    /// animated on open (reduce-motion aware) so the turn reads as a
+    /// transition, and resting flat when closed so there is no reverse
+    /// flicker. `fg` is the caret color while open.
+    fn chip_caret(
+        open: bool,
+        fg: gpui::Hsla,
+        animation_id: &'static str,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let theme = *theme::get(cx);
-        let open = self.access_menu_open;
         let svg = gpui::svg()
             .path("icons/chevron-down.svg")
             .flex_none()
-            .size(px(11.))
-            .text_color(theme.text_3);
+            .size(px(10.))
+            .text_color(if open { fg } else { theme.text_3 })
+            .into_any_element();
         if !open {
-            return svg
-                .with_transformation(Transformation::rotate(radians(0.0)))
-                .into_any_element();
+            return svg;
         }
         if theme::reduce_motion(cx) {
-            return svg
+            return gpui::svg()
+                .path("icons/chevron-down.svg")
+                .flex_none()
+                .size(px(10.))
+                .text_color(fg)
                 .with_transformation(Transformation::rotate(radians(std::f32::consts::PI)))
                 .into_any_element();
         }
-        svg.with_animation(
-            "access-caret-turn",
-            Animation::new(Duration::from_millis(150)).with_easing(|d| 1.0 - (1.0 - d).powi(3)),
-            |svg, d| {
-                svg.with_transformation(Transformation::rotate(radians(std::f32::consts::PI * d)))
-            },
-        )
-        .into_any_element()
+        gpui::svg()
+            .path("icons/chevron-down.svg")
+            .flex_none()
+            .size(px(10.))
+            .text_color(fg)
+            .with_animation(
+                animation_id,
+                Animation::new(Duration::from_millis(150)).with_easing(|d| 1.0 - (1.0 - d).powi(3)),
+                |svg, d| {
+                    svg.with_transformation(Transformation::rotate(radians(std::f32::consts::PI * d)))
+                },
+            )
+            .into_any_element()
     }
 
     /// The access-mode picker popup, while open. Minimal rows: an icon tile,
@@ -1296,7 +1318,7 @@ impl OrbitApp {
                             } else {
                                 theme.text_2
                             })
-                            .child(*label),
+                            .child(tr!(*label)),
                     )
                     .when(!hint.is_empty(), |row| {
                         row.child(
@@ -1384,29 +1406,38 @@ impl OrbitApp {
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    .px(px(7.))
-                    .h(px(24.))
-                    .rounded_md()
-                    .text_size(theme.ui_px(12.))
+                    .px(px(6.))
+                    .h(px(22.))
+                    .rounded(px(6.))
+                    .text_size(theme.ui_px(11.5))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.overlay))
                     .when(self.picker_is_open(PickerKind::Model), |chip| {
-                        chip.bg(theme.active).text_color(theme.active_fg)
+                        chip.bg(theme.active)
                     })
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_model_trigger_click))
                     .child(icon_dyn(
                         provider_icon(&self.model_provider),
-                        12.,
+                        11.,
                         theme.text_3,
                     ))
                     .child(
                         div()
                             .max_w(px(if compact { 120. } else { 220. }))
                             .truncate()
-                            .text_color(theme.text_2)
+                            .text_color(if self.picker_is_open(PickerKind::Model) {
+                                theme.active_fg
+                            } else {
+                                theme.text_2
+                            })
                             .child(self.model_label.clone()),
                     )
-                    .child(icon("icons/chevron-down.svg", 11., theme.text_3)),
+                    .child(Self::chip_caret(
+                        self.picker_is_open(PickerKind::Model),
+                        theme.active_fg,
+                        "model-caret-turn",
+                        cx,
+                    )),
             )
     }
 
@@ -1425,29 +1456,38 @@ impl OrbitApp {
                     .flex()
                     .items_center()
                     .gap_1p5()
-                    .px(px(7.))
-                    .h(px(24.))
-                    .rounded_md()
-                    .text_size(theme.ui_px(12.))
+                    .px(px(6.))
+                    .h(px(22.))
+                    .rounded(px(6.))
+                    .text_size(theme.ui_px(11.5))
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.overlay))
                     .when(self.picker_is_open(PickerKind::Thinking), |chip| {
-                        chip.bg(theme.active).text_color(theme.active_fg)
+                        chip.bg(theme.active)
                     })
                     .on_mouse_up(
                         MouseButton::Left,
                         cx.listener(Self::on_thinking_trigger_click),
                     )
                     .child({
-                        let (path, color) = thinking_icon(&self.thinking_label, &theme);
-                        icon(path, 15., color)
+                        let (path, _) = thinking_icon(&self.thinking_label, &theme);
+                        icon(path, 13., theme.text_3)
                     })
                     .child(
                         div()
-                            .text_color(theme.text_2)
+                            .text_color(if self.picker_is_open(PickerKind::Thinking) {
+                                theme.active_fg
+                            } else {
+                                theme.text_2
+                            })
                             .child(thinking_display(&self.thinking_label)),
                     )
-                    .child(icon("icons/chevron-down.svg", 11., theme.text_3)),
+                    .child(Self::chip_caret(
+                        self.picker_is_open(PickerKind::Thinking),
+                        theme.active_fg,
+                        "thinking-caret-turn",
+                        cx,
+                    )),
             )
     }
 
@@ -1888,9 +1928,9 @@ impl OrbitApp {
                                             .text_color(theme.text_3)
                                             .text_align(TextAlign::Center)
                                             .child(if asked_for {
-                                                "Everything Orbit needs is installed. This is what it found on this machine."
+                                                tr!("view.setup_complete_hint")
                                             } else {
-                                                "A few pieces are missing before Orbit can run the pi agent. Install them, then refresh."
+                                                tr!("view.setup_missing_hint")
                                             }),
                                     ),
                             )
@@ -2043,7 +2083,7 @@ impl OrbitApp {
                             .flex_none()
                             .text_size(theme.ui_px(11.5))
                             .text_color(theme.text_3)
-                            .child(fact.label),
+                            .child(fact.label.clone()),
                     )
                     .child(
                         div()
@@ -2125,7 +2165,7 @@ impl OrbitApp {
                         div()
                             .text_size(theme.ui_px(11.5))
                             .text_color(theme.text_3)
-                            .child(dep.detail),
+                            .child(dep.detail.clone()),
                     ),
             )
             .child(if dep.installed {

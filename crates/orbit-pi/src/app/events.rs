@@ -151,7 +151,7 @@ impl OrbitApp {
                         error: value
                             .get("errorMessage")
                             .and_then(Value::as_str)
-                            .unwrap_or("transient error")
+                            .unwrap_or(&tr!("events.transient_error"))
                             .to_string(),
                     });
                 }
@@ -163,7 +163,8 @@ impl OrbitApp {
                         let error = value
                             .get("finalError")
                             .and_then(|v| v.as_str())
-                            .unwrap_or("pi exhausted its automatic retries");
+                            .map(str::to_string)
+                            .unwrap_or_else(|| tr!("events.retries_exhausted"));
                         self.set_error(tr!("events.auto_retry_failed", error = error));
                     }
                 }
@@ -191,11 +192,13 @@ impl OrbitApp {
                     let hook = value
                         .get("event")
                         .and_then(Value::as_str)
-                        .unwrap_or("unknown");
+                        .map(str::to_string)
+                        .unwrap_or_else(|| tr!("events.unknown"));
                     let error = value
                         .get("error")
                         .and_then(Value::as_str)
-                        .unwrap_or("unknown error");
+                        .map(str::to_string)
+                        .unwrap_or_else(|| tr!("events.unknown_error"));
                     self.set_error(tr!(
                         "events.extension_failed",
                         name = name,
@@ -260,7 +263,7 @@ impl OrbitApp {
                     self.runtime.alive = false;
                     self.runtime.exited = true;
                     self.auth.on_disconnect();
-                    self.set_error("pi process exited — restart it from Settings → Runtime");
+                    self.set_error(tr!("events.process_exited"));
                 }
                 Event::MessageEnd { value } => {
                     // A failed LLM call ends the assistant message with
@@ -272,7 +275,9 @@ impl OrbitApp {
                     } else if self
                         .error
                         .as_deref()
-                        .is_some_and(|error| error.starts_with("Agent error:"))
+                        .is_some_and(|error| {
+                            error.starts_with(tr!("events.agent_error_prefix").as_str())
+                        })
                     {
                         // The next attempt produced a message — clear the
                         // stale agent-error banner.
@@ -732,9 +737,7 @@ impl OrbitApp {
                 self.auth.on_list_response(success, data, error);
                 if self.auth.support() != before && self.auth.support() == AuthSupport::Unsupported
                 {
-                    self.set_status(
-                        "This pi build has no auth RPC — provider sign-in uses Terminal",
-                    );
+                    self.set_status(tr!("events.auth_rpc_missing"));
                 }
             }
             "auth.status" => self.auth.on_status_response(success, data),
@@ -847,19 +850,23 @@ impl OrbitApp {
         }
         let (subtitle, fallback, kind) = if summary.failed {
             (
-                "Agent error",
-                "The turn ended with an error.",
+                tr!("events.notify_turn_failed"),
+                tr!("events.notify_turn_failed_body"),
                 ToastKind::Error,
             )
         } else {
-            ("Turn finished", "pi finished the turn.", ToastKind::Success)
+            (
+                tr!("events.notify_turn_finished"),
+                tr!("events.notify_turn_finished_body"),
+                ToastKind::Success,
+            )
         };
         let body = if summary.body.trim().is_empty() {
-            fallback
+            fallback.as_str()
         } else {
             summary.body.as_str()
         };
-        self.post_notification(session, title, subtitle, body, kind);
+        self.post_notification(session, title, &subtitle, body, kind);
     }
 
     /// A run is blocked on an extension dialog — the one event a user cannot
@@ -872,17 +879,18 @@ impl OrbitApp {
             .current_title
             .clone()
             .or_else(|| self.session_name.clone());
+        let waiting_body = tr!("events.notify_waiting_body");
         let body = value
             .get("title")
             .or_else(|| value.get("message"))
             .and_then(Value::as_str)
             .filter(|text| !text.trim().is_empty())
-            .unwrap_or("pi is waiting for your answer.");
+            .unwrap_or(&waiting_body);
         let session = self.current_session_path.clone();
         self.post_notification(
             session.as_deref(),
             title.as_deref(),
-            "Waiting for your answer",
+            &tr!("events.notify_waiting"),
             body,
             ToastKind::Warning,
         );

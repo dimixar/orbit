@@ -4,7 +4,9 @@
 //! where `<workspace-slug>` is the workspace absolute path with `/` → `-`.
 //! Each file is JSONL; the first line is the session header
 //! (`{"type":"session","id":…,"cwd":…}`) followed by entries
-//! (`message`, `model_change`, …). Titles come from the first user message.
+//! (`message`, `model_change`, …). Titles come from pi's own auto-title
+//! (`session_info.name`) when it named the session, and fall back to the
+//! first user message.
 
 use std::{
     fs,
@@ -27,9 +29,10 @@ pub struct SessionInfo {
     pub id: String,
     /// Workspace the session belongs to.
     pub cwd: PathBuf,
-    /// First user message, truncated — the title shown in the sidebar.
+    /// pi's auto-title (`session_info.name`, truncated) when it named the
+    /// session; otherwise the first user message. The sidebar's first line.
     pub title: String,
-    /// First user message preview (longer than the title line).
+    /// First user message preview — the sidebar's second line.
     pub first_message: String,
     /// Wall-clock time of the session's last *activity* — the newest
     /// `message` entry, not the file's mtime. Opening a session appends
@@ -112,10 +115,10 @@ pub fn clone_session_file(source: &Path) -> anyhow::Result<PathBuf> {
     let first_break = content
         .iter()
         .position(|byte| *byte == b'\n')
-        .ok_or_else(|| anyhow::anyhow!("session file has no header line"))?;
+        .ok_or_else(|| anyhow::anyhow!(tr!("sessions.no_header_line")))?;
     let mut header: Value = serde_json::from_slice(&content[..first_break])?;
     if header.get("type").and_then(Value::as_str) != Some("session") {
-        anyhow::bail!("not a pi session file");
+        anyhow::bail!("{}", tr!("sessions.not_a_session_file"));
     }
 
     let id = next_session_id();
@@ -266,10 +269,8 @@ fn read_session(path: &Path) -> Option<SessionInfo> {
     let id = header.get("id")?.as_str()?.to_string();
     let cwd = PathBuf::from(header.get("cwd")?.as_str()?);
 
-    // Scan a bounded number of lines for the first user message → title
-    // and preview.
-    let mut title = String::new();
-    let mut first_message = String::new();
+    // Scan a bounded number of lines for the first user message → preview.
+    let mut first_text = String::new();
     for _ in 0..60 {
         let mut line = String::new();
         match reader.read_line(&mut line) {
@@ -281,21 +282,27 @@ fn read_session(path: &Path) -> Option<SessionInfo> {
                 if value.get("type")?.as_str() == Some("message") {
                     let message = &value["message"];
                     if message["role"].as_str() == Some("user") {
-                        let text = first_user_text(message);
-                        title = cap_chars(&text, 80);
-                        first_message = cap_chars(&text, 110);
+                        first_text = first_user_text(message);
                         break;
                     }
                 }
             }
         }
     }
+    let first_message = cap_chars(&first_text, 110);
     // A header-only file is a draft: pi writes it at `new_session` time,
     // before anything is sent. Don't list it (Waku drafts parity) — the
     // session joins the sidebar once its first user message lands.
-    if title.is_empty() {
+    if first_message.is_empty() {
         return None;
     }
+    // pi's auto-title (`session_info.name`) is the real title; the first user
+    // message stands in only when the session was never named. Keeping the
+    // two distinct lets the sidebar show the message below a generated title
+    // instead of printing the same sentence twice.
+    let title = last_session_name(path)
+        .map(|name| cap_chars(&name, 80))
+        .unwrap_or_else(|| cap_chars(&first_text, 80));
 
     Some(SessionInfo {
         path: path.to_path_buf(),
@@ -305,6 +312,49 @@ fn read_session(path: &Path) -> Option<SessionInfo> {
         first_message,
         modified,
     })
+}
+
+/// The session's most recent pi-assigned name, read from a bounded tail
+/// window so it works against a file pi is still appending to. pi writes a
+/// `session_info` entry when it auto-titles the session and again on rename,
+/// so the newest entry wins; a session never named (or whose name was
+/// cleared) yields `None` and the caller falls back to the first message.
+/// The window is capped because a session's name sits near its live edge long
+/// before the file grows unbounded — an older name simply falls back.
+fn last_session_name(path: &Path) -> Option<String> {
+    const MAX_SCAN: u64 = 256 * 1024;
+    let mut file = fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(MAX_SCAN);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    // Newest line first: the last `session_info` entry is the current name.
+    // A window that starts mid-line leaves one unparseable segment, skipped.
+    for line in buf.split(|byte| *byte == b'\n').rev() {
+        if let Some(name) = session_name_in_line(line) {
+            return name;
+        }
+    }
+    None
+}
+
+/// The name on one `session_info` line: `Some(Some(name))` when the entry
+/// names the session, `Some(None)` when it clears the name, `None` for any
+/// other line (so the tail scan keeps looking).
+fn session_name_in_line(line: &[u8]) -> Option<Option<String>> {
+    let value: Value = serde_json::from_slice(line).ok()?;
+    if value.get("type").and_then(Value::as_str) != Some("session_info") {
+        return None;
+    }
+    Some(
+        value
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string),
+    )
 }
 
 /// Wall-clock time of the newest `message` entry in a session file.
@@ -412,7 +462,7 @@ pub fn read_messages_payload(path: &Path) -> Option<Value> {
     Some(serde_json::json!({ "messages": messages }))
 }
 
-fn cap_chars(text: &str, max: usize) -> String {
+pub(crate) fn cap_chars(text: &str, max: usize) -> String {
     let trimmed = text.trim();
     let mut out: String = trimmed.chars().take(max).collect();
     if trimmed.chars().count() > max {
@@ -503,6 +553,60 @@ mod tests {
         // descend, and only a session with newer activity may join the front.
         assert!(sessions.windows(2).all(|w| w[0].modified >= w[1].modified));
         assert!(sessions[0].id.len() > 10);
+    }
+
+    /// Write a session file whose first user message is `hii`, followed by
+    /// the given trailing JSONL lines.
+    fn named_session_file(dir: &str, trailing: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(dir);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("2026-01-01T00-00-00-000Z_named.jsonl");
+        fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"session\",\"id\":\"named\",\"cwd\":\"/tmp/ws\"}}\n\
+                 {{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":\"hii\"}}}}\n{trailing}"
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn read_session_uses_pis_persisted_name_as_the_title() {
+        // pi writes the auto-title as a `session_info` entry; the sidebar
+        // must show it as the title and the first message as the preview,
+        // instead of using the message for both.
+        let path = named_session_file(
+            "orbit-session-name-test",
+            "{\"type\":\"session_info\",\"name\":\"redesign the quota widget\"}\n",
+        );
+        let info = read_session(&path).expect("listable");
+        assert_eq!(info.title, "redesign the quota widget");
+        assert_eq!(info.first_message, "hii");
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn read_session_takes_the_newest_name_and_falls_back_on_clear() {
+        // A rename appends a newer `session_info`; the last one wins.
+        let path = named_session_file(
+            "orbit-session-rename-test",
+            "{\"type\":\"session_info\",\"name\":\"first name\"}\n\
+             {\"type\":\"session_info\",\"name\":\"second name\"}\n",
+        );
+        assert_eq!(read_session(&path).unwrap().title, "second name");
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+
+        // A cleared name (`null`) reverts to the first user message.
+        let path = named_session_file(
+            "orbit-session-clear-test",
+            "{\"type\":\"session_info\",\"name\":\"gone\"}\n\
+             {\"type\":\"session_info\",\"name\":null}\n",
+        );
+        assert_eq!(read_session(&path).unwrap().title, "hii");
+        let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

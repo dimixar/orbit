@@ -114,9 +114,9 @@ pub fn usage_slices(
     let mut out = Vec::new();
     if other > 0 {
         let label = if conversation == 0 {
-            "In use"
+            tr!("context_meter.in_use")
         } else {
-            "Other context"
+            tr!("context_meter.other_context")
         };
         out.push(ContextSlice {
             label: label.into(),
@@ -130,7 +130,7 @@ pub fn usage_slices(
     }
     if conversation > 0 {
         out.push(ContextSlice {
-            label: "Conversation".into(),
+            label: tr!("context_meter.conversation").into(),
             tokens: conversation,
             color: theme.accent,
         });
@@ -515,35 +515,40 @@ pub fn session_usage_section(usage: &SessionUsage, theme: Theme) -> AnyElement {
         )
         .child(session_row(
             "icons/usage-input.svg",
-            "Input",
+            tr!("context_meter.input"),
             format_tokens(usage.input),
             theme,
         ))
         .child(session_row(
             "icons/usage-output.svg",
-            "Output",
+            tr!("context_meter.output"),
             format_tokens(usage.output),
             theme,
         ))
         .child(session_row(
             "icons/cache-read.svg",
-            "Cache read",
+            tr!("context_meter.cache_read"),
             cache_read_label(usage),
             theme,
         ))
         .child(session_row(
             "icons/cache-write.svg",
-            "Cache write",
+            tr!("context_meter.cache_write"),
             format_tokens(usage.cache_write),
             theme,
         ))
         .child(session_row(
             "icons/usage-total.svg",
-            "Total",
+            tr!("context_meter.total"),
             format_tokens(usage.total),
             theme,
         ))
-        .child(session_row("icons/usage-cost.svg", "Cost", cost, theme))
+        .child(session_row(
+            "icons/usage-cost.svg",
+            tr!("context_meter.cost"),
+            cost,
+            theme,
+        ))
         .into_any_element()
 }
 
@@ -566,10 +571,11 @@ fn cache_read_label(usage: &SessionUsage) -> String {
 /// regardless of label or value length.
 fn session_row(
     icon_path: &'static str,
-    label: &'static str,
+    label: impl Into<SharedString>,
     value: String,
     theme: Theme,
 ) -> impl IntoElement {
+    let label = label.into();
     div()
         .w_full()
         .flex()

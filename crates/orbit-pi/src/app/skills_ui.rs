@@ -350,7 +350,7 @@ impl OrbitApp {
             .child(self.skill_toggle(&skill, theme, this.clone()));
 
         let description = if skill.description.trim().is_empty() {
-            "No description in frontmatter — pi will skip this skill.".to_string()
+            tr!("skills_ui.no_description")
         } else {
             skill.description.clone()
         };

@@ -356,7 +356,7 @@ fn parse(source: Source, numstat: &str, patch: &str, complete_context: bool) -> 
                 old_line: None,
                 new_line: None,
                 kind: LineKind::Meta,
-                content: "Binary file changed".into(),
+                content: tr!("review.binary_file_changed"),
                 tokens: Vec::new(),
             });
             continue;

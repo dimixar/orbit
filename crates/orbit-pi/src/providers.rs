@@ -137,7 +137,7 @@ fn write_provider_at(
 ) -> Result<(), String> {
     let id = id.trim();
     if id.is_empty() {
-        return Err("Provider id is required.".into());
+        return Err(tr!("settings.provider_id_required"));
     }
     let mut root = read_root_at(path)?;
     let providers = root
@@ -147,7 +147,7 @@ fn write_provider_at(
         .or_insert_with(|| Value::Object(Map::new()));
     let providers = providers
         .as_object_mut()
-        .ok_or_else(|| "models.json has a non-object `providers` value.".to_string())?;
+        .ok_or_else(|| tr!("providers.models_json_providers_not_object"))?;
 
     let existing = providers.get(id).and_then(Value::as_object).cloned();
     let mut entry = existing.clone().unwrap_or_default();
@@ -246,7 +246,7 @@ fn read_root_at(path: &Path) -> Result<Value, String> {
     }
     match serde_json::from_str::<Value>(&raw) {
         Ok(value @ Value::Object(_)) => Ok(value),
-        Ok(_) => Err("models.json must contain a JSON object.".into()),
+        Ok(_) => Err(tr!("providers.models_json_not_object")),
         Err(err) => Err(tr!("errors.models_json_invalid", error = err)),
     }
 }
@@ -391,6 +391,29 @@ fn pi_ai_data_dir() -> Option<PathBuf> {
 /// from the curated table; `""` when there is nothing to add.
 pub(crate) fn provider_note(id: &str) -> &'static str {
     builtin(id).map(|provider| provider.note).unwrap_or("")
+}
+
+/// Translate a provider note for display. The curated table stores English
+/// copy; this maps each note to its localized string.
+pub(crate) fn localize_note(note: &str) -> String {
+    match note {
+        "" => String::new(),
+        "ChatGPT Plus/Pro subscription." => tr!("providers.note_chatgpt_codex"),
+        "Also needs AZURE_OPENAI_BASE_URL or AZURE_OPENAI_RESOURCE_NAME." => {
+            tr!("providers.note_azure_openai")
+        }
+        "Or Application Default Credentials plus GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION." => {
+            tr!("providers.note_google_vertex")
+        }
+        "Or ambient AWS credentials (profile, IAM keys, SSO)." => {
+            tr!("providers.note_amazon_bedrock")
+        }
+        "Also needs CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_GATEWAY_ID." => {
+            tr!("providers.note_cloudflare_gateway")
+        }
+        "Also needs CLOUDFLARE_ACCOUNT_ID." => tr!("providers.note_cloudflare_workers_ai"),
+        other => other.to_string(),
+    }
 }
 
 /// Provider metadata introspected from pi-ai — authoritative, so Orbit does
@@ -638,15 +661,15 @@ fn write_api_key_at(path: &Path, id: &str, key: &str) -> Result<(), String> {
     let id = id.trim();
     let key = key.trim();
     if id.is_empty() {
-        return Err("Provider id is required.".into());
+        return Err(tr!("settings.provider_id_required"));
     }
     if key.is_empty() {
-        return Err("API key is required.".into());
+        return Err(tr!("providers.api_key_required"));
     }
     let mut root = read_auth_root_at(path)?;
     let entries = root
         .as_object_mut()
-        .ok_or_else(|| "auth.json must contain a JSON object.".to_string())?;
+        .ok_or_else(|| tr!("providers.auth_json_not_object"))?;
     let mut entry = Map::new();
     entry.insert("type".into(), Value::String("api_key".into()));
     entry.insert("key".into(), Value::String(key.to_string()));
@@ -677,7 +700,7 @@ pub(crate) fn write_ollama_cloud_session(session: &str) -> Result<(), String> {
 fn write_ollama_cloud_session_at(path: &Path, session: &str) -> Result<(), String> {
     let session = session.trim();
     if session.is_empty() {
-        return Err("A session cookie is required.".into());
+        return Err(tr!("providers.session_cookie_required"));
     }
     // A pasted value must look like a cookie header, not an API key. Reject
     // anything without a `name=value` pair so a stray key can't be stored as
@@ -688,7 +711,7 @@ fn write_ollama_cloud_session_at(path: &Path, session: &str) -> Result<(), Strin
     let mut root = read_auth_root_at(path)?;
     let entries = root
         .as_object_mut()
-        .ok_or_else(|| "auth.json must contain a JSON object.".to_string())?;
+        .ok_or_else(|| tr!("providers.auth_json_not_object"))?;
     // Repair a cookie written by an older build under the provider id; leaving
     // it there keeps the local endpoint broken.
     let legacy_session = entries
@@ -743,7 +766,7 @@ fn read_auth_root_at(path: &Path) -> Result<Value, String> {
     }
     match serde_json::from_str::<Value>(&raw) {
         Ok(value @ Value::Object(_)) => Ok(value),
-        Ok(_) => Err("auth.json must contain a JSON object.".into()),
+        Ok(_) => Err(tr!("providers.auth_json_not_object")),
         Err(err) => Err(tr!("errors.auth_json_invalid", error = err)),
     }
 }

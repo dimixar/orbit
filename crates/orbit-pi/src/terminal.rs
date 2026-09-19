@@ -1232,9 +1232,11 @@ impl Render for TerminalView {
         // so there is no reason to spend a frame every 500 ms on it.
         self.focused = focused;
         let body = match (&self.session, self.error.clone()) {
-            (_, Some(error)) => terminal_message(&theme, "Terminal unavailable", Some(&error)),
+            (_, Some(error)) => {
+                terminal_message(&theme, &tr!("terminal.unavailable"), Some(&error))
+            }
             (Some(_), None) => self.grid_element(&theme, &font, focused, window, cx),
-            (None, None) => terminal_message(&theme, "Starting shell…", None),
+            (None, None) => terminal_message(&theme, &tr!("terminal.starting_shell"), None),
         };
 
         div()

@@ -175,8 +175,8 @@ impl ModelSelector {
         // paste, etc. keep working) and the `Picker` flag (so the picker's
         // enter/escape/arrows take precedence at the same dispatch depth).
         let placeholder = match kind {
-            PickerKind::Model => "Search models…",
-            PickerKind::Thinking => "Search levels…",
+            PickerKind::Model => tr!("model_selector.search_models"),
+            PickerKind::Thinking => tr!("model_selector.search_levels"),
         };
         let filter = cx.new(|cx| {
             ComposerInput::new(cx)
@@ -289,7 +289,7 @@ impl ModelSelector {
 
         if kind == PickerKind::Thinking {
             for level in levels.iter().filter(|level| {
-                matches(level) || matches(&thinking_display(level)) || matches(thinking_hint(level))
+                matches(level) || matches(&thinking_display(level)) || matches(&thinking_hint(level))
             }) {
                 rows.push(Row::Level {
                     level: level.clone(),
@@ -433,9 +433,13 @@ impl ModelSelector {
         let this = cx.weak_entity();
         let favorites = crate::favorites::all();
         let mut entries: Vec<(String, Scope, &'static str)> =
-            vec![("All".to_string(), Scope::All, "icons/extensions.svg")];
+            vec![(tr!("model_selector.all"), Scope::All, "icons/extensions.svg")];
         if !favorites.is_empty() {
-            entries.push(("Favorites".to_string(), Scope::Favorites, "icons/star.svg"));
+            entries.push((
+                tr!("model_selector.favorites"),
+                Scope::Favorites,
+                "icons/star.svg",
+            ));
         }
         entries.extend(self.providers().into_iter().map(|provider| {
             (
@@ -938,16 +942,16 @@ pub(crate) fn thinking_display(level: &str) -> String {
 }
 
 /// Short hint shown under the thinking level label in the picker.
-fn thinking_hint(level: &str) -> &'static str {
+fn thinking_hint(level: &str) -> String {
     match level.to_ascii_lowercase().as_str() {
-        "off" | "none" => "No reasoning",
-        "minimal" | "low" => "Fast reasoning",
-        "medium" => "Balanced reasoning",
-        "high" => "Deeper reasoning",
-        "xhigh" | "ultra" => "Extensive reasoning",
-        "max" => "Maximum reasoning",
-        "auto" => "Model chooses depth",
-        _ => "Custom reasoning level",
+        "off" | "none" => tr!("model_selector.reasoning_none"),
+        "minimal" | "low" => tr!("model_selector.reasoning_fast"),
+        "medium" => tr!("model_selector.reasoning_balanced"),
+        "high" => tr!("model_selector.reasoning_deeper"),
+        "xhigh" | "ultra" => tr!("model_selector.reasoning_extensive"),
+        "max" => tr!("model_selector.reasoning_maximum"),
+        "auto" => tr!("model_selector.reasoning_auto"),
+        _ => tr!("model_selector.reasoning_custom"),
     }
 }
 
@@ -1135,8 +1139,14 @@ fn group_header(
 
 fn empty_state(kind: PickerKind, theme: Theme) -> impl IntoElement + use<> {
     let (title, hint) = match kind {
-        PickerKind::Model => ("No matching models", "Try a provider, model, or id"),
-        PickerKind::Thinking => ("No matching levels", "Try a reasoning level"),
+        PickerKind::Model => (
+            tr!("model_selector.no_matching_models"),
+            tr!("model_selector.try_a_provider_model_or_id"),
+        ),
+        PickerKind::Thinking => (
+            tr!("model_selector.no_matching_levels"),
+            tr!("model_selector.try_a_reasoning_level"),
+        ),
     };
     div()
         .h(px(120.))

@@ -90,10 +90,10 @@ pub fn checkout_branch(cwd: &Path, branch: &str) -> Result<(), String> {
 pub fn create_and_checkout_branch(cwd: &Path, name: &str) -> Result<(), String> {
     let name = name.trim();
     if name.is_empty() {
-        return Err("branch name is empty".into());
+        return Err(tr!("git.branch_name_empty"));
     }
     if name.contains([' ', '\t', '~', '^', ':', '?', '*', '[']) || name.contains("..") {
-        return Err("branch name contains invalid characters".into());
+        return Err(tr!("git.branch_name_invalid"));
     }
     if run_git(cwd, &["switch", "-c", name]).is_ok() {
         return Ok(());
@@ -106,18 +106,18 @@ pub fn create_and_checkout_branch(cwd: &Path, name: &str) -> Result<(), String> 
 pub fn commit(cwd: &Path, message: &str, include_unstaged: bool) -> Result<String, String> {
     let message = message.trim();
     if message.is_empty() {
-        return Err("enter a commit message".into());
+        return Err(tr!("git.enter_commit_message"));
     }
     if include_unstaged {
         run_git(cwd, &["add", "-A", "--", "."])?;
     } else {
         let staged = run_git(cwd, &["diff", "--cached", "--name-only"]).unwrap_or_default();
         if staged.trim().is_empty() {
-            return Err("no staged changes to commit".into());
+            return Err(tr!("git.no_staged_changes"));
         }
     }
     run_git(cwd, &["commit", "-m", message])?;
-    Ok("Committed".into())
+    Ok(tr!("git.committed"))
 }
 
 /// Push the current branch, setting its upstream on the first push.
@@ -126,14 +126,14 @@ pub fn push(cwd: &Path) -> Result<String, String> {
     // auth/network, not a missing upstream).
     if run_git(cwd, &["rev-parse", "--abbrev-ref", "@{upstream}"]).is_ok() {
         run_git(cwd, &["push"])?;
-        return Ok("Pushed".into());
+        return Ok(tr!("git.pushed"));
     }
     match current_branch(cwd) {
         Some(branch) => {
             run_git(cwd, &["push", "-u", "origin", &branch])?;
-            Ok("Pushed and set upstream".into())
+            Ok(tr!("git.pushed_and_set_upstream"))
         }
-        None => Err("no branch to push".into()),
+        None => Err(tr!("git.no_branch_to_push")),
     }
 }
 
@@ -142,7 +142,7 @@ pub fn push(cwd: &Path) -> Result<String, String> {
 /// [`merge_upstream`] for that case.
 pub fn pull(cwd: &Path) -> Result<String, String> {
     run_git(cwd, &["pull", "--ff-only"])?;
-    Ok("Pulled".into())
+    Ok(tr!("git.pulled"))
 }
 
 /// Fetch and merge the upstream into the current branch, tolerating
@@ -153,7 +153,7 @@ pub fn merge_upstream(cwd: &Path) -> Result<String, String> {
     // `--ff` overrides a `pull.ff = only` config that would otherwise refuse
     // the merge; `--no-rebase` keeps this a merge, never a rebase.
     run_git(cwd, &["pull", "--no-rebase", "--ff", "--no-edit"])?;
-    Ok("Merged".into())
+    Ok(tr!("git.merged"))
 }
 
 /// Update remote-tracking refs without touching the working tree. Used after
@@ -345,12 +345,12 @@ fn ensure_repository(cwd: &Path) -> anyhow::Result<()> {
         Ok(output) => output,
         // A missing directory or unusable git binary is, for our purposes,
         // "not a repository".
-        Err(_) => bail!("not a git repository"),
+        Err(_) => bail!("{}", tr!("git.not_a_repository")),
     };
     if output.status.success() {
         Ok(())
     } else {
-        bail!("not a git repository");
+        bail!("{}", tr!("git.not_a_repository"));
     }
 }
 
@@ -1265,7 +1265,8 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert!(error.contains("not a git repository"), "{error}");
+        let expected = tr!("git.not_a_repository");
+        assert!(error.contains(expected.as_str()), "{error}");
     }
 
     #[test]

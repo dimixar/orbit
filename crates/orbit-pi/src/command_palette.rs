@@ -156,7 +156,7 @@ impl PaletteItem {
             },
             icon,
             detail: match command {
-                PaletteCommand::OpenSettings(_) => Some("Settings".into()),
+                PaletteCommand::OpenSettings(_) => Some(tr!("command_palette.settings")),
                 _ => None,
             },
             shortcut,

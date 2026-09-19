@@ -707,6 +707,9 @@ pub struct Transcript {
     /// "Thought" cards the reader collapsed, keyed `(message_ix, step_ix)`.
     /// Missing means expanded — the default once the activity group is open.
     collapsed_thoughts: transcript_view::CollapsedThoughts,
+    /// Live "Thought" cards the reader scrolled away from the newest line.
+    /// Missing means the streaming card stays pinned to its latest line.
+    thinking_detached: transcript_view::ThinkingDetached,
     /// `toolCallId` -> `(message_ix, tool_ix)` so `tool_execution_end` results
     /// land on the right row.
     tool_positions: ToolPositions,
@@ -762,6 +765,7 @@ impl Transcript {
             expanded_blocks: Rc::new(RefCell::new(HashSet::new())),
             thinking_scrolls: Rc::new(RefCell::new(HashMap::new())),
             collapsed_thoughts: Rc::new(RefCell::new(HashSet::new())),
+            thinking_detached: Rc::new(RefCell::new(HashSet::new())),
             tool_positions: Rc::new(RefCell::new(HashMap::new())),
             hovered_turn: Rc::new(Cell::new(None)),
             hovered_usage: Rc::new(Cell::new(None)),
@@ -823,6 +827,7 @@ impl Transcript {
         self.expanded_blocks.borrow_mut().clear();
         self.thinking_scrolls.borrow_mut().clear();
         self.collapsed_thoughts.borrow_mut().clear();
+        self.thinking_detached.borrow_mut().clear();
         self.tool_positions.borrow_mut().clear();
         self.hovered_turn.set(None);
         self.rail_scroll.set_offset(point(px(0.), px(0.)));
@@ -855,6 +860,7 @@ impl Transcript {
         self.expanded_blocks.borrow_mut().clear();
         self.thinking_scrolls.borrow_mut().clear();
         self.collapsed_thoughts.borrow_mut().clear();
+        self.thinking_detached.borrow_mut().clear();
         self.tool_positions.borrow_mut().clear();
         self.hovered_turn.set(None);
         self.rail_scroll.set_offset(point(px(0.), px(0.)));
@@ -1685,6 +1691,17 @@ impl Transcript {
         self.messages.borrow().is_empty()
     }
 
+    /// Text of the first real user prompt, if any. The sidebar uses it as the
+    /// placeholder row's preview while the session file is not yet on disk
+    /// (pi flushes lazily), so the open session never reads as title-only.
+    pub fn first_user_message(&self) -> Option<String> {
+        self.messages
+            .borrow()
+            .iter()
+            .find(|message| message.user && !message.text().trim().is_empty())
+            .map(|message| message.text())
+    }
+
     /// Mark the one-time rail hint as seen — it stops rendering and the
     /// dismissal persists for this install. Returns true on the first call
     /// (i.e. the UI should repaint).
@@ -1960,6 +1977,7 @@ impl Transcript {
                 expanded_blocks: self.expanded_blocks.clone(),
                 thinking_scrolls: self.thinking_scrolls.clone(),
                 collapsed_thoughts: self.collapsed_thoughts.clone(),
+                thinking_detached: self.thinking_detached.clone(),
                 hovered_turn: self.hovered_turn.clone(),
                 hovered_usage: self.hovered_usage.clone(),
                 rail_hint_dismissed: self.rail_hint_dismissed.clone(),

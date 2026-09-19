@@ -337,6 +337,35 @@ mod tests {
         }
     }
 
+    /// Regression guard: keys added during the localization sweep must
+    /// resolve in the shipped locales instead of rendering the raw key (the
+    /// usage column picker once showed `usage.col_share`).
+    #[test]
+    fn newly_localized_ui_keys_translate() {
+        for key in [
+            "usage.col_calls",
+            "usage.col_avg",
+            "usage.col_max",
+            "usage.col_share",
+            "usage.all",
+            "context_meter.in_use",
+            "context_meter.total",
+            "access.supervised",
+            "command_palette.settings",
+            "model_selector.all",
+            "model_selector.favorites",
+            "model_selector.reasoning_balanced",
+            "onboarding.platform",
+            "git.pushed",
+        ] {
+            let en = rust_i18n::t!(key, locale = "en");
+            let zh = rust_i18n::t!(key, locale = "zh-CN");
+            assert_ne!(en.as_ref(), key, "{key} is not defined in en.yml");
+            assert_ne!(zh.as_ref(), key, "{key} is not defined in zh-CN.yml");
+            assert_ne!(zh, en, "{key} still renders English in zh-CN");
+        }
+    }
+
     /// Every key in `en.yml` must exist in every generated locale file. The
     /// generator (`scripts/gen_locales.py`) guarantees this, but a manual edit
     /// or a stale file would silently fall back to English — this catches it.

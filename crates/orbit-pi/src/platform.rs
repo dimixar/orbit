@@ -298,7 +298,7 @@ pub fn open_terminal_command(command: &str) -> Result<(), String> {
                 return Ok(());
             }
         }
-        Err("no terminal emulator found — run the command manually".into())
+        Err(tr!("platform.no_terminal_found"))
     }
 }
 
@@ -308,7 +308,7 @@ pub fn open_terminal_command(command: &str) -> Result<(), String> {
 #[cfg(target_os = "macos")]
 pub fn open_url(url: &str) -> Result<(), String> {
     if !is_safe_browser_url(url) {
-        return Err("refusing to open a non-http(s) URL".into());
+        return Err(tr!("platform.unsafe_url"));
     }
     std::process::Command::new("/usr/bin/open")
         .arg(url)
@@ -320,7 +320,7 @@ pub fn open_url(url: &str) -> Result<(), String> {
 #[cfg(not(target_os = "macos"))]
 pub fn open_url(url: &str) -> Result<(), String> {
     if !is_safe_browser_url(url) {
-        return Err("refusing to open a non-http(s) URL".into());
+        return Err(tr!("platform.unsafe_url"));
     }
     let opener = if cfg!(target_os = "windows") {
         "cmd"
@@ -419,7 +419,7 @@ pub fn open_notification_settings() -> Result<(), String> {
             return Ok(());
         }
     }
-    Err("could not open System Settings".into())
+    Err(tr!("platform.open_settings_failed"))
 }
 
 #[cfg(not(target_os = "macos"))]
