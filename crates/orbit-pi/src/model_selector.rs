@@ -496,7 +496,7 @@ impl ModelSelector {
                     let this = this.clone();
                     row = row.child(scope_chip(
                         ElementId::Name(id.into()),
-                        "Favorite current".to_string(),
+                        tr!("model_selector.favorite_current"),
                         icon("icons/star.svg", 13., theme.text_3).into_any_element(),
                         false,
                         theme,

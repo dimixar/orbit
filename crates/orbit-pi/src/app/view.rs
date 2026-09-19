@@ -1649,7 +1649,7 @@ impl OrbitApp {
                                             .text_color(theme.text_3)
                                             .text_align(TextAlign::Center)
                                             .child(
-                                                "Pick a workspace, then describe your task below.",
+                                                tr!("workspace.pick_workspace_hint"),
                                             ),
                                     ),
                             )
@@ -1817,7 +1817,7 @@ impl OrbitApp {
                             app.refresh_catalogs();
                             app.toast_success(tr!("view.connected"));
                         }
-                        Err(err) => app.toast_error(format!("pi spawn failed: {err}")),
+                        Err(err) => app.toast_error(tr!("runtime.pi_spawn_failed", error = err)),
                     }
                 }
                 cx.notify();
@@ -1928,9 +1928,9 @@ impl OrbitApp {
                                                 }),
                                             )
                                             .child(if missing > 0 {
-                                                format!("{missing} required piece(s) missing")
+                                                tr!("setup.missing_count", count = missing)
                                             } else {
-                                                "Ready".to_string()
+                                                tr!("setup.ready")
                                             }),
                                     )
                                     .child(
@@ -1982,9 +1982,9 @@ impl OrbitApp {
                                                     .text_size(theme.ui_px(12.))
                                                     .text_color(theme.text_2)
                                                     .child(if self.refreshing {
-                                                        "Checking…"
+                                                        tr!("common.checking")
                                                     } else {
-                                                        "Refresh"
+                                                        tr!("common.refresh")
                                                     }),
                                             ),
                                     )
@@ -1994,7 +1994,7 @@ impl OrbitApp {
                                     .when(asked_for, |footer| {
                                         footer.child(self.runtime_button(
                                             "setup-done",
-                                            "Done",
+                                            &tr!("common.done"),
                                             true,
                                             theme,
                                             cx.entity(),
@@ -2114,7 +2114,11 @@ impl OrbitApp {
                                 div()
                                     .text_size(theme.ui_px(11.))
                                     .text_color(theme.text_3)
-                                    .child(if dep.required { "required" } else { "optional" }),
+                                    .child(if dep.required {
+                                        tr!("setup.required")
+                                    } else {
+                                        tr!("setup.optional")
+                                    }),
                             ),
                     )
                     .child(
@@ -2132,7 +2136,7 @@ impl OrbitApp {
                     .text_size(theme.ui_px(11.5))
                     .text_color(theme.ok_green)
                     .child(icon("icons/check.svg", 12., theme.ok_green))
-                    .child(dep.version.clone().unwrap_or_else(|| "installed".into()))
+                    .child(dep.version.clone().unwrap_or_else(|| tr!("setup.installed")))
                     .into_any_element()
             } else {
                 let cmd = dep.install_hint;
@@ -2641,8 +2645,8 @@ impl OrbitApp {
         let theme = *theme::get(cx);
         if let Some(retry) = &self.retry_detail {
             let attempt = match retry.max {
-                Some(max) => format!("attempt {} of {}", retry.attempt, max),
-                None => format!("attempt {}", retry.attempt),
+                Some(max) => tr!("runtime.attempt_of", attempt = retry.attempt, max = max),
+                None => tr!("runtime.attempt", attempt = retry.attempt),
             };
             return Some(
                 div()
@@ -2665,7 +2669,7 @@ impl OrbitApp {
                             .truncate()
                             .text_size(theme.ui_px(11.5))
                             .text_color(theme.text_2)
-                            .child(format!("Retrying — {attempt} · {}", retry.error)),
+                            .child(tr!("runtime.retrying", attempt = attempt, error = retry.error)),
                     )
                     .child(
                         div()
@@ -2802,7 +2806,7 @@ impl OrbitApp {
                     .flex_none()
                     .text_size(theme.ui_px(11.))
                     .text_color(theme.text_3)
-                    .child(format!("Question {} of {}", cursor + 1, total)),
+                    .child(tr!("ask.question_of", current = cursor + 1, total = total)),
             );
         }
         // A visible dismiss affordance beside the keyboard hint.
@@ -2990,7 +2994,7 @@ impl OrbitApp {
                                             .line_height(theme.ui_px(14.))
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(theme.text_3)
-                                            .child(format!("Preview · {}", option.label)),
+                                            .child(tr!("ask.preview", label = option.label)),
                                     ),
                             )
                             .child(
@@ -3028,11 +3032,11 @@ impl OrbitApp {
 
         // ── footer: hint + Back / Next (Submit on the last question) ──
         let hint = if submitted {
-            "Sending your answers…"
+            tr!("ask.sending")
         } else if multi {
-            "↑↓ Navigate · ⏎ Toggle · esc Cancel"
+            tr!("ask.hint_multi")
         } else {
-            "↑↓ Navigate · ⏎ Next · esc Cancel"
+            tr!("ask.hint_single")
         };
         let mut back = div()
             .id("ask-back")
@@ -3060,7 +3064,11 @@ impl OrbitApp {
         back = back.child(tr!("view.back"));
 
         let last = cursor + 1 >= total;
-        let next_label = if last { "Submit" } else { "Next" };
+        let next_label = if last {
+            tr!("ask.submit")
+        } else {
+            tr!("ask.next")
+        };
         let mut next = div()
             .id("ask-next")
             .h(px(28.))
@@ -3124,9 +3132,9 @@ impl OrbitApp {
         let request = self.approval.as_ref()?;
         let theme = *theme::get(cx);
         let heading = if request.tool.trim().is_empty() {
-            "Permission needed".to_string()
+            tr!("approval.permission_needed")
         } else {
-            format!("Allow {}?", request.tool)
+            tr!("approval.allow_tool", tool = request.tool)
         };
         let detail = request.detail.clone();
 

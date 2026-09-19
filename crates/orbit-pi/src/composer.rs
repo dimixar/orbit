@@ -38,6 +38,9 @@ pub struct ComposerInput {
     focus_handle: FocusHandle,
     content: String,
     placeholder: SharedString,
+    /// True while the field still uses the shared default placeholder, which
+    /// is resolved at paint time so a language change is picked up live.
+    placeholder_is_default: bool,
     /// Element id used in `render`. Defaults to `composer-input`; form
     /// fields override it so several inputs can coexist as siblings.
     element_id: SharedString,
@@ -93,7 +96,8 @@ impl ComposerInput {
         Self {
             focus_handle: cx_focus_handle(_cx),
             content: String::new(),
-            placeholder: "Describe the task…".into(),
+            placeholder: "".into(),
+            placeholder_is_default: true,
             element_id: "composer-input".into(),
             key_context: "Composer".into(),
             selected_range: 0..0,
@@ -122,6 +126,7 @@ impl ComposerInput {
     /// Override the placeholder text.
     pub fn with_placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
         self.placeholder = placeholder.into();
+        self.placeholder_is_default = false;
         self
     }
 
@@ -1114,7 +1119,12 @@ impl Element for TextElement {
             strikethrough: None,
         };
         let (display_text, runs) = if content.is_empty() {
-            let placeholder = self.input.read(cx).placeholder.clone();
+            let input = self.input.read(cx);
+            let placeholder: SharedString = if input.placeholder_is_default {
+                tr!("composer.placeholder").into()
+            } else {
+                input.placeholder.clone()
+            };
             let mut run = base.clone();
             run.len = placeholder.len();
             run.color = theme.text_3;

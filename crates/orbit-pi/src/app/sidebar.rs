@@ -1160,9 +1160,7 @@ impl OrbitApp {
         if let Some(menu) = self.session_menu.take() {
             // Defensive: a warm parked process would recreate the file.
             if self.lives.contains_key(&menu.path) {
-                self.toast_warning(
-                    "Session has a live process — switch away and wait, then delete",
-                );
+                self.toast_warning(tr!("sidebar.live_process_delete"));
                 cx.notify();
                 return;
             }

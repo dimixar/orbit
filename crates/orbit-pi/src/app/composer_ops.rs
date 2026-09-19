@@ -394,7 +394,7 @@ impl OrbitApp {
         }
         for path in paths.paths() {
             if self.attachments.len() >= MAX_ATTACHMENTS {
-                self.set_status(format!("at most {MAX_ATTACHMENTS} images per message"));
+                self.set_status(tr!("composer_ops.max_attachments", count = MAX_ATTACHMENTS));
                 break;
             }
             match Attachment::from_path(path) {
@@ -413,7 +413,7 @@ impl OrbitApp {
     /// Add menu → "Attach image…": pick an image file and queue it.
     pub(super) fn attach_image(&mut self, cx: &mut Context<Self>) {
         if self.attachments.len() >= MAX_ATTACHMENTS {
-            self.set_status(format!("at most {MAX_ATTACHMENTS} images per message"));
+            self.set_status(tr!("composer_ops.max_attachments", count = MAX_ATTACHMENTS));
             cx.notify();
             return;
         }
@@ -423,7 +423,7 @@ impl OrbitApp {
         // `already borrowed`. The async panel shows as a sheet and resolves
         // once the user answers, by which point the borrow is released.
         let dialog = rfd::AsyncFileDialog::new()
-            .set_title("Attach an image")
+            .set_title(tr!("composer_ops.attach_image_title"))
             .add_filter("Image", &["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
         cx.spawn(async move |this, cx| {
             let Some(handle) = dialog.pick_file().await else {
@@ -434,7 +434,7 @@ impl OrbitApp {
                 match Attachment::from_path(&path) {
                     Some(attachment) => {
                         if app.attachments.len() >= MAX_ATTACHMENTS {
-                            app.set_status(format!("at most {MAX_ATTACHMENTS} images per message"));
+                            app.set_status(tr!("composer_ops.max_attachments", count = MAX_ATTACHMENTS));
                         } else {
                             app.attachments.push(attachment);
                         }
@@ -455,7 +455,7 @@ impl OrbitApp {
     pub(super) fn attach_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // See `attach_image` — never block the main thread on the native panel
         // while this entity is borrowed.
-        let dialog = rfd::AsyncFileDialog::new().set_title("Attach a file");
+        let dialog = rfd::AsyncFileDialog::new().set_title(tr!("composer_ops.attach_file_title"));
         cx.spawn_in(window, async move |this, cx| {
             let Some(handle) = dialog.pick_file().await else {
                 return;
@@ -464,7 +464,7 @@ impl OrbitApp {
             let _ = this.update_in(cx, |app, window, cx| {
                 if let Some(attachment) = Attachment::from_path(&path) {
                     if app.attachments.len() >= MAX_ATTACHMENTS {
-                        app.set_status(format!("at most {MAX_ATTACHMENTS} images per message"));
+                        app.set_status(tr!("composer_ops.max_attachments", count = MAX_ATTACHMENTS));
                     } else {
                         app.attachments.push(attachment);
                     }
@@ -750,12 +750,12 @@ impl OrbitApp {
         self.access_mode = mode;
         mode.persist();
         if self.extensions.guard().is_none() {
-            self.toast_warning(format!(
-                "Access mode set to {}, but the guard extension is unavailable",
-                mode.label()
+            self.toast_warning(tr!(
+                "access.mode_set_unavailable",
+                mode = mode.label()
             ));
         } else {
-            self.set_status(format!("Access mode: {}", mode.label()));
+            self.set_status(tr!("access.mode_set", mode = mode.label()));
         }
         cx.notify();
     }
