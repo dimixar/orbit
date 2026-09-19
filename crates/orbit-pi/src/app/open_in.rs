@@ -112,15 +112,14 @@ impl OrbitApp {
         let primary = div()
             .id("header-open-in")
             .h_full()
-            .px(px(6.))
-            .rounded_tl(px(6.))
-            .rounded_bl(px(6.))
+            .px(px(7.))
+            .rounded_tl(px(HEADER_CTRL_R))
+            .rounded_bl(px(HEADER_CTRL_R))
             .flex_none()
             .flex()
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .hover(|s| s.bg(theme.overlay))
             .active(|s| s.bg(theme.active).text_color(theme.active_fg))
             .child(
                 img(ImageSource::Image(preferred_icon))
@@ -133,15 +132,14 @@ impl OrbitApp {
             .id("header-open-in-caret")
             .relative()
             .h_full()
-            .w(px(18.))
-            .rounded_tr(px(6.))
-            .rounded_br(px(6.))
+            .w(px(19.))
+            .rounded_tr(px(HEADER_CTRL_R))
+            .rounded_br(px(HEADER_CTRL_R))
             .flex_none()
             .flex()
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .hover(|s| s.bg(theme.overlay))
             .when(self.open_in_menu_open, |s| {
                 s.bg(theme.active).text_color(theme.active_fg)
             })
@@ -153,18 +151,19 @@ impl OrbitApp {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_open_in_caret));
 
         Some(
-            div()
-                .h(px(28.))
-                .rounded(px(7.))
-                .border_1()
-                .border_color(theme.border_strong)
-                .flex_none()
-                .flex()
-                .items_center()
-                .child(primary)
-                .child(div().w(px(1.)).h_full().flex_none().bg(theme.border))
-                .child(caret)
-                .into_any_element(),
+            header_chip(
+                div()
+                    .h(px(HEADER_CTRL_H))
+                    .rounded(px(HEADER_CTRL_R))
+                    .flex_none()
+                    .flex()
+                    .items_center(),
+                &theme,
+            )
+            .child(primary)
+            .child(div().w(px(1.)).h_full().flex_none().bg(theme.border))
+            .child(caret)
+            .into_any_element(),
         )
     }
 

@@ -11,18 +11,56 @@ pub(super) const TOP_BAR_H: f32 = 44.;
 /// macOS traffic lights when the titlebar is transparent, or a plain edge
 /// inset where the system titlebar holds them (see
 /// [`platform::titlebar_options`]). The sidebar's drag strip and the main top
-/// bar share it so the window's left controls hold their place when the
-/// sidebar is toggled.
+/// bar share it so the window's left controls never ride into the OS buttons.
 pub(super) const TRAFFIC_LIGHT_CLEARANCE: f32 = platform::WINDOW_CONTROLS_CLEARANCE;
 
+/// Space between the titlebar's left controls. Set to the same 8px the right
+/// cluster spaces its chips with (`gap_2`), so the two ends of the bar share
+/// one rhythm — a bare 2px let bordered chips read as one crowded block.
+const TITLEBAR_CONTROLS_GAP: f32 = 8.;
+
+/// Breathing room between the OS window buttons and the first titlebar
+/// control. The traffic-light clearance alone ended flush against them, which
+/// made the app's own controls read as part of the caption; the lead gives
+/// the overlay its own left margin.
+pub(super) const TITLEBAR_CONTROLS_LEAD: f32 = 12.;
+
 /// Combined width of the titlebar's left controls (toggle + history) as laid
-/// out by [`OrbitApp::titlebar_left_controls`]: three 24px boxes, two 2px gaps,
-/// and the trailing 6px gap.
-pub(super) const TITLEBAR_CONTROLS_W: f32 = 24. * 3. + 2. * 2. + 6.;
+/// out by [`OrbitApp::titlebar_left_controls`]: three [`HEADER_CTRL_H`] boxes,
+/// two [`TITLEBAR_CONTROLS_GAP`] gaps, and the trailing 6px gap.
+pub(super) const TITLEBAR_CONTROLS_W: f32 = HEADER_CTRL_H * 3. + TITLEBAR_CONTROLS_GAP * 2. + 6.;
+
+/// Space between the controls and the session title while the sidebar is
+/// collapsed. The cluster's own trailing 6px pad is inside
+/// [`TITLEBAR_CONTROLS_W`], so this is what actually separates the last chip
+/// from the title — without it the two sit flush once the sidebar stops
+/// providing the separation.
+pub(super) const TITLEBAR_TITLE_GAP: f32 = 8.;
 
 /// Where the main top bar's content starts when the sidebar is collapsed: past
-/// the traffic lights and the (fixed, overlaid) window controls.
-pub(super) const TITLEBAR_LEADING: f32 = TRAFFIC_LIGHT_CLEARANCE + TITLEBAR_CONTROLS_W;
+/// the traffic lights, the controls' lead margin, the (overlaid) window
+/// controls, and the gap that keeps the title off them.
+pub(super) const TITLEBAR_LEADING: f32 =
+    TRAFFIC_LIGHT_CLEARANCE + TITLEBAR_CONTROLS_LEAD + TITLEBAR_CONTROLS_W + TITLEBAR_TITLE_GAP;
+
+/// Space kept between the last titlebar control and the sidebar's right edge
+/// while the controls are right-aligned inside the sidebar's strip. The
+/// sidebar's 6px resize handle lives against that edge, so the pad keeps the
+/// chips off it (and off the sidebar's rounded boundary).
+pub(super) const SIDEBAR_EDGE_PAD: f32 = 6.;
+
+/// Where the titlebar's left controls sit. While the sidebar is open they
+/// right-align inside its strip — [`SIDEBAR_EDGE_PAD`] off the column's right
+/// edge, so they ride both a resize drag and the open/close slide. Collapsed,
+/// there is no column to hug and the chips fall back to the fixed lead past
+/// the OS window buttons.
+pub(super) fn titlebar_controls_left(sidebar_visible: bool, sidebar_width: f32) -> f32 {
+    if sidebar_visible {
+        sidebar_width - TITLEBAR_CONTROLS_W - SIDEBAR_EDGE_PAD
+    } else {
+        TRAFFIC_LIGHT_CLEARANCE + TITLEBAR_CONTROLS_LEAD
+    }
+}
 
 /// Duration of the sidebar collapse/expand slide.
 const SIDEBAR_SLIDE_MS: u64 = 180;
@@ -177,32 +215,34 @@ impl Render for OrbitApp {
         top_controls = top_controls.children(self.render_open_in_control(cx));
         if (self.added > 0 || self.removed > 0) && !pane_visible {
             top_controls = top_controls.child(
-                div()
-                    .id("top-diff-stats")
-                    .h(px(26.))
-                    .px(px(8.))
-                    .rounded_md()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.bg_hover))
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(Self::on_open_uncommitted_review),
-                    )
-                    .child(
-                        div()
-                            .text_size(theme.ui_px(12.))
-                            .text_color(theme.add_green)
-                            .child(format!("+{}", self.added)),
-                    )
-                    .child(
-                        div()
-                            .text_size(theme.ui_px(12.))
-                            .text_color(theme.del_red)
-                            .child(format!("-{}", self.removed)),
-                    ),
+                header_chip(
+                    div()
+                        .id("top-diff-stats")
+                        .h(px(HEADER_CTRL_H))
+                        .px(px(9.))
+                        .rounded(px(HEADER_CTRL_R))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .cursor_pointer(),
+                    &theme,
+                )
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(Self::on_open_uncommitted_review),
+                )
+                .child(
+                    div()
+                        .text_size(theme.ui_px(12.))
+                        .text_color(theme.add_green)
+                        .child(format!("+{}", self.added)),
+                )
+                .child(
+                    div()
+                        .text_size(theme.ui_px(12.))
+                        .text_color(theme.del_red)
+                        .child(format!("-{}", self.removed)),
+                ),
             );
         }
         top_controls = top_controls
@@ -214,27 +254,22 @@ impl Render for OrbitApp {
                     .relative()
                     .children(self.render_session_details_popup(cx))
                     .child(
-                        div()
-                            .id("info")
-                            .p_1()
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme.bg_hover))
-                            .when(self.session_details_open, |s| s.bg(theme.bg_hover))
-                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_info_click))
-                            .child(icon("icons/info.svg", 16., theme.text_2)),
+                        header_icon_button(
+                            "info",
+                            &theme,
+                            self.session_details_open,
+                            icon("icons/info.svg", 16., theme.text_2),
+                        )
+                        .on_mouse_up(MouseButton::Left, cx.listener(Self::on_info_click)),
                     ),
             )
             // side-pane toggle sits right after the about (info) button
             .child(
-                div()
-                    .id("toggle-side-pane")
-                    .p_1()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.bg_hover))
-                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_toggle_side_pane))
-                    .child(icon(
+                header_icon_button(
+                    "toggle-side-pane",
+                    &theme,
+                    pane_visible,
+                    icon(
                         "icons/panel-right.svg",
                         16.,
                         if pane_visible {
@@ -242,23 +277,17 @@ impl Render for OrbitApp {
                         } else {
                             theme.text_2
                         },
-                    )),
+                    ),
+                )
+                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_toggle_side_pane)),
             )
             // Terminal toggle — the bottom panel (cmd-j).
             .child(
-                div()
-                    .id("toggle-terminal")
-                    .p_1()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.bg_hover))
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| {
-                            this.on_toggle_terminal(&crate::ToggleTerminal, window, cx)
-                        }),
-                    )
-                    .child(icon(
+                header_icon_button(
+                    "toggle-terminal",
+                    &theme,
+                    terminal_visible,
+                    icon(
                         "icons/terminal.svg",
                         16.,
                         if terminal_visible {
@@ -266,18 +295,22 @@ impl Render for OrbitApp {
                         } else {
                             theme.text_2
                         },
-                    )),
+                    ),
+                )
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| {
+                        this.on_toggle_terminal(&crate::ToggleTerminal, window, cx)
+                    }),
+                ),
             )
             // GitHub affordance: opens the full-page Git surface.
             .child(
-                div()
-                    .id("open-git-github")
-                    .p_1()
-                    .rounded_sm()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.bg_hover))
-                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_open_git_click))
-                    .child(icon(
+                header_icon_button(
+                    "open-git-github",
+                    &theme,
+                    self.git_open,
+                    icon(
                         "icons/github.svg",
                         16.,
                         if self.git_open {
@@ -285,7 +318,9 @@ impl Render for OrbitApp {
                         } else {
                             theme.text_2
                         },
-                    )),
+                    ),
+                )
+                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_open_git_click)),
             );
 
         // A blocking extension dialog owns the keyboard while it is open. Focus
@@ -344,8 +379,8 @@ impl Render for OrbitApp {
                             .flex_col()
                             // traffic-light strip (drag region); the window's
                             // left controls float above it in the titlebar
-                            // overlay, so they keep the same spot whether the
-                            // sidebar is open or closed.
+                            // overlay — right-aligned against this column's
+                            // edge while the sidebar is open.
                             .child(window_drag_region(div().h(px(TOP_BAR_H)).w_full()))
                             // Resize handle: drag the sidebar's right edge to
                             // adjust its width. Kept fully inside the panel so
@@ -812,25 +847,56 @@ impl Render for OrbitApp {
             // ── right side pane (Review) ──
             .children(pane_visible.then(|| self.sidepane.clone().into_any_element()))
             // ── titlebar controls ── a fixed overlay pinned just past the
-            // macOS traffic lights, above both the sidebar and the main column,
-            // so the toggle/history buttons hold their place while the sidebar
-            // slides underneath. Shown on every surface except Settings, which
-            // owns its own nav column — including the Git/Usage pages when the
-            // sidebar is collapsed, so the toggle (and history arrows) stay
-            // reachable; those pages inset their own headers to clear it. The
-            // container is not itself a hitbox, so the drag strip beneath still
-            // drags the window in the gaps between buttons while each button
-            // takes its own clicks.
+            // macOS traffic lights, above both the sidebar and the main column.
+            // Shown on every surface except Settings, which owns its own nav
+            // column — including the Git/Usage pages when the sidebar is
+            // collapsed, so the toggle (and history arrows) stay reachable;
+            // those pages inset their own headers to clear it. The controls
+            // right-align inside the sidebar's strip when it is open (hugging
+            // its edge, and tracking it through a resize or the slide) and
+            // fall back to the fixed lead when it is collapsed. The container
+            // is not itself a hitbox, so the drag strip beneath still drags the
+            // window in the gaps between buttons while each button takes its
+            // own clicks.
             .children((!self.settings_open).then(|| {
-                div()
+                let pinned = titlebar_controls_left(false, f32::from(self.sidebar_width));
+                let hugging = titlebar_controls_left(true, f32::from(self.sidebar_width));
+                let controls = div()
                     .absolute()
                     .top_0()
-                    .left(px(TRAFFIC_LIGHT_CLEARANCE))
                     .h(px(TOP_BAR_H))
                     .flex()
                     .items_center()
-                    .child(self.titlebar_left_controls(theme, cx))
-                    .into_any_element()
+                    .child(self.titlebar_left_controls(theme, cx));
+                let gen = self.sidebar_slide_gen;
+                if gen == 0 || theme::reduce_motion(cx) {
+                    controls
+                        .left(px(if self.sidebar_visible {
+                            hugging
+                        } else {
+                            pinned
+                        }))
+                        .into_any_element()
+                } else {
+                    // Same easing and duration as the panel's own slide, so the
+                    // chips ride the edge instead of snapping to it.
+                    let expanding = self.sidebar_visible;
+                    controls
+                        .with_animation(
+                            ElementId::Name(format!("titlebar-lead-{gen}").into()),
+                            Animation::new(Duration::from_millis(SIDEBAR_SLIDE_MS))
+                                .with_easing(|d| 1.0 - (1.0 - d).powi(3)),
+                            move |el, d| {
+                                let (from, to) = if expanding {
+                                    (pinned, hugging)
+                                } else {
+                                    (hugging, pinned)
+                                };
+                                el.left(px(from + (to - from) * d))
+                            },
+                        )
+                        .into_any_element()
+                }
             }))
             // ── window caption buttons ── the app owns the caption on the
             // platforms where it draws it (`platform::draws_window_controls`),
@@ -2409,75 +2475,77 @@ impl OrbitApp {
     ) -> impl IntoElement + use<> {
         let back_enabled = self.history_index > 0;
         let forward_enabled = self.history_index + 1 < self.session_history.len();
-        // Fixed 24px hit boxes with centered icons keep the three controls
-        // optically even (a bare `p_1` gives the 16px toggle a wider pill than
-        // the 14px chevrons, so their edges drift).
+        // The three controls wear the same glass chips as the right cluster
+        // ([`header_icon_button`]), so the whole 44px bar reads as one row:
+        // a fixed square hit box with a centered icon keeps the 16px toggle
+        // and the 15px chevrons optically even (a bare `p_1` lets the toggle's
+        // pill drift wider than the chevrons).
         div()
             .flex()
             .items_center()
-            .gap(px(2.))
+            .gap(px(TITLEBAR_CONTROLS_GAP))
             .pr(px(6.))
             .child(
-                div()
-                    .id("toggle-sidebar")
-                    .block_mouse_except_scroll()
-                    .size(px(24.))
-                    .rounded_sm()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.bg_hover))
-                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_toggle_sidebar))
-                    .child(icon("icons/layout-left.svg", 16., theme.text_2)),
+                header_icon_button(
+                    "toggle-sidebar",
+                    &theme,
+                    false,
+                    icon("icons/layout-left.svg", 16., theme.text_2),
+                )
+                .block_mouse_except_scroll()
+                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_toggle_sidebar)),
             )
             .child(
-                div()
-                    .id("history-back")
-                    .block_mouse_except_scroll()
-                    .size(px(24.))
-                    .rounded_sm()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(back_enabled, |b| {
-                        b.cursor_pointer()
-                            .hover(|s| s.bg(theme.bg_hover))
-                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_history_back))
-                    })
-                    .child(icon(
-                        "icons/arrow-left.svg",
-                        15.,
-                        if back_enabled {
-                            theme.text_2
-                        } else {
-                            theme.text_3
-                        },
-                    )),
+                header_chip(
+                    div()
+                        .id("history-back")
+                        .block_mouse_except_scroll()
+                        .size(px(HEADER_CTRL_H))
+                        .rounded(px(HEADER_CTRL_R))
+                        .flex()
+                        .items_center()
+                        .justify_center(),
+                    &theme,
+                )
+                .when(back_enabled, |b| {
+                    b.cursor_pointer()
+                        .on_mouse_up(MouseButton::Left, cx.listener(Self::on_history_back))
+                })
+                .child(icon(
+                    "icons/arrow-left.svg",
+                    15.,
+                    if back_enabled {
+                        theme.text_2
+                    } else {
+                        theme.text_3
+                    },
+                )),
             )
             .child(
-                div()
-                    .id("history-forward")
-                    .block_mouse_except_scroll()
-                    .size(px(24.))
-                    .rounded_sm()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .when(forward_enabled, |b| {
-                        b.cursor_pointer()
-                            .hover(|s| s.bg(theme.bg_hover))
-                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_history_forward))
-                    })
-                    .child(icon(
-                        "icons/arrow-right.svg",
-                        15.,
-                        if forward_enabled {
-                            theme.text_2
-                        } else {
-                            theme.text_3
-                        },
-                    )),
+                header_chip(
+                    div()
+                        .id("history-forward")
+                        .block_mouse_except_scroll()
+                        .size(px(HEADER_CTRL_H))
+                        .rounded(px(HEADER_CTRL_R))
+                        .flex()
+                        .items_center()
+                        .justify_center(),
+                    &theme,
+                )
+                .when(forward_enabled, |b| {
+                    b.cursor_pointer()
+                        .on_mouse_up(MouseButton::Left, cx.listener(Self::on_history_forward))
+                })
+                .child(icon(
+                    "icons/arrow-right.svg",
+                    15.,
+                    if forward_enabled {
+                        theme.text_2
+                    } else {
+                        theme.text_3
+                    },
+                )),
             )
     }
 

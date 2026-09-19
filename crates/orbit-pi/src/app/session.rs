@@ -1221,27 +1221,26 @@ impl OrbitApp {
         // A persistent glass chip rather than an invisible hit target: the
         // hairline border and ink wash read as a dedicated meter surface at
         // rest, and the hover/open state lifts it (deeper fill, stronger
-        // border) instead of the chip appearing from nothing.
-        let mut pill = div()
-            .id("top-quota")
-            .relative()
-            .h(px(26.))
-            .pl(px(9.))
-            .pr(px(7.))
-            .rounded_full()
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.overlay)
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.bg_hover).border_color(theme.border_strong))
-            .when(self.quota_popup_open, |s| {
-                s.bg(theme.bg_hover).border_color(theme.border_strong)
-            })
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_quota_click))
-            .children(self.render_quota_popup(cx));
+        // border) instead of the chip appearing from nothing. It shares the
+        // top bar's chip glass, so the meter sits in the same row as the
+        // buttons without looking like one.
+        let mut pill = header_chip(
+            div()
+                .id("top-quota")
+                .relative()
+                .h(px(HEADER_CTRL_H))
+                .pl(px(10.))
+                .pr(px(8.))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .cursor_pointer(),
+            &theme,
+        )
+        .when(self.quota_popup_open, |s| header_lift(s, &theme))
+        .on_mouse_up(MouseButton::Left, cx.listener(Self::on_quota_click))
+        .children(self.render_quota_popup(cx));
 
         // Hairline between the account identity and the meter block: the
         // two halves of the chip answer different questions (whose usage /

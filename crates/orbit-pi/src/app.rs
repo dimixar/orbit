@@ -1574,6 +1574,8 @@ mod popup_layout_tests;
 mod sidebar_active_reveal_tests;
 #[cfg(test)]
 mod sidebar_placeholder_tests;
+#[cfg(test)]
+mod titlebar_layout_tests;
 
 // `icon` and friends are part of the crate-wide UI kit; keep their original
 // `crate::app::…` paths stable for the other modules that import them.
