@@ -317,6 +317,26 @@ mod tests {
         }
     }
 
+    /// Regression guard: keys wrapped before `en.yml` existed once rendered
+    /// the raw key (the sidebar's “Settings” stayed English). They must now
+    /// resolve to a real, non-English translation.
+    #[test]
+    fn previously_unregistered_sidebar_keys_translate() {
+        for key in [
+            "common.settings",
+            "sidebar.projects",
+            "status.connected",
+            "status.offline",
+            "composer.drop_to_attach",
+        ] {
+            let en = rust_i18n::t!(key, locale = "en");
+            let zh = rust_i18n::t!(key, locale = "zh-CN");
+            assert_ne!(en.as_ref(), key, "{key} is not defined in en.yml");
+            assert_ne!(zh.as_ref(), key, "{key} is not defined in zh-CN.yml");
+            assert_ne!(zh, en, "{key} still renders English in zh-CN");
+        }
+    }
+
     /// Every key in `en.yml` must exist in every generated locale file. The
     /// generator (`scripts/gen_locales.py`) guarantees this, but a manual edit
     /// or a stale file would silently fall back to English — this catches it.
