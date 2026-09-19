@@ -739,9 +739,10 @@ fn render_rail_preview(
                 .text_size(theme.ui_px(10.5))
                 .line_height(theme.ui_px(14.))
                 .text_color(theme.text_3)
-                .child(format!(
-                    "Turn {} of {} · click to jump",
-                    turn_number, turn_total
+                .child(tr!(
+                    "transcript_view.turn_of_total_hint",
+                    current = turn_number,
+                    total = turn_total
                 )),
         )
         .child(
@@ -1173,24 +1174,50 @@ fn activity_title(steps: &[Step], live: bool) -> String {
             thoughts += 1;
         }
     }
-    let units = |n: usize, word: &str| format!("{} {}{}", n, word, if n == 1 { "" } else { "s" });
+    let unit = |count: usize, one: &str, other: &str| {
+        if count == 1 {
+            tr!(one, count = count)
+        } else {
+            tr!(other, count = count)
+        }
+    };
     if commands > 0 {
-        parts.push(format!("Ran {}", units(commands, "command")));
+        parts.push(unit(
+            commands,
+            "transcript_view.ran_command_one",
+            "transcript_view.ran_command_other",
+        ));
     }
     if reads > 0 {
-        parts.push(format!("Ran {}", units(reads, "file read")));
+        parts.push(unit(
+            reads,
+            "transcript_view.ran_file_read_one",
+            "transcript_view.ran_file_read_other",
+        ));
     }
     if edits > 0 {
-        parts.push(format!("Ran {}", units(edits, "file edit")));
+        parts.push(unit(
+            edits,
+            "transcript_view.ran_file_edit_one",
+            "transcript_view.ran_file_edit_other",
+        ));
     }
     if other > 0 {
-        parts.push(format!("Ran {}", units(other, "tool")));
+        parts.push(unit(
+            other,
+            "transcript_view.ran_tool_one",
+            "transcript_view.ran_tool_other",
+        ));
     }
     if thoughts > 0 {
         parts.push(if live {
             tr!("transcript.thinking")
         } else {
-            units(thoughts, "thought")
+            unit(
+                thoughts,
+                "transcript_view.thought_one",
+                "transcript_view.thought_other",
+            )
         });
     }
     if parts.is_empty() {
@@ -2848,7 +2875,10 @@ fn usage_metric(
         );
         if usage.cache_read > 0 {
             if let Some(percent) = usage.cache_read_percent() {
-                label.push_str(&format!(" · {percent:.0}% cached"));
+                label.push_str(&tr!(
+                    "transcript_view.cached_share",
+                    percent = format!("{percent:.0}")
+                ));
             }
         }
         if let Some(cost) = usage.cost.filter(|cost| *cost > 0.0) {
@@ -2990,7 +3020,11 @@ fn usage_metric_row(
 fn cache_read_label(usage: &MessageUsage) -> String {
     let tokens = format_tokens(usage.cache_read);
     match usage.cache_read_percent() {
-        Some(percent) => format!("{tokens} · {percent:.0}% hit"),
+        Some(percent) => tr!(
+            "transcript_view.hit_share",
+            tokens = tokens,
+            percent = format!("{percent:.0}")
+        ),
         None => tokens,
     }
 }
@@ -3034,8 +3068,11 @@ fn pulse_dot(theme: Theme, elapsed_ms: u128) -> impl IntoElement {
 
 fn fold_label(elapsed: Option<Duration>) -> String {
     match elapsed {
-        Some(duration) => format!("Worked for {}", format_duration(duration)),
-        None => "Worked".to_string(),
+        Some(duration) => tr!(
+            "transcript_view.worked_for",
+            duration = format_duration(duration)
+        ),
+        None => tr!("transcript.worked"),
     }
 }
 
@@ -3043,39 +3080,44 @@ fn fold_label(elapsed: Option<Duration>) -> String {
 fn format_duration(duration: Duration) -> String {
     let secs = duration.as_secs().max(1);
     if secs < 60 {
-        return format!("{} {}", secs, plural_unit("second", secs));
+        return spoken_unit(secs, "s");
     }
     if secs < 3_600 {
         let minutes = secs / 60;
         let remaining = secs % 60;
-        let first = format!("{} {}", minutes, plural_unit("minute", minutes));
+        let first = spoken_unit(minutes, "m");
         return if remaining > 0 {
-            format!(
-                "{} {} {}",
-                first,
-                remaining,
-                plural_unit("second", remaining)
-            )
+            format!("{} {}", first, spoken_unit(remaining, "s"))
         } else {
             first
         };
     }
     let hours = secs / 3_600;
     let minutes = (secs % 3_600) / 60;
-    let first = format!("{} {}", hours, plural_unit("hour", hours));
+    let first = spoken_unit(hours, "h");
     if minutes > 0 {
-        format!("{} {} {}", first, minutes, plural_unit("minute", minutes))
+        format!("{} {}", first, spoken_unit(minutes, "m"))
     } else {
         first
     }
 }
 
-fn plural_unit(word: &str, count: u64) -> String {
-    if count == 1 {
-        word.to_string()
+/// One spoken duration unit in the active locale: "1 second" / "7 minutes".
+fn spoken_unit(count: u64, kind: &str) -> String {
+    let word = if count == 1 {
+        match kind {
+            "s" => tr!("transcript_view.second"),
+            "m" => tr!("transcript_view.minute"),
+            _ => tr!("transcript_view.hour"),
+        }
     } else {
-        format!("{word}s")
-    }
+        match kind {
+            "s" => tr!("transcript_view.seconds"),
+            "m" => tr!("transcript_view.minutes"),
+            _ => tr!("transcript_view.hours"),
+        }
+    };
+    format!("{} {}", count, word)
 }
 
 fn render_turn_fold(
@@ -3150,27 +3192,29 @@ fn working_activity_label(step: &Step) -> Option<String> {
     if let Some(tool) = step.tools.last() {
         let detail = activity_preview(tool);
         let verb = match tool.name.as_str() {
-            "bash" | "shell" | "terminal" | "exec" | "run" => "Running",
-            "read" => "Reading",
-            "grep" | "find" | "glob" | "search" => "Searching",
-            "edit" | "write" => "Editing",
+            "bash" | "shell" | "terminal" | "exec" | "run" => {
+                tr!("transcript_view.verb_running")
+            }
+            "read" => tr!("transcript_view.verb_reading"),
+            "grep" | "find" | "glob" | "search" => tr!("transcript_view.verb_searching"),
+            "edit" | "write" => tr!("transcript_view.verb_editing"),
             other => {
                 let action = activity_action_label(other);
                 return Some(if detail.is_empty() {
-                    format!("Using {action}")
+                    tr!("transcript_view.using_tool", action = action)
                 } else {
                     format!("{action} {detail}")
                 });
             }
         };
         return Some(if detail.is_empty() {
-            verb.to_string()
+            verb
         } else {
             format!("{verb} {detail}")
         });
     }
     if !step.thinking.is_empty() {
-        return Some("Thinking…".into());
+        return Some(tr!("transcript_view.thinking_ellipsis"));
     }
     None
 }
@@ -3203,7 +3247,10 @@ fn render_working_indicator(
     // a long-running command still reads as progress, not a hang.
     let label = match activity {
         Some(activity) => format!("{} · {}", activity, format_working_elapsed(elapsed)),
-        None => format!("Working for {}", format_working_elapsed(elapsed)),
+        None => tr!(
+            "transcript_view.working_for",
+            duration = format_working_elapsed(elapsed)
+        ),
     };
     let label_size = theme.ui_px(13.5);
     let label_line = theme.ui_px(18.);
@@ -4491,9 +4538,9 @@ fn render_code_block(
     if folded {
         let hidden = lines.len() - CODE_PREVIEW_LINES;
         let label = if expanded {
-            "Show less".to_string()
+            tr!("transcript.show_less")
         } else {
-            format!("Show remaining {hidden} lines")
+            tr!("transcript_view.show_remaining_lines", count = hidden)
         };
         card = card.child(
             div()
@@ -4772,17 +4819,17 @@ fn summary_time_label_at(millis: i64, now: chrono::DateTime<chrono::Local>) -> S
     let days = (now.date_naive() - dt.date_naive()).num_days();
     let clock = dt.format("%-I:%M %p");
     match days {
-        0 => format!("Today {clock}"),
-        1 => format!("Yesterday {clock}"),
+        0 => tr!("transcript_view.today_clock", clock = clock.to_string()),
+        1 => tr!("transcript_view.yesterday_clock", clock = clock.to_string()),
         _ => dt.format("%b %-d").to_string(),
     }
 }
 
 fn changed_files_title(count: usize) -> String {
     if count == 1 {
-        "Changed 1 file".to_string()
+        tr!("transcript_view.changed_file_one", count = count)
     } else {
-        format!("Changed {count} files")
+        tr!("transcript_view.changed_file_other", count = count)
     }
 }
 
@@ -4971,11 +5018,11 @@ pub(crate) fn render_changed_files(
     if can_expand {
         let remaining = files.len() - CHANGED_FILES_PREVIEW_LIMIT;
         let label = if expanded {
-            "Show fewer files".to_string()
+            tr!("transcript_view.show_fewer_files")
         } else if remaining == 1 {
-            "Show 1 more file".to_string()
+            tr!("transcript_view.show_one_more_file")
         } else {
-            format!("Show {remaining} more files")
+            tr!("transcript_view.show_more_files", count = remaining)
         };
         let clipped = expanded && files.len() > EXPANDED_PREVIEW_LIMIT;
         let mut toggle = div()
@@ -5005,9 +5052,10 @@ pub(crate) fn render_changed_files(
                     .font_weight(FontWeight::NORMAL)
                     .text_size(theme.ui_px(11.5))
                     .text_color(theme.text_3)
-                    .child(format!(
-                        "Showing first {EXPANDED_PREVIEW_LIMIT} of {}",
-                        files.len()
+                    .child(tr!(
+                        "transcript_view.showing_first_of",
+                        limit = EXPANDED_PREVIEW_LIMIT,
+                        total = files.len()
                     )),
             );
         }

@@ -395,7 +395,7 @@ impl GitPanel {
         self.spawn_data(
             cx,
             move || git::stage_paths(&cwd, &[path]),
-            |panel, result, cx| panel.after_git(result, "Staged", cx),
+            |panel, result, cx| panel.after_git(result, &tr!("git_panel.staged"), cx),
         );
     }
 
@@ -404,7 +404,7 @@ impl GitPanel {
         self.spawn_data(
             cx,
             move || git::unstage_paths(&cwd, &[path]),
-            |panel, result, cx| panel.after_git(result, "Unstaged", cx),
+            |panel, result, cx| panel.after_git(result, &tr!("git_panel.unstaged"), cx),
         );
     }
 
@@ -413,7 +413,7 @@ impl GitPanel {
         self.spawn_data(
             cx,
             move || git::stage_all(&cwd),
-            |panel, result, cx| panel.after_git(result, "Staged all", cx),
+            |panel, result, cx| panel.after_git(result, &tr!("git_panel.staged_all"), cx),
         );
     }
 
@@ -422,7 +422,7 @@ impl GitPanel {
         self.spawn_data(
             cx,
             move || git::unstage_all(&cwd),
-            |panel, result, cx| panel.after_git(result, "Unstaged all", cx),
+            |panel, result, cx| panel.after_git(result, &tr!("git_panel.unstaged_all"), cx),
         );
     }
 
@@ -432,7 +432,7 @@ impl GitPanel {
         self.spawn_data(
             cx,
             move || git::discard_paths(&cwd, &[path]),
-            |panel, result, cx| panel.after_git(result, "Discarded changes", cx),
+            |panel, result, cx| panel.after_git(result, &tr!("git_panel.discarded_changes"), cx),
         );
     }
 
@@ -731,7 +731,7 @@ impl GitPanel {
         let branch = self
             .branch
             .clone()
-            .unwrap_or_else(|| "detached".to_string());
+            .unwrap_or_else(|| tr!("git_panel.detached"));
         let (additions, deletions) = self.stats();
         div()
             .h(px(44.))
@@ -791,7 +791,7 @@ impl GitPanel {
                             .text_size(theme.ui_px(15.))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child("Git"),
+                            .child(tr!("git_panel.title")),
                     ),
             )
             .child(div().flex_1())
@@ -895,9 +895,9 @@ impl GitPanel {
 
     fn tab_bar(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
         let tabs = [
-            (GitTab::Changes, "icons/git-compare.svg", "Changes"),
-            (GitTab::History, "icons/clock.svg", "History"),
-            (GitTab::Graph, "icons/git-fork.svg", "Graph"),
+            (GitTab::Changes, "icons/git-compare.svg", "git_panel.tab_changes"),
+            (GitTab::History, "icons/clock.svg", "git_panel.tab_history"),
+            (GitTab::Graph, "icons/git-fork.svg", "git_panel.tab_graph"),
         ];
         div()
             .h(px(40.))
@@ -908,10 +908,13 @@ impl GitPanel {
             .gap(theme.space(6.))
             .border_b_1()
             .border_color(theme.border)
-            .children(tabs.map(|(tab, tab_icon, label)| {
+            .children(tabs.map(|(tab, tab_icon, key)| {
+                let label = tr!(key);
                 let selected = self.tab == tab;
                 div()
-                    .id(gpui::ElementId::Name(format!("git-tab-{label}").into()))
+                    .id(gpui::ElementId::Name(
+                        format!("git-tab-{}", key.rsplit('.').next().unwrap_or(key)).into(),
+                    ))
                     .h(px(28.))
                     .px(px(10.))
                     .rounded(px(8.))
@@ -1100,6 +1103,17 @@ impl GitPanel {
         let behind = self.ahead_behind.map(|(_, behind)| behind).unwrap_or(0);
         let actions = bar_actions(has_changes, ahead, has_upstream, self.has_commits, behind);
         let message_focused = self.message.read(cx).focus_handle(cx).is_focused(window);
+        let commit_and_push_label = tr!("git_panel.commit_and_push");
+        let commit_label = if self.generating {
+            tr!("git_panel.generating_short")
+        } else {
+            tr!("git_panel.commit")
+        };
+        let push_label = if matches!(actions, BarActions::Push { publish: true }) {
+            tr!("git_panel.publish_branch")
+        } else {
+            tr!("git_panel.push")
+        };
         div()
             .flex_none()
             .px(theme.space(20.))
@@ -1226,9 +1240,9 @@ impl GitPanel {
                                 icon("icons/magic-wand.svg", 12., theme.text_2).into_any_element()
                             })
                             .child(if self.generating {
-                                "Generating…"
+                                tr!("git_panel.generating_short")
                             } else {
-                                "Generate"
+                                tr!("git_panel.generate")
                             })
                     }))
                     .child(match actions {
@@ -1238,7 +1252,7 @@ impl GitPanel {
                             .gap(theme.space(8.))
                             .child(action_button(
                                 "git-commit-push",
-                                "Commit and push",
+                                &commit_and_push_label,
                                 Some(
                                     icon("icons/cloud-upload.svg", 13., theme.text_2)
                                         .into_any_element(),
@@ -1252,11 +1266,7 @@ impl GitPanel {
                             ))
                             .child(action_button(
                                 "git-commit",
-                                if self.generating {
-                                    "Generating…"
-                                } else {
-                                    "Commit"
-                                },
+                                &commit_label,
                                 Some(if self.generating {
                                     spinner("git-commit-spinner", 13., theme)
                                 } else {
@@ -1279,9 +1289,9 @@ impl GitPanel {
                                 }),
                             ))
                             .into_any_element(),
-                        BarActions::Push { publish } => action_button(
+                        BarActions::Push { publish: _ } => action_button(
                             "git-push",
-                            if publish { "Publish branch" } else { "Push" },
+                            &push_label,
                             Some(
                                 icon(
                                     "icons/upload.svg",
@@ -1305,11 +1315,11 @@ impl GitPanel {
                                 div()
                                     .text_size(theme.ui_px(11.5))
                                     .text_color(theme.text_3)
-                                    .child(format!("{behind} behind")),
+                                    .child(tr!("git_panel.behind", count = behind)),
                             )
                             .child(action_button(
                                 "git-pull",
-                                "Pull",
+                                &tr!("git_panel.pull"),
                                 Some(
                                     icon("icons/arrow-down.svg", 13., theme.text_2)
                                         .into_any_element(),
@@ -1330,11 +1340,14 @@ impl GitPanel {
                                 div()
                                     .text_size(theme.ui_px(11.5))
                                     .text_color(theme.text_3)
-                                    .child(format!("diverged · {behind} behind")),
+                                    .child(tr!(
+                                        "git_panel.diverged_behind",
+                                        count = behind
+                                    )),
                             )
                             .child(action_button(
                                 "git-merge",
-                                "Merge",
+                                &tr!("git_panel.merge"),
                                 Some(
                                     icon("icons/git-merge.svg", 13., theme.text_2)
                                         .into_any_element(),
@@ -1368,7 +1381,7 @@ impl GitPanel {
             return vec![empty_note(
                 theme,
                 "icons/stop.svg",
-                "Git unavailable",
+                &tr!("git_panel.git_unavailable"),
                 Some(error),
             )];
         }
@@ -1376,7 +1389,7 @@ impl GitPanel {
             return vec![empty_note(
                 theme,
                 "icons/git-compare.svg",
-                "Reading working tree…",
+                &tr!("git_panel.reading_working_tree"),
                 None,
             )];
         }
@@ -1384,8 +1397,8 @@ impl GitPanel {
             return vec![empty_note(
                 theme,
                 "icons/check.svg",
-                "Working tree clean",
-                Some("There is nothing to commit."),
+                &tr!("git_panel.working_tree_clean"),
+                Some(&tr!("git_panel.nothing_to_commit")),
             )];
         }
         let mut out = Vec::new();
@@ -1393,7 +1406,8 @@ impl GitPanel {
             out.push(self.section_header(
                 theme,
                 cx,
-                "Staged",
+                &tr!("git_panel.section_staged"),
+                "staged",
                 self.staged.len(),
                 true,
                 Some(cx.listener(|this, _: &ClickEvent, _, cx| this.unstage_all(cx))),
@@ -1404,7 +1418,8 @@ impl GitPanel {
             out.push(self.section_header(
                 theme,
                 cx,
-                "Changes",
+                &tr!("git_panel.section_changes"),
+                "changes",
                 self.unstaged.len(),
                 false,
                 Some(cx.listener(|this, _: &ClickEvent, _, cx| this.stage_all(cx))),
@@ -1440,6 +1455,7 @@ impl GitPanel {
         theme: Theme,
         _cx: &Context<Self>,
         label: &str,
+        slug: &str,
         count: usize,
         staged_section: bool,
         action: Option<impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static>,
@@ -1465,7 +1481,7 @@ impl GitPanel {
             row = row.child(
                 div()
                     .id(gpui::ElementId::Name(
-                        format!("git-section-action-{label}").into(),
+                        format!("git-section-action-{slug}").into(),
                     ))
                     .h(px(28.))
                     .px(theme.space(8.))
@@ -1479,9 +1495,9 @@ impl GitPanel {
                     .hover(|s| s.bg(theme.bg_hover).text_color(theme.text))
                     .on_click(action)
                     .child(if staged_section {
-                        "Unstage all"
+                        tr!("git_panel.unstage_all")
                     } else {
-                        "Stage all"
+                        tr!("git_panel.stage_all")
                     }),
             );
         }
@@ -1661,17 +1677,22 @@ impl GitPanel {
 
     fn history_tab(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
         if let Some(error) = &self.history_error {
-            return empty_note(theme, "icons/stop.svg", "History unavailable", Some(error));
+            return empty_note(
+                theme,
+                "icons/stop.svg",
+                &tr!("git_panel.history_unavailable"),
+                Some(error),
+            );
         }
         if self.history.is_empty() && self.history_loading {
-            return empty_note(theme, "icons/clock.svg", "Reading history…", None);
+            return empty_note(theme, "icons/clock.svg", &tr!("git_panel.reading_history"), None);
         }
         if self.history.is_empty() {
             return empty_note(
                 theme,
                 "icons/clock.svg",
-                "No commits yet",
-                Some("Commits on this branch will show up here."),
+                &tr!("git_panel.no_commits_yet"),
+                Some(&tr!("git_panel.commits_will_show_up")),
             );
         }
         let mut list = div().flex().flex_col().py(px(6.));
@@ -1702,17 +1723,22 @@ impl GitPanel {
 
     fn graph_tab(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
         if let Some(error) = &self.graph_error {
-            return empty_note(theme, "icons/stop.svg", "Graph unavailable", Some(error));
+            return empty_note(
+                theme,
+                "icons/stop.svg",
+                &tr!("git_panel.graph_unavailable"),
+                Some(error),
+            );
         }
         if self.graph.is_empty() && self.graph_loading {
-            return empty_note(theme, "icons/git-fork.svg", "Reading history…", None);
+            return empty_note(theme, "icons/git-fork.svg", &tr!("git_panel.reading_history"), None);
         }
         if self.graph.is_empty() {
             return empty_note(
                 theme,
                 "icons/git-fork.svg",
-                "No commits yet",
-                Some("Commits across your local branches will show up here."),
+                &tr!("git_panel.no_commits_yet"),
+                Some(&tr!("git_panel.commits_across_branches")),
             );
         }
         let mut list = div().flex().flex_col().py(px(6.));
@@ -1812,15 +1838,16 @@ impl GitPanel {
         self.stage_prompt?;
         let unstaged = self.unstaged.len();
         let staged_empty = self.staged.is_empty();
-        let noun = if unstaged == 1 { "change" } else { "changes" };
         let body = if staged_empty {
-            format!("Nothing is staged. Add {unstaged} {noun} to generate a message?")
+            if unstaged == 1 {
+                tr!("git_panel.stage_prompt_body_empty_one", count = unstaged)
+            } else {
+                tr!("git_panel.stage_prompt_body_empty_other", count = unstaged)
+            }
+        } else if unstaged == 1 {
+            tr!("git_panel.stage_prompt_body_one", count = unstaged)
         } else {
-            format!(
-                "{unstaged} {noun} {} not staged yet. Include {} too?",
-                if unstaged == 1 { "isn't" } else { "aren't" },
-                if unstaged == 1 { "it" } else { "them" }
-            )
+            tr!("git_panel.stage_prompt_body_other", count = unstaged)
         };
         let card = div()
             .w_full()
@@ -1844,9 +1871,9 @@ impl GitPanel {
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
                     .child(if staged_empty {
-                        "Stage changes to generate"
+                        tr!("git_panel.stage_prompt_title_generate")
                     } else {
-                        "Stage the rest?"
+                        tr!("git_panel.stage_prompt_title_rest")
                     }),
             )
             .child(
@@ -1869,7 +1896,7 @@ impl GitPanel {
                     .gap(px(8.))
                     .child(action_button(
                         "git-prompt-cancel",
-                        "Cancel",
+                        &tr!("git_panel.cancel"),
                         None,
                         false,
                         false,
@@ -1879,7 +1906,7 @@ impl GitPanel {
                     .children((!staged_empty).then(|| {
                         action_button(
                             "git-prompt-staged",
-                            "Use staged",
+                            &tr!("git_panel.use_staged"),
                             None,
                             false,
                             false,
@@ -1891,7 +1918,7 @@ impl GitPanel {
                     }))
                     .child(action_button(
                         "git-prompt-stage-all",
-                        "Stage all and generate",
+                        &tr!("git_panel.stage_all_and_generate"),
                         Some(icon("icons/magic-wand.svg", 13., theme.send_fg).into_any_element()),
                         true,
                         false,
@@ -2609,9 +2636,9 @@ fn load_more(
         .hover(|s| s.bg(theme.bg_hover))
         .on_click(listener)
         .child(if loading {
-            "Loading…".to_string()
+            tr!("git_panel.loading")
         } else {
-            "Load more".to_string()
+            tr!("git_panel.load_more")
         })
         .into_any_element()
 }
@@ -2674,19 +2701,19 @@ fn classify_git_failure(raw: &str) -> (String, String) {
         || haystack.contains("failed to push some refs")
         || haystack.contains("fetch first")
     {
-        "Push rejected — pull or merge the remote changes first"
+        tr!("git_panel.fail_push_rejected")
     } else if haystack.contains("not possible to fast-forward")
         || haystack.contains("divergent branches")
         || haystack.contains("need to specify how to reconcile")
     {
-        "Branches have diverged — a merge is required"
+        tr!("git_panel.fail_diverged")
     } else if haystack.contains("automatic merge failed")
         || haystack.contains("merge conflict")
         || haystack.contains("conflict")
     {
-        "Merge conflicts — resolve them, then commit"
+        tr!("git_panel.fail_merge_conflicts")
     } else if haystack.contains("would be overwritten") || haystack.contains("your local changes") {
-        "Local changes would be overwritten"
+        tr!("git_panel.fail_local_overwritten")
     } else if haystack.contains("authentication failed")
         || haystack.contains("could not read username")
         || haystack.contains("could not read password")
@@ -2694,30 +2721,30 @@ fn classify_git_failure(raw: &str) -> (String, String) {
         || haystack.contains("403 forbidden")
         || haystack.contains("401 unauthorized")
     {
-        "Authentication failed — check your Git credentials"
+        tr!("git_panel.fail_auth")
     } else if haystack.contains("repository not found")
         || haystack.contains("does not appear to be a git repository")
         || haystack.contains("couldn't find remote ref")
         || haystack.contains("no such remote")
     {
-        "Remote not found — check the origin URL"
+        tr!("git_panel.fail_remote_not_found")
     } else if haystack.contains("could not resolve host")
         || haystack.contains("unable to access")
         || haystack.contains("network is unreachable")
         || haystack.contains("timed out")
     {
-        "Network error — the remote could not be reached"
+        tr!("git_panel.fail_network")
     } else if haystack.contains("no upstream branch")
         || haystack.contains("has no upstream branch")
         || haystack.contains("no branch to push")
     {
-        "No upstream branch to push to"
+        tr!("git_panel.fail_no_upstream")
     } else if haystack.contains("not a git repository") {
-        "Not a Git repository"
+        tr!("git_panel.fail_not_a_repo")
     } else {
-        "Git error"
+        tr!("git_panel.fail_generic")
     };
-    (title.to_string(), detail)
+    (title, detail)
 }
 
 /// Tidy raw Git output for display: trim trailing whitespace, drop repeated
@@ -2736,7 +2763,7 @@ fn clean_git_detail(raw: &str) -> String {
     }
     let joined = lines.join("\n").trim().to_string();
     if joined.is_empty() {
-        "git exited without an error message".to_string()
+        tr!("git_panel.git_no_error_message")
     } else {
         joined
     }

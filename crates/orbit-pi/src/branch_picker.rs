@@ -55,7 +55,10 @@ impl BranchPicker {
     ) -> Self {
         let filter = cx.new(|cx| {
             ComposerInput::new(cx)
-                .with_placeholder(format!("Search {workspace_label} branches"))
+                .with_placeholder(tr!(
+                    "branch_picker.search_branches",
+                    workspace = workspace_label
+                ))
                 .with_key_context("Composer Picker")
         });
         let create_input = cx.new(|cx| {

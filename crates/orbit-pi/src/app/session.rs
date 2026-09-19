@@ -551,7 +551,7 @@ impl OrbitApp {
                 self.set_status(tr!("session.new_session"));
             }
             Err(err) => {
-                let message = format!("pi spawn failed: {err}");
+                let message = tr!("runtime.pi_spawn_failed", error = err);
                 self.client = None;
                 self.runtime.error = Some(message.clone());
                 self.set_status(message);
@@ -692,7 +692,7 @@ impl OrbitApp {
                     // transcript.
                 }
                 Err(err) => {
-                    let message = format!("pi spawn failed: {err}");
+                    let message = tr!("runtime.pi_spawn_failed", error = err);
                     self.client = None;
                     self.runtime.error = Some(message.clone());
                     self.set_status(message);
@@ -1380,11 +1380,7 @@ impl OrbitApp {
                 div()
                     .text_size(theme.ui_px(11.))
                     .text_color(theme.text_2)
-                    .child(if count == 1 {
-                        "1 provider".to_string()
-                    } else {
-                        format!("{count} providers")
-                    }),
+                    .child(tr!("session.provider_count", count = count)),
             );
 
         // One card per provider, 8 px apart: the boundary between accounts
@@ -1716,31 +1712,45 @@ fn quota_reset_hint(resets_at: i64, now_ms: i64) -> String {
     const DAY: i64 = 24 * HOUR;
     let remaining = resets_at.saturating_sub(now_ms);
     let hint = if remaining <= 0 {
-        return format!("resets {}", format_epoch_ms(resets_at));
+        return tr!(
+            "session.resets_at",
+            time = format_epoch_ms(resets_at)
+        );
     } else if remaining < MINUTE {
-        "in <1m".to_string()
+        tr!("session.in_lt_1m")
     } else if remaining < HOUR {
-        format!("in {}m", remaining / MINUTE)
+        tr!("session.in_minutes", minutes = remaining / MINUTE)
     } else if remaining < DAY {
         let hours = remaining / HOUR;
         let minutes = (remaining % HOUR) / MINUTE;
         if minutes == 0 {
-            format!("in {hours}h")
+            tr!("session.in_hours", hours = hours)
         } else {
-            format!("in {hours}h {minutes}m")
+            tr!(
+                "session.in_hours_minutes",
+                hours = hours,
+                minutes = minutes
+            )
         }
     } else if remaining < 7 * DAY {
         let days = remaining / DAY;
         let hours = (remaining % DAY) / HOUR;
         if hours == 0 {
-            format!("in {days}d")
+            tr!("session.in_days", days = days)
         } else {
-            format!("in {days}d {hours}h")
+            tr!(
+                "session.in_days_hours",
+                days = days,
+                hours = hours
+            )
         }
     } else {
-        return format!("resets {}", format_epoch_ms(resets_at));
+        return tr!(
+            "session.resets_at",
+            time = format_epoch_ms(resets_at)
+        );
     };
-    format!("resets {hint}")
+    tr!("session.resets_in", hint = hint)
 }
 
 /// One provider card in the top-bar quota popover: a raised block carrying
@@ -1790,12 +1800,12 @@ fn quota_provider_card(app: &OrbitApp, report: &QuotaReport, theme: Theme) -> An
 
     for window in &report.windows {
         let value = if let Some(percent) = window.used_percent {
-            format!("{percent:.0}% used")
+            tr!("session.percent_used", percent = format!("{percent:.0}"))
         } else if let (Some(used), Some(limit)) = (window.used, window.limit) {
-            format!("{} / {}", amount(used), amount(limit))
+            tr!("session.used_of_limit", used = amount(used), limit = amount(limit))
         } else if let Some(used) = window.used {
             match &window.unit {
-                Some(unit) => format!("{} {unit}", amount(used)),
+                Some(unit) => tr!("session.amount_unit", amount = amount(used), unit = unit),
                 None => amount(used),
             }
         } else {

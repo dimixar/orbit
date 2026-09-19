@@ -595,7 +595,7 @@ impl Attachment {
             gpui::ImageFormat::Tiff => "tiff",
         };
         Self {
-            name: format!("Pasted image {}.{ext}", index + 1),
+            name: tr!("app.pasted_image", index = index + 1, ext = ext),
             mime: image.format.mime_type().to_string(),
             data: base64::engine::general_purpose::STANDARD.encode(&image.bytes),
             preview: Some(Arc::new(image.clone())),
@@ -689,7 +689,7 @@ impl OrbitApp {
         let plugin_source_input = cx.new(|cx| {
             ComposerInput::new(cx)
                 .with_element_id("plugin-source-input")
-                .with_placeholder("npm:@scope/pkg, git:github.com/owner/repo, or ./path")
+                .with_placeholder(tr!("app.plugin_source_placeholder"))
                 .with_key_context("Composer Picker")
                 .with_max_lines(1)
         });
@@ -735,7 +735,7 @@ impl OrbitApp {
         access_mode.persist();
         let (client, connect_error) = match extensions.spawn(&workspace) {
             Ok(client) => (Some(client), String::new()),
-            Err(err) => (None, format!("pi spawn failed: {err}")),
+            Err(err) => (None, tr!("runtime.pi_spawn_failed", error = err)),
         };
         let runtime = RuntimeStatus {
             started_at: client.as_ref().map(|_| Instant::now()),

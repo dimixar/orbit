@@ -491,14 +491,14 @@ impl SidePane {
     fn source_label(&self, source: Source) -> String {
         match source {
             Source::LastTurn { turn_count } if self.latest_turn == Some(turn_count) => {
-                "Last Turn".to_string()
+                tr!("sidepane.last_turn")
             }
-            Source::LastTurn { turn_count } => format!("Turn {turn_count}"),
-            Source::Uncommitted => "Uncommitted".into(),
-            Source::Unstaged => "Unstaged".into(),
-            Source::Staged => "Staged".into(),
-            Source::Committed => "Committed".into(),
-            Source::Branch => "Branch".into(),
+            Source::LastTurn { turn_count } => tr!("sidepane.turn_n", count = turn_count),
+            Source::Uncommitted => tr!("sidepane.uncommitted"),
+            Source::Unstaged => tr!("git_panel.unstaged"),
+            Source::Staged => tr!("git_panel.staged"),
+            Source::Committed => tr!("sidepane.committed"),
+            Source::Branch => tr!("sidepane.branch"),
         }
     }
 
@@ -722,7 +722,7 @@ impl SidePane {
                     div()
                         .text_size(theme.ui_px(11.))
                         .text_color(theme.warn)
-                        .child("partial"),
+                        .child(tr!("sidepane.partial")),
                 )
             })
             .children((!compact).then(|| {
@@ -756,18 +756,20 @@ impl SidePane {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let diff = if self.review_loading && self.review.is_none() {
-            centered_message(theme, "Loading changes…", None).into_any_element()
+            centered_message(theme, &tr!("sidepane.loading_changes"), None).into_any_element()
         } else if let Some(error) = self.review_error.as_deref() {
-            centered_message(theme, "Changes unavailable", Some(error)).into_any_element()
+            centered_message(theme, &tr!("sidepane.changes_unavailable"), Some(error))
+                .into_any_element()
         } else if let Some(snapshot) = self.review.clone() {
             if snapshot.files.is_empty() {
                 let empty = self.source.empty_description();
-                centered_message(theme, "No changes", Some(empty.as_str())).into_any_element()
+                centered_message(theme, &tr!("sidepane.no_changes"), Some(&empty))
+                    .into_any_element()
             } else {
                 self.render_diff(snapshot, theme, cx)
             }
         } else {
-            centered_message(theme, "No changes", None).into_any_element()
+            centered_message(theme, &tr!("sidepane.no_changes"), None).into_any_element()
         };
 
         let mut content = div()
@@ -959,7 +961,10 @@ impl SidePane {
                         this.expand_gap(index, direction, cx);
                     }))
             })
-            .child(format!("{} unmodified lines", gap.count()));
+            .child(tr!(
+                "sidepane.unmodified_lines",
+                count = gap.count()
+            ));
 
         div()
             .h(px(REVIEW_GAP_HEIGHT))
@@ -1214,7 +1219,7 @@ impl SidePane {
 
         let last_turn = self.last_turn_source();
         menu = menu.child(source_row(
-            "Last Turn",
+            &tr!("sidepane.last_turn"),
             last_turn.is_some(),
             last_turn.is_some() && last_turn == Some(self.source),
             last_turn,
@@ -1630,12 +1635,12 @@ impl Source {
     /// Reader-facing empty-state copy for each source.
     fn empty_description(self) -> String {
         match self {
-            Source::LastTurn { .. } => "This turn didn't change any files.".into(),
-            Source::Uncommitted => "The working tree matches HEAD.".into(),
-            Source::Unstaged => "Everything is staged.".into(),
-            Source::Staged => "Nothing is staged.".into(),
-            Source::Committed => "No commits on this branch beyond its base.".into(),
-            Source::Branch => "This branch matches its base branch.".into(),
+            Source::LastTurn { .. } => tr!("sidepane.empty_last_turn"),
+            Source::Uncommitted => tr!("sidepane.empty_uncommitted"),
+            Source::Unstaged => tr!("sidepane.empty_unstaged"),
+            Source::Staged => tr!("sidepane.empty_staged"),
+            Source::Committed => tr!("sidepane.empty_committed"),
+            Source::Branch => tr!("sidepane.empty_branch"),
         }
     }
 }

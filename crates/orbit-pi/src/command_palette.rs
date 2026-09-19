@@ -285,7 +285,7 @@ impl CommandPalette {
                     crate::sessions::relative_time(session.modified)
                 );
                 if active {
-                    detail.push_str(" · Current");
+                    detail.push_str(&tr!("command_palette.current"));
                 }
                 PaletteItem {
                     section: Section::Sessions,

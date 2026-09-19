@@ -2278,7 +2278,7 @@ impl OrbitApp {
                                 }),
                             )
                             .child(icon("icons/git-fork.svg", 12., theme.text_3))
-                            .child(format!("{count} more"))
+                            .child(tr!("view.count_more", count = count))
                     }))
                     .into_any_element()
             }))
@@ -3301,17 +3301,11 @@ impl OrbitApp {
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.text_3)
                                 .child(if self.queue.follow_up.is_empty() {
-                                    format!("Steering the running turn ({})", self.queue.len())
+                                    tr!("view.steering_turn", count = self.queue.len())
                                 } else if self.queue.steering.is_empty() {
-                                    format!(
-                                        "Queued — sends after the current task finishes ({})",
-                                        self.queue.len()
-                                    )
+                                    tr!("view.queued_after_task", count = self.queue.len())
                                 } else {
-                                    format!(
-                                        "Steering now; follow-ups send after the task finishes ({})",
-                                        self.queue.len()
-                                    )
+                                    tr!("view.steering_plus_followups", count = self.queue.len())
                                 }),
                         )
                         .child(

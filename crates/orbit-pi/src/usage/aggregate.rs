@@ -232,16 +232,16 @@ impl ChartMetric {
         Self::Errors,
     ];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Tokens => "Tokens",
-            Self::Requests => "Requests",
-            Self::Input => "Input",
-            Self::Output => "Output",
-            Self::Cache => "Cache",
-            Self::Cost => "Cost",
-            Self::Latency => "Latency",
-            Self::Errors => "Errors",
+            Self::Tokens => tr!("usage.metric_tokens"),
+            Self::Requests => tr!("usage.metric_requests"),
+            Self::Input => tr!("usage.metric_input"),
+            Self::Output => tr!("usage.metric_output"),
+            Self::Cache => tr!("usage.metric_cache"),
+            Self::Cost => tr!("usage.metric_cost"),
+            Self::Latency => tr!("usage.metric_latency"),
+            Self::Errors => tr!("usage.metric_errors"),
         }
     }
 
@@ -638,12 +638,12 @@ pub enum LatencyMetric {
 impl LatencyMetric {
     pub const ALL: [Self; 4] = [Self::Average, Self::P50, Self::P95, Self::P99];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Average => "Average",
-            Self::P50 => "P50",
-            Self::P95 => "P95",
-            Self::P99 => "P99",
+            Self::Average => tr!("usage.latency_average"),
+            Self::P50 => "P50".to_string(),
+            Self::P95 => "P95".to_string(),
+            Self::P99 => "P99".to_string(),
         }
     }
 
@@ -968,7 +968,10 @@ impl UsageSnapshot {
                     session,
                     id: entry.id.clone(),
                     title: if entry.title.is_empty() {
-                        format!("Session {}", entry.id.chars().take(8).collect::<String>())
+                        tr!(
+                            "usage.session_fallback",
+                            id = entry.id.chars().take(8).collect::<String>()
+                        )
                     } else {
                         entry.title.clone()
                     },
@@ -1244,13 +1247,18 @@ fn derive_insights(snapshot: &UsageSnapshot, index: &UsageIndex) -> Vec<Insight>
         if before > 0.0 {
             if let Some(pct) = delta.pct {
                 if pct.abs() >= INSIGHT_MIN_PCT {
-                    let verb = if pct > 0.0 { "up" } else { "down" };
+                    let verb = if pct > 0.0 {
+                        tr!("usage.insight_up")
+                    } else {
+                        tr!("usage.insight_down")
+                    };
                     out.push(Insight {
-                        text: format!(
-                            "Token usage is {verb} {:.0}% versus the previous period ({} vs {}).",
-                            pct.abs(),
-                            super::format::compact_tokens(current as u64),
-                            super::format::compact_tokens(before as u64),
+                        text: tr!(
+                            "usage.insight_token_delta",
+                            verb = verb,
+                            pct = format!("{:.0}", pct.abs()),
+                            now = super::format::compact_tokens(current as u64),
+                            before = super::format::compact_tokens(before as u64),
                         ),
                         tone: Tone::Neutral,
                     });
@@ -1265,12 +1273,12 @@ fn derive_insights(snapshot: &UsageSnapshot, index: &UsageIndex) -> Vec<Insight>
         if let Some(top) = snapshot.models.rows.first() {
             if snapshot.models.rows.len() > 1 && top.share * 100.0 >= INSIGHT_MIN_SHARE {
                 out.push(Insight {
-                    text: format!(
-                        "{} accounts for {:.0}% of token usage ({} across {} requests).",
-                        top.label,
-                        top.share * 100.0,
-                        super::format::compact_tokens(top.totals.tokens.total),
-                        super::format::count(top.totals.requests),
+                    text: tr!(
+                        "usage.insight_top_model",
+                        model = top.label,
+                        share = format!("{:.0}", top.share * 100.0),
+                        tokens = super::format::compact_tokens(top.totals.tokens.total),
+                        requests = super::format::count(top.totals.requests),
                     ),
                     tone: Tone::Neutral,
                 });
@@ -1287,11 +1295,15 @@ fn derive_insights(snapshot: &UsageSnapshot, index: &UsageIndex) -> Vec<Insight>
                 let change = now - before;
                 if change.abs() >= INSIGHT_MIN_CACHE_POINTS {
                     out.push(Insight {
-                        text: format!(
-                            "Cache hit rate {} from {:.0}% to {:.0}%.",
-                            if change > 0.0 { "improved" } else { "fell" },
-                            before,
-                            now
+                        text: tr!(
+                            "usage.insight_cache_hit",
+                            verb = if change > 0.0 {
+                                tr!("usage.insight_improved")
+                            } else {
+                                tr!("usage.insight_fell")
+                            },
+                            before = format!("{:.0}", before),
+                            now = format!("{:.0}", now),
                         ),
                         tone: if change > 0.0 {
                             Tone::Positive
@@ -1308,11 +1320,11 @@ fn derive_insights(snapshot: &UsageSnapshot, index: &UsageIndex) -> Vec<Insight>
     if let Some(top) = snapshot.workspaces.rows.first() {
         if snapshot.workspaces.rows.len() > 1 && top.share * 100.0 >= INSIGHT_MIN_SHARE {
             out.push(Insight {
-                text: format!(
-                    "{} generated the most usage: {} tokens ({:.0}% of the period).",
-                    top.label,
-                    super::format::compact_tokens(top.totals.tokens.total),
-                    top.share * 100.0
+                text: tr!(
+                    "usage.insight_top_workspace",
+                    workspace = top.label,
+                    tokens = super::format::compact_tokens(top.totals.tokens.total),
+                    share = format!("{:.0}", top.share * 100.0)
                 ),
                 tone: Tone::Neutral,
             });
@@ -1332,11 +1344,11 @@ fn derive_insights(snapshot: &UsageSnapshot, index: &UsageIndex) -> Vec<Insight>
         if let Some((start, peak)) = values.iter().max_by_key(|(_, v)| *v) {
             if mean > 0.0 && *peak as f64 >= mean * INSIGHT_ANOMALY_FACTOR {
                 out.push(Insight {
-                    text: format!(
-                        "{} is {:.1}× the average {} volume.",
-                        bucket_label(*start, snapshot.buckets.granularity),
-                        *peak as f64 / mean,
-                        snapshot.buckets.granularity.label()
+                    text: tr!(
+                        "usage.insight_peak_bucket",
+                        bucket = bucket_label(*start, snapshot.buckets.granularity),
+                        factor = format!("{:.1}", *peak as f64 / mean),
+                        metric = snapshot.buckets.granularity.label()
                     ),
                     tone: Tone::Warning,
                 });
@@ -1349,11 +1361,11 @@ fn derive_insights(snapshot: &UsageSnapshot, index: &UsageIndex) -> Vec<Insight>
         if let Some(rate) = snapshot.summary.totals.error_rate() {
             if rate >= 1.0 {
                 out.push(Insight {
-                    text: format!(
-                        "{} of {} requests failed ({:.1}%).",
-                        super::format::count(snapshot.summary.totals.errors),
-                        super::format::count(snapshot.summary.totals.requests),
-                        rate
+                    text: tr!(
+                        "usage.insight_failures",
+                        failed = super::format::count(snapshot.summary.totals.errors),
+                        total = super::format::count(snapshot.summary.totals.requests),
+                        rate = format!("{:.1}", rate)
                     ),
                     tone: Tone::Warning,
                 });
@@ -1369,11 +1381,11 @@ fn derive_insights(snapshot: &UsageSnapshot, index: &UsageIndex) -> Vec<Insight>
                 let before = previous.totals.avg_duration_ms().unwrap_or(0.0);
                 if before > 0.0 && (now - before).abs() / before * 100.0 >= INSIGHT_MIN_PCT {
                     out.push(Insight {
-                        text: format!(
-                            "Average response time moved from {} to {} ({} requests).",
-                            super::format::duration_ms(before),
-                            super::format::duration_ms(now),
-                            super::format::count(snapshot.summary.totals.duration_samples)
+                        text: tr!(
+                            "usage.insight_latency",
+                            before = super::format::duration_ms(before),
+                            now = super::format::duration_ms(now),
+                            requests = super::format::count(snapshot.summary.totals.duration_samples)
                         ),
                         tone: Tone::Neutral,
                     });
@@ -1385,12 +1397,12 @@ fn derive_insights(snapshot: &UsageSnapshot, index: &UsageIndex) -> Vec<Insight>
     // How much of the store this window covers — orients the user when a
     // narrow range is showing.
     if let Some((_oldest, _newest)) = index.span() {
-        if range_name == RangePreset::All.label() && snapshot.summary.sessions > 0 {
+        if range_name == RangePreset::All.as_str() && snapshot.summary.sessions > 0 {
             out.push(Insight {
-                text: format!(
-                    "{} sessions and {} requests recorded across all time.",
-                    super::format::count(snapshot.summary.sessions),
-                    super::format::count(snapshot.summary.totals.requests)
+                text: tr!(
+                    "usage.insight_all_time",
+                    sessions = super::format::count(snapshot.summary.sessions),
+                    requests = super::format::count(snapshot.summary.totals.requests)
                 ),
                 tone: Tone::Neutral,
             });

@@ -764,10 +764,10 @@ impl Render for ModelSelector {
         };
         let option_count = rows.iter().filter(|row| !row.is_header()).count();
         let count_label = match self.kind {
-            PickerKind::Thinking => format!("{option_count} levels"),
+            PickerKind::Thinking => tr!("model_selector.n_levels", count = option_count),
             PickerKind::Model => match self.scope {
-                Scope::Favorites => format!("{option_count} favorites"),
-                _ => format!("{option_count} models"),
+                Scope::Favorites => tr!("model_selector.n_favorites", count = option_count),
+                _ => tr!("model_selector.n_models", count = option_count),
             },
         };
 
@@ -1336,7 +1336,10 @@ fn render_row(
             // fact when pi reports it; otherwise the machine id (mono), then
             // the provider name as a last resort.
             let (secondary, mono) = match model.context_window {
-                Some(tokens) => (format!("{} context window", format_tokens(tokens)), false),
+                Some(tokens) => (
+                    tr!("model_selector.context_window", count = format_tokens(tokens)),
+                    false,
+                ),
                 None => {
                     let id = model.id.trim();
                     if id.is_empty() {

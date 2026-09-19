@@ -401,7 +401,7 @@ impl TerminalSession {
             *window_size.lock().unwrap_or_else(|e| e.into_inner()),
             0,
         )
-        .with_context(|| format!("spawn shell in {}", working_directory.display()))?;
+        .with_context(|| tr!("terminal.spawn_shell_in", dir = working_directory.display().to_string()))?;
         let event_loop = EventLoop::new(term.clone(), proxy, pty, false, false)
             .context("create terminal event loop")?;
         let sender = event_loop.channel();
@@ -1656,7 +1656,7 @@ impl TerminalPanel {
                     .bg(theme.stop_red.opacity(0.15))
                     .text_size(theme.ui_px(10.5))
                     .text_color(theme.stop_red)
-                    .child("exited"),
+                    .child(tr!("terminal.exited")),
             );
         }
         header

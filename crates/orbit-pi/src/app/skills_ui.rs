@@ -154,11 +154,7 @@ impl OrbitApp {
             .border_color(theme.border)
             .text_size(theme.ui_px(11.5))
             .text_color(theme.text_3)
-            .child(format!(
-                "{} skill{}",
-                filtered.len(),
-                if filtered.len() == 1 { "" } else { "s" }
-            ));
+            .child(tr!("skills_ui.skill_count", count = filtered.len()));
 
         div()
             .w(px(320.))
@@ -456,13 +452,16 @@ impl OrbitApp {
         let scope = match skill.scope {
             SkillScope::Project => {
                 let workspace = self.workspace_dir();
-                format!("Project · {}", skills::display_path(&workspace))
+                tr!(
+                    "skills_ui.scope_project",
+                    path = skills::display_path(&workspace)
+                )
             }
-            SkillScope::Agent => "Global · pi agent".to_string(),
-            SkillScope::User => "User · agents".to_string(),
+            SkillScope::Agent => tr!("skills_ui.scope_agent"),
+            SkillScope::User => tr!("skills_ui.scope_user"),
         };
         if skill.manual_only {
-            format!("{scope} · manual only")
+            tr!("skills_ui.scope_manual_only", scope = scope)
         } else {
             scope
         }
@@ -537,14 +536,14 @@ impl OrbitApp {
                         .min_w_0()
                         .text_size(theme.ui_px(11.5))
                         .text_color(theme.crit)
-                        .child(format!(
-                            "Delete {}? This removes its directory.",
-                            skills::display_path(skill.dir().unwrap_or(&skill.file))
+                        .child(tr!(
+                            "skills_ui.delete_skill_hint",
+                            path = skills::display_path(skill.dir().unwrap_or(&skill.file))
                         )),
                 )
                 .child(self.skill_button(
                     "skill-delete-confirm".into(),
-                    "Delete",
+                    &tr!("sidebar.delete"),
                     true,
                     Some("icons/trash.svg"),
                     theme,
@@ -553,7 +552,7 @@ impl OrbitApp {
                 ))
                 .child(self.skill_button(
                     "skill-delete-cancel".into(),
-                    "Cancel",
+                    &tr!("git_panel.cancel"),
                     false,
                     None,
                     theme,
@@ -570,7 +569,7 @@ impl OrbitApp {
             .gap_2()
             .child(self.skill_button(
                 "skill-open".into(),
-                "Open SKILL.md",
+                &tr!("skills_ui.open_skill_md"),
                 false,
                 Some("icons/file.svg"),
                 theme,
@@ -579,7 +578,7 @@ impl OrbitApp {
             ))
             .child(self.skill_button(
                 "skill-reveal".into(),
-                "Show in File Manager",
+                &tr!("skills_ui.show_in_file_manager"),
                 false,
                 Some("icons/folder.svg"),
                 theme,
@@ -588,7 +587,7 @@ impl OrbitApp {
             ))
             .child(self.skill_button(
                 "skill-copy-path".into(),
-                "Copy Path",
+                &tr!("sidebar.copy_path"),
                 false,
                 Some("icons/copy.svg"),
                 theme,
@@ -598,7 +597,7 @@ impl OrbitApp {
             .child(div().flex_1())
             .child(self.skill_button(
                 "skill-delete".into(),
-                "Delete",
+                &tr!("sidebar.delete"),
                 false,
                 Some("icons/trash.svg"),
                 theme,
@@ -711,9 +710,9 @@ impl OrbitApp {
                 match skills::set_enabled(&skill, &self.workspace_dir(), !skill.enabled) {
                     Ok(()) => {
                         self.set_status(if skill.enabled {
-                            format!("Disabled {}", skill.name)
+                            tr!("skills_ui.disabled_skill", name = skill.name)
                         } else {
-                            format!("Enabled {}", skill.name)
+                            tr!("skills_ui.enabled_skill", name = skill.name)
                         });
                         self.refresh_skills(cx);
                     }
@@ -734,7 +733,7 @@ impl OrbitApp {
                 if let Some(path) = selected {
                     let text = skills::display_path(&path);
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
-                    self.toast_success(format!("Copied {text}"));
+                    self.toast_success(tr!("skills_ui.copied_path", path = text));
                 }
             }
             SkillAction::AskDelete => {
@@ -760,7 +759,7 @@ impl OrbitApp {
         match skills::delete(&skill, &self.workspace_dir()) {
             Ok(()) => {
                 self.selected_skill = None;
-                self.toast_info(format!("Deleted skill {}", skill.name));
+                self.toast_info(tr!("skills_ui.deleted_skill", name = skill.name));
                 self.refresh_skills(cx);
             }
             Err(err) => self.set_error(err),
@@ -771,7 +770,7 @@ impl OrbitApp {
 /// "48d ago" for the skill's `SKILL.md`.
 fn skill_age(skill: &Skill) -> String {
     match skill.modified {
-        Some(modified) => format!("{} ago", sessions::relative_time(modified)),
-        None => "Unknown".to_string(),
+        Some(modified) => tr!("skills_ui.n_ago", time = sessions::relative_time(modified)),
+        None => tr!("skills_ui.unknown"),
     }
 }

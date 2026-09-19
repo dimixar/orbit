@@ -8,9 +8,9 @@ pub(crate) fn humanize_command(command: &str) -> String {
     let mut chars = spaced.chars();
     let label = match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => "Command".to_string(),
+        None => tr!("helpers.command"),
     };
-    format!("{label} failed")
+    tr!("helpers.command_failed", label = label)
 }
 
 /// One queued-message chip: a kind tag plus the message text.

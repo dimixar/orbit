@@ -164,7 +164,7 @@ impl OrbitApp {
                             .get("finalError")
                             .and_then(|v| v.as_str())
                             .unwrap_or("pi exhausted its automatic retries");
-                        self.set_error(format!("Automatic retry failed: {error}"));
+                        self.set_error(tr!("events.auto_retry_failed", error = error));
                     }
                 }
                 Event::QueueUpdate { value } => {
@@ -196,7 +196,12 @@ impl OrbitApp {
                         .get("error")
                         .and_then(Value::as_str)
                         .unwrap_or("unknown error");
-                    self.set_error(format!("Extension {name} failed on {hook}: {error}"));
+                    self.set_error(tr!(
+                        "events.extension_failed",
+                        name = name,
+                        hook = hook,
+                        error = error
+                    ));
                 }
                 Event::AgentSettled => {
                     self.busy = false;
@@ -232,7 +237,7 @@ impl OrbitApp {
                     self.is_compacting = false;
                     // A failed compaction carries `errorMessage` (docs).
                     if let Some(error) = value.get("errorMessage").and_then(Value::as_str) {
-                        self.set_error(format!("Compaction failed: {error}"));
+                        self.set_error(tr!("events.compaction_failed", error = error));
                     } else if value.get("aborted").and_then(Value::as_bool) == Some(true) {
                         self.set_status(tr!("events.compaction_aborted"));
                     }
@@ -263,7 +268,7 @@ impl OrbitApp {
                     // unsupported model). Surface it in the banner; the
                     // transcript renders the same text inline.
                     if let Some(error) = transcript::message_error(value) {
-                        self.set_error(format!("Agent error: {error}"));
+                        self.set_error(tr!("events.agent_error", error = error));
                     } else if self
                         .error
                         .as_deref()
@@ -812,7 +817,10 @@ impl OrbitApp {
             .update(cx, |input, _| std::mem::take(&mut input.pasted_images));
         for image in &pasted {
             if self.attachments.len() >= MAX_ATTACHMENTS {
-                self.set_status(format!("at most {MAX_ATTACHMENTS} images per message"));
+                self.set_status(tr!(
+                    "composer_ops.max_attachments",
+                    count = MAX_ATTACHMENTS
+                ));
                 break;
             }
             let index = self.attachments.len();

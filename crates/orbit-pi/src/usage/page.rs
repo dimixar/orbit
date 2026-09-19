@@ -204,21 +204,21 @@ impl SessionSort {
         Self::Tools,
     ];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Started => "Started",
-            Self::Title => "Session",
-            Self::Workspace => "Workspace",
-            Self::Provider => "Provider",
-            Self::Model => "Model",
-            Self::Requests => "Requests",
-            Self::Input => "Input",
-            Self::Output => "Output",
-            Self::Cache => "Cache",
-            Self::Tokens => "Tokens",
-            Self::Duration => "Duration",
-            Self::Errors => "Errors",
-            Self::Tools => "Tools",
+            Self::Started => tr!("usage.col_started"),
+            Self::Title => tr!("usage.col_session"),
+            Self::Workspace => tr!("usage.col_workspace"),
+            Self::Provider => tr!("usage.col_provider"),
+            Self::Model => tr!("usage.col_model"),
+            Self::Requests => tr!("usage.metric_requests"),
+            Self::Input => tr!("usage.metric_input"),
+            Self::Output => tr!("usage.metric_output"),
+            Self::Cache => tr!("usage.metric_cache"),
+            Self::Tokens => tr!("usage.metric_tokens"),
+            Self::Duration => tr!("usage.col_duration"),
+            Self::Errors => tr!("usage.metric_errors"),
+            Self::Tools => tr!("usage.col_tools"),
         }
     }
 
@@ -290,16 +290,22 @@ pub enum BucketSort {
 
 impl BucketSort {
     pub fn id(self) -> &'static str {
-        self.label()
+        match self {
+            Self::Date => "date",
+            Self::Requests => "requests",
+            Self::Tokens => "tokens",
+            Self::Cache => "cache-hit",
+            Self::Errors => "errors",
+        }
     }
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Date => "Date",
-            Self::Requests => "Requests",
-            Self::Tokens => "Tokens",
-            Self::Cache => "Cache hit",
-            Self::Errors => "Errors",
+            Self::Date => tr!("usage.col_date"),
+            Self::Requests => tr!("usage.metric_requests"),
+            Self::Tokens => tr!("usage.metric_tokens"),
+            Self::Cache => tr!("usage.col_cache_hit"),
+            Self::Errors => tr!("usage.metric_errors"),
         }
     }
 
@@ -430,7 +436,7 @@ pub fn query_failures(
                 || row.model.to_lowercase().contains(&needle)
                 || row.session_title.to_lowercase().contains(&needle)
                 || row.message.to_lowercase().contains(&needle)
-                || row.kind.label().to_lowercase().contains(&needle)
+                || row.kind.as_str().contains(&needle)
                 || super::table::failure_when(row.ts_ms)
                     .to_lowercase()
                     .contains(&needle)
@@ -440,7 +446,7 @@ pub fn query_failures(
     rows.sort_by(|a, b| {
         let ordering = match sort {
             FailureSort::When => a.ts_ms.cmp(&b.ts_ms),
-            FailureSort::Kind => a.kind.label().cmp(b.kind.label()),
+            FailureSort::Kind => a.kind.as_str().cmp(b.kind.as_str()),
             FailureSort::Model => a.model.to_lowercase().cmp(&b.model.to_lowercase()),
             FailureSort::Session => a
                 .session_title
@@ -479,12 +485,12 @@ impl SeriesSort {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Time => "Time",
-            Self::Value => "Metric",
-            Self::Requests => "Requests",
-            Self::Tokens => "Tokens",
+            Self::Time => tr!("usage.col_time"),
+            Self::Value => tr!("usage.col_metric"),
+            Self::Requests => tr!("usage.metric_requests"),
+            Self::Tokens => tr!("usage.metric_tokens"),
         }
     }
 
@@ -598,6 +604,16 @@ pub enum ExportFormat {
     Json,
 }
 
+impl ExportFormat {
+    /// Stable identifier for element ids — never localized.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Csv => "csv",
+            Self::Json => "json",
+        }
+    }
+}
+
 /// Which dimension the one breakdown section ranks. The four distributions the
 /// page used to stack as separate panels are the four faces of this selector.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -611,12 +627,12 @@ pub enum BreakdownTab {
 impl BreakdownTab {
     pub const ALL: [Self; 4] = [Self::Models, Self::Workspaces, Self::Providers, Self::Tools];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Models => "Models",
-            Self::Workspaces => "Workspaces",
-            Self::Providers => "Providers",
-            Self::Tools => "Tools",
+            Self::Models => tr!("usage.tab_models"),
+            Self::Workspaces => tr!("usage.tab_workspaces"),
+            Self::Providers => tr!("usage.tab_providers"),
+            Self::Tools => tr!("usage.tab_tools"),
         }
     }
 
@@ -657,14 +673,14 @@ impl BreakdownSort {
         Self::Tokens,
     ];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Name => "Name",
-            Self::Requests => "Requests",
-            Self::Input => "Input",
-            Self::Output => "Output",
-            Self::Cache => "Cache",
-            Self::Tokens => "Tokens",
+            Self::Name => tr!("usage.col_name"),
+            Self::Requests => tr!("usage.metric_requests"),
+            Self::Input => tr!("usage.metric_input"),
+            Self::Output => tr!("usage.metric_output"),
+            Self::Cache => tr!("usage.metric_cache"),
+            Self::Tokens => tr!("usage.metric_tokens"),
         }
     }
 
@@ -714,11 +730,11 @@ pub enum DetailTab {
 impl DetailTab {
     pub const ALL: [Self; 3] = [Self::Sessions, Self::Daily, Self::Failures];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Sessions => "Sessions",
-            Self::Daily => "Daily",
-            Self::Failures => "Failures",
+            Self::Sessions => tr!("usage.tab_sessions"),
+            Self::Daily => tr!("usage.tab_daily"),
+            Self::Failures => tr!("usage.tab_failures"),
         }
     }
 
@@ -747,10 +763,10 @@ pub enum UsageMode {
 impl UsageMode {
     pub const ALL: [Self; 2] = [Self::Simple, Self::Details];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Simple => "Simple",
-            Self::Details => "Details",
+            Self::Simple => tr!("usage.mode_simple"),
+            Self::Details => tr!("usage.mode_details"),
         }
     }
 
@@ -1181,9 +1197,9 @@ impl UsagePage {
             self.refreshing = false;
             self.last_updated_ms = Some(index.scanned_at_ms);
             self.error = if index.is_empty() && index.unreadable_files > 0 {
-                Some(format!(
-                    "{} session files could not be read",
-                    index.unreadable_files
+                Some(tr!(
+                    "usage.unreadable_files",
+                    count = index.unreadable_files
                 ))
             } else {
                 None
@@ -1235,7 +1251,7 @@ impl UsagePage {
         {
             filter.session = None;
             self.status = Some((
-                "That session is no longer in the store — scope cleared".to_string(),
+                tr!("usage.session_scope_cleared"),
                 Instant::now(),
             ));
         }
@@ -1384,7 +1400,10 @@ impl UsagePage {
                 session_title: {
                     let entry = index.session(row.session);
                     if entry.title.is_empty() {
-                        format!("Session {}", entry.id.chars().take(8).collect::<String>())
+                        tr!(
+                            "usage.session_fallback",
+                            id = entry.id.chars().take(8).collect::<String>()
+                        )
                     } else {
                         entry.title.clone()
                     }
@@ -2294,7 +2313,7 @@ impl UsagePage {
             .filter(|row| {
                 needle.is_empty()
                     || row.label.to_lowercase().contains(&needle)
-                    || row.class.label().to_lowercase().contains(&needle)
+                    || row.class.as_str().to_lowercase().contains(&needle)
             })
             .cloned()
             .collect()
@@ -2469,19 +2488,20 @@ impl UsagePage {
             let _ = this.update(cx, |page, cx| {
                 page.status = Some(match result {
                     Ok(()) => (
-                        format!(
-                            "Exported {} to {}",
-                            match format {
-                                ExportFormat::Csv => "filtered requests",
-                                ExportFormat::Json => "the current view",
+                        tr!(
+                            "usage.exported",
+                            what = match format {
+                                ExportFormat::Csv => tr!("usage.export_filtered_requests"),
+                                ExportFormat::Json => tr!("usage.export_current_view"),
                             },
-                            path.file_name()
+                            file = path
+                                .file_name()
                                 .map(|name| name.to_string_lossy().to_string())
                                 .unwrap_or_else(|| path.to_string_lossy().to_string())
                         ),
                         Instant::now(),
                     ),
-                    Err(err) => (format!("Export failed: {err}"), Instant::now()),
+                    Err(err) => (tr!("usage.export_failed", error = err), Instant::now()),
                 });
                 cx.notify();
             });

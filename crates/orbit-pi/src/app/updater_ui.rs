@@ -69,7 +69,7 @@ impl OrbitApp {
                 }
                 UpdaterEvent::Failed(error) => {
                     self.updater_status = UpdateStatus::Idle;
-                    self.set_error(format!("Update failed: {error}"));
+                    self.set_error(tr!("updater_ui.failed", error = error));
                 }
                 #[cfg(unix)]
                 UpdaterEvent::QuitAndInstall => {
@@ -232,20 +232,13 @@ impl OrbitApp {
             return None;
         }
         let desc = match (self.updater_status, self.updater_version.as_deref()) {
-            (UpdateStatus::Available, Some(version)) => format!(
-                "Orbit Pi v{version} is ready. Downloading installs the update and relaunches Orbit."
+            (UpdateStatus::Available, Some(version)) => tr!(
+                "updater_ui.ready_with_version",
+                version = version
             ),
-            (UpdateStatus::Available, None) => {
-                "A signed release is ready. Downloading installs the update and relaunches Orbit."
-                    .to_owned()
-            }
-            (UpdateStatus::Updating, _) => {
-                "Installing the update. Orbit will relaunch when the install finishes.".to_owned()
-            }
-            (UpdateStatus::Idle, _) => {
-                "Check for a newer signed release. Downloading installs the update and relaunches Orbit."
-                    .to_owned()
-            }
+            (UpdateStatus::Available, None) => tr!("updater_ui.ready"),
+            (UpdateStatus::Updating, _) => tr!("updater_ui.installing"),
+            (UpdateStatus::Idle, _) => tr!("updater_ui.check_hint"),
         };
         Some(self.setting_row(
             theme,
@@ -304,8 +297,8 @@ impl OrbitApp {
         match self.updater_status {
             UpdateStatus::Available => {
                 let label = match self.updater_version.as_deref() {
-                    Some(version) => format!("Download v{version}"),
-                    None => "Download update".to_owned(),
+                    Some(version) => tr!("updater_ui.download_v", version = version),
+                    None => tr!("updater_ui.download_update"),
                 };
                 base.bg(theme.send_bg)
                     .text_color(theme.send_fg)

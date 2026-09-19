@@ -468,13 +468,13 @@ impl FailureSort {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::When => "When",
-            Self::Kind => "Type",
-            Self::Model => "Model",
-            Self::Session => "Session",
-            Self::Message => "Message",
+            Self::When => tr!("usage.col_when"),
+            Self::Kind => tr!("usage.col_type"),
+            Self::Model => tr!("usage.col_model"),
+            Self::Session => tr!("usage.col_session"),
+            Self::Message => tr!("usage.col_message"),
         }
     }
 
@@ -499,7 +499,7 @@ pub struct FailureRow {
 pub(super) fn failure_kind_register(
     kind: super::model::ErrorKind,
     theme: Theme,
-) -> (&'static str, Hsla) {
+) -> (String, Hsla) {
     match kind {
         super::model::ErrorKind::Provider => (kind.label(), theme.crit),
         super::model::ErrorKind::Tool => (kind.label(), theme.warn),

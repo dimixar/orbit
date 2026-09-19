@@ -235,19 +235,25 @@ pub fn compact_card(
     let (title, subtitle) = match usage {
         Some(usage) => {
             let title = format_percent(usage)
-                .map(|p| format!("{p} context used"))
-                .unwrap_or_else(|| "Context usage".into());
+                .map(|p| tr!("context_meter.context_used", percent = p))
+                .unwrap_or_else(|| tr!("context_meter.context_usage"));
             let subtitle = match usage.tokens {
-                Some(used) => format!(
-                    "{} / {} tokens",
-                    format_tokens(used),
-                    format_tokens(usage.context_window)
+                Some(used) => tr!(
+                    "context_meter.tokens_of",
+                    used = format_tokens(used),
+                    total = format_tokens(usage.context_window)
                 ),
-                None => format!("of {} tokens", format_tokens(usage.context_window)),
+                None => tr!(
+                    "context_meter.of_tokens",
+                    total = format_tokens(usage.context_window)
+                ),
             };
             (title, subtitle)
         }
-        None => ("Context usage".into(), "Waiting for the pi agent".into()),
+        None => (
+            tr!("context_meter.context_usage"),
+            tr!("context_meter.waiting_for_agent"),
+        ),
     };
     let cost = session.and_then(|s| s.cost).map(format_cost);
     div()
@@ -281,7 +287,7 @@ pub fn compact_card(
                 .text_size(theme.ui_px(12.))
                 .text_color(theme.text_3)
                 .whitespace_nowrap()
-                .child(format!("{cost} spent"))
+                .child(tr!("context_meter.spent", cost = cost))
         }))
 }
 
@@ -314,12 +320,15 @@ pub fn details_card(
 ) -> impl IntoElement {
     let percent = usage.and_then(format_percent);
     let totals = usage.map(|u| match u.tokens {
-        Some(used) => format!(
-            "~{} / {} Tokens",
-            format_tokens(used),
-            format_tokens(u.context_window)
+        Some(used) => tr!(
+            "context_meter.tokens_of",
+            used = format_tokens(used),
+            total = format_tokens(u.context_window)
         ),
-        None => format!("of {} Tokens", format_tokens(u.context_window)),
+        None => tr!(
+            "context_meter.of_tokens",
+            total = format_tokens(u.context_window)
+        ),
     });
     let window_tokens = usage.map(|u| u.context_window).unwrap_or(0);
 
@@ -379,8 +388,8 @@ pub fn details_card(
                         .text_color(theme.text)
                         .child(
                             percent
-                                .map(|p| format!("{p} Full"))
-                                .unwrap_or_else(|| "Unknown".into()),
+                                .map(|p| tr!("context_meter.percent_full", percent = p))
+                                .unwrap_or_else(|| tr!("context_meter.unknown")),
                         ),
                 )
                 .children(totals.map(|label| {
@@ -543,7 +552,11 @@ pub fn session_usage_section(usage: &SessionUsage, theme: Theme) -> AnyElement {
 fn cache_read_label(usage: &SessionUsage) -> String {
     let tokens = format_tokens(usage.cache_read);
     match usage.cache_read_percent() {
-        Some(percent) => format!("{tokens} · {percent:.0}%"),
+        Some(percent) => tr!(
+            "context_meter.cache_read_share",
+            tokens = tokens,
+            percent = format!("{percent:.0}")
+        ),
         None => tokens,
     }
 }

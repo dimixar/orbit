@@ -142,8 +142,10 @@ impl UsagePage {
     /// 44px page header: back affordance, title, freshness, and the page's own
     /// actions. Compact by design — the data starts on the next row.
     fn header(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let refresh_label = tr!("usage.refreshing");
+        let refresh_idle_label = tr!("common.refresh");
         let status = if self.is_refreshing() {
-            Some("Refreshing…".to_string())
+            Some(refresh_label.clone())
         } else {
             self.status().map(str::to_string).or_else(|| {
                 self.last_updated_ms()
@@ -220,9 +222,9 @@ impl UsagePage {
             .child(filters::text_button(
                 "usage-refresh",
                 if self.is_refreshing() {
-                    "Refreshing…"
+                    &refresh_label
                 } else {
-                    "Refresh"
+                    &refresh_idle_label
                 },
                 Some("icons/refresh.svg"),
                 true,
@@ -242,7 +244,7 @@ impl UsagePage {
         let entity = cx.entity();
         let button = filters::text_button(
             "usage-export",
-            "Export",
+            &tr!("usage.export"),
             Some("icons/upload.svg"),
             enabled,
             theme,
@@ -344,7 +346,7 @@ impl UsagePage {
                 .child(self.multi_chip(
                     MenuKind::Workspace,
                     "usage-workspace",
-                    "All workspaces",
+                    &tr!("usage.all_workspaces"),
                     &ranked_workspaces,
                     &all_workspaces,
                     &filter.workspaces,
@@ -354,7 +356,7 @@ impl UsagePage {
                 .child(self.multi_chip(
                     MenuKind::Provider,
                     "usage-provider",
-                    "All providers",
+                    &tr!("usage.all_providers"),
                     &ranked_providers,
                     &all_providers,
                     &filter.providers,
@@ -364,7 +366,7 @@ impl UsagePage {
                 .child(self.multi_chip(
                     MenuKind::Model,
                     "usage-model",
-                    "All models",
+                    &tr!("usage.all_models"),
                     &ranked_models,
                     &all_models,
                     &filter.models,
@@ -466,7 +468,7 @@ impl UsagePage {
         }
         if let Some(session) = filter.session {
             if let Some(entry) = index.try_session(session) {
-                let label = format!("Session: {}", session_title(entry));
+                let label = tr!("usage.chip_session", name = session_title(entry));
                 let entity = cx.entity();
                 chips.push(filters::toggle_chip(
                     "usage-chip-session".to_string(),
@@ -485,7 +487,7 @@ impl UsagePage {
             let entity = cx.entity();
             chips.push(filters::toggle_chip(
                 format!("usage-chip-workspace-{id}"),
-                format!("Workspace: {}", entry.label),
+                tr!("usage.chip_workspace", name = entry.label),
                 theme,
                 move |_, _, cx| {
                     entity.update(cx, |page, cx| {
@@ -501,7 +503,7 @@ impl UsagePage {
             let entity = cx.entity();
             chips.push(filters::toggle_chip(
                 format!("usage-chip-provider-{id}"),
-                format!("Provider: {}", entry.label),
+                tr!("usage.chip_provider", name = entry.label),
                 theme,
                 move |_, _, cx| {
                     entity.update(cx, |page, cx| {
@@ -517,7 +519,7 @@ impl UsagePage {
             let entity = cx.entity();
             chips.push(filters::toggle_chip(
                 format!("usage-chip-model-{id}"),
-                format!("Model: {}", entry.label),
+                tr!("usage.chip_model", name = entry.label),
                 theme,
                 move |_, _, cx| {
                     entity.update(cx, |page, cx| {
@@ -530,7 +532,7 @@ impl UsagePage {
             let entity = cx.entity();
             chips.push(filters::toggle_chip(
                 "usage-chip-errors".to_string(),
-                "Failed requests",
+                tr!("usage.chip_failed_requests"),
                 theme,
                 move |_, _, cx| {
                     entity.update(cx, |page, cx| page.set_errors_only(false, cx));
@@ -541,7 +543,7 @@ impl UsagePage {
             let entity = cx.entity();
             chips.push(filters::toggle_chip(
                 "usage-chip-cached".to_string(),
-                "Cached only",
+                tr!("usage.chip_cached_only"),
                 theme,
                 move |_, _, cx| {
                     entity.update(cx, |page, cx| page.set_cached_only(false, cx));
@@ -552,7 +554,7 @@ impl UsagePage {
         let entity = cx.entity();
         let clear_all = filters::text_button(
             "usage-chips-clear",
-            "Clear all",
+            &tr!("usage.clear_all"),
             None,
             true,
             theme,
@@ -624,7 +626,7 @@ impl UsagePage {
                 return self.message_state(
                     theme,
                     "icons/info.svg",
-                    "Unable to load usage data",
+                    &tr!("usage.unable_to_load"),
                     &error,
                     Some(action),
                 );
@@ -638,11 +640,11 @@ impl UsagePage {
             return self.message_state(
                 theme,
                 "icons/info.svg",
-                "Unable to read usage data",
-                &format!(
-                    "{} session files in {} could not be parsed.",
-                    format::count(index.unreadable_files as u64),
-                    self.store_hint()
+                &tr!("usage.unable_to_read"),
+                &tr!(
+                    "usage.unreadable_files_hint",
+                    count = format::count(index.unreadable_files as u64),
+                    store = self.store_hint()
                 ),
                 None,
             );
@@ -659,8 +661,8 @@ impl UsagePage {
             return self.message_state(
                 theme,
                 "icons/filter.svg",
-                "No usage matches these filters",
-                "Try widening the date range or clearing a filter.",
+                &tr!("usage.no_matches"),
+                &tr!("usage.no_matches_hint"),
                 action,
             );
         }
@@ -686,16 +688,16 @@ impl UsagePage {
                 }
                 band(
                     "usage-overview",
-                    "Overview",
-                    "Headline figures and how usage moved in this range.",
+                    &tr!("usage.overview"),
+                    &tr!("usage.overview_hint"),
                     cards.into_any_element(),
                     theme,
                 )
             }
             UsageMode::Details => band(
                 "usage-details-band",
-                "Details",
-                "Ranked by tokens, then the sessions, days, and failures behind them.",
+                &tr!("usage.details"),
+                &tr!("usage.details_hint"),
                 div()
                     .w_full()
                     .flex()
@@ -720,24 +722,27 @@ impl UsagePage {
         let latency_metric = self.latency_metric();
         let by = snapshot.series.granularity.label();
         let meta = match metric {
-            ChartMetric::Cost => format!(
-                "{} total · by {by}",
-                format::cost(metric.total(&snapshot.summary.totals))
+            ChartMetric::Cost => tr!(
+                "usage.total_by",
+                value = format::cost(metric.total(&snapshot.summary.totals)),
+                by = by
             ),
-            ChartMetric::Latency => format!(
-                "{} per bucket · by {by}",
-                latency_metric.label().to_lowercase()
+            ChartMetric::Latency => tr!(
+                "usage.per_bucket",
+                value = latency_metric.label().to_lowercase(),
+                by = by
             ),
-            _ => format!(
-                "{} total · by {by}",
-                format::compact(metric.total(&snapshot.summary.totals) as u64)
+            _ => tr!(
+                "usage.total_by",
+                value = format::compact(metric.total(&snapshot.summary.totals) as u64),
+                by = by
             ),
         };
 
         section(
             "usage-activity",
-            "Usage over time",
-            Some("How requests and tokens moved in this range. Click a bucket to focus the page."),
+            &tr!("usage.over_time"),
+            Some(&tr!("usage.over_time_hint")),
             Some(meta),
             None,
             self.trend_body(snapshot, theme, cx),
@@ -749,14 +754,14 @@ impl UsagePage {
     /// a metric on the board above.
     fn signals_section(&self, insights: &[Insight], theme: Theme) -> AnyElement {
         let meta = if insights.len() == 1 {
-            "1 note".to_string()
+            tr!("usage.one_note")
         } else {
-            format!("{} notes", format::count(insights.len() as u64))
+            tr!("usage.n_notes", count = format::count(insights.len() as u64))
         };
         section(
             "usage-signals",
-            "Signals",
-            Some("What stands out in this range."),
+            &tr!("usage.signals"),
+            Some(&tr!("usage.signals_hint")),
             Some(meta),
             None,
             self.signals_body(insights, theme),
@@ -771,14 +776,14 @@ impl UsagePage {
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let daily_meta = format!(
-            "{} per day · last 12 months",
-            self.metric().label().to_lowercase()
+        let daily_meta = tr!(
+            "usage.per_day_last_year",
+            metric = self.metric().label().to_lowercase()
         );
         section(
             "usage-daily",
-            "Daily activity",
-            Some("Each cell is a day over the last year. Click one to scope the page."),
+            &tr!("usage.daily_activity"),
+            Some(&tr!("usage.daily_activity_hint")),
             Some(daily_meta),
             None,
             self.heatmap_body(snapshot, theme, cx),
@@ -796,9 +801,9 @@ impl UsagePage {
     ) -> AnyElement {
         section(
             "usage-token-health",
-            "Token health",
-            Some("How tokens split across input, output, and cache."),
-            Some("composition & cache".into()),
+            &tr!("usage.token_health"),
+            Some(&tr!("usage.token_health_hint")),
+            Some(tr!("usage.composition_and_cache")),
             None,
             self.health_body(snapshot, theme, wide, cx),
             theme,
@@ -995,18 +1000,18 @@ impl UsagePage {
     /// The store has no usage at all (§43).
     fn empty_store_state(&self, theme: Theme, unreadable: usize) -> AnyElement {
         let note = (unreadable > 0).then(|| {
-            format!(
-                "{} session files could not be read.",
-                format::count(unreadable as u64)
+            tr!(
+                "usage.unreadable_files_period",
+                count = format::count(unreadable as u64)
             )
         });
         let mut state = self.message_state(
             theme,
             "icons/usage-total.svg",
-            "No usage data yet",
-            &format!(
-                "Once you run the agent, its model, token, session and workspace activity appears here — {} is empty.",
-                self.store_hint()
+            &tr!("usage.no_data_yet"),
+            &tr!(
+                "usage.no_data_hint",
+                store = self.store_hint()
             ),
             None,
         );
@@ -1033,7 +1038,7 @@ impl UsagePage {
     fn store_hint(&self) -> String {
         self.store_path()
             .map(|path| format::short_path(&path))
-            .unwrap_or_else(|| "the session store".to_string())
+            .unwrap_or_else(|| tr!("usage.the_session_store"))
     }
 
     /// A centered message with an optional action.
@@ -1179,8 +1184,8 @@ impl UsagePage {
 
         card(
             "usage-summary",
-            "Summary",
-            Some("Headline figures for the selected range."),
+            &tr!("usage.summary"),
+            Some(&tr!("usage.summary_hint")),
             Some(summary_meta(snapshot)),
             None,
             body.into_any_element(),
@@ -1195,63 +1200,70 @@ impl UsagePage {
         let totals = &snapshot.summary.totals;
         let mut cells = Vec::new();
         cells.push(KpiCell {
-            label: "Requests".into(),
+            label: tr!("usage.metric_requests"),
             value: format::count(totals.requests),
-            sub: delta_sub(snapshot, ChartMetric::Requests, "model requests in range"),
+            sub: delta_sub(
+                snapshot,
+                ChartMetric::Requests,
+                &tr!("usage.sub_requests_in_range"),
+            ),
             tone: CellTone::Normal,
             click: Some(ChartMetric::Requests),
         });
         cells.push(KpiCell {
-            label: "Total tokens".into(),
+            label: tr!("usage.metric_total_tokens"),
             value: format::compact(totals.tokens.total),
             sub: match totals.tokens_per_request() {
-                Some(avg) => format!("{} avg/request", format::compact(avg as u64)),
-                None => "no requests".into(),
+                Some(avg) => tr!(
+                    "usage.sub_avg_per_request",
+                    value = format::compact(avg as u64)
+                ),
+                None => tr!("usage.sub_no_requests"),
             },
             tone: CellTone::Normal,
             click: Some(ChartMetric::Tokens),
         });
         cells.push(match snapshot.cache.hit_rate {
             Some(rate) => KpiCell {
-                label: "Cache hit rate".into(),
+                label: tr!("usage.metric_cache_hit_rate"),
                 value: format::percent(rate),
-                sub: format!(
-                    "{} read · {} written",
-                    format::compact(snapshot.cache.cache_read),
-                    format::compact(snapshot.cache.cache_write)
+                sub: tr!(
+                    "usage.sub_read_written",
+                    read = format::compact(snapshot.cache.cache_read),
+                    written = format::compact(snapshot.cache.cache_write)
                 ),
                 tone: CellTone::Normal,
                 // Focus the cache analytics: plot cache volume over time.
                 click: Some(ChartMetric::Cache),
             },
             None => KpiCell {
-                label: "Cache hit rate".into(),
-                value: "Unavailable".into(),
-                sub: "no cache tokens reported".into(),
+                label: tr!("usage.metric_cache_hit_rate"),
+                value: tr!("usage.unavailable"),
+                sub: tr!("usage.sub_no_cache_tokens"),
                 tone: CellTone::Muted,
                 click: None,
             },
         });
         cells.push(match totals.avg_duration_ms() {
             Some(avg) => KpiCell {
-                label: "Avg response".into(),
+                label: tr!("usage.metric_avg_response"),
                 value: format::duration_ms(avg),
                 sub: if snapshot.latency.has_percentiles() {
-                    format!(
-                        "p95 {} · {} measured",
-                        format::duration_ms(snapshot.latency.p95_ms as f64),
-                        format::count(snapshot.latency.samples)
+                    tr!(
+                        "usage.sub_p95_measured",
+                        p95 = format::duration_ms(snapshot.latency.p95_ms as f64),
+                        count = format::count(snapshot.latency.samples)
                     )
                 } else {
-                    format!("{} measured", format::count(snapshot.latency.samples))
+                    tr!("usage.sub_measured", count = format::count(snapshot.latency.samples))
                 },
                 tone: CellTone::Normal,
                 click: Some(ChartMetric::Latency),
             },
             None => KpiCell {
-                label: "Avg response".into(),
-                value: "Unavailable".into(),
-                sub: "no measurable request gaps".into(),
+                label: tr!("usage.metric_avg_response"),
+                value: tr!("usage.unavailable"),
+                sub: tr!("usage.sub_no_request_gaps"),
                 tone: CellTone::Muted,
                 click: None,
             },
@@ -1270,56 +1282,59 @@ impl UsagePage {
     ) -> AnyElement {
         let totals = &snapshot.summary.totals;
         let headline: Vec<(String, String)> = vec![
-            ("Input tokens".into(), format::compact(totals.tokens.input)),
+            (tr!("usage.stat_input_tokens"), format::compact(totals.tokens.input)),
             (
-                "Output tokens".into(),
+                tr!("usage.stat_output_tokens"),
                 format::compact(totals.tokens.output),
             ),
             (
-                "Cost".into(),
+                tr!("usage.stat_cost"),
                 match (totals.cost_coverage(), totals.cost_per_request()) {
-                    (0.0, _) => "Unavailable".into(),
-                    (_, Some(per)) => format!(
-                        "{} · {} / req",
-                        format::cost(totals.cost_usd),
-                        format::cost(per)
+                    (0.0, _) => tr!("usage.unavailable"),
+                    (_, Some(per)) => tr!(
+                        "usage.stat_cost_per_req",
+                        cost = format::cost(totals.cost_usd),
+                        per = format::cost(per)
                     ),
                     (_, None) => format::cost(totals.cost_usd),
                 },
             ),
             (
-                "Failed".into(),
+                tr!("usage.stat_failed"),
                 if totals.errors > 0 {
                     format::exact(totals.errors)
                 } else {
-                    "None".into()
+                    tr!("usage.none")
                 },
             ),
-            ("Sessions".into(), format::count(snapshot.summary.sessions)),
-            ("Turns".into(), format::count(snapshot.summary.turns)),
             (
-                "Tool calls".into(),
+                tr!("usage.stat_sessions"),
+                format::count(snapshot.summary.sessions),
+            ),
+            (tr!("usage.stat_turns"), format::count(snapshot.summary.turns)),
+            (
+                tr!("usage.stat_tool_calls"),
                 format::count(snapshot.summary.tool_runs),
             ),
         ];
         let mut extra: Vec<(String, String)> = vec![(
-            "Bash commands".into(),
+            tr!("usage.stat_bash_commands"),
             format::count(snapshot.summary.bash_runs),
         )];
         if snapshot.summary.tool_errors > 0 {
             extra.push((
-                "Tool failures".into(),
+                tr!("usage.stat_tool_failures"),
                 format::count(snapshot.summary.tool_errors),
             ));
         }
         if totals.duration_samples > 0 {
             extra.push((
-                "Generation time".into(),
+                tr!("usage.stat_generation_time"),
                 format::span_ms(totals.duration_ms as i64),
             ));
         }
         if let Some(avg) = totals.avg_prompt() {
-            extra.push(("Avg prompt".into(), format::compact(avg as u64)));
+            extra.push((tr!("usage.stat_avg_prompt"), format::compact(avg as u64)));
         }
         if let Some(ratio) = totals.output_input_ratio() {
             // Three decimals: output is routinely a fraction of a percent of
@@ -1329,18 +1344,21 @@ impl UsagePage {
             } else {
                 format!("{ratio:.3}×")
             };
-            extra.push(("Output / input".into(), text));
+            extra.push((tr!("usage.stat_output_input"), text));
         }
         if let Some(per_mtok) = totals.cost_per_mtok() {
-            extra.push(("Cost / M tokens".into(), format::cost(per_mtok)));
+            extra.push((tr!("usage.stat_cost_per_mtok"), format::cost(per_mtok)));
         }
         if totals.peak_prompt > 0 {
-            extra.push(("Peak prompt".into(), format::compact(totals.peak_prompt)));
+            extra.push((
+                tr!("usage.stat_peak_prompt"),
+                format::compact(totals.peak_prompt),
+            ));
         }
         if totals.reasoning_reported > 0 {
             extra.push((
-                "Reasoning".into(),
-                format!("{} of output", format::compact(totals.reasoning)),
+                tr!("usage.stat_reasoning"),
+                tr!("usage.stat_reasoning_of_output", value = format::compact(totals.reasoning)),
             ));
         }
 
@@ -1451,7 +1469,7 @@ impl UsagePage {
         for option in ChartMetric::ALL {
             let available = option.available(&snapshot.summary);
             if !available {
-                unavailable.push(option.label());
+                unavailable.push(option.as_str());
             }
             let active = option == metric;
             let entity = cx.entity();
@@ -1848,18 +1866,18 @@ impl UsagePage {
         let totals = &snapshot.summary.totals;
         let page_requests: u64 = result.rows.iter().map(|row| row.totals.requests).sum();
         let page_tokens: u64 = result.rows.iter().map(|row| row.totals.tokens.total).sum();
-        let mut filtered = format!(
-            "Filtered totals: {} requests · {} tokens",
-            format::count(totals.requests),
-            format::compact(totals.tokens.total)
+        let mut filtered = tr!(
+            "usage.filtered_totals_requests",
+            requests = format::count(totals.requests),
+            tokens = format::compact(totals.tokens.total)
         );
         if totals.cost_coverage() > 0.0 {
             filtered.push_str(&format!(" · {}", format::cost(totals.cost_usd)));
         }
-        let page = format!(
-            "this page: {} requests · {} tokens",
-            format::count(page_requests),
-            format::compact(page_tokens)
+        let page = tr!(
+            "usage.page_requests",
+            requests = format::count(page_requests),
+            tokens = format::compact(page_tokens)
         );
         totals_row(&filtered, &page, theme)
     }
@@ -1874,13 +1892,13 @@ impl UsagePage {
         let pages = result.page_count();
         let current = result.page;
         let summary = if result.total == 0 {
-            "No buckets match".to_string()
+            tr!("usage.no_buckets_match").to_string()
         } else {
-            format!(
-                "Showing {}–{} of {}",
-                format::count(result.first_row() as u64),
-                format::count(result.last_row() as u64),
-                format::count(result.total as u64)
+            tr!(
+                "usage.showing_range",
+                first = format::count(result.first_row() as u64),
+                last = format::count(result.last_row() as u64),
+                total = format::count(result.total as u64)
             )
         };
 
@@ -1966,18 +1984,18 @@ impl UsagePage {
     fn bucket_totals(&self, result: &BucketQueryResult, theme: Theme) -> AnyElement {
         let page_requests: u64 = result.rows.iter().map(|row| row.totals.requests).sum();
         let page_tokens: u64 = result.rows.iter().map(|row| row.totals.tokens.total).sum();
-        let mut filtered = format!(
-            "Filtered totals: {} requests · {} tokens",
-            format::count(result.totals.requests),
-            format::compact(result.totals.tokens.total)
+        let mut filtered = tr!(
+            "usage.filtered_totals_requests",
+            requests = format::count(result.totals.requests),
+            tokens = format::compact(result.totals.tokens.total)
         );
         if result.totals.cost_coverage() > 0.0 {
             filtered.push_str(&format!(" · {}", format::cost(result.totals.cost_usd)));
         }
-        let page = format!(
-            "this page: {} requests · {} tokens",
-            format::count(page_requests),
-            format::compact(page_tokens)
+        let page = tr!(
+            "usage.page_requests",
+            requests = format::count(page_requests),
+            tokens = format::compact(page_tokens)
         );
         totals_row(&filtered, &page, theme)
     }
@@ -1991,13 +2009,13 @@ impl UsagePage {
         let pages = result.page_count();
         let current = result.page;
         let summary = if result.total == 0 {
-            "No buckets match".to_string()
+            tr!("usage.no_buckets_match").to_string()
         } else {
-            format!(
-                "Showing {}–{} of {}",
-                format::count(result.first_row() as u64),
-                format::count(result.last_row() as u64),
-                format::count(result.total as u64)
+            tr!(
+                "usage.showing_range",
+                first = format::count(result.first_row() as u64),
+                last = format::count(result.last_row() as u64),
+                total = format::count(result.total as u64)
             )
         };
         let size_open = self.menu() == Some(MenuKind::BucketPageSize);
@@ -2023,8 +2041,12 @@ impl UsagePage {
             Corner::TopRight,
             move || size_panel.unwrap_or_else(|| div().into_any_element()),
         );
-        let prev =
-            filters::outline_button("usage-bucket-page-prev", "Previous", current > 1, theme, {
+        let prev = filters::outline_button(
+            "usage-bucket-page-prev",
+            &tr!("usage.previous"),
+            current > 1,
+            theme,
+            {
                 let entity = cx.entity();
                 move |_, _, cx| {
                     entity.update(cx, |page, cx| {
@@ -2033,7 +2055,7 @@ impl UsagePage {
                 }
             });
         let next =
-            filters::outline_button("usage-bucket-page-next", "Next", current < pages, theme, {
+            filters::outline_button("usage-bucket-page-next", &tr!("usage.next"), current < pages, theme, {
                 let entity = cx.entity();
                 move |_, _, cx| {
                     entity.update(cx, |page, cx| page.set_bucket_page(current + 1, cx));
@@ -2079,11 +2101,11 @@ impl UsagePage {
 
     fn failure_totals(&self, result: &FailureQueryResult, theme: Theme) -> AnyElement {
         let page_n = result.rows.len();
-        let filtered = format!(
-            "Filtered totals: {} events",
-            format::count(result.total as u64)
+        let filtered = tr!(
+            "usage.filtered_totals_events",
+            events = format::count(result.total as u64)
         );
-        let page = format!("this page: {} events", format::count(page_n as u64));
+        let page = tr!("usage.page_events", events = format::count(page_n as u64));
         totals_row(&filtered, &page, theme)
     }
 
@@ -2096,13 +2118,13 @@ impl UsagePage {
         let pages = result.page_count();
         let current = result.page;
         let summary = if result.total == 0 {
-            "No failures match".to_string()
+            tr!("usage.no_failures_match").to_string()
         } else {
-            format!(
-                "Showing {}–{} of {}",
-                format::count(result.first_row() as u64),
-                format::count(result.last_row() as u64),
-                format::count(result.total as u64)
+            tr!(
+                "usage.showing_range",
+                first = format::count(result.first_row() as u64),
+                last = format::count(result.last_row() as u64),
+                total = format::count(result.total as u64)
             )
         };
         let size_open = self.menu() == Some(MenuKind::FailurePageSize);
@@ -2128,8 +2150,12 @@ impl UsagePage {
             Corner::TopRight,
             move || size_panel.unwrap_or_else(|| div().into_any_element()),
         );
-        let prev =
-            filters::outline_button("usage-failure-page-prev", "Previous", current > 1, theme, {
+        let prev = filters::outline_button(
+            "usage-failure-page-prev",
+            &tr!("usage.previous"),
+            current > 1,
+            theme,
+            {
                 let entity = cx.entity();
                 move |_, _, cx| {
                     entity.update(cx, |page, cx| {
@@ -2138,7 +2164,7 @@ impl UsagePage {
                 }
             });
         let next =
-            filters::outline_button("usage-failure-page-next", "Next", current < pages, theme, {
+            filters::outline_button("usage-failure-page-next", &tr!("usage.next"), current < pages, theme, {
                 let entity = cx.entity();
                 move |_, _, cx| {
                     entity.update(cx, |page, cx| page.set_failure_page(current + 1, cx));
@@ -2187,14 +2213,17 @@ impl UsagePage {
                     .text_size(theme.ui_px(10.5))
                     .text_color(theme.text_3)
                     .child(if latency.has_percentiles() {
-                        format!("{} measured", format::count(latency.samples))
-                    } else {
-                        format!(
-                            "{} measured — percentiles need {}",
-                            format::count(latency.samples),
-                            LatencyStats::MIN_SAMPLES
-                        )
-                    }),
+                    tr!(
+                        "usage.sub_measured",
+                        count = format::count(latency.samples)
+                    )
+                } else {
+                    tr!(
+                        "usage.sub_measured_needs_min",
+                        count = format::count(latency.samples),
+                        min = LatencyStats::MIN_SAMPLES
+                    )
+                }),
             )
             .into_any_element()
     }
@@ -2311,8 +2340,8 @@ impl UsagePage {
 
         section(
             "usage-breakdowns",
-            "Breakdown",
-            Some("Ranked by tokens. Switch models, workspaces, providers, or tools."),
+            &tr!("usage.breakdown"),
+            Some(&tr!("usage.breakdown_hint")),
             Some(meta),
             None,
             body.into_any_element(),
@@ -2360,18 +2389,18 @@ impl UsagePage {
     fn breakdown_totals(&self, result: &BreakdownQueryResult, theme: Theme) -> AnyElement {
         let page_requests: u64 = result.rows.iter().map(|row| row.totals.requests).sum();
         let page_tokens: u64 = result.rows.iter().map(|row| row.totals.tokens.total).sum();
-        let mut filtered = format!(
-            "Filtered totals: {} requests · {} tokens",
-            format::count(result.totals.requests),
-            format::compact(result.totals.tokens.total)
+        let mut filtered = tr!(
+            "usage.filtered_totals_requests",
+            requests = format::count(result.totals.requests),
+            tokens = format::compact(result.totals.tokens.total)
         );
         if result.totals.cost_coverage() > 0.0 {
             filtered.push_str(&format!(" · {}", format::cost(result.totals.cost_usd)));
         }
-        let page = format!(
-            "this page: {} requests · {} tokens",
-            format::count(page_requests),
-            format::compact(page_tokens)
+        let page = tr!(
+            "usage.page_requests",
+            requests = format::count(page_requests),
+            tokens = format::compact(page_tokens)
         );
         totals_row(&filtered, &page, theme)
     }
@@ -2380,15 +2409,15 @@ impl UsagePage {
     fn tools_totals(&self, result: &ToolQueryResult, theme: Theme) -> AnyElement {
         let page_calls: u64 = result.rows.iter().map(|row| row.calls).sum();
         let page_errors: u64 = result.rows.iter().map(|row| row.errors).sum();
-        let filtered = format!(
-            "Filtered totals: {} calls · {} failed",
-            format::count(result.calls),
-            format::count(result.errors)
+        let filtered = tr!(
+            "usage.filtered_totals_calls",
+            calls = format::count(result.calls),
+            failed = format::count(result.errors)
         );
-        let page = format!(
-            "this page: {} calls · {} failed",
-            format::count(page_calls),
-            format::count(page_errors)
+        let page = tr!(
+            "usage.page_calls",
+            calls = format::count(page_calls),
+            failed = format::count(page_errors)
         );
         totals_row(&filtered, &page, theme)
     }
@@ -2408,13 +2437,13 @@ impl UsagePage {
         let start = (current - 1) * page_size;
         let shown = page_size.min(total.saturating_sub(start));
         let summary = if total == 0 {
-            "No rows".to_string()
+            tr!("usage.no_rows").to_string()
         } else {
-            format!(
-                "Showing {}–{} of {}",
-                format::count((start + 1) as u64),
-                format::count((start + shown) as u64),
-                format::count(total as u64)
+            tr!(
+                "usage.showing_range",
+                first = format::count((start + 1) as u64),
+                last = format::count((start + shown) as u64),
+                total = format::count(total as u64)
             )
         };
 
@@ -2444,7 +2473,7 @@ impl UsagePage {
 
         let prev = filters::outline_button(
             "usage-breakdown-page-prev",
-            "Previous",
+            &tr!("usage.previous"),
             current > 1,
             theme,
             {
@@ -2458,7 +2487,7 @@ impl UsagePage {
         );
         let next = filters::outline_button(
             "usage-breakdown-page-next",
-            "Next",
+            &tr!("usage.next"),
             current < pages,
             theme,
             {
@@ -2576,7 +2605,7 @@ impl UsagePage {
             columns,
             elements,
             height,
-            empty_cell("No rows match this search.", theme),
+            empty_cell(&tr!("usage.no_rows_match_search"), theme),
             theme,
             Rc::new(move |page, ix, sort, cx| {
                 let Some(Some(key)) = keys.get(ix).copied() else {
@@ -2605,7 +2634,7 @@ impl UsagePage {
     ) -> AnyElement {
         let mut chart = div().w_full().pb(px(12.)).flex().flex_col().gap(px(2.));
         if rows.is_empty() {
-            chart = chart.child(empty_line("No usage in this range.", theme));
+            chart = chart.child(empty_line(&tr!("usage.no_usage_in_range"), theme));
         }
         for row in rows {
             let fraction = if total > 0 {
@@ -2656,7 +2685,7 @@ impl UsagePage {
     fn tools_chart(&self, rows: &[ToolRow], total: u64, theme: Theme) -> AnyElement {
         let mut chart = div().w_full().pb(px(12.)).flex().flex_col().gap(px(2.));
         if rows.is_empty() {
-            chart = chart.child(empty_line("No tool calls in this range.", theme));
+            chart = chart.child(empty_line(&tr!("usage.no_tool_calls_in_range"), theme));
         }
         for row in rows {
             let fraction = if total > 0 {
@@ -2664,12 +2693,13 @@ impl UsagePage {
             } else {
                 0.0
             };
-            let tooltip = format!(
-                "{} · {} calls · {} errors · avg {}",
-                row.label,
-                format::count(row.calls),
-                format::count(row.errors),
-                row.avg_duration_ms()
+            let tooltip = tr!(
+                "usage.tool_chart_tooltip",
+                name = row.label,
+                calls = format::count(row.calls),
+                errors = format::count(row.errors),
+                avg = row
+                    .avg_duration_ms()
                     .map(format::duration_ms)
                     .unwrap_or_else(|| "—".into())
             );
@@ -2686,7 +2716,11 @@ impl UsagePage {
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .child(chart_label(&row.label, Some(row.class.label()), theme))
+                    .child(chart_label(
+                        &row.label,
+                        Some(row.class.label().as_str()),
+                        theme,
+                    ))
                     .child(bar_track(fraction, theme))
                     .child(chart_value(&format::count(row.calls), theme))
                     .child(chart_share(&format::share(fraction), theme)),
@@ -2789,7 +2823,7 @@ impl UsagePage {
             columns,
             elements,
             height,
-            empty_cell("No tools match this search.", theme),
+            empty_cell(&tr!("usage.no_tools_match_search"), theme),
             theme,
             Rc::new(|_: &mut UsagePage, _: usize, _: SortState, _: &mut Context<UsagePage>| {}),
             cx,
@@ -2807,22 +2841,27 @@ impl UsagePage {
     ) -> AnyElement {
         let tokens = snapshot.summary.totals.tokens;
         let total = tokens.total;
-        let slices: [(&str, u64, Hsla, ChartMetric); 4] = [
-            ("Input", tokens.input, theme.accent, ChartMetric::Input),
+        let slices: [(String, u64, Hsla, ChartMetric); 4] = [
             (
-                "Output",
+                tr!("usage.slice_input"),
+                tokens.input,
+                theme.accent,
+                ChartMetric::Input,
+            ),
+            (
+                tr!("usage.slice_output"),
                 tokens.output,
                 theme.accent.opacity(0.62),
                 ChartMetric::Output,
             ),
             (
-                "Cache read",
+                tr!("usage.slice_cache_read"),
                 tokens.cache_read,
                 theme.accent.opacity(0.40),
                 ChartMetric::Cache,
             ),
             (
-                "Cache write",
+                tr!("usage.slice_cache_write"),
                 tokens.cache_write,
                 theme.accent.opacity(0.22),
                 ChartMetric::Cache,
@@ -2836,7 +2875,7 @@ impl UsagePage {
             .overflow_hidden()
             .flex()
             .bg(theme.trough);
-        for (_, value, color, _) in slices {
+        for &(_, value, color, _) in slices.iter() {
             if value == 0 || total == 0 {
                 continue;
             }
@@ -2849,16 +2888,22 @@ impl UsagePage {
         }
 
         let mut content = div().flex().flex_col().gap(px(10.)).child(stack);
-        for (label, value, color, metric) in slices {
+        for (label, value, color, metric) in slices.iter() {
             // Clicking a component points the main chart at it (§19); hover
             // surfaces the exact figure (§42).
             let entity = cx.entity();
+            let metric = *metric;
             let share = if total == 0 {
                 "—".to_string()
             } else {
-                format::share(value as f64 / total as f64)
+                format::share(*value as f64 / total as f64)
             };
-            let tooltip = format!("{label}: {} tokens · {share}", format::exact(value));
+            let tooltip = tr!(
+                "usage.slice_tooltip",
+                label = label,
+                tokens = format::exact(*value),
+                share = share
+            );
             content = content.child(
                 div()
                     .id(SharedString::from(format!("usage-composition-{label}")))
@@ -2874,13 +2919,13 @@ impl UsagePage {
                     .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                         entity.update(cx, |page, cx| page.set_metric(metric, cx));
                     })
-                    .child(div().size(px(8.)).rounded(px(2.)).flex_none().bg(color))
+                    .child(div().size(px(8.)).rounded(px(2.)).flex_none().bg(*color))
                     .child(
                         div()
                             .flex_1()
                             .text_size(theme.ui_px(12.))
                             .text_color(theme.text_2)
-                            .child(label),
+                            .child(label.clone()),
                     )
                     .child(
                         div()
@@ -2888,7 +2933,7 @@ impl UsagePage {
                             .font(num_font())
                             .text_size(theme.ui_px(11.5))
                             .text_color(theme.text)
-                            .child(format::compact(value)),
+                            .child(format::compact(*value)),
                     )
                     .child(
                         div()
@@ -2910,12 +2955,11 @@ impl UsagePage {
                 .text_size(theme.ui_px(10.5))
                 .text_color(theme.text_3)
                 .child(if total == 0 {
-                    "No tokens in this range.".to_string()
+                    tr!("usage.no_tokens_in_range")
                 } else if tokens.cache_read == 0 && tokens.cache_write == 0 {
-                    "Cache data unavailable — these providers report no cache tokens.".to_string()
+                    tr!("usage.cache_unavailable_providers")
                 } else {
-                    "Total = input + output + cache read + cache write. Reasoning tokens are a subset of output."
-                        .to_string()
+                    tr!("usage.composition_formula")
                 }),
         );
 
@@ -2937,7 +2981,7 @@ impl UsagePage {
         let mut content = div().flex().flex_col().gap(px(10.));
         if !available {
             content = content.child(empty_line(
-                "Cache data unavailable — no cache tokens were reported in this range.",
+                &tr!("usage.cache_unavailable_range"),
                 theme,
             ));
             return div().w_full().child(content).into_any_element();
@@ -2989,20 +3033,23 @@ impl UsagePage {
         content = content.child(
             div().flex().flex_col().gap(px(2.)).children(
                 [
-                    ("Cache reads", format::compact(cache.cache_read)),
-                    ("Cache writes", format::compact(cache.cache_write)),
-                    ("Uncached input", format::compact(cache.uncached_input)),
+                    (tr!("usage.cache_reads"), format::compact(cache.cache_read)),
+                    (tr!("usage.cache_writes"), format::compact(cache.cache_write)),
                     (
-                        "Requests served from cache",
-                        format!(
-                            "{} of {}",
-                            format::count(cache.cached_requests),
-                            format::count(snapshot.summary.totals.requests)
+                        tr!("usage.uncached_input"),
+                        format::compact(cache.uncached_input),
+                    ),
+                    (
+                        tr!("usage.requests_served_from_cache"),
+                        tr!(
+                            "usage.of_total",
+                            count = format::count(cache.cached_requests),
+                            total = format::count(snapshot.summary.totals.requests)
                         ),
                     ),
                 ]
                 .into_iter()
-                .map(|(label, value)| stat_row(label, &value, theme)),
+                .map(|(label, value)| stat_row(&label, &value, theme)),
             ),
         );
 
@@ -3043,7 +3090,7 @@ impl UsagePage {
                 .child(
                     div()
                         .text_color(theme.text_3)
-                        .child("Hit rate = cache reads / (cache reads + uncached input) ·"),
+                        .child(tr!("usage.hit_rate_formula")),
                 )
                 .child(
                     div()
@@ -3055,9 +3102,9 @@ impl UsagePage {
                             entity.update(cx, |page, cx| page.set_cached_only(!cached_only, cx));
                         })
                         .child(if cached_only {
-                            "show all requests"
+                            tr!("usage.show_all_requests")
                         } else {
-                            "show cached requests only"
+                            tr!("usage.show_cached_only")
                         }),
                 ),
         );
@@ -3080,24 +3127,25 @@ impl UsagePage {
         let totals = &snapshot.summary.totals;
         let tokens = totals.tokens;
         let composition_meta = if tokens.total == 0 {
-            "no tokens in range".to_string()
+            tr!("usage.no_tokens_in_range_short")
         } else {
-            format!("{} tokens", format::compact(tokens.total))
+            tr!("usage.n_tokens", count = format::compact(tokens.total))
         };
         let cache_meta = match snapshot.cache.hit_rate {
-            Some(rate) if snapshot.cache.is_available() => {
-                format!("{} hit rate", format::percent(rate))
-            }
-            _ => "unavailable".into(),
+            Some(rate) if snapshot.cache.is_available() => tr!(
+                "usage.n_hit_rate",
+                rate = format::percent(rate)
+            ),
+            _ => tr!("usage.unavailable_short"),
         };
         let composition = subpanel(
-            "Token composition",
+            &tr!("usage.token_composition"),
             Some(composition_meta),
             self.composition_body(snapshot, theme, cx),
             theme,
         );
         let cache = subpanel(
-            "Cache performance",
+            &tr!("usage.cache_performance"),
             Some(cache_meta),
             self.cache_body(snapshot, theme, cx),
             theme,
@@ -3157,12 +3205,12 @@ impl UsagePage {
                 let result = self.session_page(cx);
                 let all = snapshot.sessions.len();
                 let meta = if result.total == all {
-                    format!("{} sessions", format::count(all as u64))
+                    tr!("usage.n_sessions", count = format::count(all as u64))
                 } else {
-                    format!(
-                        "{} of {} sessions",
-                        format::count(result.total as u64),
-                        format::count(all as u64)
+                    tr!(
+                        "usage.n_of_n_sessions",
+                        count = format::count(result.total as u64),
+                        total = format::count(all as u64)
                     )
                 };
                 let table = self.sessions_content(&result, theme, cx);
@@ -3189,17 +3237,17 @@ impl UsagePage {
                 let result = self.bucket_result(snapshot, cx);
                 let all = snapshot.buckets.rows.len();
                 let meta = if result.total == all {
-                    format!(
-                        "{} buckets · by {}",
-                        format::count(all as u64),
-                        granularity.label()
+                    tr!(
+                        "usage.n_buckets_by",
+                        buckets = format::count(all as u64),
+                        by = granularity.label()
                     )
                 } else {
-                    format!(
-                        "{} of {} buckets · by {}",
-                        format::count(result.total as u64),
-                        format::count(all as u64),
-                        granularity.label()
+                    tr!(
+                        "usage.n_of_n_buckets_by",
+                        buckets = format::count(result.total as u64),
+                        total = format::count(all as u64),
+                        by = granularity.label()
                     )
                 };
                 let table = self.buckets_content(&result, granularity, theme, cx);
@@ -3226,20 +3274,20 @@ impl UsagePage {
                 let result = self.failure_result(cx);
                 let all = errors.rows.len();
                 let meta = if result.total == all {
-                    format!(
-                        "{} provider errors recorded · {} tool failures · {} stopped",
-                        format::count(errors.provider),
-                        format::count(errors.tool),
-                        format::count(errors.aborted)
+                    tr!(
+                        "usage.failures_meta",
+                        provider = format::count(errors.provider),
+                        tool = format::count(errors.tool),
+                        stopped = format::count(errors.aborted)
                     )
                 } else {
-                    format!(
-                        "{} of {} events · {} provider · {} tool · {} stopped",
-                        format::count(result.total as u64),
-                        format::count(all as u64),
-                        format::count(errors.provider),
-                        format::count(errors.tool),
-                        format::count(errors.aborted)
+                    tr!(
+                        "usage.failures_meta_filtered",
+                        events = format::count(result.total as u64),
+                        total = format::count(all as u64),
+                        provider = format::count(errors.provider),
+                        tool = format::count(errors.tool),
+                        stopped = format::count(errors.aborted)
                     )
                 };
                 let table = self.failures_content(&result, theme, cx);
@@ -3265,8 +3313,8 @@ impl UsagePage {
 
         section(
             "usage-details",
-            "Records",
-            Some("The sessions, daily buckets, and failures behind the figures."),
+            &tr!("usage.records"),
+            Some(&tr!("usage.records_hint")),
             Some(meta),
             None,
             content,
@@ -3304,7 +3352,7 @@ impl UsagePage {
             columns,
             rows,
             table_h,
-            empty_cell("No sessions match this search.", theme),
+            empty_cell(&tr!("usage.no_sessions_match_search"), theme),
             theme,
             Rc::new(
                 move |page, ix, sort, cx| match (keys.get(ix).copied().flatten(), sort) {
@@ -3345,7 +3393,7 @@ impl UsagePage {
             columns,
             rows,
             table_h,
-            empty_cell("No buckets match this search.", theme),
+            empty_cell(&tr!("usage.no_buckets_match_search"), theme),
             theme,
             Rc::new(
                 move |page, ix, sort, cx| match (keys.get(ix).copied(), sort) {
@@ -3385,7 +3433,7 @@ impl UsagePage {
             columns,
             rows,
             table_h,
-            empty_cell("No failures match this search.", theme),
+            empty_cell(&tr!("usage.no_failures_match_search"), theme),
             theme,
             Rc::new(move |page, ix, sort, cx| {
                 let key = keys.get(ix).copied().unwrap_or(FailureSort::When);
@@ -3633,13 +3681,13 @@ impl UsagePage {
     /// dropped here; Time always stays.
     fn series_columns(&self, metric: ChartMetric) -> (Vec<Column>, Vec<SeriesSort>) {
         let (sort, desc) = self.series_sort_state();
-        let plan: [(SeriesSort, &'static str, f32, bool); 4] = [
-            (SeriesSort::Time, "Time", 0., false),
+        let plan: [(SeriesSort, String, f32, bool); 4] = [
+            (SeriesSort::Time, tr!("usage.col_time"), 0., false),
             (SeriesSort::Value, metric.label(), 112., true),
-            (SeriesSort::Requests, "Requests", 104., true),
-            (SeriesSort::Tokens, "Tokens", 96., true),
+            (SeriesSort::Requests, tr!("usage.metric_requests"), 104., true),
+            (SeriesSort::Tokens, tr!("usage.metric_tokens"), 96., true),
         ];
-        let keep: Vec<(SeriesSort, &'static str, f32, bool)> = plan
+        let keep: Vec<(SeriesSort, String, f32, bool)> = plan
             .into_iter()
             .filter(|(key, _, _, _)| self.series_column_visible(*key))
             .collect();
@@ -3872,17 +3920,17 @@ impl UsagePage {
                 .hover(|style| style.bg(theme.bg_hover));
             for (ix, column) in columns.iter().enumerate() {
                 let key = keys.get(ix).copied().unwrap_or(FailureSort::When);
-                let (text, color) = match key {
+                let (label, color) = match key {
                     FailureSort::When => (super::table::failure_when(row.ts_ms), theme.text_3),
                     FailureSort::Kind => {
                         let (label, color) = super::table::failure_kind_register(row.kind, theme);
-                        (label.to_string(), color)
+                        (label, color)
                     }
                     FailureSort::Model => (row.model.clone(), theme.text_2),
                     FailureSort::Session => (row.session_title.clone(), theme.text_2),
                     FailureSort::Message => (row.message.clone(), theme.text_3),
                 };
-                line = line.child(text_cell(column, text, color, theme));
+                line = line.child(text_cell(column, label, color, theme));
             }
             elements.push(line.into_any_element());
         }
@@ -3960,18 +4008,18 @@ impl UsagePage {
         let page_requests: u64 = result.rows.iter().map(|row| row.totals.requests).sum();
         let page_tokens: u64 = result.rows.iter().map(|row| row.totals.tokens.total).sum();
 
-        let mut filtered = format!(
-            "Filtered totals: {} requests · {} tokens",
-            format::count(totals.requests),
-            format::compact(totals.tokens.total)
+        let mut filtered = tr!(
+            "usage.filtered_totals_requests",
+            requests = format::count(totals.requests),
+            tokens = format::compact(totals.tokens.total)
         );
         if totals.cost_coverage() > 0.0 {
             filtered.push_str(&format!(" · {}", format::cost(totals.cost_usd)));
         }
-        let page = format!(
-            "this page: {} requests · {} tokens",
-            format::count(page_requests),
-            format::compact(page_tokens)
+        let page = tr!(
+            "usage.page_requests",
+            requests = format::count(page_requests),
+            tokens = format::compact(page_tokens)
         );
 
         Some(
@@ -3999,13 +4047,13 @@ impl UsagePage {
         let pages = result.page_count();
         let current = result.page;
         let summary = if result.total == 0 {
-            "No sessions match".to_string()
+            tr!("usage.no_sessions_match").to_string()
         } else {
-            format!(
-                "Showing {}–{} of {}",
-                format::count(result.first_row() as u64),
-                format::count(result.last_row() as u64),
-                format::count(result.total as u64)
+            tr!(
+                "usage.showing_range",
+                first = format::count(result.first_row() as u64),
+                last = format::count(result.last_row() as u64),
+                total = format::count(result.total as u64)
             )
         };
 
@@ -4033,13 +4081,13 @@ impl UsagePage {
             move || size_panel.unwrap_or_else(|| div().into_any_element()),
         );
 
-        let prev = filters::outline_button("usage-page-prev", "Previous", current > 1, theme, {
+        let prev = filters::outline_button("usage-page-prev", &tr!("usage.previous"), current > 1, theme, {
             let entity = cx.entity();
             move |_, _, cx| {
                 entity.update(cx, |page, cx| page.set_page(current.saturating_sub(1), cx));
             }
         });
-        let next = filters::outline_button("usage-page-next", "Next", current < pages, theme, {
+        let next = filters::outline_button("usage-page-next", &tr!("usage.next"), current < pages, theme, {
             let entity = cx.entity();
             move |_, _, cx| {
                 entity.update(cx, |page, cx| page.set_page(current + 1, cx));
@@ -4184,13 +4232,13 @@ fn session_context_menu(row: &SessionRow, theme: Theme, page: Entity<UsagePage>)
     let model_label = row.top_model.clone();
 
     let mut items: Vec<AnyElement> = Vec::new();
-    items.push(context_item("Open session".into(), theme, {
+    items.push(context_item(tr!("usage.ctx_open_session"), theme, {
         let page = page.clone();
         move |window, cx| {
             page.update(cx, |page, cx| page.open_session(window, cx, session));
         }
     }));
-    items.push(context_item("Scope to this session".into(), theme, {
+    items.push(context_item(tr!("usage.ctx_scope_to_session"), theme, {
         let page = page.clone();
         move |_, cx| {
             page.update(cx, |page, cx| page.set_session_scope(Some(session), cx));
@@ -4198,7 +4246,7 @@ fn session_context_menu(row: &SessionRow, theme: Theme, page: Entity<UsagePage>)
     }));
     items.push(context_separator(theme));
     items.push(context_item(
-        "Copy session ID".into(),
+        tr!("usage.ctx_copy_session_id"),
         theme,
         move |_, cx| {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(session_id.clone()));
@@ -4206,7 +4254,7 @@ fn session_context_menu(row: &SessionRow, theme: Theme, page: Entity<UsagePage>)
     ));
     items.push(context_separator(theme));
     items.push(context_item(
-        format!("Filter by provider: {provider_label}"),
+        tr!("usage.ctx_filter_by_provider", name = provider_label),
         theme,
         {
             let page = page.clone();
@@ -4219,7 +4267,7 @@ fn session_context_menu(row: &SessionRow, theme: Theme, page: Entity<UsagePage>)
     ));
     if let Some(model_id) = model_id {
         items.push(context_item(
-            format!("Filter by model: {model_label}"),
+            tr!("usage.ctx_filter_by_model", name = model_label),
             theme,
             {
                 let page = page.clone();
@@ -4231,7 +4279,7 @@ fn session_context_menu(row: &SessionRow, theme: Theme, page: Entity<UsagePage>)
             },
         ));
     }
-    items.push(context_item("Filter by workspace".into(), theme, {
+    items.push(context_item(tr!("usage.ctx_filter_by_workspace"), theme, {
         let page = page.clone();
         move |_, cx| {
             page.update(cx, |page, cx| {
@@ -4492,7 +4540,7 @@ fn segmented<T>(
     prefix: &'static str,
     options: &[T],
     active: T,
-    label: impl Fn(T) -> &'static str,
+    label: impl Fn(T) -> String,
     key: impl Fn(T) -> &'static str,
     theme: Theme,
     on_pick: impl Fn(T, &mut Window, &mut App) + 'static,
@@ -4776,12 +4824,16 @@ fn hit_rate_bars(series: &TimeSeries, theme: Theme) -> AnyElement {
                 Some(rate) => (
                     (rate / 100.0).clamp(0.03, 1.0) as f32,
                     theme.accent.opacity(0.55),
-                    format!("{} · {} hit rate", point.stamp, format::percent(rate)),
+                    tr!(
+                        "usage.cache_bar_tooltip",
+                        stamp = point.stamp,
+                        rate = format::percent(rate)
+                    ),
                 ),
                 None => (
                     0.03,
                     theme.trough,
-                    format!("{} · no cache traffic", point.stamp),
+                    tr!("usage.cache_bar_no_traffic", stamp = point.stamp),
                 ),
             };
             div()
@@ -4845,11 +4897,11 @@ fn breakdown_name_cell(column: &Column, row: &GroupRow, theme: Theme) -> AnyElem
 
 /// The Summary card's meta line: the range's headline counts.
 fn summary_meta(snapshot: &UsageSnapshot) -> String {
-    format!(
-        "{} requests · {} tokens · {} sessions",
-        format::count(snapshot.summary.totals.requests),
-        format::compact(snapshot.summary.totals.tokens.total),
-        format::count(snapshot.summary.sessions)
+    tr!(
+        "usage.summary_meta",
+        requests = format::count(snapshot.summary.totals.requests),
+        tokens = format::compact(snapshot.summary.totals.tokens.total),
+        sessions = format::count(snapshot.summary.sessions)
     )
 }
 
@@ -4864,47 +4916,47 @@ fn toggle(list: &mut Vec<u16>, value: u16) {
 
 fn session_title(entry: &super::model::SessionEntry) -> String {
     if entry.title.is_empty() {
-        format!("Session {}", entry.id.chars().take(8).collect::<String>())
+        tr!("usage.session_fallback", id = entry.id.chars().take(8).collect::<String>())
     } else {
         entry.title.clone()
     }
 }
 
 fn model_meta(breakdown: &Breakdown) -> String {
-    format!(
-        "{} models · {} requests",
-        format::count(breakdown.rows.len() as u64),
-        format::count(breakdown.totals.requests)
+    tr!(
+        "usage.meta_models_requests",
+        models = format::count(breakdown.rows.len() as u64),
+        requests = format::count(breakdown.totals.requests)
     )
 }
 
 fn workspace_meta(breakdown: &Breakdown) -> String {
-    format!(
-        "{} workspaces · {} tokens",
-        format::count(breakdown.rows.len() as u64),
-        format::compact(breakdown.totals.tokens.total)
+    tr!(
+        "usage.meta_workspaces_tokens",
+        workspaces = format::count(breakdown.rows.len() as u64),
+        tokens = format::compact(breakdown.totals.tokens.total)
     )
 }
 
 fn provider_meta(breakdown: &Breakdown) -> String {
-    format!(
-        "{} providers · {} requests",
-        format::count(breakdown.rows.len() as u64),
-        format::count(breakdown.totals.requests)
+    tr!(
+        "usage.meta_providers_requests",
+        providers = format::count(breakdown.rows.len() as u64),
+        requests = format::count(breakdown.totals.requests)
     )
 }
 
 fn tools_meta(snapshot: &UsageSnapshot) -> String {
     let tools = &snapshot.tools;
     match snapshot.summary.tool_error_rate() {
-        Some(rate) if tools.errors > 0 => format!(
-            "{} calls · {} failed ({})",
-            format::count(tools.calls),
-            format::count(tools.errors),
-            format::percent(rate)
+        Some(rate) if tools.errors > 0 => tr!(
+            "usage.meta_calls_failed_pct",
+            calls = format::count(tools.calls),
+            failed = format::count(tools.errors),
+            rate = format::percent(rate)
         ),
-        Some(_) => format!("{} calls · none failed", format::count(tools.calls)),
-        None => "no tool calls".to_string(),
+        Some(_) => tr!("usage.meta_calls_none_failed", calls = format::count(tools.calls)),
+        None => tr!("usage.no_tool_calls"),
     }
 }
 
@@ -4931,11 +4983,11 @@ fn delta_sub(snapshot: &UsageSnapshot, metric: ChartMetric, fallback: &str) -> S
     // The sign already carries direction; the arrow only earns its place when
     // there is no percentage to read.
     match delta.pct {
-        Some(_) => format!("{} vs previous period", format::delta(delta.pct)),
+        Some(_) => tr!("usage.delta_vs_previous", delta = format::delta(delta.pct)),
         None => match delta.direction {
-            Direction::Up => "up from nothing last period".to_string(),
-            Direction::Down => "down from last period".to_string(),
-            Direction::Flat => "no change vs previous period".to_string(),
+            Direction::Up => tr!("usage.delta_up_from_nothing"),
+            Direction::Down => tr!("usage.delta_down_from_last"),
+            Direction::Flat => tr!("usage.delta_no_change"),
         },
     }
 }
@@ -4943,19 +4995,19 @@ fn delta_sub(snapshot: &UsageSnapshot, metric: ChartMetric, fallback: &str) -> S
 /// Why a metric is not offered, phrased for the data that is missing.
 fn unavailable_reason(unavailable: &[&str]) -> String {
     let mut reasons: Vec<String> = Vec::new();
-    if unavailable.contains(&"Cost") {
-        reasons.push("cost needs a price table for these models".to_string());
+    if unavailable.contains(&"cost") {
+        reasons.push(tr!("usage.reason_needs_price_table"));
     }
-    if unavailable.contains(&"Latency") {
-        reasons.push("response time needs measurable request gaps".to_string());
+    if unavailable.contains(&"latency") {
+        reasons.push(tr!("usage.reason_needs_request_gaps"));
     }
     if reasons.is_empty() {
         String::new()
     } else {
-        format!(
-            "{} not shown: {}",
-            unavailable.join(", "),
-            reasons.join("; ")
+        tr!(
+            "usage.not_shown",
+            metrics = unavailable.join(", "),
+            reasons = reasons.join("; ")
         )
     }
 }
@@ -5119,7 +5171,7 @@ pub fn export_json(index: &UsageIndex, snapshot: &UsageSnapshot, search: &str) -
             serde_json::json!({
                 "timestamp_ms": row.ts_ms,
                 "session_id": index.session(row.session).id,
-                "kind": row.kind.label(),
+                "kind": row.kind.as_str(),
                 "model": index.model(row.model).label,
                 "message": row.message,
             })
@@ -5132,7 +5184,7 @@ pub fn export_json(index: &UsageIndex, snapshot: &UsageSnapshot, search: &str) -
         .map(|row| {
             serde_json::json!({
                 "tool": row.label,
-                "class": row.class.label(),
+                "class": row.class.as_str(),
                 "calls": row.calls,
                 "errors": row.errors,
                 "avg_duration_ms": row.avg_duration_ms(),
@@ -5145,10 +5197,10 @@ pub fn export_json(index: &UsageIndex, snapshot: &UsageSnapshot, search: &str) -
         "generated_at_ms": super::collect::now_ms(),
         "range": {
             "preset": snapshot.filter.range.preset.as_str(),
-            "label": snapshot.filter.range.label(),
+            "label": snapshot.filter.range.preset.as_str(),
             "start_ms": snapshot.filter.range.start_ms,
             "end_ms": snapshot.filter.range.end_ms,
-            "granularity": snapshot.series.granularity.label(),
+            "granularity": snapshot.series.granularity.as_str(),
         },
         "summary": {
             "requests": totals.requests,

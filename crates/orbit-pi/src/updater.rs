@@ -338,7 +338,7 @@ impl Updater {
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
-                self.fail_install(format!("could not start the update helper: {error}"));
+                self.fail_install(tr!("updater.helper_failed", error = error));
                 return false;
             }
         };
@@ -712,7 +712,7 @@ fn run_install(flags: &HelperFlags) -> i32 {
         let _ = spawn_install(&flags.install_dir, &exe_name, None);
         return helper_error(
             flags,
-            &format!("could not move the running install aside: {error}"),
+            &tr!("updater.move_aside_failed", error = error),
         );
     }
     sync_directory(flags.parent_dir());
@@ -723,7 +723,7 @@ fn run_install(flags: &HelperFlags) -> i32 {
         let _ = spawn_install(&flags.install_dir, &exe_name, None);
         return helper_error(
             flags,
-            &format!("could not move the update into place: {error}"),
+            &tr!("updater.move_into_place_failed", error = error),
         );
     }
     sync_directory(flags.parent_dir());
@@ -735,7 +735,7 @@ fn run_install(flags: &HelperFlags) -> i32 {
             let _ = std::fs::rename(&backup, &flags.install_dir);
             sync_directory(flags.parent_dir());
             let _ = spawn_install(&flags.install_dir, &exe_name, None);
-            return helper_error(flags, &format!("could not relaunch the new build: {error}"));
+            return helper_error(flags, &tr!("updater.relaunch_failed", error = error));
         }
     };
 
@@ -756,7 +756,7 @@ fn run_install(flags: &HelperFlags) -> i32 {
             let _ = spawn_install(&flags.install_dir, &exe_name, None);
             helper_error(
                 flags,
-                &format!("the new build exited before its window opened ({status})"),
+                &tr!("updater.new_build_exited", status = status.to_string()),
             )
         }
         RelaunchState::TimedOut => {

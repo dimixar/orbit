@@ -585,7 +585,7 @@ where
 fn command_error(output: &Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     if stderr.is_empty() {
-        format!("git exited with {}", output.status)
+        tr!("git.exited_with", status = output.status.to_string())
     } else {
         stderr
     }

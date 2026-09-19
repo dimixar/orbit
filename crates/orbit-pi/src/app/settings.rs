@@ -247,7 +247,7 @@ impl OrbitApp {
                                     .text_size(theme.ui_px(11.))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.text_3)
-                                    .child("Orbit"),
+                                    .child(tr!("app.name")),
                             )
                             .child(
                                 div()
@@ -663,8 +663,8 @@ impl OrbitApp {
             return vec![self.empty_resource_card(
                 theme,
                 "icons/tag-01.svg",
-                "No models reported",
-                "The running pi has not returned a model catalog yet. Refresh from Settings → Providers, or start a session.",
+                &tr!("settings.no_models_reported"),
+                &tr!("settings.no_models_reported_hint"),
             )];
         }
         let needle = self.models_filter.read(cx).text().trim().to_lowercase();
@@ -734,10 +734,9 @@ impl OrbitApp {
                                     .flex_none()
                                     .text_size(theme.ui_px(11.))
                                     .text_color(theme.text_3)
-                                    .child(format!(
-                                        "{} model{}",
-                                        models.len(),
-                                        if models.len() == 1 { "" } else { "s" }
+                                    .child(tr!(
+                                        "settings.n_models",
+                                        count = models.len()
                                     )),
                             ),
                     )
@@ -754,15 +753,16 @@ impl OrbitApp {
         }
 
         if sections.is_empty() {
+            let hint = if favorites_only {
+                tr!("settings.no_models_match_favorites_hint")
+            } else {
+                tr!("settings.no_models_match_hint")
+            };
             sections.push(self.empty_resource_card(
                 theme,
                 "icons/search.svg",
-                "No models match",
-                if favorites_only {
-                    "Nothing favorited matches this search — star a model, or turn the filter off."
-                } else {
-                    "Try a different search — the catalog itself is unchanged."
-                },
+                &tr!("settings.no_models_match"),
+                &hint,
             ));
         }
         sections
@@ -832,9 +832,9 @@ impl OrbitApp {
                     .text_size(theme.ui_px(10.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(meta_ink)
-                    .child(format!(
-                        "{} ctx",
-                        crate::context_meter::format_tokens(window)
+                    .child(tr!(
+                        "settings.n_ctx",
+                        count = crate::context_meter::format_tokens(window)
                     )),
             );
         }
@@ -954,14 +954,18 @@ impl OrbitApp {
     ) -> Vec<AnyElement> {
         let mut rows: Vec<AnyElement> = Vec::new();
         if let Some(error) = &self.plugins_error {
-            rows.push(self.provider_error_card(theme, "Settings could not be read", error));
+            rows.push(self.provider_error_card(
+                theme,
+                &tr!("settings.could_not_read_settings"),
+                error,
+            ));
         }
         if self.plugins.is_empty() {
             rows.push(self.empty_resource_card(
                 theme,
                 "icons/extensions.svg",
-                "No plugins installed",
-                "Install an npm package, a git repo, or a local path above.",
+                &tr!("settings.no_plugins_installed"),
+                &tr!("settings.no_plugins_installed_hint"),
             ));
             return rows;
         }
@@ -984,8 +988,8 @@ impl OrbitApp {
             rows.push(self.empty_resource_card(
                 theme,
                 "icons/search.svg",
-                "No plugins match",
-                "Try a different search — installed packages are unchanged.",
+                &tr!("settings.no_plugins_match"),
+                &tr!("settings.no_plugins_match_hint"),
             ));
             return rows;
         }
@@ -1002,11 +1006,11 @@ impl OrbitApp {
                     .w_full()
                     .text_size(theme.ui_px(12.))
                     .text_color(theme.text_3)
-                    .child(format!(
-                        "{} of {} shown · {} installed",
-                        visible.len(),
-                        self.plugins.len(),
-                        installed
+                    .child(tr!(
+                        "settings.plugins_shown_installed",
+                        shown = visible.len(),
+                        total = self.plugins.len(),
+                        installed = installed
                     ))
                     .into_any_element(),
             );
@@ -1057,7 +1061,7 @@ impl OrbitApp {
         }
         if !package.installed {
             badges = badges.child(self.provider_badge(
-                "Not installed",
+                &tr!("settings.not_installed"),
                 theme.crit,
                 theme.crit.opacity(0.12),
                 theme,
@@ -1297,11 +1301,7 @@ impl OrbitApp {
                 .min_w_0()
                 .text_size(theme.ui_px(12.))
                 .text_color(theme.text_3)
-                .child(format!(
-                    "{} package{} configured",
-                    self.plugins.len(),
-                    if self.plugins.len() == 1 { "" } else { "s" }
-                ))
+                .child(tr!("settings.n_packages", count = self.plugins.len()))
                 .into_any_element(),
         };
 
@@ -1598,11 +1598,11 @@ impl OrbitApp {
                     .min_w_0()
                     .text_size(theme.ui_px(12.))
                     .text_color(theme.text_3)
-                    .child(format!(
-                        "{} providers · {} active · {} connected",
-                        all.len(),
-                        active,
-                        connected
+                    .child(tr!(
+                        "settings.providers_active_connected",
+                        all = all.len(),
+                        active = active,
+                        connected = connected
                     )),
             )
             .child(refresh_button)
@@ -1694,13 +1694,15 @@ impl OrbitApp {
                                     .text_size(theme.ui_px(11.5))
                                     .text_color(theme.text_2)
                                     .child(
-                                        "pi reads auth.json at startup — restart it to load the new credentials.",
+                                        tr!(
+                                            "settings.restart_pi_credentials_hint"
+                                        ),
                                     ),
                             ),
                     )
                     .child(self.provider_button(
                         "providers-apply".into(),
-                        "Restart pi",
+                        &tr!("settings.restart_pi"),
                         ProviderButtonStyle::Primary,
                         theme,
                         this.clone(),
@@ -1978,41 +1980,41 @@ impl OrbitApp {
         let session = self.auth.login_for(&view.id)?;
         let (headline, detail, tint) = match session.phase {
             LoginPhase::Connecting => (
-                "Connecting…",
-                "Asking pi to start the sign-in flow.".to_string(),
+                tr!("status.connecting"),
+                tr!("auth.asking_pi"),
                 theme.warn,
             ),
             LoginPhase::AwaitingBrowser => (
-                "Waiting for your browser…",
-                "Finish signing in there, then return to Orbit.".to_string(),
+                tr!("auth.waiting_browser"),
+                tr!("auth.finish_in_browser"),
                 theme.accent,
             ),
             LoginPhase::AwaitingDeviceCode => (
-                "Enter this device code",
-                "Approve the request in your browser to continue.".to_string(),
+                tr!("auth.enter_device_code"),
+                tr!("auth.approve_in_browser"),
                 theme.accent,
             ),
             LoginPhase::Succeeded => (
-                "Connected",
-                "pi saved the credential to auth.json.".to_string(),
+                tr!("status.connected"),
+                tr!("auth.credential_saved"),
                 theme.ok_green,
             ),
             LoginPhase::Error => (
-                "Sign-in failed",
+                tr!("status.sign_in_failed"),
                 session
                     .error
                     .as_ref()
                     .map(|(_, message)| message.clone())
                     .filter(|message| !message.is_empty())
-                    .unwrap_or_else(|| "The sign-in did not complete.".to_string()),
+                    .unwrap_or_else(|| tr!("auth.sign_in_incomplete")),
                 theme.crit,
             ),
             LoginPhase::Cancelled => (
-                "Cancelled",
+                tr!("status.cancelled"),
                 session
                     .message
                     .clone()
-                    .unwrap_or_else(|| "The sign-in was cancelled.".to_string()),
+                    .unwrap_or_else(|| tr!("auth.sign_in_cancelled")),
                 theme.text_3,
             ),
         };
@@ -2109,7 +2111,7 @@ impl OrbitApp {
                     buttons = buttons
                         .child(self.provider_button(
                             format!("provider-auth-open-{}", view.id),
-                            "Open page",
+                            &tr!("auth.open_page"),
                             ProviderButtonStyle::Primary,
                             theme,
                             this.clone(),
@@ -2117,7 +2119,7 @@ impl OrbitApp {
                         ))
                         .child(self.provider_button(
                             format!("provider-auth-copy-{}", view.id),
-                            "Copy code",
+                            &tr!("auth.copy_code"),
                             ProviderButtonStyle::Ghost,
                             theme,
                             this.clone(),
@@ -2126,7 +2128,7 @@ impl OrbitApp {
                 }
                 buttons = buttons.child(self.provider_button(
                     format!("provider-auth-cancel-{}", view.id),
-                    "Cancel",
+                    &tr!("git_panel.cancel"),
                     ProviderButtonStyle::Ghost,
                     theme,
                     this.clone(),
@@ -2136,7 +2138,7 @@ impl OrbitApp {
             LoginPhase::Succeeded => {
                 buttons = buttons.child(self.provider_button(
                     format!("provider-auth-done-{}", view.id),
-                    "Done",
+                    &tr!("common.done"),
                     ProviderButtonStyle::Primary,
                     theme,
                     this.clone(),
@@ -2147,7 +2149,7 @@ impl OrbitApp {
                 buttons = buttons
                     .child(self.provider_button(
                         format!("provider-auth-retry-{}", view.id),
-                        "Try again",
+                        &tr!("view.try_again"),
                         ProviderButtonStyle::Primary,
                         theme,
                         this.clone(),
@@ -2191,7 +2193,7 @@ impl OrbitApp {
                 format!("{value:.2}")
             }
         };
-        let reset_label = |ms: i64| format!("resets {}", format_epoch_ms(ms));
+        let reset_label = |ms: i64| tr!("session.resets_at", time = format_epoch_ms(ms));
 
         let mut head = div().flex().items_center().gap_2().child(
             div()
@@ -2224,12 +2226,12 @@ impl OrbitApp {
 
         for window in &report.windows {
             let value = if let Some(percent) = window.used_percent {
-                format!("{percent:.0}% used")
+                tr!("session.percent_used", percent = format!("{percent:.0}"))
             } else if let (Some(used), Some(limit)) = (window.used, window.limit) {
-                format!("{} / {}", amount(used), amount(limit))
+                tr!("session.used_of_limit", used = amount(used), limit = amount(limit))
             } else if let Some(used) = window.used {
                 match &window.unit {
-                    Some(unit) => format!("{} {unit}", amount(used)),
+                    Some(unit) => tr!("session.amount_unit", amount = amount(used), unit = unit),
                     None => amount(used),
                 }
             } else {
@@ -2347,6 +2349,10 @@ impl OrbitApp {
         this: Entity<OrbitApp>,
     ) -> AnyElement {
         let confirming = self.provider_remove_confirm.as_deref() == Some(view.id.as_str());
+        let update_key_label = tr!("settings.update_key");
+        let add_key_label = tr!("settings.add_api_key");
+        let reconnect_label = tr!("settings.reconnect");
+        let sign_in_label = tr!("settings.sign_in");
         // The card no longer renders quota inline: usage opens in a popup so a
         // connected card stays compact (see `provider_usage_layer`).
         let has_usage = view.quota.as_ref().is_some_and(|report| {
@@ -2485,13 +2491,9 @@ impl OrbitApp {
         // Active providers show what pi is serving; unconfigured built-ins show
         // their full built-in catalog size (pi's RPC never reports those).
         let count_label = if !view.active && view.catalog_count > 0 {
-            format!("{} in catalog", view.catalog_count)
+            tr!("settings.n_in_catalog", count = view.catalog_count)
         } else {
-            format!(
-                "{} model{}",
-                view.model_count,
-                if view.model_count == 1 { "" } else { "s" }
-            )
+            tr!("settings.n_models", count = view.model_count)
         };
         let mut facts = div()
             .flex()
@@ -2504,9 +2506,9 @@ impl OrbitApp {
             facts = facts
                 .child(div().size(px(3.)).rounded_full().bg(theme.text_3))
                 .child(match kind {
-                    "oauth" => "OAuth (auth.json)".to_string(),
-                    "api_key" => "API key (auth.json)".to_string(),
-                    "session" => "Usage session (auth.json)".to_string(),
+                    "oauth" => tr!("settings.cred_oauth"),
+                    "api_key" => tr!("settings.cred_api_key"),
+                    "session" => tr!("settings.cred_session"),
                     other => other.to_string(),
                 });
             if let Some(status) = &view.live_status {
@@ -2518,13 +2520,16 @@ impl OrbitApp {
                 if let Some(expires_at) = status.expires_at {
                     facts = facts
                         .child(div().size(px(3.)).rounded_full().bg(theme.text_3))
-                        .child(format!("expires {}", format_epoch_ms(expires_at)));
+                        .child(tr!(
+                            "settings.expires_at",
+                            time = format_epoch_ms(expires_at)
+                        ));
                 }
             }
         } else if let Some(env_var) = &view.env_var {
             facts = facts
                 .child(div().size(px(3.)).rounded_full().bg(theme.text_3))
-                .child(format!("via {env_var}"));
+                .child(tr!("settings.via_env_var", env_var = env_var));
         }
         if view.has_api_key {
             facts = facts
@@ -2534,7 +2539,7 @@ impl OrbitApp {
 
         let endpoint = if view.base_url.is_empty() {
             if view.note.is_empty() {
-                "pi default endpoint".to_string()
+                tr!("settings.pi_default_endpoint")
             } else {
                 view.note.to_string()
             }
@@ -2566,7 +2571,7 @@ impl OrbitApp {
                 )
                 .child(self.provider_button(
                     format!("provider-remove-confirm-{}", view.id),
-                    "Remove",
+                    &tr!("settings.remove"),
                     ProviderButtonStyle::Danger,
                     theme,
                     this.clone(),
@@ -2576,7 +2581,7 @@ impl OrbitApp {
                 ))
                 .child(self.provider_button(
                     format!("provider-remove-cancel-{}", view.id),
-                    "Cancel",
+                    &tr!("git_panel.cancel"),
                     ProviderButtonStyle::Ghost,
                     theme,
                     this.clone(),
@@ -2600,7 +2605,11 @@ impl OrbitApp {
                         let update = view.credential_kind() == Some("api_key");
                         primary = primary.child(self.provider_button(
                             format!("provider-key-{}", view.id),
-                            if update { "Update key" } else { "Add API key" },
+                            if update {
+                                &update_key_label
+                            } else {
+                                &add_key_label
+                            },
                             ProviderButtonStyle::Ghost,
                             theme,
                             this.clone(),
@@ -2641,7 +2650,11 @@ impl OrbitApp {
                     let reconnect = view.credential_kind() == Some("oauth");
                     primary = primary.child(self.provider_button(
                         format!("provider-signin-{}", view.id),
-                        if reconnect { "Reconnect" } else { "Sign in" },
+                        if reconnect {
+                            &reconnect_label
+                        } else {
+                            &sign_in_label
+                        },
                         ProviderButtonStyle::Primary,
                         theme,
                         this.clone(),
@@ -2655,7 +2668,11 @@ impl OrbitApp {
                     let update = view.credential_kind() == Some("api_key");
                     primary = primary.child(self.provider_button(
                         format!("provider-key-{}", view.id),
-                        if update { "Update key" } else { "Add API key" },
+                        if update {
+                            &update_key_label
+                        } else {
+                            &add_key_label
+                        },
                         if view.oauth && !view.connected() {
                             ProviderButtonStyle::Ghost
                         } else {
@@ -2680,7 +2697,7 @@ impl OrbitApp {
             if view.id == "ollama" {
                 primary = primary.child(self.provider_button(
                     "provider-ollama-session".to_string(),
-                    "Usage session",
+                    &tr!("settings.usage_session"),
                     ProviderButtonStyle::Ghost,
                     theme,
                     this.clone(),
@@ -2701,7 +2718,7 @@ impl OrbitApp {
             if view.custom {
                 secondary = secondary.child(self.provider_button(
                     format!("provider-configure-{}", view.id),
-                    "Configure",
+                    &tr!("settings.configure"),
                     ProviderButtonStyle::Ghost,
                     theme,
                     this.clone(),
@@ -2713,7 +2730,7 @@ impl OrbitApp {
             if connected {
                 secondary = secondary.child(self.provider_button(
                     format!("provider-signout-{}", view.id),
-                    "Disconnect",
+                    &tr!("settings.disconnect"),
                     ProviderButtonStyle::Ghost,
                     theme,
                     this.clone(),
@@ -2725,7 +2742,7 @@ impl OrbitApp {
             if view.custom {
                 secondary = secondary.child(self.provider_button(
                     format!("provider-remove-{}", view.id),
-                    "Remove",
+                    &tr!("settings.remove"),
                     ProviderButtonStyle::Danger,
                     theme,
                     this.clone(),
@@ -2737,7 +2754,7 @@ impl OrbitApp {
             if has_usage {
                 secondary = secondary.child(self.provider_button(
                     format!("provider-usage-{}", view.id),
-                    "Usage",
+                    &tr!("session.usage"),
                     ProviderButtonStyle::Ghost,
                     theme,
                     this.clone(),
@@ -2910,7 +2927,7 @@ impl OrbitApp {
             }
             ProviderAction::AuthOpenUrl(url) => {
                 if let Err(err) = platform::open_url(&url) {
-                    self.toast_warning(format!("Could not open the browser: {err}"));
+                    self.toast_warning(tr!("runtime.browser_failed", error = err));
                 }
             }
             ProviderAction::AuthCopy(value) => {
@@ -3028,7 +3045,10 @@ impl OrbitApp {
                             .text_size(theme.ui_px(15.))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child(format!("Usage — {}", view.name)),
+                            .child(tr!(
+                                "settings.usage_for",
+                                name = view.name
+                            )),
                     )
                     .child(
                         div()
@@ -3103,12 +3123,12 @@ impl OrbitApp {
 
         let (field_label, hint) = match editor.kind {
             ProviderKeyKind::ApiKey => (
-                "API key",
-                "A literal key, `$ENV_VAR`, or `!command` — stored in auth.json (0600).",
+                tr!("settings.api_key"),
+                tr!("settings.api_key_hint"),
             ),
             ProviderKeyKind::OllamaCloudSession => (
-                "Session cookie",
-                "Paste the Cookie header from ollama.com/settings (e.g. `__Secure-session=…`). Stored in auth.json (0600); only sent to ollama.com.",
+                tr!("settings.session_cookie"),
+                tr!("settings.session_cookie_hint"),
             ),
         };
 
@@ -3169,7 +3189,7 @@ impl OrbitApp {
                     )
                     .child(self.provider_button(
                         format!("provider-key-signin-{id}"),
-                        "Sign in",
+                        &tr!("settings.sign_in"),
                         ProviderButtonStyle::Ghost,
                         theme,
                         this_signin,
@@ -3220,7 +3240,7 @@ impl OrbitApp {
             );
         let save = self.provider_button(
             "provider-key-save".into(),
-            "Save key",
+            &tr!("settings.save_key"),
             ProviderButtonStyle::Primary,
             theme,
             this.clone(),
@@ -3259,7 +3279,10 @@ impl OrbitApp {
                             .text_size(theme.ui_px(15.))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child(format!("API key — {}", editor.provider_name)),
+                            .child(tr!(
+                                "settings.api_key_for",
+                                name = editor.provider_name
+                            )),
                     )
                     .child(
                         div()
@@ -3340,9 +3363,9 @@ impl OrbitApp {
                 .any(|provider| &provider.id == id)
         });
         let subtitle = if editing && editor.in_catalog && !is_custom_entry {
-            "Built-in provider — entries here override pi's defaults. Sign in with `pi /login`."
+            tr!("settings.builtin_provider_hint")
         } else {
-            "Saved to ~/.pi/agent/models.json — shared with the pi CLI."
+            tr!("settings.saved_to_models_json")
         };
 
         let field = |label: &str, hint: Option<&str>, input: Entity<ComposerInput>| -> AnyElement {
@@ -3445,17 +3468,19 @@ impl OrbitApp {
                 .into_any_element()
         } else {
             field(
-                "Provider id",
-                Some("The key pi addresses the provider by — models become <id>/<model>."),
+                &tr!("settings.provider_id"),
+                Some(&tr!("settings.provider_id_hint")),
                 editor.id.clone(),
             )
         };
 
         let api_key_hint = if editor.had_api_key {
-            "A key is stored in models.json — leave blank to keep it."
+            tr!("settings.api_key_stored_hint")
         } else {
-            "Optional. `$ENV_VAR`, `!command`, or a literal key."
+            tr!("settings.api_key_optional_hint")
         };
+        let models_builtin_hint = tr!("settings.models_builtin_hint");
+        let models_custom_hint = tr!("settings.models_custom_hint");
 
         let body = div()
             .w_full()
@@ -3464,13 +3489,13 @@ impl OrbitApp {
             .gap_3p5()
             .child(identity)
             .child(field(
-                "Display name",
-                Some("Optional."),
+                &tr!("settings.display_name"),
+                Some(&tr!("settings.optional")),
                 editor.name.clone(),
             ))
             .child(field(
-                "Base URL",
-                Some("Required for custom endpoints. Empty keeps pi's default."),
+                &tr!("settings.base_url"),
+                Some(&tr!("settings.base_url_hint")),
                 editor.base_url.clone(),
             ))
             .child(
@@ -3487,13 +3512,13 @@ impl OrbitApp {
                     )
                     .child(api_chips),
             )
-            .child(field("API key", Some(api_key_hint), editor.api_key.clone()))
+            .child(field(&tr!("settings.api_key"), Some(&api_key_hint), editor.api_key.clone()))
             .child(field(
-                "Models",
+                &tr!("settings.models_field"),
                 Some(if editor.in_catalog {
-                    "Comma-separated ids. Empty keeps pi's built-in models for this provider."
+                    &models_builtin_hint
                 } else {
-                    "Comma-separated ids. At least one is required for a custom provider."
+                    &models_custom_hint
                 }),
                 editor.models.clone(),
             ));
@@ -3531,9 +3556,9 @@ impl OrbitApp {
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
                             .child(if editing {
-                                "Configure provider"
+                                tr!("settings.configure_provider")
                             } else {
-                                "Add provider"
+                                tr!("settings.add_provider")
                             }),
                     )
                     .child(
@@ -3619,9 +3644,9 @@ impl OrbitApp {
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.send_fg)
                         .child(if editing {
-                            "Save changes"
+                            tr!("settings.save_changes")
                         } else {
-                            "Add provider"
+                            tr!("settings.add_provider")
                         }),
                 )
         };
@@ -3796,9 +3821,9 @@ impl OrbitApp {
                     .text_size(theme.ui_px(12.))
                     .text_color(theme.text_2)
                     .child(if self.client.is_some() {
-                        "Connected"
+                        tr!("status.connected")
                     } else {
-                        "Not running"
+                        tr!("settings.not_running")
                     }),
             )
             .into_any_element()
@@ -3994,11 +4019,11 @@ impl OrbitApp {
 
         let description = match state {
             RuntimeState::Running => {
-                "Spawned as a child process — newline-delimited JSON over stdio."
+                tr!("settings.spawned_child_process")
             }
-            RuntimeState::Exited => "The process exited on its own. Restart to reconnect.",
-            RuntimeState::Stopped => "No pi process is running — start it to use the agent.",
-            RuntimeState::Failed => "The last start failed. See the error below.",
+            RuntimeState::Exited => tr!("settings.runtime_exited"),
+            RuntimeState::Stopped => tr!("settings.runtime_stopped"),
+            RuntimeState::Failed => tr!("settings.runtime_failed"),
         };
 
         let mut controls = div().flex().items_center().gap_2();
@@ -4068,7 +4093,7 @@ impl OrbitApp {
         let mut process = vec![self.setting_row(
             theme,
             &tr!("settings.status"),
-            Some(description),
+            Some(&description),
             None,
             Some(
                 div()
@@ -4108,7 +4133,7 @@ impl OrbitApp {
             None,
             Some(runtime_text(
                 theme,
-                "stdio — newline-delimited JSON (no host or port)".to_string(),
+                tr!("settings.transport_stdio"),
             )),
         ));
         process.push(self.setting_row(
@@ -4143,13 +4168,11 @@ impl OrbitApp {
         // Background sessions — each owns its own pi process.
         if !self.lives.is_empty() {
             let count = self.lives.len();
-            let noun = if count == 1 { "session" } else { "sessions" };
-            let parked_desc =
-                format!("{count} background {noun} running in their own pi processes");
+            let parked_desc = tr!("settings.background_sessions", count = count);
             let mut background = vec![self.setting_row(
                 theme,
                 &tr!("settings.parked_processes"),
-                Some(parked_desc.as_str()),
+                Some(&parked_desc),
                 None,
                 None,
             )];
@@ -4165,10 +4188,14 @@ impl OrbitApp {
                     None,
                     Some(runtime_text(
                         theme,
-                        format!(
-                            "pid {} · {}",
-                            parked.client.child_pid(),
-                            if parked.busy { "busy" } else { "idle" }
+                        tr!(
+                            "settings.pid_state",
+                            pid = parked.client.child_pid(),
+                            state = if parked.busy {
+                                tr!("settings.busy")
+                            } else {
+                                tr!("settings.idle")
+                            }
                         ),
                     )),
                 ));
@@ -4293,7 +4320,7 @@ impl OrbitApp {
                     None,
                     Some(self.runtime_button(
                         "abort-retry",
-                        "Abort retry",
+                        &tr!("settings.abort_retry"),
                         false,
                         theme,
                         this.clone(),
@@ -4323,8 +4350,10 @@ impl OrbitApp {
     pub(super) fn follow_up_mode_toggle(&self, theme: Theme, this: Entity<OrbitApp>) -> AnyElement {
         let all = self.follow_up_mode == "all";
         let (one_id, all_id) = ("follow-up-mode-one", "follow-up-mode-all");
+        let one_label = tr!("settings.one_at_a_time");
+        let all_label = tr!("settings.all");
         let button =
-            |label: &'static str, value_all: bool, id: &'static str, this: Entity<OrbitApp>| {
+            |label: String, value_all: bool, id: &'static str, this: Entity<OrbitApp>| {
                 let active = all == value_all;
                 div()
                     .id(id)
@@ -4357,8 +4386,8 @@ impl OrbitApp {
             .flex()
             .items_center()
             .gap_2()
-            .child(button("One at a time", false, one_id, this.clone()))
-            .child(button("All", true, all_id, this))
+            .child(button(one_label, false, one_id, this.clone()))
+            .child(button(all_label, true, all_id, this))
             .into_any_element()
     }
 
@@ -4409,9 +4438,9 @@ impl OrbitApp {
             "set_auto_compaction",
         );
         self.set_status(if self.auto_compaction {
-            "Auto-compaction on"
+            tr!("settings.auto_compaction_on")
         } else {
-            "Auto-compaction off"
+            tr!("settings.auto_compaction_off")
         });
         cx.notify();
     }
@@ -4425,9 +4454,9 @@ impl OrbitApp {
             "set_auto_retry",
         );
         self.set_status(if self.auto_retry {
-            "Auto-retry on"
+            tr!("settings.auto_retry_on")
         } else {
-            "Auto-retry off"
+            tr!("settings.auto_retry_off")
         });
         cx.notify();
     }
@@ -4439,9 +4468,9 @@ impl OrbitApp {
         ui.reduce_motion = !ui.reduce_motion;
         theme::set_ui_prefs(cx, ui);
         self.set_status(if ui.reduce_motion {
-            "Reduce motion on"
+            tr!("settings.reduce_motion_on")
         } else {
-            "Reduce motion off"
+            tr!("settings.reduce_motion_off")
         });
         cx.notify();
     }
@@ -4882,7 +4911,7 @@ impl OrbitApp {
                             .font_family(theme::code_font_family())
                             .text_size(theme.term_px(10.5))
                             .text_color(theme.text_3)
-                            .child("orbit — pi"),
+                            .child(tr!("settings.terminal_prompt")),
                     ),
             )
             .child(
@@ -4900,7 +4929,7 @@ impl OrbitApp {
                             .font_family(theme::code_font_family())
                             .text_size(theme.term_px(12.5))
                             .text_color(theme.text_2)
-                            .child("pi agent ready · anthropic/claude"),
+                            .child(tr!("settings.preview_prompt")),
                     )
                     .child(prompt("", true)),
             );
@@ -4911,8 +4940,8 @@ impl OrbitApp {
             .py(theme.space(12.))
             .flex()
             .gap(theme.space(16.))
-            .child(column("Interface preview", interface.into_any_element()))
-            .child(column("Terminal preview", terminal.into_any_element()))
+            .child(column(&tr!("settings.interface_preview"), interface.into_any_element()))
+            .child(column(&tr!("settings.terminal_preview"), terminal.into_any_element()))
             .into_any_element()
     }
 
@@ -4920,17 +4949,18 @@ impl OrbitApp {
     /// page backdrop, or reset to the dot grid.
     pub(super) fn background_controls(&self, theme: Theme, this: Entity<OrbitApp>) -> AnyElement {
         let label = crate::dither::configured_label();
+        let choose_label = if label.is_some() {
+            tr!("settings.replace_ellipsis")
+        } else {
+            tr!("settings.choose_image")
+        };
         let mut controls = div()
             .flex()
             .items_center()
             .gap_2()
             .child(self.runtime_button(
                 "background-choose",
-                if label.is_some() {
-                    "Replace…"
-                } else {
-                    "Choose image…"
-                },
+                &choose_label,
                 false,
                 theme,
                 this.clone(),
@@ -5026,9 +5056,9 @@ impl OrbitApp {
         // Async panel only: see `OrbitApp::browse_for_folder` for why a
         // blocking native dialog on the main thread aborts the app.
         let dialog = rfd::AsyncFileDialog::new()
-            .set_title("Choose a background image")
+            .set_title(tr!("settings.choose_background_title"))
             .add_filter(
-                "Images",
+                &tr!("settings.images_filter"),
                 &["png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff"],
             );
         cx.spawn(async move |this, cx| {
@@ -5040,7 +5070,7 @@ impl OrbitApp {
                 match crate::dither::choose_file(&path) {
                     Ok(label) => {
                         crate::dither::background();
-                        app.set_status(format!("Background set to {label}"));
+                        app.set_status(tr!("settings.background_set", label = label));
                     }
                     Err(err) => app.set_status(err),
                 }
@@ -5784,12 +5814,12 @@ impl OrbitApp {
             return;
         }
         let verb = match op {
-            PluginOp::Install => "Installing",
-            PluginOp::Update => "Updating",
-            PluginOp::Remove => "Removing",
+            PluginOp::Install => tr!("settings.verb_installing"),
+            PluginOp::Update => tr!("settings.verb_updating"),
+            PluginOp::Remove => tr!("settings.verb_removing"),
         };
-        self.plugin_action = Some(format!("{verb} {source}…"));
-        let done = format!("{verb} {source}");
+        self.plugin_action = Some(tr!("settings.plugin_progress", verb = verb, source = source));
+        let done = tr!("settings.plugin_progress_plain", verb = verb, source = source);
         let workspace = self.workspace_dir();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -5811,7 +5841,11 @@ impl OrbitApp {
                             .rev()
                             .find(|line| !line.trim().is_empty())
                             .map(str::to_string);
-                        app.toast_success(last.unwrap_or_else(|| format!("{done} — done")));
+                        app.toast_success(
+                            last.unwrap_or_else(|| {
+                                tr!("settings.plugin_done", done = done)
+                            }),
+                        );
                         app.refresh_plugins(cx);
                     }
                     Err(err) => app.set_error(err),
@@ -6068,10 +6102,14 @@ impl OrbitApp {
                 self.provider_auth_dirty = true;
                 self.reload_custom_providers(cx);
                 let what = match kind {
-                    ProviderKeyKind::ApiKey => "API key",
-                    ProviderKeyKind::OllamaCloudSession => "Ollama Cloud session",
+                    ProviderKeyKind::ApiKey => tr!("settings.api_key"),
+                    ProviderKeyKind::OllamaCloudSession => tr!("settings.ollama_cloud_session"),
                 };
-                self.toast_success(format!("{what} saved for {name} — Restart pi to use it"));
+                self.toast_success(tr!(
+                    "settings.key_saved_for",
+                    what = what,
+                    name = name
+                ));
             }
             Err(err) => {
                 if let Some(editor) = self.provider_key_editor.as_mut() {
@@ -6095,8 +6133,9 @@ impl OrbitApp {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
         {
-            self.toast_error(format!(
-                "Refusing to run login for invalid provider id {id}"
+            self.toast_error(tr!(
+                "settings.refuse_invalid_login",
+                id = id
             ));
             cx.notify();
             return;
@@ -6105,12 +6144,17 @@ impl OrbitApp {
         match platform::open_terminal_command(&command) {
             Ok(()) => {
                 self.provider_auth_dirty = true;
-                self.toast_info(format!(
-                    "Finish signing in to {name} in Terminal, then Restart pi"
+                self.toast_info(tr!(
+                    "settings.finish_sign_in_terminal",
+                    name = name
                 ));
             }
             Err(err) => {
-                self.toast_warning(format!("Could not open Terminal: {err} — run `{command}`"));
+                self.toast_warning(tr!(
+                    "settings.terminal_failed_hint",
+                    error = err,
+                    command = command
+                ));
             }
         }
         cx.notify();
@@ -6136,7 +6180,7 @@ impl OrbitApp {
                 },
                 "auth.logout",
             );
-            self.toast_info(format!("Signing out of {id}…"));
+            self.toast_info(tr!("settings.signing_out", id = id));
             cx.notify();
             return;
         }
@@ -6144,7 +6188,7 @@ impl OrbitApp {
             Ok(()) => {
                 self.provider_auth_dirty = true;
                 self.reload_custom_providers(cx);
-                self.toast_success(format!("Signed out of {id} — Restart pi to apply"));
+                self.toast_success(tr!("settings.signed_out", id = id));
             }
             Err(err) => {
                 self.provider_auth_error = Some(err);
@@ -6321,7 +6365,7 @@ impl OrbitApp {
             .collect();
 
         let error = if id.is_empty() {
-            Some("Provider id is required.".to_string())
+            Some(tr!("settings.provider_id_required"))
         } else if !id
             .chars()
             .next()
@@ -6330,19 +6374,16 @@ impl OrbitApp {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
         {
-            Some(
-                "Id must start with a letter or number — letters, numbers, dots, dashes and underscores only."
-                    .to_string(),
-            )
+            Some(tr!("settings.provider_id_invalid"))
         } else if !(base_url.is_empty()
             || base_url.starts_with("http://")
             || base_url.starts_with("https://"))
         {
-            Some("Base URL must start with http:// or https://.".to_string())
+            Some(tr!("settings.base_url_scheme"))
         } else if base_url.is_empty() && !in_catalog {
-            Some("Base URL is required for a custom provider.".to_string())
+            Some(tr!("settings.base_url_required"))
         } else if models.is_empty() && !in_catalog {
-            Some("Add at least one model id.".to_string())
+            Some(tr!("settings.add_model_id"))
         } else {
             None
         };
@@ -6368,8 +6409,9 @@ impl OrbitApp {
                 self.provider_editor = None;
                 self.reload_custom_providers(cx);
                 self.refresh_catalogs();
-                self.toast_success(format!(
-                    "Saved {id} — restart pi if it doesn't appear in the catalog"
+                self.toast_success(tr!(
+                    "settings.provider_saved",
+                    id = id
                 ));
             }
             Err(err) => {
@@ -6388,7 +6430,7 @@ impl OrbitApp {
                 self.provider_remove_confirm = None;
                 self.reload_custom_providers(cx);
                 self.refresh_catalogs();
-                self.toast_info(format!("Removed provider {id}"));
+                self.toast_info(tr!("settings.provider_removed", id = id));
             }
             Err(err) => {
                 self.custom_providers_error = Some(err);
@@ -6420,16 +6462,18 @@ fn model_visible(
 /// while a search or the favorites filter is narrowing the grid.
 fn model_count_label(total: usize, shown: usize, favorites: usize, filtered: bool) -> String {
     if total == 0 {
-        return "No models reported by the runtime".to_string();
+        return tr!("settings.no_models_reported_by_runtime");
     }
-    let favorites = format!(
-        "{favorites} favorite{}",
-        if favorites == 1 { "" } else { "s" }
-    );
+    let favorites = tr!("settings.n_favorites", count = favorites);
     if filtered {
-        format!("{shown} of {total} shown · {favorites}")
+        tr!(
+            "settings.count_of_shown",
+            shown = shown,
+            total = total,
+            favorites = favorites
+        )
     } else {
-        format!("{total} models · {favorites}")
+        tr!("settings.count_models", total = total, favorites = favorites)
     }
 }
 
@@ -6534,12 +6578,15 @@ mod model_filter_tests {
         );
         assert_eq!(
             model_count_label(236, 236, 12, false),
-            "236 models · 12 favorites"
+            "236 models · 12 favorite(s)"
         );
         assert_eq!(
             model_count_label(236, 1, 12, true),
-            "1 of 236 shown · 12 favorites"
+            "1 of 236 shown · 12 favorite(s)"
         );
-        assert_eq!(model_count_label(3, 3, 1, false), "3 models · 1 favorite");
+        assert_eq!(
+            model_count_label(3, 3, 1, false),
+            "3 models · 1 favorite(s)"
+        );
     }
 }

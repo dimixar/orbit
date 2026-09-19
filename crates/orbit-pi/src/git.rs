@@ -177,7 +177,7 @@ pub(crate) fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     let output = command(cwd)
         .args(args)
         .output()
-        .map_err(|err| format!("git not available: {err}"))?;
+        .map_err(|err| tr!("git.not_available", error = err))?;
     if !output.status.success() {
         return Err(command_error(&output));
     }
@@ -201,7 +201,7 @@ where
 fn command_error(output: &Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     if stderr.is_empty() {
-        format!("git exited with {}", output.status)
+        tr!("git.exited_with", status = output.status.to_string())
     } else {
         stderr
     }

@@ -156,7 +156,7 @@ impl OrbitApp {
                 self.set_status(tr!("pickers.new_task_started"));
             }
             Err(err) => {
-                let message = format!("pi spawn failed: {err}");
+                let message = tr!("runtime.pi_spawn_failed", error = err);
                 self.client = None;
                 self.runtime.error = Some(message.clone());
                 self.set_status(message);
@@ -443,7 +443,7 @@ impl OrbitApp {
         }
         let current = crate::git::current_branch(&cwd).unwrap_or_else(|| "HEAD".into());
         let branches = crate::git::list_branches(&cwd).unwrap_or_else(|err| {
-            self.toast_error(format!("branch list failed: {err}"));
+            self.toast_error(tr!("pickers.branch_list_failed", error = err));
             vec![current.clone()]
         });
         let workspace_label = sessions::workspace_label(&cwd);
@@ -511,8 +511,8 @@ impl OrbitApp {
             let _ = this.update(cx, |app, cx| {
                 app.branch_operation_pending = false;
                 match result {
-                    Ok(()) => app.toast_success(format!("Switched to {label}")),
-                    Err(err) => app.toast_error(format!("Branch switch failed: {err}")),
+                    Ok(()) => app.toast_success(tr!("pickers.switched_to", label = label)),
+                    Err(err) => app.toast_error(tr!("pickers.branch_switch_failed", error = err)),
                 }
                 app.refresh_branch_status(cx);
                 cx.notify();
@@ -542,8 +542,8 @@ impl OrbitApp {
             let _ = this.update(cx, |app, cx| {
                 app.branch_operation_pending = false;
                 match result {
-                    Ok(()) => app.toast_success(format!("Created and switched to {label}")),
-                    Err(err) => app.toast_error(format!("Branch create failed: {err}")),
+                    Ok(()) => app.toast_success(tr!("pickers.created_and_switched", label = label)),
+                    Err(err) => app.toast_error(tr!("pickers.branch_create_failed", error = err)),
                 }
                 app.refresh_branch_status(cx);
                 cx.notify();

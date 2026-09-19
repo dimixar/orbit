@@ -269,9 +269,9 @@ fn week_grid(
     for (row, name) in WEEKDAYS.iter().enumerate() {
         // Every other row, like a calendar's own axis: Mon / Wed / Fri.
         let text = if show_labels && row % 2 == 0 {
-            *name
+            crate::i18n::translate(&format!("usage.weekday_{row}"))
         } else {
-            ""
+            String::new()
         };
         labels = labels.child(
             div()
@@ -413,17 +413,17 @@ fn day_readout(
         ChartMetric::Latency => format::duration_ms(value),
         _ => format::compact(value.max(0.0) as u64),
     };
-    let mut rows: Vec<(&str, String)> = vec![(metric.label(), primary)];
+    let mut rows: Vec<(String, String)> = vec![(metric.label(), primary)];
     // The metric's own value is already the first row; the supporting rows
     // below must not repeat its label.
     if metric != ChartMetric::Requests {
-        rows.push(("Requests", format::exact(totals.requests)));
+        rows.push((tr!("usage.metric_requests"), format::exact(totals.requests)));
     }
     if metric != ChartMetric::Tokens {
-        rows.push(("Tokens", format::compact(totals.tokens.total)));
+        rows.push((tr!("usage.metric_tokens"), format::compact(totals.tokens.total)));
     }
     if totals.errors > 0 && metric != ChartMetric::Errors {
-        rows.push(("Errors", format::exact(totals.errors)));
+        rows.push((tr!("usage.metric_errors"), format::exact(totals.errors)));
     }
 
     let mut body = div().flex().flex_col().gap(px(2.)).child(

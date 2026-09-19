@@ -309,7 +309,7 @@ fn run_pi(
 
     let mut child = command
         .spawn()
-        .map_err(|err| format!("failed to run {bin}: {err}"))?;
+        .map_err(|err| tr!("errors.failed_to_run", bin = bin, error = err))?;
     let stdout = child.stdout.take().ok_or("pi stdout unavailable")?;
     let stderr = child.stderr.take().ok_or("pi stderr unavailable")?;
     let out_handle = std::thread::spawn(move || read_to_end(stdout));
@@ -324,18 +324,22 @@ fn run_pi(
                 return if status.success() {
                     Ok(out)
                 } else {
-                    Err(format!("pi exited with {status}: {}", first_line(&err)))
+                    Err(tr!(
+                        "errors.pi_exited_with",
+                        status = status.to_string(),
+                        stderr = first_line(&err)
+                    ))
                 };
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err("commit message generation timed out".into());
+                    return Err(tr!("errors.commit_generation_timed_out"));
                 }
                 std::thread::sleep(Duration::from_millis(40));
             }
-            Err(err) => return Err(format!("pi process error: {err}")),
+            Err(err) => return Err(tr!("errors.pi_process_error", error = err)),
         }
     }
 }

@@ -152,13 +152,13 @@ fn read_packages(
     let raw = match fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(format!("Could not read {}: {err}", path.display())),
+        Err(err) => return Err(tr!("errors.could_not_read", path = path.display().to_string(), error = err)),
     };
     if raw.trim().is_empty() {
         return Ok(Vec::new());
     }
     let root: Value = serde_json::from_str(&raw)
-        .map_err(|err| format!("{} is not valid JSON: {err}", path.display()))?;
+        .map_err(|err| tr!("errors.not_valid_json", path = path.display().to_string(), error = err))?;
     Ok(package_sources(&root)
         .into_iter()
         .map(|source| resolve(&source, scope, workspace))
@@ -348,7 +348,7 @@ fn run_pi(args: &[String], workspace: &Path) -> Result<String, String> {
 
     let mut child = command
         .spawn()
-        .map_err(|err| format!("failed to run {bin}: {err}"))?;
+        .map_err(|err| tr!("errors.failed_to_run", bin = bin, error = err))?;
     let stdout = child.stdout.take().ok_or("pi stdout unavailable")?;
     let stderr = child.stderr.take().ok_or("pi stderr unavailable")?;
     let out_handle = std::thread::spawn(move || read_to_end(stdout));
@@ -370,11 +370,11 @@ fn run_pi(args: &[String], workspace: &Path) -> Result<String, String> {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(format!("pi {} timed out", args.join(" ")));
+                    return Err(tr!("errors.pi_timed_out", args = args.join(" ")));
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
-            Err(err) => return Err(format!("pi process error: {err}")),
+            Err(err) => return Err(tr!("errors.pi_process_error", error = err)),
         }
     }
 }

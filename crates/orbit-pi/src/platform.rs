@@ -259,7 +259,7 @@ pub fn open_terminal_command(command: &str) -> Result<(), String> {
     // non-default terminal is installed.
     let path = std::env::temp_dir().join(format!("orbit-{}.command", std::process::id()));
     let script = format!("#!/bin/zsh\n{command}\n");
-    std::fs::write(&path, script).map_err(|err| format!("could not write login script: {err}"))?;
+    std::fs::write(&path, script).map_err(|err| tr!("platform.login_script_failed", error = err))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -269,7 +269,7 @@ pub fn open_terminal_command(command: &str) -> Result<(), String> {
         .arg(&path)
         .spawn()
         .map(|_| ())
-        .map_err(|err| format!("could not open Terminal: {err}"))
+        .map_err(|err| tr!("platform.terminal_failed", error = err))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -284,7 +284,7 @@ pub fn open_terminal_command(command: &str) -> Result<(), String> {
         launcher
             .spawn()
             .map(|_| ())
-            .map_err(|err| format!("could not open a terminal: {err}"))
+            .map_err(|err| tr!("platform.terminal_failed", error = err))
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -314,7 +314,7 @@ pub fn open_url(url: &str) -> Result<(), String> {
         .arg(url)
         .spawn()
         .map(|_| ())
-        .map_err(|err| format!("could not open the browser: {err}"))
+        .map_err(|err| tr!("platform.browser_failed", error = err))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -337,7 +337,7 @@ pub fn open_url(url: &str) -> Result<(), String> {
     command
         .spawn()
         .map(|_| ())
-        .map_err(|err| format!("could not open the browser: {err}"))
+        .map_err(|err| tr!("platform.browser_failed", error = err))
 }
 
 /// Rename the running process so macOS labels the application menu with the
@@ -533,14 +533,14 @@ fn unsupported_reason(version: OsVersion) -> Option<String> {
     {
         const FLOOR_MAJOR: u32 = 13;
         if version.major > 0 && version.major < FLOOR_MAJOR {
-            return Some(format!("Orbit needs macOS {FLOOR_MAJOR} or newer"));
+            return Some(tr!("platform.needs_macos", major = FLOOR_MAJOR));
         }
     }
     #[cfg(windows)]
     {
         const FLOOR_BUILD: u32 = 17763;
         if version.build > 0 && version.build < FLOOR_BUILD {
-            return Some("Orbit needs Windows 10 (1809) or newer".to_string());
+            return Some(tr!("platform.needs_windows").to_string());
         }
     }
     // Linux has no floor to compare against (see `os_probe`).
