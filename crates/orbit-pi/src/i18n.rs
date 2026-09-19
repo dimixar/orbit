@@ -315,4 +315,38 @@ mod tests {
             assert!(!value.is_empty(), "missing language.title for {}", language.locale());
         }
     }
+
+    /// Every key in `en.yml` must exist in every generated locale file. The
+    /// generator (`scripts/gen_locales.py`) guarantees this, but a manual edit
+    /// or a stale file would silently fall back to English — this catches it.
+    #[test]
+    fn locale_files_cover_every_english_key() {
+        fn keys(src: &str) -> std::collections::BTreeSet<&str> {
+            src.lines()
+                .filter(|line| !line.trim().is_empty() && !line.starts_with("_version"))
+                .filter_map(|line| line.split_once(':').map(|(key, _)| key.trim()))
+                .collect()
+        }
+        let en = keys(include_str!("../locales/en.yml"));
+        for (locale, source) in [
+            ("zh-CN", include_str!("../locales/zh-CN.yml")),
+            ("ja", include_str!("../locales/ja.yml")),
+            ("ko", include_str!("../locales/ko.yml")),
+            ("es", include_str!("../locales/es.yml")),
+            ("fr", include_str!("../locales/fr.yml")),
+            ("de", include_str!("../locales/de.yml")),
+            ("pt-BR", include_str!("../locales/pt-BR.yml")),
+            ("ru", include_str!("../locales/ru.yml")),
+            ("it", include_str!("../locales/it.yml")),
+        ] {
+            let have = keys(source);
+            let missing: Vec<_> = en.difference(&have).collect();
+            assert!(
+                missing.is_empty(),
+                "{locale} is missing {} key(s), e.g. {:?}",
+                missing.len(),
+                &missing[..missing.len().min(5)]
+            );
+        }
+    }
 }

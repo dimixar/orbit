@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Interface localization via `rust-i18n`, shipped with ten locales — English,
+  Simplified Chinese, Japanese, Korean, Spanish, French, German, Brazilian
+  Portuguese, Russian, and Italian — plus a `System` option that follows the
+  OS preferred language. Settings → Appearance → Language switches it live
+  (including the native menu bar); `locales/en.yml` is the source of truth and
+  `scripts/gen_locales.py` regenerates the other files from the glossary.
+
 ## [0.0.6] - 2026-09-19
 
 ### Added

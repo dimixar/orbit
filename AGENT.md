@@ -30,7 +30,10 @@ pi as a child process, no web, no webview, no Node daemon.
 ```
 Cargo.toml              workspace: orbit-pi, orbit-rpc
 crates/orbit-pi/        GPUI app — window, shell, chat, settings
-  src/main.rs           bootstrap, assets, keybindings, heartbeat
+  src/main.rs           bootstrap, assets, keybindings, heartbeat, native menu (localized)
+  src/i18n.rs           AppLanguage + locale detection; the `tr!`/`tr_cow!` macros
+  locales/              translations: en.yml is the source of truth, one file per locale
+                        (generated from en.yml + scripts/i18n_glossary*.py)
   src/app.rs            OrbitApp state model + shared types + controller wiring (module map in the file header)
   src/app/runtime.rs    pi process lifecycle, status/error, provider auth
   src/app/events.rs     heartbeat event drain, RPC response routing, session/workspace watchers
@@ -112,6 +115,46 @@ PRODUCT.md  INTENT.md  README.md  AGENT.md
 Workspace edition is **2021**. Prefer **Rust 1.94+**. Root `Cargo.lock` is the lockfile; ignore a nested `crates/orbit-pi/Cargo.lock` if present.
 
 Override the pi binary with `PI_BIN` (default: `pi` on `PATH`).
+
+## Localization (i18n)
+
+UI copy is translated through [rust-i18n](https://github.com/longbridgeapp/rust-i18n).
+`locales/en.yml` is the **source of truth** — every key and its English text.
+The other nine locale files are generated, never hand-edited:
+
+```
+python3 scripts/gen_locales.py        # regenerate locales/*.yml + report gaps
+cargo test -p orbit-pi i18n           # completeness guard
+```
+
+- **Ships:** English, 简体中文 (`zh-CN`), 日本語 (`ja`), 한국어 (`ko`),
+  Español (`es`), Français (`fr`), Deutsch (`de`), Português do Brasil
+  (`pt-BR`), Русский (`ru`), Italiano (`it`) — plus `System`, which resolves
+  through the OS preferred language (`AppLanguage::from_locale_id`).
+- **Call sites:** wrap literals with the crate-root macros — `tr!("key")` for
+  plain text, `tr!("key", count = n)` for `%{count}` interpolation, and
+  `tr_cow!("key")` only on hot render paths that borrow. Never hard-code
+  user-facing English in a render path; add a key instead.
+- **Translations** live in `scripts/i18n_glossary*.py`, keyed by the exact
+  English string from `en.yml`. Split by surface (core, settings, palette,
+  transcript). A string with no entry falls back to English.
+- **Keys** are `surface.slug` (`settings.general`, `transcript.thinking`) so a
+  translator sees context; identical English can appear under several keys.
+- **Native menu:** `set_app_menus` rebuilds the macOS menu bar when the
+  language changes (`theme::set_ui_prefs` calls it).
+
+### Adding a string
+
+1. Wrap the literal with `tr!("surface.slug")` at the call site.
+2. Add `surface.slug: "English"` to `locales/en.yml` (append; keep key order).
+3. Add `"English": "translation"` under each locale in the matching
+   `scripts/i18n_glossary_*.py`.
+4. Run `python3 scripts/gen_locales.py` and `cargo test -p orbit-pi i18n`.
+
+The codemods in `scripts/` (`localize_calls.py`, `localize_settings.py`,
+`localize_call_args.py`) wrap common GPUI builder patterns in bulk; run one,
+merge its key TSV into `en.yml`, then translate. They skip test code and
+`*_tests.rs` on purpose.
 
 ## Current state
 
