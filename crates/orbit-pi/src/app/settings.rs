@@ -40,24 +40,24 @@ impl OrbitApp {
     pub(super) fn render_settings(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let this = cx.entity();
         let theme = *theme::get(cx);
-        let sections: [(SettingsSection, &'static str, &'static str); 9] = [
-            (SettingsSection::General, "icons/settings.svg", "General"),
+        let sections: [(SettingsSection, &'static str, String); 9] = [
+            (SettingsSection::General, "icons/settings.svg", tr!("settings.general")),
             (
                 SettingsSection::Runtime,
                 "icons/server-stack.svg",
-                "Runtime",
+                tr!("settings.runtime"),
             ),
-            (SettingsSection::Agent, "icons/spark.svg", "Agent"),
-            (SettingsSection::Skills, "icons/magic-wand.svg", "Skills"),
-            (SettingsSection::Plugins, "icons/extensions.svg", "Plugins"),
-            (SettingsSection::Models, "icons/tag-01.svg", "Models"),
+            (SettingsSection::Agent, "icons/spark.svg", tr!("settings.agent")),
+            (SettingsSection::Skills, "icons/magic-wand.svg", tr!("settings.skills")),
+            (SettingsSection::Plugins, "icons/extensions.svg", tr!("settings.plugins")),
+            (SettingsSection::Models, "icons/tag-01.svg", tr!("settings.models")),
             (
                 SettingsSection::Appearance,
                 "icons/contrast.svg",
-                "Appearance",
+                tr!("settings.appearance"),
             ),
-            (SettingsSection::Providers, "icons/cloud.svg", "Providers"),
-            (SettingsSection::About, "icons/info.svg", "About"),
+            (SettingsSection::Providers, "icons/cloud.svg", tr!("settings.providers")),
+            (SettingsSection::About, "icons/info.svg", tr!("settings.about")),
         ];
 
         div()
@@ -148,7 +148,7 @@ impl OrbitApp {
                             .flex_col()
                             .gap(px(3.))
                             .children(sections.iter().map(
-                                |&(section, section_icon, label)| {
+                                |&(section, section_icon, ref label)| {
                                     let this = this.clone();
                                     let selected = self.settings_section == section;
                                     // Group starts: Skills opens the pi
@@ -342,34 +342,43 @@ impl OrbitApp {
     }
 
     pub(super) fn settings_header(&self, theme: Theme) -> impl IntoElement + use<> {
-        let (title, subtitle) = match self.settings_section {
-            SettingsSection::General => ("General", "App behavior, local data, and notifications."),
+        let (title, subtitle): (String, String) = match self.settings_section {
+            SettingsSection::General => (
+                tr!("settings.general"),
+                tr!("settings.general_description"),
+            ),
             SettingsSection::Runtime => (
-                "Runtime",
-                "The pi agent process Orbit spawns — stdio transport, no host or port.",
+                tr!("settings.runtime"),
+                tr!("settings.runtime_description"),
             ),
             SettingsSection::Agent => (
-                "Agent",
-                "How pi queues your messages, compacts context, and retries errors.",
+                tr!("settings.agent"),
+                tr!("settings.agent_description"),
             ),
             SettingsSection::Skills => (
-                "Skills",
-                "SKILL.md files pi can load, from this project and your global agent.",
+                tr!("settings.skills"),
+                tr!("settings.skills_description"),
             ),
             SettingsSection::Plugins => (
-                "Plugins",
-                "pi packages for this machine and this project. pi loads them at startup — restart pi to apply changes.",
+                tr!("settings.plugins"),
+                tr!("settings.plugins_description"),
             ),
             SettingsSection::Models => (
-                "Models",
-                "Every model the running pi reports, grouped by provider. Favorites are shared with the composer's model picker.",
+                tr!("settings.models"),
+                tr!("settings.models_description"),
             ),
-            SettingsSection::Appearance => ("Appearance", "Window, layout, and color preferences."),
+            SettingsSection::Appearance => (
+                tr!("settings.appearance"),
+                tr!("settings.appearance_description"),
+            ),
             SettingsSection::Providers => (
-                "Providers",
-                "The live catalog plus custom providers from ~/.pi/agent/models.json.",
+                tr!("settings.providers"),
+                tr!("settings.providers_description"),
             ),
-            SettingsSection::About => ("About", "Versions and the rendering stack."),
+            SettingsSection::About => (
+                tr!("settings.about"),
+                tr!("settings.about_description"),
+            ),
         };
         div()
             .flex()

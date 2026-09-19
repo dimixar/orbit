@@ -106,11 +106,11 @@ enum Section {
 }
 
 impl Section {
-    fn label(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Self::Sessions => "Sessions",
-            Self::Commands => "Commands",
-            Self::Settings => "Settings",
+            Self::Sessions => tr!("command_palette.sessions"),
+            Self::Commands => tr!("command_palette.commands"),
+            Self::Settings => tr!("command_palette.settings"),
         }
     }
 }
@@ -322,7 +322,7 @@ impl CommandPalette {
         };
         let mut items = vec![
             PaletteItem::command(
-                "New Session",
+                tr!("command_palette.new_session"),
                 "icons/plus.svg",
                 Some("⌘N"),
                 PaletteCommand::NewSession,
@@ -330,7 +330,7 @@ impl CommandPalette {
                 next(),
             ),
             PaletteItem::command(
-                "Focus Composer",
+                tr!("command_palette.focus_composer"),
                 "icons/compose.svg",
                 None,
                 PaletteCommand::FocusComposer,
@@ -338,7 +338,7 @@ impl CommandPalette {
                 next(),
             ),
             PaletteItem::command(
-                "Refresh Sessions",
+                tr!("command_palette.refresh_sessions"),
                 "icons/refresh.svg",
                 Some("⌘R"),
                 PaletteCommand::RefreshSessions,
@@ -347,9 +347,9 @@ impl CommandPalette {
             ),
             PaletteItem::command(
                 if self.snapshot.sidebar_visible {
-                    "Hide Sidebar"
+                    tr!("command_palette.hide_sidebar")
                 } else {
-                    "Show Sidebar"
+                    tr!("command_palette.show_sidebar")
                 },
                 "icons/layout-left.svg",
                 None,
@@ -359,9 +359,9 @@ impl CommandPalette {
             ),
             PaletteItem::command(
                 if self.snapshot.side_panel_visible {
-                    "Hide Side Panel"
+                    tr!("command_palette.hide_side_panel")
                 } else {
-                    "Show Side Panel"
+                    tr!("command_palette.show_side_panel")
                 },
                 "icons/panel-right.svg",
                 None,
@@ -371,9 +371,9 @@ impl CommandPalette {
             ),
             PaletteItem::command(
                 if self.snapshot.terminal_visible {
-                    "Hide Terminal"
+                    tr!("command_palette.hide_terminal")
                 } else {
-                    "Show Terminal"
+                    tr!("command_palette.show_terminal")
                 },
                 "icons/terminal.svg",
                 Some("⌘J"),
@@ -382,7 +382,7 @@ impl CommandPalette {
                 next(),
             ),
             PaletteItem::command(
-                "Review Changes",
+                tr!("command_palette.review_changes"),
                 "icons/file-diff.svg",
                 None,
                 PaletteCommand::ReviewChanges,
@@ -390,7 +390,7 @@ impl CommandPalette {
                 next(),
             ),
             PaletteItem::command(
-                "Open Git",
+                tr!("command_palette.open_git"),
                 "icons/git-commit.svg",
                 None,
                 PaletteCommand::OpenGit,
@@ -400,7 +400,7 @@ impl CommandPalette {
         ];
         if self.snapshot.can_choose_model {
             items.push(PaletteItem::command(
-                "Choose Model",
+                tr!("command_palette.choose_model"),
                 "icons/spark.svg",
                 None,
                 PaletteCommand::ChooseModel,
@@ -410,7 +410,7 @@ impl CommandPalette {
         }
         if self.snapshot.can_choose_thinking {
             items.push(PaletteItem::command(
-                "Choose Thinking Level",
+                tr!("command_palette.choose_thinking_level"),
                 "icons/thinking-medium.svg",
                 None,
                 PaletteCommand::ChooseThinking,
@@ -420,7 +420,7 @@ impl CommandPalette {
         }
         if self.snapshot.busy {
             items.push(PaletteItem::command(
-                "Abort Run",
+                tr!("command_palette.abort_run"),
                 "icons/stop.svg",
                 Some("Esc"),
                 PaletteCommand::AbortRun,
@@ -430,7 +430,7 @@ impl CommandPalette {
         }
         if self.snapshot.session_id.is_some() {
             items.push(PaletteItem::command(
-                "Copy Session ID",
+                tr!("command_palette.copy_session_id"),
                 "icons/copy.svg",
                 None,
                 PaletteCommand::CopySessionId,
@@ -438,7 +438,7 @@ impl CommandPalette {
                 next(),
             ));
             items.push(PaletteItem::command(
-                "Clone Session",
+                tr!("command_palette.clone_session"),
                 "icons/git-fork.svg",
                 None,
                 PaletteCommand::CloneSession,
@@ -450,55 +450,55 @@ impl CommandPalette {
             (
                 SettingsSection::General,
                 "icons/settings.svg",
-                "General",
+                tr!("settings.general"),
                 "settings preferences general language font",
             ),
             (
                 SettingsSection::Runtime,
                 "icons/server-stack.svg",
-                "Runtime",
+                tr!("settings.runtime"),
                 "settings preferences runtime process pi start stop restart",
             ),
             (
                 SettingsSection::Agent,
                 "icons/spark.svg",
-                "Agent",
+                tr!("settings.agent"),
                 "settings preferences agent steer follow-up compaction retry",
             ),
             (
                 SettingsSection::Skills,
                 "icons/magic-wand.svg",
-                "Skills",
+                tr!("settings.skills"),
                 "settings preferences skills skill.md instructions agent",
             ),
             (
                 SettingsSection::Plugins,
                 "icons/extensions.svg",
-                "Plugins",
+                tr!("settings.plugins"),
                 "settings preferences plugins extensions packages install npm git",
             ),
             (
                 SettingsSection::Models,
                 "icons/tag-01.svg",
-                "Models",
+                tr!("settings.models"),
                 "settings preferences models catalog favorites providers",
             ),
             (
                 SettingsSection::Appearance,
                 "icons/contrast.svg",
-                "Appearance",
+                tr!("settings.appearance"),
                 "settings preferences appearance theme light dark",
             ),
             (
                 SettingsSection::Providers,
                 "icons/cloud.svg",
-                "Providers",
+                tr!("settings.providers"),
                 "settings preferences providers models api",
             ),
             (
                 SettingsSection::About,
                 "icons/info.svg",
-                "About",
+                tr!("settings.about"),
                 "settings about version app",
             ),
         ] {
