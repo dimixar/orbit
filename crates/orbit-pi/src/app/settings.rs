@@ -412,30 +412,26 @@ impl OrbitApp {
                     .unwrap_or_default();
                 let mut rows = vec![self.settings_section(
                     theme,
-                    "This machine",
+                    &tr!("settings.this_machine"),
                     vec![
                         self.setting_row(
                             theme,
-                            "pi agent",
-                            Some(
-                                "Spawned as a child process — newline-delimited JSON over stdio.",
-                            ),
+                            &tr!("settings.pi_agent"),
+                            Some(&tr!("settings.spawned_as_a_child_process_newline_delimited_jso")),
                             None,
                             Some(self.connection_status(theme)),
                         ),
                         self.setting_row(
                             theme,
-                            "Local by default",
-                            Some(
-                                "Sessions live in pi's own store on this computer — no daemon, no cloud.",
-                            ),
+                            &tr!("settings.local_by_default"),
+                            Some(&tr!("settings.sessions_live_in_pi_s_own_store_on_this_computer")),
                             Some(&sessions::sessions_dir().to_string_lossy()),
                             None,
                         ),
                         self.setting_row(
                             theme,
-                            "Workspace",
-                            Some("New tasks start in this directory."),
+                            &tr!("settings.workspace"),
+                            Some(&tr!("settings.new_tasks_start_in_this_directory")),
                             Some(&workspace.to_string_lossy()),
                             None,
                         ),
@@ -458,8 +454,8 @@ impl OrbitApp {
             SettingsSection::About => {
                 let mut about = vec![self.setting_row(
                     theme,
-                    "Orbit Pi",
-                    Some("Native workbench for the pi coding agent."),
+                    &tr!("settings.orbit_pi"),
+                    Some(&tr!("settings.native_workbench_for_the_pi_coding_agent")),
                     None,
                     Some(
                         div()
@@ -475,8 +471,8 @@ impl OrbitApp {
                 about.push(
                     self.setting_row(
                         theme,
-                        "GPUI",
-                        Some("GPU-accelerated UI framework (pinned; runtime shaders)."),
+                        &tr!("settings.gpui"),
+                        Some(&tr!("settings.gpu_accelerated_ui_framework_pinned_runtime_shad")),
                         None,
                         Some(
                             div()
@@ -489,21 +485,19 @@ impl OrbitApp {
                 );
                 about.push(self.setting_row(
                     theme,
-                    "pi CLI",
-                    Some("The only agent runtime — pi speaks its own RPC protocol over stdio."),
+                    &tr!("settings.pi_cli"),
+                    Some(&tr!("settings.the_only_agent_runtime_pi_speaks_its_own_rpc_pro")),
                     None,
                     Some(self.connection_status(theme)),
                 ));
                 about.push(self.setting_row(
                     theme,
-                    "Source",
-                    Some(
-                        "Open source under Apache-2.0 — code, issues, and release notes live on GitHub.",
-                    ),
+                    &tr!("settings.source"),
+                    Some(&tr!("settings.open_source_under_apache_2_0_code_issues_and_rel")),
                     None,
                     Some(self.about_github_button(theme)),
                 ));
-                vec![self.settings_section(theme, "About", about)]
+                vec![self.settings_section(theme, &tr!("settings.about"), about)]
             }
         }
     }
@@ -3839,10 +3833,8 @@ impl OrbitApp {
         let mut rows = vec![
             self.setting_row(
                 theme,
-                "Desktop notifications",
-                Some(
-                    "Show a system banner when a run finishes while Orbit is in the background, or when pi is waiting for your answer.",
-                ),
+                &tr!("settings.desktop_notifications"),
+                Some(&tr!("settings.show_a_system_banner_when_a_run_finishes_while_o")),
                 None,
                 Some(self.settings_toggle(
                     "notification-desktop-toggle",
@@ -3854,10 +3846,8 @@ impl OrbitApp {
             ),
             self.setting_row(
                 theme,
-                "In-app toasts",
-                Some(
-                    "Show a toast in the window when a run finishes, or when pi is waiting for your answer, while Orbit is frontmost.",
-                ),
+                &tr!("settings.in_app_toasts"),
+                Some(&tr!("settings.show_a_toast_in_the_window_when_a_run_finishes_o")),
                 None,
                 Some(self.settings_toggle(
                     "notification-toasts-toggle",
@@ -3869,8 +3859,8 @@ impl OrbitApp {
             ),
             self.setting_row(
                 theme,
-                "Notification sound",
-                Some("Play the system alert sound when a background run finishes or pi is waiting for your answer."),
+                &tr!("settings.notification_sound"),
+                Some(&tr!("settings.play_the_system_alert_sound_when_a_background_ru")),
                 None,
                 Some(self.settings_toggle(
                     "notification-sound-toggle",
@@ -3885,8 +3875,8 @@ impl OrbitApp {
             match self.notification_auth {
                 notifications::DesktopAuth::Denied => rows.push(self.setting_row(
                     theme,
-                    "Blocked in System Settings",
-                    Some("macOS is not allowing Orbit Pi to post notifications."),
+                    &tr!("settings.blocked_in_system_settings"),
+                    Some(&tr!("settings.macos_is_not_allowing_orbit_pi_to_post_notificat")),
                     None,
                     Some(self.runtime_button(
                         "notification-open-settings",
@@ -3901,17 +3891,15 @@ impl OrbitApp {
                 )),
                 notifications::DesktopAuth::Unbundled => rows.push(self.setting_row(
                     theme,
-                    "Developer build",
-                    Some(
-                        "Orbit is running from a bare binary, so banners are posted as Script Editor and clicks cannot open their session. The packaged app posts them as Orbit Pi.",
-                    ),
+                    &tr!("settings.developer_build"),
+                    Some(&tr!("settings.orbit_is_running_from_a_bare_binary_so_banners_a")),
                     None,
                     None,
                 )),
                 notifications::DesktopAuth::Granted | notifications::DesktopAuth::Unknown => {}
             }
         }
-        self.settings_section(theme, "Notifications", rows)
+        self.settings_section(theme, &tr!("settings.notifications"), rows)
     }
 
     /// Flip the desktop channel, ask for permission on the way on, and
@@ -4070,7 +4058,7 @@ impl OrbitApp {
 
         let mut process = vec![self.setting_row(
             theme,
-            "Status",
+            &tr!("settings.status"),
             Some(description),
             None,
             Some(
@@ -4085,28 +4073,28 @@ impl OrbitApp {
         )];
         process.push(self.setting_row(
             theme,
-            "Process ID",
+            &tr!("settings.process_id"),
             None,
             None,
             Some(runtime_text(theme, pid)),
         ));
         process.push(self.setting_row(
             theme,
-            "Binary",
+            &tr!("settings.binary"),
             None,
             None,
             Some(runtime_path(theme, orbit_rpc::pi_binary())),
         ));
         process.push(self.setting_row(
             theme,
-            "Uptime",
+            &tr!("settings.uptime"),
             None,
             None,
             Some(runtime_text(theme, uptime)),
         ));
         process.push(self.setting_row(
             theme,
-            "Transport",
+            &tr!("settings.transport"),
             None,
             None,
             Some(runtime_text(
@@ -4116,14 +4104,14 @@ impl OrbitApp {
         ));
         process.push(self.setting_row(
             theme,
-            "Workspace",
+            &tr!("settings.workspace"),
             None,
             None,
             Some(runtime_path(theme, workspace)),
         ));
         process.push(self.setting_row(
             theme,
-            "Session store",
+            &tr!("settings.session_store"),
             None,
             None,
             Some(runtime_path(
@@ -4134,14 +4122,14 @@ impl OrbitApp {
         if let Some(error) = &self.runtime.error {
             process.push(self.setting_row(
                 theme,
-                "Last error",
+                &tr!("settings.last_error"),
                 None,
                 None,
                 Some(runtime_error(theme, error.clone())),
             ));
         }
 
-        let mut rows = vec![self.settings_section(theme, "Process", process)];
+        let mut rows = vec![self.settings_section(theme, &tr!("settings.process"), process)];
 
         // Background sessions — each owns its own pi process.
         if !self.lives.is_empty() {
@@ -4151,7 +4139,7 @@ impl OrbitApp {
                 format!("{count} background {noun} running in their own pi processes");
             let mut background = vec![self.setting_row(
                 theme,
-                "Parked processes",
+                &tr!("settings.parked_processes"),
                 Some(parked_desc.as_str()),
                 None,
                 None,
@@ -4176,7 +4164,7 @@ impl OrbitApp {
                     )),
                 ));
             }
-            rows.push(self.settings_section(theme, "Background", background));
+            rows.push(self.settings_section(theme, &tr!("settings.background"), background));
         }
 
         // Recent stderr — visible failures for "if any issue, show status".
@@ -4251,19 +4239,15 @@ impl OrbitApp {
         let behavior = vec![
             self.setting_row(
                 theme,
-                "Follow-up messages",
-                Some(
-                    "Messages sent while the agent is running wait in the queue above the composer and are delivered once the current task finishes.",
-                ),
+                &tr!("settings.follow_up_messages"),
+                Some(&tr!("settings.messages_sent_while_the_agent_is_running_wait_in")),
                 None,
                 Some(self.follow_up_mode_toggle(theme, this.clone())),
             ),
             self.setting_row(
                 theme,
-                "Auto-compaction",
-                Some(
-                    "Compact conversation context automatically when it nears the model's window.",
-                ),
+                &tr!("settings.auto_compaction"),
+                Some(&tr!("settings.compact_conversation_context_automatically_when_")),
                 None,
                 Some(self.settings_toggle(
                     "auto-compaction-toggle",
@@ -4275,10 +4259,8 @@ impl OrbitApp {
             ),
             self.setting_row(
                 theme,
-                "Auto-retry",
-                Some(
-                    "Retry automatically on transient errors (overloaded, rate limit, 5xx). pi does not report this setting back, so the switch reflects the last value Orbit sent.",
-                ),
+                &tr!("settings.auto_retry"),
+                Some(&tr!("settings.retry_automatically_on_transient_errors_overload")),
                 None,
                 Some(self.settings_toggle(
                     "auto-retry-toggle",
@@ -4294,11 +4276,11 @@ impl OrbitApp {
         if self.retrying {
             sections.push(self.settings_section(
                 theme,
-                "Status",
+                &tr!("settings.status"),
                 vec![self.setting_row(
                     theme,
-                    "Retrying",
-                    Some("pi is waiting out a transient provider error before retrying."),
+                    &tr!("settings.retrying"),
+                    Some(&tr!("settings.pi_is_waiting_out_a_transient_provider_error_bef")),
                     None,
                     Some(self.runtime_button(
                         "abort-retry",
@@ -4314,17 +4296,17 @@ impl OrbitApp {
         if self.client.is_none() {
             sections.push(self.settings_section(
                 theme,
-                "Status",
+                &tr!("settings.status"),
                 vec![self.setting_row(
                     theme,
-                    "pi is not connected",
-                    Some("Start the runtime from Settings → Runtime to change agent behavior."),
+                    &tr!("settings.pi_is_not_connected"),
+                    Some(&tr!("settings.start_the_runtime_from_settings_runtime_to_chang")),
                     None,
                     None,
                 )],
             ));
         }
-        sections.push(self.settings_section(theme, "Behavior", behavior));
+        sections.push(self.settings_section(theme, &tr!("settings.behavior"), behavior));
         sections
     }
 
@@ -4572,15 +4554,15 @@ impl OrbitApp {
         }
         theme_rows.push(self.setting_row(
             theme,
-            "Theme",
-            Some("Pick a Zed-compatible palette for the workbench."),
+            &tr!("settings.theme"),
+            Some(&tr!("settings.pick_a_zed_compatible_palette_for_the_workbench")),
             None,
             Some(self.theme_control(theme, this.clone(), cx)),
         ));
         theme_rows.push(self.setting_row(
             theme,
-            "Background image",
-            Some("A dithered image behind the new-task page."),
+            &tr!("settings.background_image"),
+            Some(&tr!("settings.a_dithered_image_behind_the_new_task_page")),
             background.as_deref(),
             Some(self.background_controls(theme, this.clone())),
         ));
@@ -4592,15 +4574,15 @@ impl OrbitApp {
             Some(self.language_select(theme, this.clone(), cx)),
         ));
         let mut sections = vec![
-            self.settings_section(theme, "Theme & background", theme_rows),
+            self.settings_section(theme, &tr!("settings.theme_and_background"), theme_rows),
             self.settings_section(
                 theme,
-                "Type & density",
+                &tr!("settings.type_and_density"),
                 vec![
                     self.type_preview(theme),
                     self.setting_row(
                         theme,
-                        "Interface font",
+                        &tr!("settings.interface_font"),
                         None,
                         None,
                         Some(self.font_family_select(
@@ -4612,7 +4594,7 @@ impl OrbitApp {
                     ),
                     self.setting_row(
                         theme,
-                        "Code font",
+                        &tr!("settings.code_font"),
                         None,
                         None,
                         Some(self.font_family_select(
@@ -4624,7 +4606,7 @@ impl OrbitApp {
                     ),
                     self.setting_row(
                         theme,
-                        "UI font size",
+                        &tr!("settings.ui_font_size"),
                         None,
                         None,
                         Some(self.preset_select(
@@ -4636,7 +4618,7 @@ impl OrbitApp {
                     ),
                     self.setting_row(
                         theme,
-                        "Terminal size",
+                        &tr!("settings.terminal_size"),
                         None,
                         None,
                         Some(self.preset_select(
@@ -4648,7 +4630,7 @@ impl OrbitApp {
                     ),
                     self.setting_row(
                         theme,
-                        "Editor size",
+                        &tr!("settings.editor_size"),
                         None,
                         None,
                         Some(self.preset_select(
@@ -4660,7 +4642,7 @@ impl OrbitApp {
                     ),
                     self.setting_row(
                         theme,
-                        "Spacing density",
+                        &tr!("settings.spacing_density"),
                         None,
                         None,
                         Some(self.preset_select(
@@ -4674,19 +4656,19 @@ impl OrbitApp {
             ),
             self.settings_section(
                 theme,
-                "Layout",
+                &tr!("settings.layout"),
                 vec![
                     self.setting_row(
                         theme,
-                        "Show sidebar",
-                        Some("Show the sessions sidebar. Also toggleable from the top bar."),
+                        &tr!("settings.show_sidebar"),
+                        Some(&tr!("settings.show_the_sessions_sidebar_also_toggleable_from_t")),
                         None,
                         Some(self.sidebar_toggle(theme, this.clone())),
                     ),
                     self.setting_row(
                         theme,
-                        "Reduce motion",
-                        Some("Stop looping animations — spinners and the running-session shimmer render static."),
+                        &tr!("settings.reduce_motion"),
+                        Some(&tr!("settings.stop_looping_animations_spinners_and_the_running")),
                         None,
                         Some(self.settings_toggle(
                             "reduce-motion",
@@ -4706,12 +4688,12 @@ impl OrbitApp {
                 1,
                 self.settings_section(
                     theme,
-                    "Background tuning",
+                    &tr!("settings.background_tuning"),
                     vec![
                         self.setting_row(
                             theme,
-                            "Blur",
-                            Some("Softens the picture before the dither pass, so a busy photo sits further behind the text."),
+                            &tr!("settings.blur"),
+                            Some(&tr!("settings.softens_the_picture_before_the_dither_pass_so_a_")),
                             None,
                             Some(self.tuning_select(
                                 SettingsSelect::BackdropBlur,
@@ -4722,8 +4704,8 @@ impl OrbitApp {
                         ),
                         self.setting_row(
                             theme,
-                            "Pixel size",
-                            Some("The dither cell edge. Fine cells read as halftone, coarse ones as chunky pixels."),
+                            &tr!("settings.pixel_size"),
+                            Some(&tr!("settings.the_dither_cell_edge_fine_cells_read_as_halftone")),
                             None,
                             Some(self.tuning_select(
                                 SettingsSelect::BackdropCell,
@@ -4734,8 +4716,8 @@ impl OrbitApp {
                         ),
                         self.setting_row(
                             theme,
-                            "Bottom fade",
-                            Some("How far the picture fades into the page behind the composer."),
+                            &tr!("settings.bottom_fade"),
+                            Some(&tr!("settings.how_far_the_picture_fades_into_the_page_behind_t")),
                             None,
                             Some(self.tuning_select(
                                 SettingsSelect::BackdropFade,

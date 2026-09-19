@@ -9,13 +9,22 @@ Run after editing en.yml or the glossary:
 
     python3 scripts/gen_locales.py
 """
+import glob
 import io
+import importlib
 import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from i18n_glossary import GLOSSARY  # noqa: E402
+
+# Glossary modules are split by surface (core, settings, ...) so each file
+# stays reviewable. Later modules win on a key conflict.
+GLOSSARY = {}
+for module_path in sorted(glob.glob(os.path.join(HERE, "i18n_glossary*.py"))):
+    module = importlib.import_module(os.path.basename(module_path)[:-3])
+    for locale, table in getattr(module, "GLOSSARY", {}).items():
+        GLOSSARY.setdefault(locale, {}).update(table)
 
 LOCALES = os.path.join(HERE, "..", "crates", "orbit-pi", "locales")
 EN = os.path.join(LOCALES, "en.yml")

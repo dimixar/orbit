@@ -198,23 +198,19 @@ impl OrbitApp {
         }
         Some(self.settings_section(
             theme,
-            "Updates",
+            &tr!("updater_ui.updates"),
             vec![
                 self.setting_row(
                     theme,
-                    "Automatic updates",
-                    Some(
-                        "Check for a newer signed release once at launch. Updates install after Orbit quits.",
-                    ),
+                    &tr!("updater_ui.automatic_updates"),
+                    Some(&tr!("updater_ui.check_for_a_newer_signed_release_once_at_launch_")),
                     None,
                     Some(self.automatic_updates_toggle(theme, this.clone())),
                 ),
                 self.setting_row(
                     theme,
-                    "Check for updates",
-                    Some(
-                        "Verify a new release now; a staged update downloads, verifies, and installs after Orbit quits.",
-                    ),
+                    &tr!("updater_ui.check_for_updates"),
+                    Some(&tr!("updater_ui.verify_a_new_release_now_a_staged_update_downloa")),
                     None,
                     Some(self.update_action_button(theme, this)),
                 ),
@@ -253,7 +249,7 @@ impl OrbitApp {
         };
         Some(self.setting_row(
             theme,
-            "Updates",
+            &tr!("updater_ui.updates"),
             Some(&desc),
             None,
             Some(self.update_action_button(theme, this)),
