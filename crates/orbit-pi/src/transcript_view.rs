@@ -1188,16 +1188,16 @@ fn activity_title(steps: &[Step], live: bool) -> String {
     }
     if thoughts > 0 {
         parts.push(if live {
-            "Thinking".to_string()
+            tr!("transcript.thinking")
         } else {
             units(thoughts, "thought")
         });
     }
     if parts.is_empty() {
         return if live {
-            "Working".into()
+            tr!("transcript.working")
         } else {
-            "Worked".into()
+            tr!("transcript.worked")
         };
     }
     parts.join(" \u{b} ")
@@ -1360,15 +1360,20 @@ fn render_thinking_body(
     thinking_scrolls: ThinkingScrolls,
     collapsed_thoughts: CollapsedThoughts,
 ) -> impl IntoElement {
-    let label = if live { "Thinking" } else { "Thought" };
+    let label = if live {
+        tr!("transcript.thinking")
+    } else {
+        tr!("transcript.thought")
+    };
     // The label stays the bold accent anchor; the timing is secondary —
     // normal weight and muted, like the other metric text in the row.
     let timing = duration.map(|duration| {
-        if live {
-            format!("for {}", format_working_elapsed(duration))
+        let elapsed = if live {
+            format_working_elapsed(duration)
         } else {
-            format!("for {}", format_duration(duration))
-        }
+            format_duration(duration)
+        };
+        tr!("transcript.for_duration", duration = elapsed)
     });
     let detail = cap_chars(thinking, THINKING_TEXT_CAP);
     let collapsed = collapsed_thoughts.borrow().contains(&key);
@@ -1590,7 +1595,7 @@ fn render_ask_card(tool: &ToolCall, theme: Theme, key: (usize, usize)) -> AnyEle
                 .flex_none()
                 .text_size(theme.ui_px(11.))
                 .text_color(theme.text_3)
-                .child(format!("{} asked", questions.len())),
+                .child(tr!("transcript.asked", count = questions.len())),
         );
     }
     if declined {
@@ -1967,7 +1972,7 @@ fn render_tool_error_strip(tool: &ToolCall, theme: Theme) -> impl IntoElement {
         .output
         .as_ref()
         .and_then(first_error_line)
-        .unwrap_or_else(|| "The run failed without an error message.".to_string());
+        .unwrap_or_else(|| tr!("transcript.run_failed"));
     div()
         .w_full()
         .border_t_1()
@@ -2011,11 +2016,11 @@ fn render_tool_detail(
     // structured data, plain otherwise.
     let diff = edit_diff(tool);
     let first = match tool_command(tool) {
-        Some(command) => Some(("Command", command, Some(highlight::Lang::Shell), true)),
+        Some(command) => Some((tr!("transcript.command"), command, Some(highlight::Lang::Shell), true)),
         None if diff.is_some() => None,
         None => tool.args.as_ref().map(|args| {
             (
-                "Arguments",
+                tr!("transcript.arguments"),
                 display_value_capped(args, DETAIL_TEXT_CAP),
                 section_lang(Some(args)),
                 false,
@@ -2024,7 +2029,7 @@ fn render_tool_detail(
     };
     let second = tool.output.as_ref().map(|output| {
         (
-            "Output",
+            tr!("transcript.output"),
             display_value_capped(output, OUTPUT_TEXT_CAP),
             section_lang(Some(output)),
             false,
@@ -2071,7 +2076,7 @@ fn render_tool_detail(
                         render_detail_section(
                             key,
                             section,
-                            label,
+                            &label,
                             content,
                             lang,
                             prompt,
@@ -2206,9 +2211,9 @@ fn render_detail_section(
     if foldable {
         let total = lines.len();
         let toggle_label = if expanded {
-            "Show less".to_string()
+            tr!("transcript.show_less")
         } else {
-            format!("Show all {total} lines")
+            tr!("transcript.show_all_lines", total = total)
         };
         card.child(
             div()
@@ -2244,8 +2249,9 @@ fn render_detail_section(
                             .truncate()
                             .font_weight(FontWeight::NORMAL)
                             .text_color(theme.text_3)
-                            .child(format!(
-                                "Showing first {OUTPUT_EXPANDED_PAINT_LINES} — copy for the full log"
+                            .child(tr!(
+                                "transcript.showing_first_output",
+                                count = OUTPUT_EXPANDED_PAINT_LINES
                             )),
                     )
                 })
@@ -2553,9 +2559,9 @@ fn render_edit_diff(
         );
     if foldable {
         let label = if expanded {
-            "Show less".to_string()
+            tr!("transcript.show_less")
         } else {
-            format!("Show all {total} lines")
+            tr!("transcript.show_all_lines", total = total)
         };
         body = body.child(
             div()
@@ -2592,8 +2598,9 @@ fn render_edit_diff(
                             .truncate()
                             .font_weight(FontWeight::NORMAL)
                             .text_color(theme.text_3)
-                            .child(format!(
-                                "Showing first {EDIT_DIFF_PAINT_LINES} — copy for the whole diff"
+                            .child(tr!(
+                                "transcript.showing_first_diff",
+                                count = EDIT_DIFF_PAINT_LINES
                             )),
                     )
                 })
@@ -2908,13 +2915,13 @@ fn usage_breakdown_card(usage: &MessageUsage, theme: Theme) -> AnyElement {
         )
         .child(usage_metric_row(
             "icons/usage-input.svg",
-            "Input",
+            tr!("transcript.input"),
             format_tokens(usage.input),
             theme,
         ))
         .child(usage_metric_row(
             "icons/usage-output.svg",
-            "Output",
+            tr!("transcript.output"),
             format_tokens(usage.output),
             theme,
         ))
@@ -2948,10 +2955,11 @@ fn usage_breakdown_card(usage: &MessageUsage, theme: Theme) -> AnyElement {
 
 fn usage_metric_row(
     icon_path: &'static str,
-    label: &'static str,
+    label: impl Into<SharedString>,
     value: String,
     theme: Theme,
 ) -> impl IntoElement {
+    let label = label.into();
     div()
         .w_full()
         .flex()
