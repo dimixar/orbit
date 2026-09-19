@@ -356,7 +356,7 @@ pub(crate) fn render_side_row(
                     div()
                         .text_size(theme.ui_px(11.))
                         .text_color(theme.text_3)
-                        .child(format!("Show {count} more")),
+                        .child(tr!("sidebar.show_count_more", count = count)),
                 )
                 .into_any_element()
         }
@@ -789,7 +789,7 @@ pub(crate) fn session_menu_popup(
             .child(menu_item(
                 "menu-copy-path",
                 "icons/copy.svg",
-                "Copy path",
+                tr!("sidebar.copy_path"),
                 theme,
                 this.clone(),
                 false,
@@ -798,7 +798,7 @@ pub(crate) fn session_menu_popup(
             .child(menu_item(
                 "menu-reveal",
                 "icons/folder.svg",
-                "Reveal in Finder",
+                tr!("sidebar.reveal_in_finder"),
                 theme,
                 this.clone(),
                 false,
@@ -807,7 +807,7 @@ pub(crate) fn session_menu_popup(
             .child(menu_item(
                 "menu-clone",
                 "icons/git-fork.svg",
-                "Clone session",
+                tr!("sidebar.clone_session"),
                 theme,
                 this.clone(),
                 false,
@@ -818,7 +818,7 @@ pub(crate) fn session_menu_popup(
                     .child(menu_item(
                         "menu-delete",
                         "icons/trash.svg",
-                        "Delete session…",
+                        tr!("sidebar.delete_session_menu"),
                         theme,
                         this.clone(),
                         true,
@@ -951,7 +951,7 @@ pub(crate) fn workspace_menu_popup(this: Entity<OrbitApp>, theme: Theme) -> AnyE
         .child(menu_item(
             "wm-copy-path",
             "icons/copy.svg",
-            "Copy path",
+            tr!("sidebar.copy_path"),
             theme,
             this.clone(),
             false,
@@ -961,7 +961,7 @@ pub(crate) fn workspace_menu_popup(this: Entity<OrbitApp>, theme: Theme) -> AnyE
         .child(menu_item(
             "wm-remove",
             "icons/minus.svg",
-            "Remove from sidebar",
+            tr!("sidebar.remove_from_sidebar"),
             theme,
             this.clone(),
             false,
@@ -977,15 +977,20 @@ pub(crate) fn workspace_menu_popup(this: Entity<OrbitApp>, theme: Theme) -> AnyE
         .into_any_element()
 }
 
-pub(crate) fn menu_item<C: Fn(&mut OrbitApp, &mut Context<OrbitApp>) + 'static>(
+pub(crate) fn menu_item<C, L>(
     id: &'static str,
     icon_path: &'static str,
-    label: &'static str,
+    label: L,
     theme: Theme,
     this: Entity<OrbitApp>,
     danger: bool,
     on_click: C,
-) -> impl IntoElement + use<C> {
+) -> impl IntoElement + use<C, L>
+where
+    C: Fn(&mut OrbitApp, &mut Context<OrbitApp>) + 'static,
+    L: Into<SharedString>,
+{
+    let label: SharedString = label.into();
     let on_click = on_click;
     let (hover_bg, text_color, icon_color) = if danger {
         (theme.stop_red_hover, theme.send_fg, theme.send_fg)
@@ -1137,7 +1142,7 @@ impl OrbitApp {
                 self.sessions = sessions::load_sessions();
                 self.toast_success(tr!("sidebar.session_cloned"));
             }
-            Err(err) => self.toast_error(format!("clone failed: {err}")),
+            Err(err) => self.toast_error(tr!("sidebar.clone_failed", error = err)),
         }
         cx.notify();
     }
@@ -1162,7 +1167,7 @@ impl OrbitApp {
                 return;
             }
             if let Err(err) = fs::remove_file(&menu.path) {
-                self.toast_error(format!("delete failed: {err}"));
+                self.toast_error(tr!("sidebar.delete_failed", error = err));
             } else {
                 self.toast_info(tr!("sidebar.session_deleted"));
             }
@@ -1234,7 +1239,7 @@ impl OrbitApp {
         self.collapsed_workspaces.remove(&menu.label);
         self.expanded_workspace_groups.remove(&menu.label);
         self.expanded_session_groups.remove(&menu.label);
-        self.toast_info(format!("Removed {} from the sidebar", menu.label));
+        self.toast_info(tr!("sidebar.removed_from_sidebar", name = menu.label));
         cx.notify();
     }
 
