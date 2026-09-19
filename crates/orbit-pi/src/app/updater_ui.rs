@@ -113,7 +113,7 @@ impl OrbitApp {
             updater.check_for_updates();
             self.set_status(tr!("updater_ui.checking_for_updates"));
         } else {
-            self.toast_warning("Updates are not available in this build");
+            self.toast_warning(tr!("updater.not_available_in_build"));
         }
         cx.notify();
     }

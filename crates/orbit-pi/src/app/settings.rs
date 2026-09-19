@@ -2355,22 +2355,22 @@ impl OrbitApp {
         let session = self.auth.login_for(&view.id);
         let (status_label, status_color) = if let Some(session) = session {
             match session.phase {
-                LoginPhase::Connecting => ("Connecting", theme.warn),
+                LoginPhase::Connecting => (tr!("status.connecting"), theme.warn),
                 LoginPhase::AwaitingBrowser | LoginPhase::AwaitingDeviceCode => {
-                    ("Connecting", theme.accent)
+                    (tr!("status.connecting"), theme.accent)
                 }
-                LoginPhase::Succeeded => ("Connected", theme.ok_green),
-                LoginPhase::Error => ("Sign-in failed", theme.crit),
-                LoginPhase::Cancelled => ("Cancelled", theme.text_3),
+                LoginPhase::Succeeded => (tr!("status.connected"), theme.ok_green),
+                LoginPhase::Error => (tr!("status.sign_in_failed"), theme.crit),
+                LoginPhase::Cancelled => (tr!("status.cancelled"), theme.text_3),
             }
         } else if view.active {
-            ("Active", theme.ok_green)
+            (tr!("status.active"), theme.ok_green)
         } else if view.connected() {
-            ("Connected", theme.accent)
+            (tr!("status.connected"), theme.accent)
         } else if view.custom {
-            ("Not loaded", theme.warn)
+            (tr!("status.not_loaded"), theme.warn)
         } else {
-            ("Not configured", theme.text_3)
+            (tr!("status.not_configured"), theme.text_3)
         };
 
         let tile = div()
@@ -3984,10 +3984,10 @@ impl OrbitApp {
     ) -> Vec<AnyElement> {
         let state = self.runtime_state();
         let (state_label, state_color) = match state {
-            RuntimeState::Running => ("Running", theme.ok_green),
-            RuntimeState::Exited => ("Exited", theme.crit),
-            RuntimeState::Stopped => ("Stopped", theme.text_3),
-            RuntimeState::Failed => ("Failed to start", theme.crit),
+            RuntimeState::Running => (tr!("runtime.state_running"), theme.ok_green),
+            RuntimeState::Exited => (tr!("runtime.state_exited"), theme.crit),
+            RuntimeState::Stopped => (tr!("runtime.state_stopped"), theme.text_3),
+            RuntimeState::Failed => (tr!("runtime.state_failed"), theme.crit),
         };
         let running = state == RuntimeState::Running;
         let has_client = self.client.is_some();
@@ -4474,7 +4474,7 @@ impl OrbitApp {
     pub(super) fn rename_session(&mut self, cx: &mut Context<Self>) {
         let name = self.session_name_input.read(cx).text().trim().to_string();
         if name.is_empty() {
-            self.toast_warning("Enter a session name first");
+            self.toast_warning(tr!("settings.enter_session_name"));
             cx.notify();
             return;
         }
@@ -5771,7 +5771,7 @@ impl OrbitApp {
         }
         let source = self.plugin_source_input.read(cx).text().trim().to_string();
         if source.is_empty() {
-            self.toast_warning("Enter a package source to install");
+            self.toast_warning(tr!("settings.enter_package_source"));
             cx.notify();
             return;
         }
@@ -5969,7 +5969,7 @@ impl OrbitApp {
     pub(super) fn provider_apply_credentials(&mut self, cx: &mut Context<Self>) {
         // Never yank the process out from under a live turn.
         if self.busy || self.transcript.is_streaming() {
-            self.toast_warning("Finish the current turn, then Restart pi to load credentials");
+            self.toast_warning(tr!("settings.finish_turn_before_restart"));
             cx.notify();
             return;
         }

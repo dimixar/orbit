@@ -80,7 +80,7 @@ impl OrbitApp {
     /// there is no process) so callers can keep the user's input intact.
     pub(super) fn send(&mut self, body: CommandBody, label: &str) -> bool {
         let Some(client) = self.client.as_ref() else {
-            self.toast_warning("pi is not running");
+            self.toast_warning(tr!("runtime.pi_not_running"));
             return false;
         };
         match client.send(body) {

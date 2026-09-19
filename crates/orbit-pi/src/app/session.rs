@@ -1647,7 +1647,7 @@ impl OrbitApp {
         cx: &mut Context<Self>,
     ) {
         let Some((ix, text)) = self.transcript.last_response_text() else {
-            self.toast_warning("No response to copy yet");
+            self.toast_warning(tr!("session.no_response_to_copy"));
             cx.notify();
             return;
         };

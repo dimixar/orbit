@@ -437,7 +437,7 @@ impl OrbitApp {
             None => return,
         };
         if !crate::git::is_repo(&cwd) {
-            self.toast_warning("Not a Git repository");
+            self.toast_warning(tr!("git.not_a_repository"));
             cx.notify();
             return;
         }
