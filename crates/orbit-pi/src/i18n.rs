@@ -44,7 +44,9 @@ impl AppLanguage {
         Self::Italian,
     ];
 
-    /// Explicit languages only (no `System`), in picker order.
+    /// Explicit languages only (no `System`), in picker order. Used by the
+    /// completeness tests and by callers that enumerate shipped locales.
+    #[allow(dead_code)]
     pub const EXPLICIT: [Self; 10] = [
         Self::English,
         Self::SimplifiedChinese,
@@ -139,10 +141,6 @@ impl AppLanguage {
         }
     }
 
-    fn from_system() -> Self {
-        Self::from_locale_id(&system_locale())
-    }
-
     /// Map an arbitrary BCP-47 tag onto a shipped locale, defaulting to
     /// English. Only Simplified Chinese is enabled — Traditional tags stay
     /// English rather than reading as the wrong script.
@@ -192,11 +190,14 @@ pub fn translate(key: &str) -> String {
 }
 
 /// Whether the active locale reads dates in an East-Asian order
-/// (`2026年2月3日`), which some call sites format by hand.
+/// (`2026年2月3日`), which some call sites format by hand. Reserved for the
+/// date formatters; unused until those read it.
+#[allow(dead_code)]
 pub fn uses_east_asian_date_format() -> bool {
     locale_uses_east_asian_date_format(&rust_i18n::locale())
 }
 
+#[allow(dead_code)]
 fn locale_uses_east_asian_date_format(locale: &str) -> bool {
     matches!(locale, "zh-CN" | "ja" | "ko")
 }

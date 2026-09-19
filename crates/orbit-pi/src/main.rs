@@ -27,7 +27,9 @@ macro_rules! tr {
     };
 }
 
-/// Borrowed translation for hot render paths (no interpolation).
+/// Borrowed translation for hot render paths (no interpolation). Kept for
+/// call sites that can borrow; plain `tr!` allocates and is the default.
+#[allow(unused_macros)]
 macro_rules! tr_cow {
     ($key:literal) => {
         rust_i18n::t!($key)
