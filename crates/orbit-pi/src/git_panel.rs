@@ -142,7 +142,7 @@ impl GitPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let message = cx.new(|cx| {
             crate::composer::ComposerInput::new(cx)
-                .with_placeholder("Commit message — leave blank to generate")
+                .with_placeholder(tr!("git_panel.commit_message_leave_blank_to_generate"))
                 .with_key_context("Composer Picker")
                 .with_max_lines(6)
         });
@@ -523,7 +523,7 @@ impl GitPanel {
                 match result {
                     Ok(()) => {
                         panel.clear_failure();
-                        panel.set_status("Staged all changes");
+                        panel.set_status(tr!("git_panel.staged_all_changes"));
                         panel.refresh_status(cx);
                         panel.perform_pending(pending, cx);
                     }
@@ -557,7 +557,7 @@ impl GitPanel {
     fn generate_then(&mut self, action: Option<GitAction>, cx: &mut Context<Self>) {
         let Some(cwd) = self.cwd() else { return };
         self.generating = true;
-        self.set_status("Generating commit message…");
+        self.set_status(tr!("git_panel.generating_commit_message"));
         cx.notify();
         let provider = self.provider.clone();
         let model = self.model.clone();
@@ -596,7 +596,7 @@ impl GitPanel {
                         panel
                             .message
                             .update(cx, |input, cx| input.replace_range(0..len, &message, cx));
-                        panel.set_status("Commit message ready");
+                        panel.set_status(tr!("git_panel.commit_message_ready"));
                         if let Some(action) = action {
                             panel.run_git_action(action, Some(message), cx);
                             return;
@@ -714,7 +714,7 @@ impl GitPanel {
                 match result {
                     Ok(()) => {
                         panel.clear_failure();
-                        panel.set_status("Branch checked out");
+                        panel.set_status(tr!("git_panel.branch_checked_out"));
                     }
                     Err(err) => panel.set_failure(err),
                 }
@@ -777,7 +777,7 @@ impl GitPanel {
                         div()
                             .text_size(theme.ui_px(12.5))
                             .text_color(theme.text_2)
-                            .child("Back"),
+                            .child(tr!("git_panel.back")),
                     ),
             )
             .child(
@@ -1159,7 +1159,7 @@ impl GitPanel {
                                 div()
                                     .text_size(theme.ui_px(12.))
                                     .text_color(theme.text_2)
-                                    .child("Include unstaged changes"),
+                                    .child(tr!("git_panel.include_unstaged_changes")),
                             )
                             .children(self.include_unstaged.then(|| {
                                 let (additions, deletions) = self.unstaged_stats();
@@ -1350,7 +1350,7 @@ impl GitPanel {
                         BarActions::UpToDate => div()
                             .text_size(theme.ui_px(11.5))
                             .text_color(theme.text_3)
-                            .child("Up to date")
+                            .child(tr!("git_panel.up_to_date"))
                             .into_any_element(),
                     }),
             )
@@ -1563,7 +1563,7 @@ impl GitPanel {
                                     this.discard(p.clone(), cx)
                                 }
                             }))
-                            .child("Discard"),
+                            .child(tr!("git_panel.discard")),
                     )
                     .child(
                         div()
@@ -1584,7 +1584,7 @@ impl GitPanel {
                                 this.pending_discard = None;
                                 cx.notify();
                             }))
-                            .child("Cancel"),
+                            .child(tr!("git_panel.cancel")),
                     );
             } else {
                 actions = actions.child(row_button(

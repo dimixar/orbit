@@ -327,7 +327,7 @@ impl OrbitApp {
                 self.refresh_catalogs();
                 // Capability probes queue after the state request.
                 self.probe_auth();
-                self.toast_info("pi process started");
+                self.toast_info(tr!("runtime.pi_process_started"));
             }
             Err(err) => {
                 let message = format!("pi spawn failed: {err}");
@@ -346,7 +346,7 @@ impl OrbitApp {
         }
         self.drop_client();
         self.busy = false;
-        self.toast_info("pi process stopped");
+        self.toast_info(tr!("runtime.pi_process_stopped"));
         cx.notify();
     }
 

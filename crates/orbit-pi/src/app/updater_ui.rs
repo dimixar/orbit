@@ -65,7 +65,7 @@ impl OrbitApp {
                 }
                 UpdaterEvent::UpToDate => {
                     self.updater_status = UpdateStatus::Idle;
-                    self.toast_info("Orbit is up to date");
+                    self.toast_info(tr!("updater_ui.orbit_is_up_to_date"));
                 }
                 UpdaterEvent::Failed(error) => {
                     self.updater_status = UpdateStatus::Idle;
@@ -98,7 +98,7 @@ impl OrbitApp {
             .is_some_and(|updater| updater.install_available_update());
         if started {
             self.updater_status = UpdateStatus::Updating;
-            self.toast_info("Preparing the update…");
+            self.toast_info(tr!("updater_ui.preparing_the_update"));
             cx.notify();
         }
     }
@@ -111,7 +111,7 @@ impl OrbitApp {
             .and_then(|state| state.0.as_ref())
         {
             updater.check_for_updates();
-            self.set_status("Checking for updates…");
+            self.set_status(tr!("updater_ui.checking_for_updates"));
         } else {
             self.toast_warning("Updates are not available in this build");
         }
@@ -174,13 +174,13 @@ impl OrbitApp {
                         this.install_available_update(cx);
                     }),
                 )
-                .child("Update");
+                .child(tr!("updater_ui.update"));
         } else {
             button = button
                 .bg(theme.bg_hover)
                 .text_color(theme.text_3)
                 .cursor_default()
-                .child("Updating\u{2026}");
+                .child(tr!("updater_ui.updating"));
         }
         Some(button.into_any_element())
     }
@@ -327,7 +327,7 @@ impl OrbitApp {
                 .bg(theme.bg_raised)
                 .text_color(theme.text_3)
                 .cursor_default()
-                .child("Updating\u{2026}")
+                .child(tr!("updater_ui.updating"))
                 .into_any_element(),
             UpdateStatus::Idle => base
                 .border_1()
@@ -339,7 +339,7 @@ impl OrbitApp {
                 .on_mouse_up(MouseButton::Left, move |_, _, cx| {
                     this.update(cx, |app, cx| app.begin_update_check(cx));
                 })
-                .child("Check for Updates\u{2026}")
+                .child(tr!("updater_ui.check_for_updates"))
                 .into_any_element(),
         }
     }

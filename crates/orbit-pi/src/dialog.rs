@@ -462,7 +462,7 @@ impl Dialog {
                 .pb(px(14.))
                 .text_size(theme.ui_px(13.))
                 .text_color(theme.text_3)
-                .child("No options were provided.")
+                .child(tr!("dialog.no_options_were_provided"))
                 .into_any_element();
         }
         let list_h = (options.len() as f32 * OPTION_H).min(LIST_MAX_H);

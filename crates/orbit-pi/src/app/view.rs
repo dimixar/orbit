@@ -1641,7 +1641,7 @@ impl OrbitApp {
                                             .text_size(theme.ui_px(20.))
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(theme.text)
-                                            .child("Start a task"),
+                                            .child(tr!("view.start_a_task")),
                                     )
                                     .child(
                                         div()
@@ -1674,7 +1674,7 @@ impl OrbitApp {
                                             .text_size(theme.ui_px(10.5))
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(theme.text_3)
-                                            .child("Workspace"),
+                                            .child(tr!("view.workspace")),
                                     )
                                     .child(
                                         div()
@@ -1815,7 +1815,7 @@ impl OrbitApp {
                             app.client = Some(client);
                             app.send(CommandBody::GetState, "get_state");
                             app.refresh_catalogs();
-                            app.toast_success("Connected");
+                            app.toast_success(tr!("view.connected"));
                         }
                         Err(err) => app.toast_error(format!("pi spawn failed: {err}")),
                     }
@@ -1879,7 +1879,7 @@ impl OrbitApp {
                                             .text_size(theme.ui_px(22.))
                                             .font_weight(FontWeight::MEDIUM)
                                             .text_color(theme.text)
-                                            .child("Set up Orbit"),
+                                            .child(tr!("view.set_up_orbit")),
                                     )
                                     .child(
                                         div()
@@ -2475,7 +2475,7 @@ impl OrbitApp {
                     .text_size(theme.ui_px(13.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child("New Task"),
+                    .child(tr!("view.new_task")),
             )
             .child(
                 div()
@@ -2517,7 +2517,7 @@ impl OrbitApp {
                     .truncate()
                     .text_size(theme.ui_px(12.5))
                     .text_color(theme.text_3)
-                    .child("Search"),
+                    .child(tr!("view.search")),
             )
             .child(
                 div()
@@ -2584,7 +2584,7 @@ impl OrbitApp {
                     } else {
                         theme.text_2
                     })
-                    .child("Usage"),
+                    .child(tr!("view.usage")),
             )
     }
 
@@ -2684,7 +2684,7 @@ impl OrbitApp {
                                     this.abort_retry(cx);
                                 }),
                             )
-                            .child("Cancel"),
+                            .child(tr!("view.cancel")),
                     )
                     .into_any_element(),
             );
@@ -2716,7 +2716,7 @@ impl OrbitApp {
                             .min_w_0()
                             .text_size(theme.ui_px(11.5))
                             .text_color(theme.text_2)
-                            .child("Preparing conversation context…"),
+                            .child(tr!("view.preparing_conversation_context")),
                     )
                     .into_any_element(),
             );
@@ -2940,7 +2940,7 @@ impl OrbitApp {
                         } else {
                             theme.text_2
                         })
-                        .child("Type something."),
+                        .child(tr!("view.type_something")),
                 );
             if !submitted {
                 row =
@@ -3057,7 +3057,7 @@ impl OrbitApp {
                 .hover(|style| style.bg(theme.overlay_strong).text_color(theme.text))
                 .on_click(cx.listener(|this, _, window, cx| this.ask_prev_question(window, cx)));
         }
-        back = back.child("Back");
+        back = back.child(tr!("view.back"));
 
         let last = cursor + 1 >= total;
         let next_label = if last { "Submit" } else { "Next" };
@@ -3317,7 +3317,7 @@ impl OrbitApp {
                                 .cursor_pointer()
                                 .hover(|s| s.bg(theme.overlay).text_color(theme.text))
                                 .on_mouse_up(MouseButton::Left, cx.listener(Self::on_clear_queue))
-                                .child("Clear"),
+                                .child(tr!("view.clear")),
                         ),
                 )
                 .child(chips)
@@ -3376,7 +3376,7 @@ impl OrbitApp {
                                     this.runtime_restart(cx);
                                 }),
                             )
-                            .child("Reconnect"),
+                            .child(tr!("view.reconnect")),
                     )
                 })
                 .child(

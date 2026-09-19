@@ -347,7 +347,7 @@ pub fn details_card(
                         .flex_1()
                         .text_size(theme.ui_px(13.))
                         .text_color(theme.text_2)
-                        .child("Context Usage"),
+                        .child(tr!("context_meter.context_usage")),
                 )
                 .child(
                     div()
@@ -417,7 +417,7 @@ fn compact_action(is_compacting: bool, on_compact: Rc<ActionClick>, theme: Theme
         button
             .text_color(theme.text_3)
             .cursor_default()
-            .child("Compacting\u{2026}")
+            .child(tr!("context_meter.compacting"))
             .into_any_element()
     } else {
         button
@@ -425,7 +425,7 @@ fn compact_action(is_compacting: bool, on_compact: Rc<ActionClick>, theme: Theme
             .cursor_pointer()
             .hover(|s| s.bg(theme.bg_hover))
             .on_click(move |event, window, cx| on_compact(event, window, cx))
-            .child("Compact now")
+            .child(tr!("context_meter.compact_now"))
             .into_any_element()
     }
 }
@@ -456,7 +456,7 @@ fn legend(slices: &[ContextSlice], theme: Theme) -> impl IntoElement + use<> {
         return div()
             .text_size(theme.ui_px(12.))
             .text_color(theme.text_3)
-            .child("No usage reported for this session yet.")
+            .child(tr!("context_meter.no_usage_reported_for_this_session_yet"))
             .into_any_element();
     }
     div()
@@ -502,7 +502,7 @@ pub fn session_usage_section(usage: &SessionUsage, theme: Theme) -> AnyElement {
             div()
                 .text_size(theme.ui_px(12.))
                 .text_color(theme.text_3)
-                .child("Session usage"),
+                .child(tr!("context_meter.session_usage")),
         )
         .child(session_row(
             "icons/usage-input.svg",

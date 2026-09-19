@@ -500,9 +500,9 @@ fn legend(theme: Theme) -> AnyElement {
         .gap(px(6.))
         .text_size(theme.ui_px(10.))
         .text_color(theme.text_3)
-        .child("Less")
+        .child(tr!("heatmap.less"))
         .child(swatches)
-        .child("More")
+        .child(tr!("heatmap.more"))
         .into_any_element()
 }
 

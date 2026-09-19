@@ -76,6 +76,8 @@ def is_copy(text: str) -> bool:
         return False
     if "%{" in text:  # already a template
         return False
+    if "{" in text or "}" in text:  # Rust format placeholder
+        return False
     if IDENT.match(text):
         return False
     if text.endswith((".svg", ".png", ".json", ".yml", ".rs", ".ttf", ".icns", ".ico")):
@@ -111,7 +113,7 @@ def main(apply: bool):
     files = []
     for dp, _, fs in os.walk(ROOT):
         for f in fs:
-            if f.endswith(".rs"):
+            if f.endswith(".rs") and not f.endswith("_tests.rs"):
                 files.append(os.path.join(dp, f))
     files.sort()
 
@@ -155,7 +157,12 @@ def main(apply: bool):
 
         for _, pat in PATTERNS:
             head = pat.sub(repl, head)
-        open(path, "w", encoding="utf-8").write(head + tail)
+        if apply:
+            open(path, "w", encoding="utf-8").write(head + tail)
+        else:
+            for line in head.splitlines():
+                if 'tr!("' in line and line not in src:
+                    pass
 
     for k in sorted(all_keys):
         print(f"{k}\t{all_keys[k]}")

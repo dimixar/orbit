@@ -548,7 +548,7 @@ impl OrbitApp {
                 self.refresh_catalogs();
                 // Capability probes queue after the new-session request.
                 self.probe_auth();
-                self.set_status("New session");
+                self.set_status(tr!("session.new_session"));
             }
             Err(err) => {
                 let message = format!("pi spawn failed: {err}");
@@ -981,7 +981,7 @@ impl OrbitApp {
                     .text_size(theme.ui_px(12.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child("Session details"),
+                    .child(tr!("session.session_details")),
             )
             .child(
                 div()
@@ -1013,7 +1013,7 @@ impl OrbitApp {
                     div()
                         .text_size(theme.ui_px(11.))
                         .text_color(theme.text_3)
-                        .child("Name"),
+                        .child(tr!("session.name")),
                 )
                 .child(
                     div()
@@ -1062,7 +1062,7 @@ impl OrbitApp {
                                         this.update(cx, |app, cx| app.rename_session(cx));
                                     }
                                 })
-                                .child("Update"),
+                                .child(tr!("session.update")),
                         ),
                 )
         });
@@ -1137,7 +1137,7 @@ impl OrbitApp {
                             .flex_1()
                             .text_size(theme.ui_px(12.))
                             .text_color(theme.text)
-                            .child("Commit or push"),
+                            .child(tr!("session.commit_or_push")),
                     )
                     .child(icon("icons/chevron-right.svg", 11., theme.text_3)),
             )
@@ -1165,7 +1165,7 @@ impl OrbitApp {
                             .flex_1()
                             .text_size(theme.ui_px(12.))
                             .text_color(theme.text)
-                            .child("Compare branch"),
+                            .child(tr!("session.compare_branch")),
                     )
                     .child(icon("icons/chevron-right.svg", 11., theme.text_3)),
             )
@@ -1340,7 +1340,7 @@ impl OrbitApp {
                         div()
                             .text_size(theme.ui_px(11.5))
                             .text_color(theme.text_2)
-                            .child("Usage"),
+                            .child(tr!("session.usage")),
                     );
             }
         }
@@ -1374,7 +1374,7 @@ impl OrbitApp {
                     .text_size(theme.ui_px(12.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child("Provider usage"),
+                    .child(tr!("session.provider_usage")),
             )
             .child(
                 div()
@@ -1653,7 +1653,7 @@ impl OrbitApp {
         };
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         self.transcript.mark_copied(ix);
-        self.toast_success("Copied latest response");
+        self.toast_success(tr!("session.copied_latest_response"));
         cx.notify();
     }
 

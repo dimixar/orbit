@@ -342,7 +342,7 @@ fn render_jump_button(state: MessageScrollerState, theme: Theme) -> impl IntoEle
                             .text_size(px(11.5))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child("New activity"),
+                            .child(tr!("message_scroller.new_activity")),
                     )
                 }),
         )

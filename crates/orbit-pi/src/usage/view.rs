@@ -193,7 +193,7 @@ impl UsagePage {
                         div()
                             .text_size(theme.ui_px(12.5))
                             .text_color(theme.text_2)
-                            .child("Back"),
+                            .child(tr!("view.back")),
                     ),
             )
             .child(
@@ -206,7 +206,7 @@ impl UsagePage {
                         div()
                             .text_size(theme.ui_px(15.))
                             .font_weight(FontWeight::MEDIUM)
-                            .child("Usage"),
+                            .child(tr!("view.usage")),
                     ),
             )
             .children(status.map(|status| {
@@ -577,7 +577,7 @@ impl UsagePage {
                         .text_size(theme.ui_px(11.))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text_3)
-                        .child("FILTERS"),
+                        .child(tr!("view.filters")),
                 )
                 .children(chips)
                 .child(clear_all)
@@ -619,7 +619,7 @@ impl UsagePage {
                     .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                         entity.update(cx, |page, cx| page.refresh(cx));
                     })
-                    .child("Try again")
+                    .child(tr!("view.try_again"))
                     .into_any_element();
                 return self.message_state(
                     theme,
@@ -828,7 +828,7 @@ impl UsagePage {
                 .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                     entity.update(cx, |page, cx| page.clear_filters(cx));
                 })
-                .child("Clear filters")
+                .child(tr!("view.clear_filters"))
                 .into_any_element(),
         )
     }
@@ -1366,7 +1366,7 @@ impl UsagePage {
                     .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                         fail_entity.update(cx, |page, cx| page.set_errors_only(true, cx));
                     })
-                    .child("View failures")
+                    .child(tr!("view.view_failures"))
                     .into_any_element(),
             );
         }
@@ -2171,7 +2171,7 @@ impl UsagePage {
                 div()
                     .text_color(theme.text_3)
                     .font_weight(FontWeight::MEDIUM)
-                    .child("Response time"),
+                    .child(tr!("view.response_time")),
             )
             .children(items.into_iter().map(|(label, value)| {
                 div()
@@ -2965,7 +2965,7 @@ impl UsagePage {
                                 div()
                                     .text_size(theme.ui_px(11.5))
                                     .text_color(theme.text_3)
-                                    .child("of prompt tokens served from cache"),
+                                    .child(tr!("view.of_prompt_tokens_served_from_cache")),
                             ),
                     )
                     .child(
@@ -3025,7 +3025,7 @@ impl UsagePage {
                         div()
                             .text_size(theme.ui_px(10.5))
                             .text_color(theme.text_3)
-                            .child("Hit rate over time"),
+                            .child(tr!("view.hit_rate_over_time")),
                     )
                     .child(hit_rate_bars(&snapshot.series, theme)),
             );
@@ -4609,7 +4609,7 @@ fn table_pager(
             div()
                 .text_size(theme.ui_px(12.))
                 .text_color(theme.text_3)
-                .child("Rows"),
+                .child(tr!("view.rows")),
         )
         .child(size_control)
         .child(
@@ -4724,7 +4724,7 @@ fn retry_note(theme: Theme) -> AnyElement {
     div()
         .text_size(theme.ui_px(12.))
         .text_color(theme.text_3)
-        .child("Retries are unavailable: pi records automatic retries as live events, not in session files.")
+        .child(tr!("view.retries_are_unavailable_pi_records_automatic_ret"))
         .into_any_element()
 }
 

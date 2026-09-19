@@ -800,14 +800,14 @@ fn render_rail_hint(
                 .line_height(theme.ui_px(16.))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.text)
-                .child("Jump between turns"),
+                .child(tr!("transcript_view.jump_between_turns")),
         )
         .child(
             div()
                 .text_size(theme.ui_px(11.5))
                 .line_height(theme.ui_px(16.))
                 .text_color(theme.text_3)
-                .child("Click a line — or press ⌘↑ ⌘↓ — to revisit any prompt."),
+                .child(tr!("transcript_view.click_a_line_or_press_to_revisit_any_prompt")),
         )
         .on_click(move |_, _, cx| {
             crate::transcript::dismiss_rail_hint_state(&rail_hint_dismissed, &rail_hint_shown_at);
@@ -1140,7 +1140,7 @@ fn render_assistant_error(error: &str, theme: Theme) -> AnyElement {
                         .text_size(theme.ui_px(12.5))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text)
-                        .child("Agent error"),
+                        .child(tr!("transcript_view.agent_error")),
                 )
                 .child(
                     div()
@@ -1582,7 +1582,7 @@ fn render_ask_card(tool: &ToolCall, theme: Theme, key: (usize, usize)) -> AnyEle
                 .flex_none()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.accent)
-                .child("Question"),
+                .child(tr!("transcript_view.question")),
         );
     if questions.len() > 1 {
         header = header.child(
@@ -1601,7 +1601,7 @@ fn render_ask_card(tool: &ToolCall, theme: Theme, key: (usize, usize)) -> AnyEle
                 .justify_end()
                 .text_size(theme.ui_px(11.))
                 .text_color(theme.text_3)
-                .child("No answer"),
+                .child(tr!("transcript_view.no_answer")),
         );
     } else if tool.failed {
         header = header.child(div().flex_1().flex().justify_end().child(glyph(
@@ -1730,7 +1730,7 @@ fn render_ask_card(tool: &ToolCall, theme: Theme, key: (usize, usize)) -> AnyEle
                     .text_size(theme.ui_px(11.))
                     .line_height(theme.ui_px(15.))
                     .text_color(theme.text_3)
-                    .child("Waiting for an answer…"),
+                    .child(tr!("transcript_view.waiting_for_an_answer")),
             );
         }
         body = body.child(block);
@@ -2904,7 +2904,7 @@ fn usage_breakdown_card(usage: &MessageUsage, theme: Theme) -> AnyElement {
             div()
                 .text_size(theme.ui_px(11.5))
                 .text_color(theme.text_3)
-                .child("Message usage"),
+                .child(tr!("transcript_view.message_usage")),
         )
         .child(usage_metric_row(
             "icons/usage-input.svg",
@@ -3182,7 +3182,7 @@ fn render_stopped_marker(theme: Theme) -> impl IntoElement {
                 .line_height(theme.ui_px(18.))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.text_3)
-                .child("Stopped"),
+                .child(tr!("transcript_view.stopped")),
         )
 }
 
@@ -4887,7 +4887,7 @@ pub(crate) fn render_changed_files(
             .text_color(theme.text_2)
             .hover(|style| style.bg(theme.bg_hover).text_color(theme.text))
             .child(glyph("icons/file-diff.svg", 12., theme.text_3))
-            .child("Review")
+            .child(tr!("transcript_view.review"))
             .on_click(move |_, window, cx| review(window, cx))
     });
 

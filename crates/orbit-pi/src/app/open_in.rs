@@ -247,7 +247,7 @@ impl OrbitApp {
                     .justify_center()
                     .text_size(theme.ui_px(12.))
                     .text_color(theme.text_3)
-                    .child("No matches"),
+                    .child(tr!("open_in.no_matches")),
             );
         }
 

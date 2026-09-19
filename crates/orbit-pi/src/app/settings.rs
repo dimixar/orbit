@@ -106,7 +106,7 @@ impl OrbitApp {
                                     div()
                                         .text_size(theme.ui_px(13.))
                                         .text_color(theme.text_2)
-                                        .child("Back"),
+                                        .child(tr!("settings.back")),
                                 ),
                         ),
                     )
@@ -132,7 +132,7 @@ impl OrbitApp {
                                     .text_size(theme.ui_px(10.5))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(theme.text_3)
-                                    .child("SETTINGS"),
+                                    .child(tr!("settings.settings")),
                             ),
                     )
                     // Section rows — 30px pills grouped by what they belong
@@ -608,7 +608,7 @@ impl OrbitApp {
                     } else {
                         theme.text_2
                     })
-                    .child("Favorites"),
+                    .child(tr!("settings.favorites")),
             );
 
         div()
@@ -852,7 +852,7 @@ impl OrbitApp {
                             .text_size(theme.ui_px(10.5))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.active_fg)
-                            .child("Active"),
+                            .child(tr!("settings.active")),
                     ),
             );
         } else {
@@ -868,7 +868,7 @@ impl OrbitApp {
                     .text_size(theme.ui_px(10.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_3)
-                    .child("Set active"),
+                    .child(tr!("settings.set_active")),
             );
         }
 
@@ -1070,7 +1070,7 @@ impl OrbitApp {
                     div()
                         .text_size(theme.ui_px(11.5))
                         .text_color(theme.crit)
-                        .child("Remove this plugin?"),
+                        .child(tr!("settings.remove_this_plugin")),
                 )
                 .child(self.plugin_button(
                     format!("plugin-remove-confirm-{source}"),
@@ -1555,7 +1555,7 @@ impl OrbitApp {
                     .text_size(theme.ui_px(12.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_2)
-                    .child("Refresh"),
+                    .child(tr!("settings.refresh")),
             );
 
         let add_button = div()
@@ -1581,7 +1581,7 @@ impl OrbitApp {
                     .text_size(theme.ui_px(12.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.send_fg)
-                    .child("Add provider"),
+                    .child(tr!("settings.add_provider")),
             );
 
         let toolbar = div()
@@ -1684,7 +1684,7 @@ impl OrbitApp {
                                     .text_size(theme.ui_px(12.5))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.text)
-                                    .child("Credentials changed"),
+                                    .child(tr!("settings.credentials_changed")),
                             )
                             .child(
                                 div()
@@ -1735,13 +1735,13 @@ impl OrbitApp {
                             .text_size(theme.ui_px(13.))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child("No providers match"),
+                            .child(tr!("settings.no_providers_match")),
                     )
                     .child(
                         div()
                             .text_size(theme.ui_px(12.))
                             .text_color(theme.text_2)
-                            .child("Try a different search."),
+                            .child(tr!("settings.try_a_different_search")),
                     )
                     .into_any_element(),
             );
@@ -1802,7 +1802,7 @@ impl OrbitApp {
                         div()
                             .text_size(theme.ui_px(11.5))
                             .text_color(theme.text_3)
-                            .child("Fix or remove the file before editing providers here."),
+                            .child(tr!("settings.fix_or_remove_the_file_before_editing_providers_")),
                     ),
             )
             .into_any_element()
@@ -2057,7 +2057,7 @@ impl OrbitApp {
                         div()
                             .text_size(theme.ui_px(10.5))
                             .text_color(theme.text_3)
-                            .child("Device code"),
+                            .child(tr!("settings.device_code")),
                     )
                     .child(
                         div()
@@ -2195,7 +2195,7 @@ impl OrbitApp {
                 .text_size(theme.ui_px(10.5))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.text_3)
-                .child("USAGE"),
+                .child(tr!("settings.usage")),
         );
         if let Some(plan) = &report.plan {
             head = head.child(self.provider_badge(
@@ -2526,7 +2526,7 @@ impl OrbitApp {
         if view.has_api_key {
             facts = facts
                 .child(div().size(px(3.)).rounded_full().bg(theme.text_3))
-                .child("models.json key");
+                .child(tr!("settings.models_json_key"));
         }
 
         let endpoint = if view.base_url.is_empty() {
@@ -2559,7 +2559,7 @@ impl OrbitApp {
                         .min_w_0()
                         .text_size(theme.ui_px(11.5))
                         .text_color(theme.crit)
-                        .child("Remove this provider?"),
+                        .child(tr!("settings.remove_this_provider")),
                 )
                 .child(self.provider_button(
                     format!("provider-remove-confirm-{}", view.id),
@@ -2629,7 +2629,7 @@ impl OrbitApp {
                         div()
                             .text_size(theme.ui_px(11.))
                             .text_color(theme.text_3)
-                            .child("No sign-in methods available"),
+                            .child(tr!("settings.no_sign_in_methods_available")),
                     );
                 }
             } else {
@@ -2912,7 +2912,7 @@ impl OrbitApp {
             }
             ProviderAction::AuthCopy(value) => {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(value));
-                self.toast_success("Copied to clipboard");
+                self.toast_success(tr!("settings.copied_to_clipboard"));
             }
             ProviderAction::EditKey {
                 id,
@@ -2991,7 +2991,7 @@ impl OrbitApp {
                 div()
                     .text_size(theme.ui_px(12.))
                     .text_color(theme.text_2)
-                    .child("Close"),
+                    .child(tr!("settings.close")),
             );
 
         let card = div()
@@ -3162,7 +3162,7 @@ impl OrbitApp {
                             .flex_1()
                             .text_size(theme.ui_px(11.))
                             .text_color(theme.text_3)
-                            .child("Prefer a subscription? Sign in with OAuth instead."),
+                            .child(tr!("settings.prefer_a_subscription_sign_in_with_oauth_instead")),
                     )
                     .child(self.provider_button(
                         format!("provider-key-signin-{id}"),
@@ -3213,7 +3213,7 @@ impl OrbitApp {
                 div()
                     .text_size(theme.ui_px(12.))
                     .text_color(theme.text_2)
-                    .child("Cancel"),
+                    .child(tr!("settings.cancel")),
             );
         let save = self.provider_button(
             "provider-key-save".into(),
@@ -3430,7 +3430,7 @@ impl OrbitApp {
                         .text_size(theme.ui_px(12.))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text_2)
-                        .child("Provider id"),
+                        .child(tr!("settings.provider_id")),
                 )
                 .child(
                     div()
@@ -3480,7 +3480,7 @@ impl OrbitApp {
                             .text_size(theme.ui_px(12.))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text_2)
-                            .child("API type"),
+                            .child(tr!("settings.api_type")),
                     )
                     .child(api_chips),
             )
@@ -3591,7 +3591,7 @@ impl OrbitApp {
                     div()
                         .text_size(theme.ui_px(12.))
                         .text_color(theme.text_2)
-                        .child("Cancel"),
+                        .child(tr!("settings.cancel")),
                 )
         };
         let save = {
@@ -3823,7 +3823,7 @@ impl OrbitApp {
             .cursor_pointer()
             .hover(|s| s.bg(theme.bg_hover))
             .child(icon("icons/arrow-up-right.svg", 12., theme.text_2))
-            .child("GitHub")
+            .child(tr!("settings.github"))
             .on_mouse_up(MouseButton::Left, |_, _, cx| {
                 cx.open_url(env!("CARGO_PKG_REPOSITORY"));
             })
@@ -3934,7 +3934,7 @@ impl OrbitApp {
         self.notification_prefs.toasts = !self.notification_prefs.toasts;
         notifications::Prefs::persist(self.notification_prefs);
         if self.notification_prefs.toasts {
-            self.toast_info("In-app toasts are on");
+            self.toast_info(tr!("settings.in_app_toasts_are_on"));
         }
         cx.notify();
     }
@@ -4191,7 +4191,7 @@ impl OrbitApp {
                 .py(theme.space(12.))
                 .text_size(theme.ui_px(12.))
                 .text_color(theme.text_3)
-                .child("No output from the pi process.")
+                .child(tr!("settings.no_output_from_the_pi_process"))
                 .into_any_element()
         } else {
             let mut block = div().flex().flex_col().gap(px(2.));
@@ -4227,7 +4227,7 @@ impl OrbitApp {
                         .text_size(theme.ui_px(10.5))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text_3)
-                        .child("RECENT STDERR"),
+                        .child(tr!("settings.recent_stderr")),
                 )
                 .child(body)
                 .into_any_element(),
@@ -4476,7 +4476,7 @@ impl OrbitApp {
         self.send(CommandBody::AbortRetry, "abort_retry");
         self.retrying = false;
         self.retry_detail = None;
-        self.set_status("Retry aborted");
+        self.set_status(tr!("settings.retry_aborted"));
         cx.notify();
     }
 
@@ -4502,7 +4502,7 @@ impl OrbitApp {
                 session.title = name;
             }
         }
-        self.toast_success("Session renamed");
+        self.toast_success(tr!("settings.session_renamed"));
         cx.notify();
     }
 
@@ -4829,14 +4829,14 @@ impl OrbitApp {
                     .text_size(theme.ui_px(15.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child("New task"),
+                    .child(tr!("settings.new_task")),
             )
             .child(
                 div()
                     .font_family(theme::ui_font_family())
                     .text_size(theme.ui_px(12.5))
                     .text_color(theme.text_2)
-                    .child("The quick brown fox jumps over the lazy dog."),
+                    .child(tr!("settings.the_quick_brown_fox_jumps_over_the_lazy_dog")),
             );
 
         // ── terminal sample ──
@@ -5063,7 +5063,7 @@ impl OrbitApp {
     pub(super) fn background_reset(&mut self, cx: &mut Context<Self>) {
         crate::dither::clear_all();
         crate::dither::background();
-        self.set_status("Background reset");
+        self.set_status(tr!("settings.background_reset"));
         cx.notify();
     }
 
@@ -5355,7 +5355,7 @@ impl OrbitApp {
                         .justify_center()
                         .text_size(theme.ui_px(12.))
                         .text_color(theme.text_3)
-                        .child("No matches"),
+                        .child(tr!("settings.no_matches")),
                 )
                 .into_any_element()
         } else {
@@ -5857,7 +5857,7 @@ impl OrbitApp {
             }
             PluginAction::Refresh => {
                 self.refresh_plugins(cx);
-                self.toast_info("Reloaded installed plugins");
+                self.toast_info(tr!("settings.reloaded_installed_plugins"));
                 cx.notify();
             }
         }
@@ -5968,7 +5968,7 @@ impl OrbitApp {
             });
         })
         .detach();
-        self.toast_info("Refreshed provider catalog");
+        self.toast_info(tr!("settings.refreshed_provider_catalog"));
         cx.notify();
     }
 
@@ -5995,7 +5995,7 @@ impl OrbitApp {
         }
         self.provider_auth_dirty = false;
         self.reload_custom_providers(cx);
-        self.toast_success("pi restarted — credentials loaded");
+        self.toast_success(tr!("settings.pi_restarted_credentials_loaded"));
         cx.notify();
     }
 
@@ -6215,7 +6215,7 @@ impl OrbitApp {
                 .with_element_id("provider-editor-name")
                 .with_key_context("Composer Picker")
                 .with_max_lines(1)
-                .with_placeholder("Optional display name")
+                .with_placeholder(tr!("settings.optional_display_name"))
                 .with_text(name_text)
         });
         let base_url_input = cx.new(|cx| {
@@ -6242,7 +6242,7 @@ impl OrbitApp {
                 .with_element_id("provider-editor-models")
                 .with_key_context("Composer Picker")
                 .with_max_lines(4)
-                .with_placeholder("model-id, model-id-2")
+                .with_placeholder(tr!("settings.model_id_model_id_2"))
                 .with_text(models_text)
         });
 

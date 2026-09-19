@@ -998,14 +998,14 @@ impl UsagePage {
         let search = cx.new(|cx| {
             ComposerInput::new(cx)
                 .with_element_id("usage-session-search")
-                .with_placeholder("Search sessions…")
+                .with_placeholder(tr!("page.search_sessions"))
                 .with_key_context("Composer Picker")
                 .with_max_lines(1)
         });
         let menu_query = cx.new(|cx| {
             ComposerInput::new(cx)
                 .with_element_id("usage-menu-query")
-                .with_placeholder("Filter…")
+                .with_placeholder(tr!("page.filter"))
                 .with_key_context("Composer Picker")
                 .with_max_lines(1)
         });
@@ -1019,7 +1019,7 @@ impl UsagePage {
         let breakdown_search = cx.new(|cx| {
             ComposerInput::new(cx)
                 .with_element_id("usage-breakdown-search")
-                .with_placeholder("Search breakdown…")
+                .with_placeholder(tr!("page.search_breakdown"))
                 .with_key_context("Composer Picker")
                 .with_max_lines(1)
         });
@@ -1027,7 +1027,7 @@ impl UsagePage {
         let series_search = cx.new(|cx| {
             ComposerInput::new(cx)
                 .with_element_id("usage-series-search")
-                .with_placeholder("Search buckets…")
+                .with_placeholder(tr!("page.search_buckets"))
                 .with_key_context("Composer Picker")
                 .with_max_lines(1)
         });
@@ -1038,7 +1038,7 @@ impl UsagePage {
         let bucket_search = cx.new(|cx| {
             ComposerInput::new(cx)
                 .with_element_id("usage-bucket-search")
-                .with_placeholder("Search buckets…")
+                .with_placeholder(tr!("page.search_buckets"))
                 .with_key_context("Composer Picker")
                 .with_max_lines(1)
         });
@@ -1049,7 +1049,7 @@ impl UsagePage {
         let failure_search = cx.new(|cx| {
             ComposerInput::new(cx)
                 .with_element_id("usage-failure-search")
-                .with_placeholder("Search failures…")
+                .with_placeholder(tr!("page.search_failures"))
                 .with_key_context("Composer Picker")
                 .with_max_lines(1)
         });

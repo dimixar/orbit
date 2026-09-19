@@ -153,7 +153,7 @@ impl OrbitApp {
                 self.refresh_catalogs();
                 // Capability probes queue after the state request.
                 self.probe_auth();
-                self.set_status("New task started");
+                self.set_status(tr!("pickers.new_task_started"));
             }
             Err(err) => {
                 let message = format!("pi spawn failed: {err}");
@@ -394,7 +394,7 @@ impl OrbitApp {
             PaletteCommand::CopySessionId => {
                 if let Some(id) = self.session_id.clone() {
                     cx.write_to_clipboard(ClipboardItem::new_string(id));
-                    self.toast_success("Session ID copied");
+                    self.toast_success(tr!("pickers.session_id_copied"));
                     cx.notify();
                 }
             }

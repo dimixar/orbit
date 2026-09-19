@@ -106,7 +106,7 @@ impl SidePane {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let tree_filter = cx.new(|cx| {
             ComposerInput::new(cx)
-                .with_placeholder("Filter files…")
+                .with_placeholder(tr!("sidepane.filter_files"))
                 .with_key_context("Composer Picker")
         });
         Self {
@@ -626,7 +626,7 @@ impl SidePane {
                     .text_size(theme.ui_px(12.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child("Review"),
+                    .child(tr!("sidepane.review")),
             )
             .children(tree_available.then(|| {
                 div()
@@ -1300,7 +1300,7 @@ fn source_row(
                     .flex_none()
                     .text_size(theme.ui_px(10.))
                     .text_color(theme.text_3)
-                    .child("no turns yet"),
+                    .child(tr!("sidepane.no_turns_yet")),
             )
         })
         .when(selected, |row| {

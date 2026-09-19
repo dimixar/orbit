@@ -234,7 +234,7 @@ impl OrbitApp {
                     if let Some(error) = value.get("errorMessage").and_then(Value::as_str) {
                         self.set_error(format!("Compaction failed: {error}"));
                     } else if value.get("aborted").and_then(Value::as_bool) == Some(true) {
-                        self.set_status("Compaction aborted");
+                        self.set_status(tr!("events.compaction_aborted"));
                     }
                     // Post-compaction usage is unknown until the next turn;
                     // refresh so the meter can show an empty/unknown state.
@@ -501,7 +501,7 @@ impl OrbitApp {
             // compacting state belongs before the data gate.
             "compact" => {
                 self.is_compacting = false;
-                self.toast_info("Context compacted");
+                self.toast_info(tr!("events.context_compacted"));
                 self.refresh_context_stats();
                 self.send(CommandBody::GetState, "get_state");
                 return;
@@ -530,7 +530,7 @@ impl OrbitApp {
                     }
                 }
                 *refresh_sessions = true;
-                self.toast_success("Session cloned");
+                self.toast_success(tr!("events.session_cloned"));
                 self.send(CommandBody::GetMessages, "get_messages");
                 self.send(CommandBody::GetState, "get_state");
                 self.refresh_catalogs();

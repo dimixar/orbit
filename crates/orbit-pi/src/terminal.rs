@@ -1725,7 +1725,7 @@ impl TerminalPanel {
                             div()
                                 .text_size(theme.ui_px(12.5))
                                 .text_color(theme.text_2)
-                                .child("Shell exited"),
+                                .child(tr!("terminal.shell_exited")),
                         )
                         .child(
                             div()
@@ -1747,7 +1747,7 @@ impl TerminalPanel {
                                     cx.listener(|this, _, _, cx| this.restart(cx)),
                                 )
                                 .child(icon("icons/refresh.svg", 13., theme.active_fg))
-                                .child("Restart"),
+                                .child(tr!("terminal.restart")),
                         ),
                 )
                 .into_any_element(),

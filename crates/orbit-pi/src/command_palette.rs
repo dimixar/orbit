@@ -226,7 +226,7 @@ impl CommandPalette {
     ) -> Self {
         let filter = cx.new(|cx| {
             ComposerInput::new(cx)
-                .with_placeholder("Search sessions, commands, settings…")
+                .with_placeholder(tr!("command_palette.search_sessions_commands_settings"))
                 .with_key_context("Composer Picker")
         });
         Self {
@@ -690,13 +690,13 @@ impl Render for CommandPalette {
                             .text_size(theme.ui_px(13.))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text_2)
-                            .child("No results"),
+                            .child(tr!("command_palette.no_results")),
                     )
                     .child(
                         div()
                             .text_size(theme.ui_px(12.))
                             .text_color(theme.text_3)
-                            .child("Try a session title, a command, or a setting"),
+                            .child(tr!("command_palette.try_a_session_title_a_command_or_a_setting")),
                     ),
             );
         } else {
@@ -786,9 +786,9 @@ impl Render for CommandPalette {
                     .border_color(theme.border)
                     .text_size(theme.ui_px(11.))
                     .text_color(theme.text_3)
-                    .child("↑↓ Navigate")
-                    .child("⏎ Select")
-                    .child("Esc Close"),
+                    .child(tr!("command_palette.navigate"))
+                    .child(tr!("command_palette.select"))
+                    .child(tr!("command_palette.esc_close")),
             );
 
         // ── scrim layer ──

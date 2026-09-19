@@ -1177,9 +1177,9 @@ fn footer(count_label: String, theme: Theme) -> impl IntoElement + use<> {
         .text_color(theme.text_3)
         .child(count_label)
         .child(div().flex_1())
-        .child("↑↓ Navigate")
-        .child("⏎ Select")
-        .child("Esc Close")
+        .child(tr!("model_selector.navigate"))
+        .child(tr!("model_selector.select"))
+        .child(tr!("model_selector.esc_close"))
 }
 
 fn label_column<P: IntoElement, S: IntoElement>(

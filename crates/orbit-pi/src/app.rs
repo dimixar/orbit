@@ -658,18 +658,18 @@ impl OrbitApp {
         // dispatch to the (unhandled) Picker actions rather than submitting.
         let settings_filter = cx.new(|cx| {
             ComposerInput::new(cx)
-                .with_placeholder("Filter…")
+                .with_placeholder(tr!("app.filter"))
                 .with_key_context("Composer Picker")
         });
         let open_in_filter = cx.new(|cx| {
             ComposerInput::new(cx)
-                .with_placeholder("Filter…")
+                .with_placeholder(tr!("app.filter"))
                 .with_key_context("Composer Picker")
         });
         let provider_filter = cx.new(|cx| {
             ComposerInput::new(cx)
                 .with_element_id("provider-filter")
-                .with_placeholder("Search providers…")
+                .with_placeholder(tr!("app.search_providers"))
                 .with_key_context("Composer Picker")
                 .with_max_lines(1)
         });
@@ -677,7 +677,7 @@ impl OrbitApp {
         let models_filter = cx.new(|cx| {
             ComposerInput::new(cx)
                 .with_element_id("models-filter")
-                .with_placeholder("Search models…")
+                .with_placeholder(tr!("app.search_models"))
                 .with_key_context("Composer Picker")
                 .with_max_lines(1)
         });
@@ -697,7 +697,7 @@ impl OrbitApp {
         let plugins_filter = cx.new(|cx| {
             ComposerInput::new(cx)
                 .with_element_id("plugins-filter")
-                .with_placeholder("Search installed plugins…")
+                .with_placeholder(tr!("app.search_installed_plugins"))
                 .with_key_context("Composer Picker")
                 .with_max_lines(1)
         });
@@ -708,7 +708,7 @@ impl OrbitApp {
         let skills_filter = cx.new(|cx| {
             ComposerInput::new(cx)
                 .with_element_id("skills-filter")
-                .with_placeholder("Search skills…")
+                .with_placeholder(tr!("app.search_skills"))
                 .with_key_context("Composer Picker")
                 .with_max_lines(1)
         });
@@ -721,7 +721,7 @@ impl OrbitApp {
         let session_name_input = cx.new(|cx| {
             ComposerInput::new(cx)
                 .with_element_id("session-name-input")
-                .with_placeholder("Session name…")
+                .with_placeholder(tr!("app.session_name"))
                 .with_max_lines(1)
         });
 

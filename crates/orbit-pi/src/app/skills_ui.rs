@@ -93,7 +93,7 @@ impl OrbitApp {
                     .min_w_0()
                     .text_size(theme.ui_px(12.5))
                     .text_color(theme.text_2)
-                    .child("All skills"),
+                    .child(tr!("skills_ui.all_skills")),
             )
             .child(
                 div()
@@ -141,7 +141,7 @@ impl OrbitApp {
                         div()
                             .text_size(theme.ui_px(12.))
                             .text_color(theme.text_2)
-                            .child("No skills match"),
+                            .child(tr!("skills_ui.no_skills_match")),
                     )
                     .into_any_element(),
             );
@@ -300,13 +300,13 @@ impl OrbitApp {
                         .text_size(theme.ui_px(13.))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text)
-                        .child("Select a skill"),
+                        .child(tr!("skills_ui.select_a_skill")),
                 )
                 .child(
                     div()
                         .text_size(theme.ui_px(12.))
                         .text_color(theme.text_2)
-                        .child("Pick one from the list to see its details and SKILL.md."),
+                        .child(tr!("skills_ui.pick_one_from_the_list_to_see_its_details_and_sk")),
                 )
                 .into_any_element();
         };
@@ -415,7 +415,7 @@ impl OrbitApp {
                     div()
                         .text_size(theme.ui_px(12.))
                         .text_color(theme.text_3)
-                        .child("SKILL.md is empty."),
+                        .child(tr!("skills_ui.skill_md_is_empty")),
                 )
                 .into_any_element(),
         };
@@ -446,7 +446,7 @@ impl OrbitApp {
                     .text_size(theme.ui_px(10.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_3)
-                    .child("SKILL.MD"),
+                    .child(tr!("skills_ui.skill_md")),
             )
             .child(content)
             .into_any_element()

@@ -440,7 +440,7 @@ impl OrbitApp {
                         }
                     }
                     None => {
-                        app.set_status("unsupported image format");
+                        app.set_status(tr!("composer_ops.unsupported_image_format"));
                     }
                 }
                 cx.notify();

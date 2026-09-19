@@ -386,7 +386,7 @@ pub(crate) fn render_side_row(
                     div()
                         .text_size(theme.ui_px(11.))
                         .text_color(theme.text_3)
-                        .child("Show less"),
+                        .child(tr!("sidebar.show_less")),
                 )
                 .into_any_element()
         }
@@ -721,13 +721,13 @@ pub(crate) fn session_menu_popup(
                             .text_size(theme.ui_px(12.5))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
-                            .child("Delete this session?"),
+                            .child(tr!("sidebar.delete_this_session")),
                     )
                     .child(
                         div()
                             .text_size(theme.ui_px(11.))
                             .text_color(theme.text_2)
-                            .child("Removes the session file from disk."),
+                            .child(tr!("sidebar.removes_the_session_file_from_disk")),
                     ),
             )
             .child(
@@ -755,7 +755,7 @@ pub(crate) fn session_menu_popup(
                                     this.update(cx, |app, cx| app.on_menu_cancel(cx));
                                 }
                             })
-                            .child("Cancel"),
+                            .child(tr!("sidebar.cancel")),
                     )
                     .child(
                         div()
@@ -777,7 +777,7 @@ pub(crate) fn session_menu_popup(
                                     this.update(cx, |app, cx| app.on_menu_delete_confirm(cx));
                                 }
                             })
-                            .child("Delete"),
+                            .child(tr!("sidebar.delete")),
                     ),
             )
             .into_any_element()
@@ -1058,14 +1058,14 @@ pub(crate) fn empty_sessions_state(theme: Theme) -> impl IntoElement + use<> {
                 .text_size(theme.ui_px(12.5))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.text_2)
-                .child("No projects yet"),
+                .child(tr!("sidebar.no_projects_yet")),
         )
         .child(
             div()
                 .text_size(theme.ui_px(11.5))
                 .text_color(theme.text_3)
                 .text_align(TextAlign::Center)
-                .child("Pick a folder to start your first task."),
+                .child(tr!("sidebar.pick_a_folder_to_start_your_first_task")),
         )
 }
 
@@ -1135,7 +1135,7 @@ impl OrbitApp {
         match sessions::clone_session_file(&menu.path) {
             Ok(_) => {
                 self.sessions = sessions::load_sessions();
-                self.toast_success("Session cloned");
+                self.toast_success(tr!("sidebar.session_cloned"));
             }
             Err(err) => self.toast_error(format!("clone failed: {err}")),
         }
@@ -1164,7 +1164,7 @@ impl OrbitApp {
             if let Err(err) = fs::remove_file(&menu.path) {
                 self.toast_error(format!("delete failed: {err}"));
             } else {
-                self.toast_info("Session deleted");
+                self.toast_info(tr!("sidebar.session_deleted"));
             }
             self.sessions = sessions::load_sessions();
             cx.notify();
