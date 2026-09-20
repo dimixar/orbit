@@ -686,6 +686,8 @@ pub(crate) fn dismiss_rail_hint_state(
 /// Transcript state shared between the view and the RPC event pump.
 pub struct Transcript {
     messages: Rc<RefCell<Vec<ChatMessage>>>,
+    /// Cross-block text selection + right-click copy menu state.
+    text_selection: transcript_view::TextSelectionState,
     scroller: MessageScrollerState,
     /// Index of the assistant message currently being streamed, if any.
     streaming: Rc<Cell<Option<usize>>>,
@@ -760,6 +762,7 @@ impl Transcript {
         let messages = Rc::new(RefCell::new(Vec::new()));
         Self {
             messages,
+            text_selection: Rc::new(RefCell::new(transcript_view::TextSelection::new())),
             scroller: MessageScrollerState::new(0),
             streaming: Rc::new(Cell::new(None)),
             stream_started: Rc::new(Cell::new(None)),
@@ -790,8 +793,15 @@ impl Transcript {
         }
     }
 
+    /// The current transcript text selection, if any — the keyboard copy
+    /// path (`cmd-c`) reads it without stealing the composer's own copy.
+    pub fn selected_text(&self) -> Option<String> {
+        self.text_selection.borrow().selected_text()
+    }
+
     /// Rebuild the whole transcript from a `get_messages` response payload.
     pub fn load_from(&mut self, data: &Value) {
+        self.text_selection.borrow_mut().clear();
         let mut parsed = Vec::new();
         if let Some(messages) = data.get("messages").and_then(Value::as_array) {
             for message in messages {
@@ -853,6 +863,7 @@ impl Transcript {
     /// Clear for a fresh session.
     pub fn clear(&mut self) {
         *self.messages.borrow_mut() = Vec::new();
+        self.text_selection.borrow_mut().clear();
         self.scroller.reset(0);
         self.streaming.set(None);
         self.seed_text.set(false);
@@ -1973,6 +1984,7 @@ impl Transcript {
         transcript_view::render_transcript(
             TranscriptView {
                 messages: self.messages.clone(),
+                text_selection: self.text_selection.clone(),
                 scroller: self.scroller.clone(),
                 streaming: self.streaming.clone(),
                 stream_started: self.stream_started.clone(),

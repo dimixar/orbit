@@ -424,6 +424,10 @@ pub struct OrbitApp {
     /// Keeps the composer observer alive: edits re-render the app so the
     /// send button's quiet/ready state tracks the text live.
     _input_sub: Subscription,
+    /// Keeps the transcript `cmd-c` interceptor alive: a live transcript
+    /// selection wins over the focused composer's own copy, but only while
+    /// one exists (the composer keeps its copy otherwise).
+    _copy_selection_sub: Subscription,
     /// Onboarding dependency check results (pi, node, git).
     deps: Vec<Dependency>,
     /// Whether the setup page is open on request (Settings → About →
@@ -791,6 +795,32 @@ impl OrbitApp {
         // the send button's quiet/ready state tracks the text as you type.
         let input_sub = cx.observe(&input, |_, _, cx| cx.notify());
 
+        // `cmd-c` with a live transcript selection copies that selection even
+        // while the composer holds focus — an interceptor is the only hook
+        // that runs before focus-path action dispatch, so the composer keeps
+        // its own copy whenever the transcript has nothing selected.
+        let copy_selection_sub = {
+            let app = cx.entity().downgrade();
+            cx.intercept_keystrokes(move |event, _window, cx| {
+                let keystroke = &event.keystroke;
+                if keystroke.key != "c"
+                    || !keystroke.modifiers.platform
+                    || keystroke.modifiers.shift
+                    || keystroke.modifiers.alt
+                    || keystroke.modifiers.control
+                {
+                    return;
+                }
+                let _ = app.update(cx, |app, cx| {
+                    let Some(text) = app.transcript.selected_text() else {
+                        return;
+                    };
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    cx.stop_propagation();
+                });
+            })
+        };
+
         // Probe the runtime pieces we need (pi, node, git) so the setup page
         // can show install commands when something is missing.
         let deps = onboarding::check_dependencies();
@@ -910,6 +940,7 @@ impl OrbitApp {
             preferred_open_in_app: platform::load_preferred_open_in_app(),
             _theme_sub: theme_sub,
             _input_sub: input_sub,
+            _copy_selection_sub: copy_selection_sub,
             deps,
             setup_open: false,
             host,

@@ -24,11 +24,13 @@ use std::{
 };
 
 use gpui::{
-    deferred, div, img, linear_color_stop, linear_gradient, list, point, prelude::*, px, svg,
-    Animation, AnimationExt, AnyElement, App, ClipboardItem, ElementId, Font, FontFeatures,
-    FontStyle, FontWeight, Hsla, Image, ImageSource, InteractiveText, ObjectFit, Pixels,
-    ScrollHandle, ScrollWheelEvent, SharedString, StrikethroughStyle, StyledText, TextAlign,
-    TextRun, UnderlineStyle, Window,
+    anchored, canvas, deferred, div, img, linear_color_stop, linear_gradient, list, point,
+    prelude::*, px, svg, Animation, AnimationExt, AnyElement, App, Bounds, ClipboardItem,
+    CursorStyle, DispatchPhase, Element, ElementId, Font, FontFeatures, FontStyle, FontWeight,
+    GlobalElementId, Hitbox, HitboxBehavior, Hsla, Image, ImageSource, InspectorElementId,
+    InteractiveText, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ObjectFit, Pixels, ScrollHandle, ScrollWheelEvent, SharedString, StrikethroughStyle,
+    StyledText, TextAlign, TextLayout, TextRun, UnderlineStyle, Window,
 };
 
 use std::ops::Range;
@@ -153,6 +155,8 @@ pub(crate) type ThinkingDetached = Rc<RefCell<HashSet<(usize, usize)>>>;
 
 pub(crate) struct TranscriptView {
     pub messages: Rc<RefCell<Vec<ChatMessage>>>,
+    /// Cross-block text selection + the right-click copy menu.
+    pub text_selection: TextSelectionState,
     pub scroller: MessageScrollerState,
     pub streaming: Rc<Cell<Option<usize>>>,
     pub stream_started: Rc<Cell<Option<Instant>>>,
@@ -216,8 +220,707 @@ pub(crate) struct TranscriptView {
     pub search_active: Option<Rc<Cell<Option<usize>>>>,
 }
 
+// ── text selection ─────────────────────────────────────────────────────────
+
+/// One rendered text block from the last painted frame, in visual order.
+/// Registered by [`SelectableText`] so the transcript panel's mouse handlers
+/// can hit-test a window position to a (block, byte offset) without owning
+/// the layout themselves.
+struct TextBlock {
+    key: ElementId,
+    /// The block's plain text — what a selection contributes to the clipboard.
+    text: SharedString,
+    /// Message this block rendered from — right-click "Copy Message" target.
+    message_ix: usize,
+    /// Link ranges inside `text` (markdown links), resolved on a plain click.
+    links: Vec<(Range<usize>, String)>,
+    layout: TextLayout,
+    bounds: Bounds<Pixels>,
+}
+
+/// A block captured when a selection began; the selection's `blocks` list is
+/// the visual order at that moment, so copying does not depend on later
+/// frames or virtualization.
+struct SelectedBlock {
+    key: ElementId,
+    text: SharedString,
+}
+
+/// One endpoint of a selection: index into [`Selection::blocks`] plus a byte
+/// offset into that block's text.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct SelectPoint {
+    block: usize,
+    offset: usize,
+}
+
+/// An active cross-block selection. Intermediate blocks are fully selected;
+/// only the anchor and focus blocks carry partial ranges.
+struct Selection {
+    blocks: Vec<SelectedBlock>,
+    anchor: SelectPoint,
+    focus: SelectPoint,
+}
+
+impl Selection {
+    fn normalized(&self) -> (SelectPoint, SelectPoint) {
+        if (self.focus.block, self.focus.offset) < (self.anchor.block, self.anchor.offset) {
+            (self.focus, self.anchor)
+        } else {
+            (self.anchor, self.focus)
+        }
+    }
+}
+
+/// The right-click menu over transcript text: `Copy Selection` reads the live
+/// selection, `Copy Message` carries the message text captured on open.
+#[derive(Clone)]
+struct TextMenu {
+    position: gpui::Point<Pixels>,
+    message_text: String,
+}
+
+/// Shared text-selection state — one per transcript, cloned into every text
+/// element and the panel's mouse handlers so all of them see the same drag.
+pub(crate) struct TextSelection {
+    /// Blocks registered by the current frame's paint, in visual order.
+    blocks: Vec<TextBlock>,
+    /// Key -> index into [`TextSelection::blocks`] (dedupe + lookup).
+    index: HashMap<ElementId, usize>,
+    /// Bumped once per transcript render; the first block painted after a
+    /// bump drops the previous frame's registrations.
+    frame: u64,
+    painted_frame: u64,
+    selection: Option<Selection>,
+    dragging: bool,
+    /// The drag moved away from the anchor — mouse-up is not a link click.
+    moved: bool,
+    /// The press that started the drag, for link resolution on release.
+    down: Option<(ElementId, usize)>,
+    menu: Option<TextMenu>,
+}
+
+pub(crate) type TextSelectionState = Rc<RefCell<TextSelection>>;
+
+impl TextSelection {
+    pub(crate) fn new() -> Self {
+        Self {
+            blocks: Vec::new(),
+            index: HashMap::new(),
+            frame: 0,
+            painted_frame: 0,
+            selection: None,
+            dragging: false,
+            moved: false,
+            down: None,
+            menu: None,
+        }
+    }
+
+    /// Start a new render frame: blocks registered by the next paint replace
+    /// the previous frame's registrations.
+    fn begin_frame(&mut self) {
+        self.frame = self.frame.wrapping_add(1);
+    }
+
+    fn register(&mut self, block: TextBlock) {
+        if self.painted_frame != self.frame {
+            self.painted_frame = self.frame;
+            self.blocks.clear();
+            self.index.clear();
+        }
+        match self.index.get(&block.key).copied() {
+            Some(existing) => self.blocks[existing] = block,
+            None => {
+                self.index.insert(block.key.clone(), self.blocks.len());
+                self.blocks.push(block);
+            }
+        }
+    }
+
+    /// Index and byte offset of the text under `position`: the containing
+    /// block, or the nearest one when the pointer sits in a gutter.
+    fn hit(&self, position: gpui::Point<Pixels>) -> Option<(usize, usize)> {
+        let index = self
+            .blocks
+            .iter()
+            .position(|block| block.bounds.contains(&position))
+            .or_else(|| self.nearest_block(position))?;
+        let block = &self.blocks[index];
+        let local = point(
+            position.x.clamp(block.bounds.left(), block.bounds.right()),
+            position.y.clamp(block.bounds.top(), block.bounds.bottom()),
+        );
+        let offset = match block.layout.index_for_position(local) {
+            Ok(offset) | Err(offset) => offset,
+        };
+        Some((index, offset.min(block.text.len())))
+    }
+
+    fn nearest_block(&self, position: gpui::Point<Pixels>) -> Option<usize> {
+        self.blocks
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                let da = gutter_distance(a, position);
+                let db = gutter_distance(b, position);
+                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(index, _)| index)
+    }
+
+    fn begin_selection(&mut self, position: gpui::Point<Pixels>) {
+        self.menu = None;
+        self.moved = false;
+        self.down = None;
+        let Some((index, offset)) = self.hit(position) else {
+            self.selection = None;
+            self.dragging = false;
+            return;
+        };
+        let key = self.blocks[index].key.clone();
+        let blocks = self
+            .blocks
+            .iter()
+            .map(|block| SelectedBlock {
+                key: block.key.clone(),
+                text: block.text.clone(),
+            })
+            .collect();
+        let point = SelectPoint {
+            block: index,
+            offset,
+        };
+        self.down = Some((key, offset));
+        self.selection = Some(Selection {
+            blocks,
+            anchor: point,
+            focus: point,
+        });
+        self.dragging = true;
+    }
+
+    fn extend_selection(&mut self, position: gpui::Point<Pixels>) {
+        if !self.dragging {
+            return;
+        }
+        let Some((index, offset)) = self.hit(position) else {
+            return;
+        };
+        let key = self.blocks[index].key.clone();
+        let Some(selection) = self.selection.as_mut() else {
+            return;
+        };
+        let Some(target) = selection.blocks.iter().position(|block| block.key == key) else {
+            return;
+        };
+        let next = SelectPoint {
+            block: target,
+            offset,
+        };
+        if next != selection.anchor {
+            self.moved = true;
+        }
+        selection.focus = next;
+    }
+
+    /// End a drag; a press that never moved resolves to the link under it.
+    fn finish_selection(&mut self) -> Option<String> {
+        self.dragging = false;
+        if self.moved {
+            return None;
+        }
+        let (key, offset) = self.down.take()?;
+        let block = self.blocks.iter().find(|block| block.key == key)?;
+        block
+            .links
+            .iter()
+            .find(|(range, _)| range.contains(&offset))
+            .map(|(_, url)| url.clone())
+    }
+
+    fn clear_selection(&mut self) -> bool {
+        let had = self.selection.take().is_some();
+        self.dragging = false;
+        self.down = None;
+        self.moved = false;
+        had
+    }
+
+    /// Drop the selection and any open menu (session switch, outside click).
+    pub(crate) fn clear(&mut self) {
+        self.clear_selection();
+        self.menu = None;
+    }
+
+    /// Message index of the block under `position` (context menu). A press in
+    /// the row padding between blocks still counts when it lands close to one.
+    fn message_at(&self, position: gpui::Point<Pixels>) -> Option<usize> {
+        if let Some(index) = self
+            .blocks
+            .iter()
+            .position(|block| block.bounds.contains(&position))
+        {
+            return Some(self.blocks[index].message_ix);
+        }
+        let (index, distance) = self
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(index, block)| (index, gutter_distance(block, position)))
+            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))?;
+        (distance < 24.).then(|| self.blocks[index].message_ix)
+    }
+
+    /// Byte range of this block that is selected, clamped to its current
+    /// text and snapped to char boundaries (the text can shrink mid-stream).
+    fn range_for(&self, key: &ElementId, text: &str) -> Option<Range<usize>> {
+        let selection = self.selection.as_ref()?;
+        let (start, end) = selection.normalized();
+        let index = selection
+            .blocks
+            .iter()
+            .position(|block| &block.key == key)?;
+        if index < start.block || index > end.block {
+            return None;
+        }
+        let from = if index == start.block {
+            byte_boundary(text, start.offset)
+        } else {
+            0
+        };
+        let to = if index == end.block {
+            byte_boundary(text, end.offset)
+        } else {
+            text.len()
+        };
+        (from < to).then_some(from..to)
+    }
+
+    /// The selected text, one line per selected block (the clipboard form).
+    pub(crate) fn selected_text(&self) -> Option<String> {
+        let selection = self.selection.as_ref()?;
+        let (start, end) = selection.normalized();
+        if start == end {
+            return None;
+        }
+        let mut parts: Vec<&str> = Vec::new();
+        for (index, block) in selection.blocks.iter().enumerate() {
+            if index < start.block || index > end.block {
+                continue;
+            }
+            let from = if index == start.block {
+                byte_boundary(&block.text, start.offset)
+            } else {
+                0
+            };
+            let to = if index == end.block {
+                byte_boundary(&block.text, end.offset)
+            } else {
+                block.text.len()
+            };
+            if from < to {
+                parts.push(&block.text[from..to]);
+            }
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n"))
+        }
+    }
+}
+
+fn gutter_distance(block: &TextBlock, position: gpui::Point<Pixels>) -> f32 {
+    let dx: f32 = (position.x - position.x.clamp(block.bounds.left(), block.bounds.right()))
+        .abs()
+        .into();
+    let dy: f32 = (position.y - position.y.clamp(block.bounds.top(), block.bounds.bottom()))
+        .abs()
+        .into();
+    dx + dy
+}
+
+/// Snap a byte offset back to a char boundary (layout offsets are glyph
+/// boundaries already; this guards stale offsets from a streaming edit).
+fn byte_boundary(text: &str, mut offset: usize) -> usize {
+    offset = offset.min(text.len());
+    while offset > 0 && !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+/// Split `runs` so the selected byte range carries the selection wash as a
+/// run background — gpui paints run backgrounds itself, so the highlight
+/// needs no separate layout math and never reflows text.
+fn highlight_runs(runs: Vec<TextRun>, range: Option<Range<usize>>, color: Hsla) -> Vec<TextRun> {
+    let Some(range) = range else {
+        return runs;
+    };
+    if range.is_empty() {
+        return runs;
+    }
+    let mut out = Vec::with_capacity(runs.len() + 2);
+    let mut offset = 0usize;
+    for run in runs {
+        let start = offset;
+        let end = offset + run.len;
+        offset = end;
+        let hi_from = range.start.max(start);
+        let hi_to = range.end.min(end);
+        if hi_from >= hi_to {
+            out.push(run);
+            continue;
+        }
+        if hi_from > start {
+            out.push(TextRun {
+                len: hi_from - start,
+                ..run.clone()
+            });
+        }
+        out.push(TextRun {
+            len: hi_to - hi_from,
+            background_color: Some(color),
+            ..run.clone()
+        });
+        if hi_to < end {
+            out.push(TextRun {
+                len: end - hi_to,
+                ..run
+            });
+        }
+    }
+    out
+}
+
+fn selection_color(theme: Theme) -> Hsla {
+    theme.accent.opacity(if theme.mode == ThemeMode::Dark {
+        0.30
+    } else {
+        0.20
+    })
+}
+
+thread_local! {
+    /// The active selectable-text scope, set while a transcript row's element
+    /// tree is built. `None` outside the transcript (the skills viewer), where
+    /// prose keeps the plain clickable [`InteractiveText`].
+    static TEXT_SCOPE: RefCell<Option<TextScope>> = const { RefCell::new(None) };
+}
+
+#[derive(Clone)]
+struct TextScope {
+    state: TextSelectionState,
+    message_ix: usize,
+}
+
+struct TextScopeGuard(Option<TextScope>);
+
+impl TextScopeGuard {
+    fn enter(scope: TextScope) -> Self {
+        Self(TEXT_SCOPE.with(|current| current.replace(Some(scope))))
+    }
+}
+
+impl Drop for TextScopeGuard {
+    fn drop(&mut self) {
+        TEXT_SCOPE.with(|current| current.replace(self.0.take()));
+    }
+}
+
+fn text_scope() -> Option<TextScope> {
+    TEXT_SCOPE.with(|current| current.borrow().clone())
+}
+
+/// A [`StyledText`] that registers itself with the transcript's selection
+/// state so the panel can hit-test it. Styling comes from the caller's wrapper
+/// div, exactly as with a bare [`StyledText`].
+struct SelectableText {
+    key: ElementId,
+    text: StyledText,
+    /// Plain text this block contributes to the clipboard.
+    plain: SharedString,
+    links: Vec<(Range<usize>, String)>,
+    scope: Option<TextScope>,
+}
+
+impl SelectableText {
+    fn new(
+        key: ElementId,
+        text: StyledText,
+        plain: SharedString,
+        links: Vec<(Range<usize>, String)>,
+        scope: Option<TextScope>,
+    ) -> Self {
+        Self {
+            key,
+            text,
+            plain,
+            links,
+            scope,
+        }
+    }
+}
+
+impl Element for SelectableText {
+    type RequestLayoutState = ();
+    type PrepaintState = (Hitbox, TextLayout);
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        self.text.request_layout(None, inspector_id, window, cx)
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (Hitbox, TextLayout) {
+        self.text
+            .prepaint(None, inspector_id, bounds, &mut (), window, cx);
+        let layout = self.text.layout().clone();
+        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        (hitbox, layout)
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        (hitbox, layout): &mut (Hitbox, TextLayout),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.text
+            .paint(None, inspector_id, bounds, &mut (), &mut (), window, cx);
+        if let Some(scope) = self.scope.as_ref() {
+            // The cursor rides this block's own hitbox: an I-beam over text,
+            // a hand on links. A block's request wins only while the pointer
+            // is actually on the text, so in-row buttons keep their pointer.
+            if hitbox.is_hovered(window) {
+                let position = window.mouse_position();
+                let offset = match layout.index_for_position(position) {
+                    Ok(offset) | Err(offset) => offset,
+                };
+                let over_link = self.links.iter().any(|(range, _)| range.contains(&offset));
+                let style = if over_link {
+                    CursorStyle::PointingHand
+                } else {
+                    CursorStyle::IBeam
+                };
+                window.set_cursor_style(style, hitbox);
+            }
+            scope.state.borrow_mut().register(TextBlock {
+                key: self.key.clone(),
+                text: self.plain.clone(),
+                message_ix: scope.message_ix,
+                links: self.links.clone(),
+                layout: layout.clone(),
+                bounds,
+            });
+        }
+    }
+}
+
+impl IntoElement for SelectableText {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+/// Register the transcript panel's mouse handlers: drag-select (cross-block),
+/// right-click menu, link clicks, and click-outside clearing. The canvas
+/// listener receives every window mouse event, so a drag that leaves the
+/// panel keeps updating (clamped to the nearest text block).
+fn register_text_selection(
+    state: TextSelectionState,
+    messages: Rc<RefCell<Vec<ChatMessage>>>,
+    bounds: Bounds<Pixels>,
+    hitbox: Hitbox,
+    window: &mut Window,
+) {
+    window.on_mouse_event({
+        let state = state.clone();
+        move |event: &MouseDownEvent, phase, window, _| {
+            if phase != DispatchPhase::Capture || !hitbox.is_hovered(window) {
+                return;
+            }
+            let menu_open = state.borrow().menu.is_some();
+            match event.button {
+                MouseButton::Left => {
+                    // The open menu owns the next press; its outside-click
+                    // handler dismisses it without disturbing the selection.
+                    if menu_open {
+                        return;
+                    }
+                    state.borrow_mut().begin_selection(event.position);
+                    window.refresh();
+                }
+                MouseButton::Right => {
+                    let Some(message_ix) = state.borrow().message_at(event.position) else {
+                        return;
+                    };
+                    let message_text = messages
+                        .borrow()
+                        .get(message_ix)
+                        .map(ChatMessage::text)
+                        .unwrap_or_default();
+                    state.borrow_mut().menu = Some(TextMenu {
+                        position: event.position,
+                        message_text,
+                    });
+                    window.refresh();
+                }
+                _ => {}
+            }
+        }
+    });
+    window.on_mouse_event({
+        let state = state.clone();
+        move |event: &MouseMoveEvent, phase, window, _| {
+            if phase != DispatchPhase::Capture || !state.borrow().dragging {
+                return;
+            }
+            state.borrow_mut().extend_selection(event.position);
+            window.refresh();
+        }
+    });
+    window.on_mouse_event({
+        let state = state.clone();
+        move |event: &MouseUpEvent, phase, window, cx| {
+            if phase != DispatchPhase::Capture || event.button != MouseButton::Left {
+                return;
+            }
+            let url = state.borrow_mut().finish_selection();
+            if let Some(url) = url {
+                cx.open_url(&url);
+            }
+            window.refresh();
+        }
+    });
+    window.on_mouse_event({
+        let state = state.clone();
+        move |event: &MouseDownEvent, phase, window, _| {
+            if phase != DispatchPhase::Capture || event.button != MouseButton::Left {
+                return;
+            }
+            if bounds.contains(&event.position) {
+                return;
+            }
+            if state.borrow_mut().clear_selection() {
+                window.refresh();
+            }
+        }
+    });
+}
+
+/// The right-click menu: `Copy Selection` (disabled without one) and
+/// `Copy Message` (the clicked message's full text).
+fn text_selection_menu(menu: &TextMenu, state: TextSelectionState, theme: Theme) -> AnyElement {
+    let selected = state.borrow().selected_text();
+    let copy_selection = selected.clone();
+    let close = state.clone();
+    let copy_selection_item = selection_menu_item(
+        tr!("transcript.copy_selection"),
+        selected.is_some(),
+        theme,
+        move |window, cx| {
+            if let Some(text) = copy_selection.clone() {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            }
+            close.borrow_mut().menu = None;
+            cx.stop_propagation();
+            window.refresh();
+        },
+    );
+    let copy_message = menu.message_text.clone();
+    let close = state.clone();
+    let copy_message_item = selection_menu_item(
+        tr!("transcript.copy_message"),
+        true,
+        theme,
+        move |window, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string(copy_message.clone()));
+            close.borrow_mut().menu = None;
+            cx.stop_propagation();
+            window.refresh();
+        },
+    );
+    let dismiss = state.clone();
+    deferred(
+        anchored().position(menu.position).snap_to_window().child(
+            div()
+                .id("transcript-text-menu")
+                .min_w(px(190.))
+                .rounded(px(9.))
+                .border_1()
+                .border_color(theme.border_strong)
+                .bg(theme.menu_bg)
+                .shadow(theme.popover_shadow())
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .occlude()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_down_out(move |_, window, _| {
+                    dismiss.borrow_mut().menu = None;
+                    window.refresh();
+                })
+                .child(copy_selection_item)
+                .child(copy_message_item),
+        ),
+    )
+    .into_any_element()
+}
+
+fn selection_menu_item(
+    label: String,
+    enabled: bool,
+    theme: Theme,
+    on_click: impl Fn(&mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .px(px(10.))
+        .py(px(6.))
+        .text_size(theme.ui_px(12.))
+        .text_color(if enabled { theme.text } else { theme.text_3 })
+        .when(enabled, |item| {
+            item.cursor_pointer()
+                .hover(|style| style.bg(theme.bg_hover))
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    on_click(window, cx);
+                })
+        })
+        .child(label)
+        .into_any_element()
+}
+
 struct RowPaint {
     messages: Rc<RefCell<Vec<ChatMessage>>>,
+    /// Selection state threaded to every text block this row renders.
+    text_selection: TextSelectionState,
     ix: usize,
     row_count: usize,
     theme: Theme,
@@ -255,6 +958,14 @@ fn suppress_message_footer(has_summary: bool, ix: usize, row_count: usize) -> bo
 pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl IntoElement + use<> {
     let theme = *theme::get(cx);
     let messages = view.messages.clone();
+    let text_selection = view.text_selection.clone();
+    text_selection.borrow_mut().begin_frame();
+    // Clones the list closure cannot move: the panel's mouse handlers and
+    // right-click menu need them after the list (and its rows) have captured
+    // the originals.
+    let events_selection = text_selection.clone();
+    let events_messages = messages.clone();
+    let menu_selection = text_selection.clone();
     let streaming = view.streaming.clone();
     let stream_started = view.stream_started.clone();
     let expanded_turns = view.expanded_turns.clone();
@@ -416,6 +1127,7 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
         }
         render_row(RowPaint {
             messages: messages.clone(),
+            text_selection: text_selection.clone(),
             ix,
             row_count,
             theme: *theme::get(cx),
@@ -453,7 +1165,27 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
     // `min_h_0` child of a column, so `h_full` on the list is a definite
     // height. Jump-to-latest and the bottom fade live on the scroller wrap.
     let scroller = message_scroller::render_scroller(view.scroller.clone(), theme, list_el);
-    div()
+    // Selection handlers ride a transparent canvas over the panel: its paint
+    // callback registers global mouse listeners, so a drag that leaves the
+    // panel keeps extending (clamped to the nearest text block) instead of
+    // freezing at the edge.
+    let events = {
+        let state = events_selection;
+        let messages = events_messages;
+        canvas(
+            // One hitbox for the whole panel: `is_hovered` respects occluding
+            // overlays (the find bar, popovers), so presses there never start
+            // a selection behind them.
+            |bounds, window, _| window.insert_hitbox(bounds, HitboxBehavior::Normal),
+            move |bounds, hitbox, window, _| {
+                register_text_selection(state, messages, bounds, hitbox, window);
+            },
+        )
+        .absolute()
+        .inset_0()
+        .size_full()
+    };
+    let mut panel = div()
         .id(ElementId::Name("transcript-panel".into()))
         .w_full()
         .min_w_0()
@@ -461,6 +1193,7 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
         .min_h_0()
         .relative()
         .child(scroller)
+        .child(events)
         .when(show_rail, |shell| {
             shell.child(render_navigation_rail(
                 turn_snippets,
@@ -476,7 +1209,12 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
                 rail_hint_dismissed,
                 rail_hint_shown_at,
             ))
-        })
+        });
+    let menu = menu_selection.borrow().menu.clone();
+    if let Some(menu) = menu {
+        panel = panel.child(text_selection_menu(&menu, menu_selection, theme));
+    }
+    panel
 }
 
 /// Waku's conversation rail: ticks per user turn, vertically centered,
@@ -820,7 +1558,9 @@ fn render_rail_hint(
                 .text_size(theme.ui_px(11.5))
                 .line_height(theme.ui_px(16.))
                 .text_color(theme.text_3)
-                .child(tr!("transcript_view.click_a_line_or_press_to_revisit_any_prompt")),
+                .child(tr!(
+                    "transcript_view.click_a_line_or_press_to_revisit_any_prompt"
+                )),
         )
         .on_click(move |_, _, cx| {
             crate::transcript::dismiss_rail_hint_state(&rail_hint_dismissed, &rail_hint_shown_at);
@@ -846,6 +1586,13 @@ fn render_row(paint: RowPaint) -> AnyElement {
     let Some(message) = messages.get(paint.ix) else {
         return div().into_any_element();
     };
+    // Every text block built below registers with the row's selection scope
+    // (thread-local, mirroring the block-parse memo), so the low-level text
+    // builders stay unaware of the transcript panel's selection state.
+    let _scope = TextScopeGuard::enter(TextScope {
+        state: paint.text_selection.clone(),
+        message_ix: paint.ix,
+    });
     let followup = starts_followup_turn(&messages, paint.ix);
     let first = paint.ix == 0;
     let last = paint.ix + 1 == paint.row_count;
@@ -1143,7 +1890,7 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
     // model). pi carries the message in `errorMessage`; render it so a
     // failed turn is never an empty row.
     if let Some(error) = &message.error {
-        content = content.child(render_assistant_error(error, theme));
+        content = content.child(render_assistant_error(error, ix, theme));
     }
 
     // A cancelled turn keeps its partial content and says so, quietly —
@@ -1192,7 +1939,7 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
 /// A settled assistant turn that failed: the provider/agent `errorMessage`
 /// pi carries on the message, as a red card. Mirrors the app-level error
 /// banner so the failure is visible in context too.
-fn render_assistant_error(error: &str, theme: Theme) -> AnyElement {
+fn render_assistant_error(error: &str, ix: usize, theme: Theme) -> AnyElement {
     div()
         .w_full()
         .max_w_full()
@@ -1226,7 +1973,26 @@ fn render_assistant_error(error: &str, theme: Theme) -> AnyElement {
                         .text_size(theme.ui_px(12.5))
                         .text_color(theme.text_2)
                         .whitespace_normal()
-                        .child(error.to_string()),
+                        .child({
+                            let text: SharedString = error.to_string().into();
+                            let key = ElementId::NamedInteger("agent-error".into(), ix as u64);
+                            let scope = text_scope();
+                            let range = scope
+                                .as_ref()
+                                .and_then(|scope| scope.state.borrow().range_for(&key, &text));
+                            let runs = highlight_runs(
+                                vec![code_run(text.len(), theme.text_2, &ui_font())],
+                                range,
+                                selection_color(theme),
+                            );
+                            SelectableText::new(
+                                key,
+                                StyledText::new(text.clone()).with_runs(runs),
+                                text,
+                                Vec::new(),
+                                scope,
+                            )
+                        }),
                 ),
         )
         .into_any_element()
@@ -1637,7 +2403,28 @@ fn render_thinking_body(
                 .line_height(theme.code_px(18.))
                 .text_color(theme.tool_meta)
                 .whitespace_normal()
-                .child(detail),
+                .child({
+                    let body_key = ElementId::NamedInteger(
+                        "thinking-body".into(),
+                        ((key.0 as u64) << 32) | key.1 as u64,
+                    );
+                    let scope = text_scope();
+                    let range = scope
+                        .as_ref()
+                        .and_then(|scope| scope.state.borrow().range_for(&body_key, &detail));
+                    let runs = highlight_runs(
+                        vec![code_run(detail.len(), theme.tool_meta, &mono_font())],
+                        range,
+                        selection_color(theme),
+                    );
+                    SelectableText::new(
+                        body_key,
+                        StyledText::new(detail.clone()).with_runs(runs),
+                        detail.into(),
+                        Vec::new(),
+                        scope,
+                    )
+                }),
         );
     }
     card
@@ -2011,8 +2798,7 @@ fn render_activity_card(
                                     div().min_w_0().overflow_hidden().whitespace_nowrap().child(
                                         syntax_styled(
                                             &detail,
-                                            Some(tokens.as_ref()),
-                                            0,
+                                            tokens.first().map(Vec::as_slice),
                                             theme.tool_meta,
                                             theme,
                                         ),
@@ -2196,7 +2982,12 @@ fn render_tool_detail(
     // structured data, plain otherwise.
     let diff = edit_diff(tool);
     let first = match tool_command(tool) {
-        Some(command) => Some((tr!("transcript.command"), command, Some(highlight::Lang::Shell), true)),
+        Some(command) => Some((
+            tr!("transcript.command"),
+            command,
+            Some(highlight::Lang::Shell),
+            true,
+        )),
         None if diff.is_some() => None,
         None => tool.args.as_ref().map(|args| {
             (
@@ -2386,7 +3177,9 @@ fn render_detail_section(
                             .child("$"),
                     )
                 })
-                .child(render_detail_body(&content, visible, lang, theme)),
+                .child(render_detail_body(
+                    &content, visible, lang, key, section, theme,
+                )),
         );
     if foldable {
         let total = lines.len();
@@ -2459,6 +3252,8 @@ fn render_detail_body(
     content: &str,
     visible: &[&str],
     lang: Option<highlight::Lang>,
+    key: (usize, usize),
+    section: u8,
     theme: Theme,
 ) -> AnyElement {
     let tokens = lang.map(|lang| highlight::tokenize_cached(lang, content));
@@ -2473,10 +3268,20 @@ fn render_detail_body(
         .flex()
         .flex_col()
         .children(visible.iter().enumerate().map(move |(line_ix, line)| {
-            div().w_full().min_w_0().child(syntax_styled(
+            let line_id = ElementId::NamedInteger(
+                "detail-line".into(),
+                ((key.0 as u64) << 34)
+                    | ((key.1 as u64) << 18)
+                    | ((section as u64) << 12)
+                    | line_ix as u64,
+            );
+            div().w_full().min_w_0().child(syntax_line(
                 line,
-                tokens.as_deref(),
-                line_ix,
+                tokens
+                    .as_deref()
+                    .and_then(|lines| lines.get(line_ix))
+                    .map(Vec::as_slice),
+                line_id,
                 theme.code_text,
                 theme,
             ))
@@ -2735,7 +3540,8 @@ fn render_edit_diff(
         .children(
             rows.iter()
                 .take(visible)
-                .map(|row| render_edit_diff_row(row, theme)),
+                .enumerate()
+                .map(|(line_ix, row)| render_edit_diff_row(row, line_ix, key, theme)),
         );
     if foldable {
         let label = if expanded {
@@ -2802,7 +3608,12 @@ fn render_edit_diff(
     body.into_any_element()
 }
 
-fn render_edit_diff_row(row: &DiffRow, theme: Theme) -> AnyElement {
+fn render_edit_diff_row(
+    row: &DiffRow,
+    line_ix: usize,
+    key: (usize, usize),
+    theme: Theme,
+) -> AnyElement {
     if row.kind == DiffRowKind::Break {
         return div()
             .w_full()
@@ -2812,6 +3623,10 @@ fn render_edit_diff_row(row: &DiffRow, theme: Theme) -> AnyElement {
             .border_color(theme.border)
             .into_any_element();
     }
+    let line_id = ElementId::NamedInteger(
+        "diff-line".into(),
+        ((key.0 as u64) << 34) | ((key.1 as u64) << 18) | line_ix as u64,
+    );
     let (body_bg, gutter_bg, edge, marker_color, marker) = match row.kind {
         DiffRowKind::Addition => (
             Some(theme.add_green.opacity(diff_body_wash(theme))),
@@ -2860,7 +3675,7 @@ fn render_edit_diff_row(row: &DiffRow, theme: Theme) -> AnyElement {
                 .whitespace_normal()
                 .when_some(body_bg, |body, bg| body.bg(bg))
                 .text_color(theme.code_text)
-                .child(diff_row_text(row, theme)),
+                .child(diff_row_text(row, line_id, theme)),
         )
         .into_any_element()
 }
@@ -2881,36 +3696,22 @@ fn diff_gutter_wash(theme: Theme) -> f32 {
     }
 }
 
-/// Syntax-colored text for one diff row (tokens are already per-line).
-fn diff_row_text(row: &DiffRow, theme: Theme) -> StyledText {
-    let font = mono_font();
-    let display = if row.text.is_empty() {
-        " "
-    } else {
-        row.text.as_str()
-    };
-    let mut runs: Vec<TextRun> = Vec::new();
-    if let Some(tokens) = row.tokens.as_ref() {
-        let mut offset = 0usize;
-        for token in tokens {
-            let start = token.range.start.min(row.text.len());
-            let end = token.range.end.min(row.text.len());
-            if start > offset {
-                runs.push(code_run(start - offset, theme.code_text, &font));
-            }
-            if end > start {
-                runs.push(code_run(end - start, theme.token_color(token.class), &font));
-            }
-            offset = offset.max(end);
-        }
-        if offset < row.text.len() {
-            runs.push(code_run(row.text.len() - offset, theme.code_text, &font));
-        }
-    }
-    if runs.is_empty() {
-        runs.push(code_run(display.len(), theme.code_text, &font));
-    }
-    StyledText::new(display.to_string()).with_runs(runs)
+/// Syntax-colored text for one diff row (tokens are already per-line); the
+/// row's text (with its `+`/`-` marker) is what a selection copies.
+fn diff_row_text(row: &DiffRow, key: ElementId, theme: Theme) -> SelectableText {
+    let (display, runs) = syntax_runs(&row.text, row.tokens.as_deref(), theme.code_text, theme);
+    let scope = text_scope();
+    let range = scope
+        .as_ref()
+        .and_then(|scope| scope.state.borrow().range_for(&key, &display));
+    let runs = highlight_runs(runs, range, selection_color(theme));
+    SelectableText::new(
+        key,
+        StyledText::new(display).with_runs(runs),
+        row.text.clone().into(),
+        Vec::new(),
+        scope,
+    )
 }
 
 /// Arguments / result text: strings as-is, everything else pretty-printed.
@@ -3748,7 +4549,9 @@ fn ui_font() -> Font {
     }
 }
 
-/// A styled, word-wrapping paragraph. Links open via `cx.open_url`.
+/// A styled, word-wrapping paragraph. In the transcript the text is
+/// selectable and links resolve through the panel's mouse handlers; outside
+/// it (the skills viewer) the plain clickable [`InteractiveText`] is kept.
 ///
 /// Line height must clear inline-code backgrounds: a tight 14/22 measure let
 /// the next wrapped line (and the next block) paint through the previous one.
@@ -3763,24 +4566,41 @@ fn paragraph_text(
 ) -> impl IntoElement {
     let spans = parse_inline(text);
     let (body, runs, links) = inline_runs(&spans, weight, color, theme);
-    let ranges: Vec<Range<usize>> = links.iter().map(|(range, _)| range.clone()).collect();
-    div()
+    let wrapper = div()
         .w_full()
         .min_w_0()
         .whitespace_normal()
         .text_size(theme.ui_px(size))
         .line_height(theme.ui_px(line_height))
-        .text_color(color)
-        .child(
-            InteractiveText::new(key, StyledText::new(body).with_runs(runs)).on_click(
-                ranges,
-                move |range_ix: usize, _, cx| {
-                    if let Some((_, url)) = links.get(range_ix) {
-                        cx.open_url(url);
-                    }
-                },
-            ),
-        )
+        .text_color(color);
+    if let Some(scope) = text_scope() {
+        let range = scope.state.borrow().range_for(&key, body.as_ref());
+        let runs = highlight_runs(runs, range, selection_color(theme));
+        let plain = body.clone();
+        wrapper
+            .child(SelectableText::new(
+                key,
+                StyledText::new(body).with_runs(runs),
+                plain,
+                links,
+                Some(scope),
+            ))
+            .into_any_element()
+    } else {
+        let ranges: Vec<Range<usize>> = links.iter().map(|(range, _)| range.clone()).collect();
+        wrapper
+            .child(
+                InteractiveText::new(key, StyledText::new(body).with_runs(runs)).on_click(
+                    ranges,
+                    move |range_ix: usize, _, cx| {
+                        if let Some((_, url)) = links.get(range_ix) {
+                            cx.open_url(url);
+                        }
+                    },
+                ),
+            )
+            .into_any_element()
+    }
 }
 
 fn md_id(ix: usize, salt: u64, block_ix: usize, sub: usize) -> ElementId {
@@ -4683,7 +5503,19 @@ fn render_code_block(
                         .line_height(theme.code_px(21.))
                         .text_color(theme.code_text)
                         .children(visible.iter().enumerate().map(|(line_ix, line)| {
-                            code_line(line, tokens.as_deref(), line_ix, theme)
+                            let line_id = ElementId::NamedInteger(
+                                "code-line".into(),
+                                code_line_id(ix, salt, block_ix, line_ix),
+                            );
+                            code_line(
+                                line,
+                                tokens
+                                    .as_deref()
+                                    .and_then(|lines| lines.get(line_ix))
+                                    .map(Vec::as_slice),
+                                line_id,
+                                theme,
+                            )
                         })),
                 ),
         );
@@ -4761,33 +5593,61 @@ fn code_block_label(language: Option<&str>) -> String {
 /// One code line as syntax-colored `TextRun`s over the monospace face.
 /// `whitespace_nowrap` keeps indentation exact and lets the block scroll
 /// instead of wrap; an empty line carries a space so its row keeps height.
-fn code_line(
-    text: &str,
-    tokens: Option<&Vec<Vec<Token>>>,
-    line_ix: usize,
-    theme: Theme,
-) -> AnyElement {
+fn code_line(text: &str, tokens: Option<&[Token]>, key: ElementId, theme: Theme) -> AnyElement {
     div()
         .flex_none()
         .whitespace_nowrap()
-        .child(syntax_styled(text, tokens, line_ix, theme.code_text, theme))
+        .child(syntax_line(text, tokens, key, theme.code_text, theme))
         .into_any_element()
+}
+
+/// A selectable syntax-highlighted line; the selection wash rides the line's
+/// runs, so wrapped/folded lines highlight exactly with the text.
+fn syntax_line(
+    text: &str,
+    tokens: Option<&[Token]>,
+    key: ElementId,
+    base: Hsla,
+    theme: Theme,
+) -> SelectableText {
+    let (display, runs) = syntax_runs(text, tokens, base, theme);
+    let plain: SharedString = text.to_string().into();
+    let scope = text_scope();
+    let range = scope
+        .as_ref()
+        .and_then(|scope| scope.state.borrow().range_for(&key, &display));
+    let runs = highlight_runs(runs, range, selection_color(theme));
+    SelectableText::new(
+        key,
+        StyledText::new(display).with_runs(runs),
+        plain,
+        Vec::new(),
+        scope,
+    )
 }
 
 /// Build a line of syntax-colored text: plain gaps and token spans over the
 /// monospace face, with an empty line carrying a space so its row keeps
 /// height. Shared by code blocks (no-wrap) and tool detail (wrapping).
-fn syntax_styled(
+fn syntax_styled(text: &str, tokens: Option<&[Token]>, base: Hsla, theme: Theme) -> StyledText {
+    let (display, runs) = syntax_runs(text, tokens, base, theme);
+    StyledText::new(display).with_runs(runs)
+}
+
+fn syntax_runs(
     text: &str,
-    tokens: Option<&Vec<Vec<Token>>>,
-    line_ix: usize,
+    tokens: Option<&[Token]>,
     base: Hsla,
     theme: Theme,
-) -> StyledText {
+) -> (SharedString, Vec<TextRun>) {
     let font = mono_font();
-    let display = if text.is_empty() { " " } else { text };
+    let display: SharedString = if text.is_empty() {
+        " ".into()
+    } else {
+        text.to_string().into()
+    };
     let mut runs: Vec<TextRun> = Vec::new();
-    if let Some(spans) = tokens.and_then(|lines| lines.get(line_ix)) {
+    if let Some(spans) = tokens {
         let mut offset = 0usize;
         for token in spans {
             let start = token.range.start.min(text.len());
@@ -4807,7 +5667,12 @@ fn syntax_styled(
     if runs.is_empty() {
         runs.push(code_run(display.len(), base, &font));
     }
-    StyledText::new(display.to_string()).with_runs(runs)
+    (display, runs)
+}
+
+/// Element id for one line inside a code block.
+fn code_line_id(ix: usize, salt: u64, block_ix: usize, line_ix: usize) -> u64 {
+    ((ix as u64) << 40) | ((salt & 0xff_ffff) << 16) | ((block_ix as u64) << 10) | line_ix as u64
 }
 
 fn code_run(len: usize, color: Hsla, font: &Font) -> TextRun {
@@ -4885,7 +5750,16 @@ fn render_table(
                     FontWeight::NORMAL
                 },
                 theme.assistant_text,
-                md_id(ix, salt, block_ix, sub),
+                // Table cells get their own id namespace: `md_id`'s 8-bit
+                // `sub` overflows for taller tables and would collide with
+                // other blocks (selection keys depend on unique ids).
+                ElementId::NamedInteger(
+                    "md-table".into(),
+                    ((ix as u64) << 40)
+                        | ((salt & 0xffff) << 24)
+                        | ((block_ix as u64) << 16)
+                        | (sub as u64 & 0xffff),
+                ),
                 theme,
             ));
         if last {
@@ -6064,5 +6938,272 @@ mod tests {
         assert!(matches!(first[0], Block::Heading(1, _)));
         let third = parse_blocks_cached("# Title\n\nchanged\n");
         assert!(!Rc::ptr_eq(&first, &third));
+    }
+
+    /// A selection over `texts` with keys `block-0..block-N` — the shape the
+    /// panel builds on mouse-down.
+    fn selection_over(
+        texts: &[&str],
+        anchor: (usize, usize),
+        focus: (usize, usize),
+    ) -> TextSelection {
+        let blocks = texts
+            .iter()
+            .enumerate()
+            .map(|(ix, text)| SelectedBlock {
+                key: ElementId::Name(format!("block-{ix}").into()),
+                text: (*text).to_string().into(),
+            })
+            .collect();
+        let mut state = TextSelection::new();
+        state.selection = Some(Selection {
+            blocks,
+            anchor: SelectPoint {
+                block: anchor.0,
+                offset: anchor.1,
+            },
+            focus: SelectPoint {
+                block: focus.0,
+                offset: focus.1,
+            },
+        });
+        state
+    }
+
+    fn test_key(ix: usize) -> ElementId {
+        ElementId::Name(format!("block-{ix}").into())
+    }
+
+    #[test]
+    fn selection_spans_blocks_with_partial_ends() {
+        // Cross-paragraph: first block from the anchor offset to its end,
+        // middle blocks whole, last block up to the focus offset.
+        let state = selection_over(
+            &["hello world", "second paragraph", "third"],
+            (0, 6),
+            (2, 5),
+        );
+        assert_eq!(
+            state.selected_text().as_deref(),
+            Some("world\nsecond paragraph\nthird")
+        );
+        // A backwards drag normalizes to the same text.
+        let state = selection_over(
+            &["hello world", "second paragraph", "third"],
+            (2, 5),
+            (0, 6),
+        );
+        assert_eq!(
+            state.selected_text().as_deref(),
+            Some("world\nsecond paragraph\nthird")
+        );
+        // A collapsed selection is nothing to copy.
+        let state = selection_over(&["only"], (0, 2), (0, 2));
+        assert_eq!(state.selected_text(), None);
+    }
+
+    #[test]
+    fn selection_ranges_are_per_block() {
+        let state = selection_over(
+            &["first block", "middle block", "last block"],
+            (0, 6),
+            (2, 4),
+        );
+        assert_eq!(state.range_for(&test_key(0), "first block"), Some(6..11));
+        assert_eq!(state.range_for(&test_key(1), "middle block"), Some(0..12));
+        assert_eq!(state.range_for(&test_key(2), "last block"), Some(0..4));
+        // A block outside the selection washes nothing.
+        let state = selection_over(&["one", "two"], (1, 1), (1, 2));
+        assert_eq!(state.range_for(&test_key(0), "one"), None);
+    }
+
+    #[test]
+    fn selection_offsets_snap_to_char_boundaries_and_shrinking_text() {
+        // Offset 2 sits inside the multi-byte 'é' (bytes 1..3): the start
+        // snaps back so the highlighted range is a whole char.
+        let state = selection_over(&["héllo"], (0, 2), (0, 3));
+        assert_eq!(state.selected_text().as_deref(), Some("é"));
+        // Offsets past the current text end (stale mid-stream selection)
+        // clamp instead of panicking.
+        let state = selection_over(&["short"], (0, 2), (0, 50));
+        assert_eq!(state.selected_text().as_deref(), Some("ort"));
+    }
+
+    #[test]
+    fn highlight_runs_splits_only_the_selected_slice() {
+        let font = ui_font();
+        let color = Hsla::default();
+        let runs = vec![
+            code_run(4, Hsla::default(), &font),
+            code_run(4, Hsla::default(), &font),
+        ];
+        let out = highlight_runs(runs, Some(3..6), color);
+        let lens: Vec<usize> = out.iter().map(|run| run.len).collect();
+        assert_eq!(lens, vec![3, 1, 2, 2]);
+        assert_eq!(out[1].background_color, Some(color));
+        assert_eq!(out[2].background_color, Some(color));
+        assert_eq!(out[3].background_color, None);
+        // Without a selection the runs are untouched.
+        let out = highlight_runs(vec![code_run(4, Hsla::default(), &font)], None, color);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].background_color, None);
+    }
+
+    /// A minimal transcript view: one assistant paragraph and one user
+    /// prompt, with fresh shared state for every collaborator.
+    fn test_messages() -> Rc<RefCell<Vec<ChatMessage>>> {
+        Rc::new(RefCell::new(vec![
+            ChatMessage {
+                user: false,
+                steps: vec![Step {
+                    text: "Alpha bravo charlie delta echo foxtrot golf hotel india juliet \
+                           kilo lima mike november oscar papa quebec romeo sierra tango \
+                           uniform victor whiskey x-ray yankee zulu."
+                        .into(),
+                    ..Step::default()
+                }],
+                images: Vec::new(),
+                elapsed: None,
+                finished_at: None,
+                error: None,
+                aborted: false,
+            },
+            ChatMessage {
+                user: true,
+                steps: vec![Step {
+                    text: "Second paragraph in a follow-up turn.".into(),
+                    ..Step::default()
+                }],
+                images: Vec::new(),
+                elapsed: None,
+                finished_at: None,
+                error: None,
+                aborted: false,
+            },
+        ]))
+    }
+
+    fn test_view(
+        state: TextSelectionState,
+        messages: Rc<RefCell<Vec<ChatMessage>>>,
+        scroller: MessageScrollerState,
+    ) -> TranscriptView {
+        TranscriptView {
+            scroller,
+            messages,
+            text_selection: state,
+            streaming: Rc::new(Cell::new(None)),
+            stream_started: Rc::new(Cell::new(None)),
+            expanded_turns: Rc::new(RefCell::new(HashSet::new())),
+            expanded_files: Rc::new(RefCell::new(HashSet::new())),
+            expanded_activities: Rc::new(RefCell::new(HashMap::new())),
+            expanded_tools: Rc::new(RefCell::new(HashSet::new())),
+            copied: Rc::new(RefCell::new(HashMap::new())),
+            copied_sections: Rc::new(RefCell::new(HashMap::new())),
+            expanded_sections: Rc::new(RefCell::new(HashSet::new())),
+            expanded_blocks: Rc::new(RefCell::new(HashSet::new())),
+            thinking_scrolls: Rc::new(RefCell::new(HashMap::new())),
+            collapsed_thoughts: Rc::new(RefCell::new(HashSet::new())),
+            thinking_detached: Rc::new(RefCell::new(HashSet::new())),
+            hovered_turn: Rc::new(Cell::new(None)),
+            hovered_usage: Rc::new(Cell::new(None)),
+            rail_hint_dismissed: Rc::new(Cell::new(true)),
+            rail_hint_shown_at: Rc::new(Cell::new(None)),
+            workspace: None,
+            viewport_height: px(600.),
+            main_width: px(900.),
+            rail_scroll: ScrollHandle::new(),
+            rail_autoscroll: Rc::new(Cell::new(None)),
+            summary_files: None,
+            summary_finished_at: None,
+            summary_usage: None,
+            review_changes: None,
+            image_opener: None,
+            search_hits: None,
+            search_active: None,
+        }
+    }
+
+    /// The entity wrapper `list()` requires (it reads `window.current_view`).
+    struct SelectTestView {
+        messages: Rc<RefCell<Vec<ChatMessage>>>,
+        state: TextSelectionState,
+        scroller: MessageScrollerState,
+    }
+
+    impl gpui::Render for SelectTestView {
+        fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {
+            render_transcript(
+                test_view(
+                    self.state.clone(),
+                    self.messages.clone(),
+                    self.scroller.clone(),
+                ),
+                cx,
+            )
+        }
+    }
+
+    /// The panel's selection plumbing end-to-end: a simulated drag from the
+    /// assistant paragraph into the user prompt must produce a cross-block
+    /// selection (this caught a panel hitbox that never filled its bounds).
+    #[gpui::test]
+    fn transcript_drag_selects_across_paragraphs(cx: &mut gpui::TestAppContext) {
+        let mut cx = cx.add_empty_window();
+        cx.update(|_, cx| cx.set_global(theme::Theme::for_id(theme::ThemeId::Orbit)));
+        let state: TextSelectionState = Rc::new(RefCell::new(TextSelection::new()));
+        let messages = test_messages();
+        let scroller = MessageScrollerState::new(messages.borrow().len());
+        let state_in = state.clone();
+        let messages_in = messages.clone();
+        let scroller_in = scroller.clone();
+        let view = cx.update(|_, cx| {
+            cx.new(move |_| SelectTestView {
+                messages: messages_in,
+                state: state_in,
+                scroller: scroller_in,
+            })
+        });
+        // The standalone test window only re-registers the panel's mouse
+        // listeners when the entity is painted, so redraw between input
+        // events (a real window paints a frame after every event anyway).
+        let mut paint = |cx: &mut gpui::VisualTestContext| {
+            let view = view.clone();
+            cx.draw(
+                point(px(0.), px(0.)),
+                gpui::size(px(900.), px(600.)),
+                move |_, _| view.clone(),
+            );
+        };
+        paint(&mut cx);
+
+        let blocks = state.borrow();
+        assert!(
+            blocks.blocks.len() >= 2,
+            "expected the rendered paragraphs to register as selectable blocks, got {}",
+            blocks.blocks.len()
+        );
+        let first = blocks.blocks[0].bounds;
+        let last = blocks.blocks[blocks.blocks.len() - 1].bounds;
+        drop(blocks);
+
+        let start = point(first.left() + px(2.), first.top() + px(8.));
+        let end = point(last.left() + px(60.), last.top() + px(8.));
+        cx.simulate_mouse_down(start, MouseButton::Left, gpui::Modifiers::none());
+        paint(&mut cx);
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), gpui::Modifiers::none());
+        paint(&mut cx);
+        cx.simulate_mouse_up(end, MouseButton::Left, gpui::Modifiers::none());
+
+        let selected = state.borrow().selected_text();
+        assert!(
+            selected.is_some(),
+            "drag across paragraphs produced no selection"
+        );
+        let selected = selected.unwrap();
+        assert!(
+            selected.contains("zulu") && selected.contains("Second"),
+            "unexpected selection text: {selected:?}"
+        );
     }
 }
