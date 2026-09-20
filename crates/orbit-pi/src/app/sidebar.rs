@@ -129,6 +129,7 @@ pub(crate) fn sessions_with_placeholder(
 /// have sessions there; sessions in unlisted folders are omitted entirely
 /// (they stay on disk). Each group shows at most
 /// [`SIDEBAR_GROUP_SESSIONS_VISIBLE`] sessions until expanded.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_sidebar_rows(
     sessions: &[SessionInfo],
     workspaces: &[PathBuf],
@@ -136,6 +137,7 @@ pub(crate) fn build_sidebar_rows(
     collapsed_workspaces: &HashSet<String>,
     expanded_workspace_groups: &HashSet<String>,
     expanded_session_groups: &HashSet<String>,
+    pinned: &HashSet<PathBuf>,
     active_path: &Option<PathBuf>,
 ) -> Vec<SideRow> {
     let mut side_rows: Vec<SideRow> = Vec::new();
@@ -159,6 +161,14 @@ pub(crate) fn build_sidebar_rows(
             ixs.push(ix);
         }
     }
+    // Pinned sessions lead their project group; recency order is preserved
+    // within the pinned and unpinned partitions (the sort is stable). Doing
+    // this here rather than in `load_sessions` keeps an Orbit-owned
+    // preference out of the pi-store scan — and means a pinned session can
+    // never be hidden by the per-group truncation below.
+    for (_, _, ixs) in groups.iter_mut() {
+        ixs.sort_by_key(|&ix| !pinned.contains(&sessions[ix].path));
+    }
     for (label, cwd, ixs) in groups {
         let collapsed = is_workspace_group_collapsed(
             &label,
@@ -173,11 +183,13 @@ pub(crate) fn build_sidebar_rows(
             cwd,
         });
         if collapsed {
-            // A collapsed group hides its sessions — except the open one,
-            // which stays pinned under the header so the sidebar always
-            // shows where the live session lives.
-            if let Some(active) = active_path {
-                if let Some(&ix) = ixs.iter().find(|&&ix| sessions[ix].path == *active) {
+            // A collapsed group hides its sessions — except the open one and
+            // any pinned ones, which stay under the header so the live session
+            // and a deliberate mark are always reachable. `ixs` is already
+            // pinned-first, so the pinned rows keep their place at the top.
+            for &ix in &ixs {
+                let open = active_path.as_deref() == Some(sessions[ix].path.as_path());
+                if open || pinned.contains(&sessions[ix].path) {
                     side_rows.push(SideRow::Session(ix));
                 }
             }
@@ -216,6 +228,9 @@ pub(crate) fn render_side_row(
     this: &Entity<OrbitApp>,
     agent_running: bool,
     running_paths: &Rc<HashSet<PathBuf>>,
+    // Sessions the user pinned — they lead their project group and take a
+    // small pin glyph on the title line.
+    pinned_paths: &Rc<HashSet<PathBuf>>,
     // Every session with a live (running or warm-idle) pi process. Guards
     // delete, which would otherwise let an alive process recreate the file.
     live_paths: &Rc<HashSet<PathBuf>>,
@@ -410,6 +425,7 @@ pub(crate) fn render_side_row(
             // The open session runs live; parked (background) sessions run
             // in their own pi processes — both get the loader (Waku).
             let running = (active && agent_running) || running_paths.contains(&session.path);
+            let pinned = pinned_paths.contains(&session.path);
             let this = this.clone();
             let this_for_row = this.clone();
             let this_for_menu = this.clone();
@@ -482,6 +498,9 @@ pub(crate) fn render_side_row(
                             .items_center()
                             .gap(px(6.))
                             .when(running, |line| line.child(running_loader(theme, *ix)))
+                            .when(pinned, |line| {
+                                line.child(icon("icons/pin.svg", 16., theme.text_3))
+                            })
                             .child(title)
                             .child(session_menu_button(
                                 *ix,
@@ -701,6 +720,7 @@ pub(crate) fn session_menu_popup(
 ) -> AnyElement {
     let deletable = menu.deletable;
     let confirm = menu.confirm_delete;
+    let pinned = crate::pins::contains(&menu.path);
 
     let body: AnyElement = if confirm {
         // Delete confirmation — the destructive step gets a named victim.
@@ -784,6 +804,19 @@ pub(crate) fn session_menu_popup(
             .w_full()
             .flex()
             .flex_col()
+            .child(menu_item(
+                "menu-pin",
+                "icons/pin.svg",
+                if pinned {
+                    tr!("sidebar.unpin_session")
+                } else {
+                    tr!("sidebar.pin_session")
+                },
+                theme,
+                this.clone(),
+                false,
+                |app, cx| app.on_menu_toggle_pin(cx),
+            ))
             .child(menu_item(
                 "menu-copy-path",
                 "icons/copy.svg",
@@ -1145,6 +1178,16 @@ impl OrbitApp {
         cx.notify();
     }
 
+    /// Pin or unpin the session the open row menu belongs to. The pin lives
+    /// in Orbit's own store (`~/.orbit-pi/pinned-sessions.json`); pi's
+    /// session file is never touched.
+    pub(super) fn on_menu_toggle_pin(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = self.session_menu.take() {
+            crate::pins::toggle(&menu.path);
+        }
+        cx.notify();
+    }
+
     /// First Delete click: swap the popup to the confirmation state.
     pub(super) fn on_menu_delete_request(&mut self, cx: &mut Context<Self>) {
         if let Some(menu) = self.session_menu.as_mut() {
@@ -1165,6 +1208,8 @@ impl OrbitApp {
             if let Err(err) = fs::remove_file(&menu.path) {
                 self.toast_error(tr!("sidebar.delete_failed", error = err));
             } else {
+                // A deleted session must not leave a stale pin behind.
+                crate::pins::remove(&menu.path);
                 self.toast_info(tr!("sidebar.session_deleted"));
             }
             self.sessions = sessions::load_sessions();

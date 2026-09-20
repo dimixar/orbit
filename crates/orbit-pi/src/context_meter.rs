@@ -67,6 +67,19 @@ pub fn format_percent(usage: &ContextUsage) -> Option<String> {
     }
 }
 
+/// Whole-number label for a cache hit rate: rounds to nearest, but a rate
+/// that merely *rounds* to 100 (e.g. 99.9%) shows `99`, since claiming a
+/// perfect hit rate would be false — pi still served uncached input tokens.
+/// Only an exact 100 prints as `100`.
+pub fn hit_percent_label(percent: f32) -> String {
+    let rounded = (percent.round() as i32).clamp(0, 100);
+    if rounded == 100 && percent < 100.0 {
+        String::from("99")
+    } else {
+        rounded.to_string()
+    }
+}
+
 /// Compact token label (`151K`, `1.0K`, `688`) matching the reference UI.
 pub fn format_tokens(n: u64) -> String {
     if n >= 1_000_000 {
@@ -560,7 +573,7 @@ fn cache_read_label(usage: &SessionUsage) -> String {
         Some(percent) => tr!(
             "context_meter.cache_read_share",
             tokens = tokens,
-            percent = format!("{percent:.0}")
+            percent = hit_percent_label(percent)
         ),
         None => tokens,
     }

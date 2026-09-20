@@ -45,6 +45,10 @@ const REVIEW_FILE_HEADER_HEIGHT: f32 = 36.;
 const REVIEW_HUNK_HEIGHT: f32 = 24.;
 const REVIEW_GAP_HEIGHT: f32 = 32.;
 
+/// How long the Review refresh button spins after a click, so a fast diff
+/// read still reads as acknowledged (the same floor Settings uses).
+const REFRESH_FEEDBACK: Duration = Duration::from_millis(650);
+
 /// Drag marker for the side-pane resize handle (gpui typed drag state).
 pub struct SidePaneResize;
 
@@ -68,6 +72,9 @@ pub struct SidePane {
     /// next time the pane is visible.
     review_stale: bool,
     review_error: Option<String>,
+    /// Manual-refresh feedback: the header button spins until this instant,
+    /// so a click is acknowledged even when the diff read finishes instantly.
+    refresh_spin_until: Option<Instant>,
     /// Which git snapshot is shown; changing it reloads the diff.
     source: Source,
     /// Monotonic id so a slow load for a previous source can be discarded.
@@ -119,6 +126,7 @@ impl SidePane {
             review_loading: false,
             review_stale: true,
             review_error: None,
+            refresh_spin_until: None,
             source: Source::default(),
             load_generation: 0,
             source_menu_open: false,
@@ -296,6 +304,9 @@ impl SidePane {
         let generation = self.load_generation;
         self.review_loading = true;
         self.review_stale = false;
+        // Paint the loading state on the click's own frame; without this the
+        // spinner can be replaced by the result before it is ever drawn.
+        cx.notify();
         cx.spawn(async move |this, cx| {
             let parsed = cx
                 .background_executor()
@@ -405,6 +416,28 @@ impl SidePane {
         if !self.review_loading {
             self.load_review(cx);
         }
+    }
+
+    /// Refresh from the header button: same reload, plus a short minimum spin
+    /// so the click is visibly acknowledged even when the diff is instant.
+    fn refresh_from_button(&mut self, cx: &mut Context<Self>) {
+        self.refresh_review(cx);
+        self.refresh_spin_until = Some(Instant::now() + REFRESH_FEEDBACK);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(REFRESH_FEEDBACK).await;
+            let _ = this.update(cx, |pane, cx| {
+                // A second click extends the floor; only the last timer clears.
+                if pane
+                    .refresh_spin_until
+                    .is_some_and(|until| Instant::now() >= until)
+                {
+                    pane.refresh_spin_until = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     // ── source filter ──────────────────────────────────────────────────
@@ -654,13 +687,15 @@ impl SidePane {
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.bg_hover))
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.refresh_review(cx);
+                        this.refresh_from_button(cx);
                     }))
-                    .child(if self.review_loading {
-                        spinner("review-spinner", theme)
-                    } else {
-                        icon("icons/refresh.svg", 13., theme.text_3).into_any_element()
-                    }),
+                    .child(
+                        if self.review_loading || self.refresh_spin_until.is_some() {
+                            spinner("review-spinner", theme)
+                        } else {
+                            icon("icons/refresh.svg", 13., theme.text_3).into_any_element()
+                        },
+                    ),
             )
             .child(
                 div()

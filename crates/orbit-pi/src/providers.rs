@@ -284,6 +284,14 @@ pub(crate) fn auth_path() -> PathBuf {
 /// `Provider is not configured: ollama`.
 const OLLAMA_SESSION_KEY: &str = "ollama-cloud-session";
 
+/// The provider ids Ollama Cloud usage attaches to: the local Ollama
+/// endpoint's id, and the `ollama-cloud` id used by the third-party
+/// `pi-ollama-cloud-provider` package. Orbit treats both as the same account
+/// for the session editor, sign-out, and quota display.
+pub(crate) fn is_ollama_cloud_provider(id: &str) -> bool {
+    id == "ollama" || id == "ollama-cloud"
+}
+
 /// A provider pi ships with, independent of whether it is authenticated.
 /// Mirrors `builtinProviders()` in `@earendil-works/pi-ai` plus the docs'
 /// env-var / OAuth table, so Orbit can list every provider individually.
@@ -637,16 +645,16 @@ fn read_auth_at(path: &Path) -> Result<HashMap<String, ProviderAuth>, String> {
         };
         out.insert(id.clone(), ProviderAuth { kind });
     }
-    // The session cookie lives outside the provider credential; surface it as
-    // `ollama` so the card shows it and offers Disconnect. A real credential
-    // stored under `ollama` wins.
-    if has_ollama_session && !out.contains_key("ollama") {
-        out.insert(
-            "ollama".to_string(),
-            ProviderAuth {
+    // The session cookie lives outside the provider credential; surface it
+    // under both Ollama ids so whichever card exists (the local `ollama`
+    // endpoint or the third-party `ollama-cloud` provider) shows it and
+    // offers Disconnect. A real credential under either id wins.
+    if has_ollama_session {
+        for id in ["ollama", "ollama-cloud"] {
+            out.entry(id.to_string()).or_insert(ProviderAuth {
                 kind: AuthKind::OllamaSession,
-            },
-        );
+            });
+        }
     }
     Ok(out)
 }
@@ -811,6 +819,7 @@ pub(crate) fn provider_display_name(id: &str) -> String {
         "minimax-cn" => "MiniMax (CN)",
         "nvidia" => "NVIDIA",
         "ollama" => "Ollama",
+        "ollama-cloud" => "Ollama Cloud",
         "github-copilot" => "GitHub Copilot",
         "cloudflare-ai-gateway" => "Cloudflare AI Gateway",
         "cloudflare-workers-ai" => "Cloudflare Workers AI",
@@ -1025,9 +1034,10 @@ mod tests {
             session.get("session").unwrap(),
             "__Secure-session=abc123; cf_clearance=xyz"
         );
-        // The UI surfaces it as an `ollama` credential, distinct from a key.
+        // The UI surfaces it under both Ollama ids, distinct from a key.
         let auth = read_auth_at(&path).unwrap();
         assert_eq!(auth["ollama"].kind, AuthKind::OllamaSession);
+        assert_eq!(auth["ollama-cloud"].kind, AuthKind::OllamaSession);
         // The unrelated key survives the write.
         assert!(root.get("anthropic").is_some());
 

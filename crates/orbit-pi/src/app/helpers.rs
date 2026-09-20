@@ -167,6 +167,26 @@ pub(crate) fn header_icon_button(
     }
 }
 
+/// A bare top-bar icon button: the same square hit box as
+/// [`header_icon_button`], but without the chip's hairline or glass fill so
+/// it sits flat on the titlebar. Hover is the only affordance.
+pub(crate) fn header_ghost_button(
+    id: &'static str,
+    theme: &Theme,
+    child: impl IntoElement,
+) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .size(px(HEADER_CTRL_H))
+        .rounded(px(HEADER_CTRL_R))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.bg_hover))
+        .child(child)
+}
+
 /// Width of one caption button, matching the metric Windows uses for its own
 /// (`platform::WINDOW_CONTROLS_W` is three of them).
 pub(crate) const CAPTION_BUTTON_W: f32 = 46.;

@@ -36,6 +36,10 @@ pub type Close = std::rc::Rc<dyn Fn(&mut Window, &mut gpui::App)>;
 
 const HISTORY_PAGE: usize = 40;
 
+/// How long the header refresh button keeps spinning after a click, so a
+/// fast git read still reads as acknowledged (the same floor Settings uses).
+const REFRESH_FEEDBACK: Duration = Duration::from_millis(650);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GitTab {
     Changes,
@@ -121,6 +125,10 @@ pub struct GitPanel {
     /// chip's following mouse-up does not toggle it straight back open.
     menu_dismissed_at: Option<Instant>,
     branch_operation: bool,
+    /// Manual-refresh feedback: the header button spins until this instant
+    /// (and while the active tab's data is in flight), so a click is always
+    /// acknowledged even when the git read finishes inside one frame.
+    refresh_spin_until: Option<Instant>,
 
     /// One-line feedback (success/failure) with a short TTL.
     status: Option<(String, Instant)>,
@@ -176,6 +184,7 @@ impl GitPanel {
             branch_menu_open: false,
             menu_dismissed_at: None,
             branch_operation: false,
+            refresh_spin_until: None,
             status: None,
             remote_web: None,
             chrome_leading: 12.,
@@ -272,6 +281,37 @@ impl GitPanel {
             GitTab::History => self.refresh_history(cx),
             GitTab::Graph => self.refresh_graph(cx),
             GitTab::Changes => {}
+        }
+    }
+
+    /// Refresh from the header button: same reload, plus a short minimum spin
+    /// so the click is visibly acknowledged even when the read is instant.
+    fn refresh_from_button(&mut self, cx: &mut Context<Self>) {
+        self.refresh_all(cx);
+        self.refresh_spin_until = Some(Instant::now() + REFRESH_FEEDBACK);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(REFRESH_FEEDBACK).await;
+            let _ = this.update(cx, |panel, cx| {
+                // A second click extends the floor; only the last timer clears.
+                if panel
+                    .refresh_spin_until
+                    .is_some_and(|until| Instant::now() >= until)
+                {
+                    panel.refresh_spin_until = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Whether the active tab's data is in flight.
+    fn tab_loading(&self) -> bool {
+        match self.tab {
+            GitTab::Changes => self.changes_loading,
+            GitTab::History => self.history_loading,
+            GitTab::Graph => self.graph_loading,
         }
     }
 
@@ -873,8 +913,18 @@ impl GitPanel {
                     .rounded_sm()
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.bg_hover))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.refresh_all(cx)))
-                    .child(icon("icons/refresh.svg", 13., theme.text_3)),
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.refresh_from_button(cx);
+                    }))
+                    .child(
+                        if (self.refresh_spin_until.is_some() || self.tab_loading())
+                            && !theme.ui.reduce_motion
+                        {
+                            spinner("git-refresh-spinner", 13., theme)
+                        } else {
+                            icon("icons/refresh.svg", 13., theme.text_3).into_any_element()
+                        },
+                    ),
             )
             .into_any_element()
     }

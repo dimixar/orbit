@@ -4,7 +4,8 @@
 //! End-aligned neutral bubbles, assistant turns are Start-aligned prose. A
 //! ghost copy/timestamp footer reveals on row hover. Settled: **Worked for**
 //! fold → thinking/tool cards → answer → files → copy footer. Live: thinking
-//! + activity cards → answer → files → **Working for**.
+//! + activity cards → answer → files → **Working for** — work stays in
+//! sequence with the text as it arrives from the agent.
 //!
 //! Timestamps render on the footer when pi provides one (snapshot
 //! `timestamp` fields, or a wall-clock stamp taken at `message_end`).
@@ -38,7 +39,7 @@ use serde_json::Value;
 
 use orbit_rpc::MessageUsage;
 
-use crate::context_meter::format_tokens;
+use crate::context_meter::{format_tokens, hit_percent_label};
 use crate::highlight::{self, Token};
 use crate::message_scroller::{self, MessageScrollerState};
 use crate::shimmer::ShimmerText;
@@ -1041,12 +1042,10 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
                 // The group covers the work up to and including the step
                 // that produced the first answer text; work in later steps
                 // gets its own group further down, so tool calls stay in
-                // sequence with the text.
-                let group_end = if paint.live {
-                    message.steps.len()
-                } else {
-                    answer_start.map_or(message.steps.len(), |answer| answer + 1)
-                };
+                // sequence with the text — live included: a turn that speaks
+                // and then works again must not hoist that work above the
+                // answer that preceded it.
+                let group_end = answer_start.map_or(message.steps.len(), |answer| answer + 1);
                 let group_has_work = message.steps[..group_end]
                     .iter()
                     .any(|step| !step.thinking.is_empty() || !step.tools.is_empty());
@@ -1092,9 +1091,10 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
         // in sequence, instead of being pulled up into the first group.
         // The group absorbs every following work-only step, so a run of
         // tool calls between two text blocks is ONE group ("Ran 4
-        // commands · 5 thoughts"), never a stack of per-step rows.
-        if !paint.live
-            && answer_start.is_some_and(|answer| step_ix > answer)
+        // commands · 5 thoughts"), never a stack of per-step rows. While
+        // live, the currently streaming work-only step is absorbed too,
+        // so the group sits where the agent actually resumed working.
+        if answer_start.is_some_and(|answer| step_ix > answer)
             && step_ix >= covered_until
             && (!step.thinking.is_empty() || !step.tools.is_empty())
         {
@@ -1115,7 +1115,7 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
                 .borrow()
                 .get(&(ix, step_ix))
                 .copied()
-                .unwrap_or(false);
+                .unwrap_or(paint.live);
             content = content.child(render_activity_group(
                 ix,
                 step_ix..group_end,
@@ -1333,12 +1333,17 @@ fn render_activity_group(
 ) -> impl IntoElement {
     let steps = &all_steps[range.clone()];
     let title = activity_title(steps, live);
-    let total_tools = steps.iter().map(|step| step.tools.len()).sum::<usize>();
     let tool_base = all_steps[..range.start]
         .iter()
         .map(|step| step.tools.len())
         .sum::<usize>();
-    let last_tool = tool_base + total_tools.saturating_sub(1);
+    // The tool that may still be running is the turn's newest call — not
+    // merely this group's newest (a live turn can carry several groups).
+    let last_tool = all_steps
+        .iter()
+        .map(|step| step.tools.len())
+        .sum::<usize>()
+        .saturating_sub(1);
     let key = (ix, range.start);
     let mut group = div()
         .w_full()
@@ -1410,7 +1415,9 @@ fn render_activity_group(
                 let duration = step_thinking_duration(all_steps, range.start + step_ix);
                 // Only the turn's last step can still be streaming; earlier
                 // thoughts are settled and must not chase the live edge.
-                let streaming = live && step_ix + 1 == steps.len();
+                // Measured against ALL steps, not this group: a live group
+                // can end before the turn's last (still-streaming) step.
+                let streaming = live && range.start + step_ix + 1 == all_steps.len();
                 body = body.child(render_thinking_body(
                     &step.thinking,
                     live,
@@ -3169,7 +3176,7 @@ fn cache_read_label(usage: &MessageUsage) -> String {
         Some(percent) => tr!(
             "transcript_view.hit_share",
             tokens = tokens,
-            percent = format!("{percent:.0}")
+            percent = hit_percent_label(percent)
         ),
         None => tokens,
     }

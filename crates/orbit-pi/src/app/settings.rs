@@ -2702,14 +2702,15 @@ impl OrbitApp {
             // accounts expose session/weekly usage only behind a signed-in
             // settings page, which needs the user's own session cookie. Offer
             // the session editor explicitly so neither is auto-scraped.
-            if view.id == "ollama" {
+            if providers::is_ollama_cloud_provider(&view.id) {
                 primary = primary.child(self.provider_button(
-                    "provider-ollama-session".to_string(),
+                    format!("provider-ollama-session-{}", view.id),
                     &tr!("settings.usage_session"),
                     ProviderButtonStyle::Ghost,
                     theme,
                     this.clone(),
                     ProviderAction::EditOllamaSession {
+                        id: view.id.clone(),
                         name: view.name.clone(),
                     },
                 ));
@@ -2948,8 +2949,8 @@ impl OrbitApp {
                 oauth,
                 note,
             } => self.provider_key_open(id, name, oauth, note, window, cx),
-            ProviderAction::EditOllamaSession { name } => self.provider_credential_open(
-                "ollama".to_string(),
+            ProviderAction::EditOllamaSession { id, name } => self.provider_credential_open(
+                id,
                 name,
                 false,
                 "",
@@ -6271,8 +6272,8 @@ impl OrbitApp {
     pub(super) fn provider_sign_out(&mut self, id: String, cx: &mut Context<Self>) {
         // The Ollama Cloud session lives under its own auth.json key, which
         // pi's provider logout does not know about; clear it so Disconnect
-        // drops the whole credential.
-        if id == "ollama" {
+        // drops the whole credential. Both Ollama ids share the session.
+        if providers::is_ollama_cloud_provider(&id) {
             if let Err(err) = providers::remove_ollama_session() {
                 self.provider_auth_error = Some(err);
             }

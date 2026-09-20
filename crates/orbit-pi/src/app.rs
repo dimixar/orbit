@@ -1469,7 +1469,9 @@ enum ProviderAction {
     },
     /// Open the Ollama Cloud session editor (a pasted cookie header) — the
     /// legacy session/weekly path, distinct from the monthly-credit API key.
+    /// Carries the provider id that opened it (`ollama` or `ollama-cloud`).
     EditOllamaSession {
+        id: String,
         name: String,
     },
     SignOut {

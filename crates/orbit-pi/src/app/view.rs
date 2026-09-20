@@ -89,6 +89,9 @@ impl Render for OrbitApp {
         // open group shows up to SIDEBAR_GROUP_SESSIONS_VISIBLE sessions
         // with per-group Show more / Show less toggles.
         let sidebar_sessions = self.sidebar_sessions();
+        // A pinned session leads its project group; the sidebar sorts and
+        // marks pinned rows from this snapshot (Orbit-owned state).
+        let pinned: Rc<HashSet<PathBuf>> = Rc::new(crate::pins::all().paths());
         let side_rows = Rc::new(build_sidebar_rows(
             &sidebar_sessions,
             &self.workspaces,
@@ -96,6 +99,7 @@ impl Render for OrbitApp {
             &self.collapsed_workspaces,
             &self.expanded_workspace_groups,
             &self.expanded_session_groups,
+            &pinned,
             &self.current_session_path,
         ));
         let old = self.sidebar_list.item_count();
@@ -368,7 +372,6 @@ impl Render for OrbitApp {
                     .flex_none()
                     .h_full()
                     .overflow_hidden()
-                    .bg(theme.bg_sidebar)
                     .child(
                         div()
                             .id("sidebar")
@@ -474,6 +477,7 @@ impl Render for OrbitApp {
                                                             &this,
                                                             agent_running,
                                                             &running_paths,
+                                                            &pinned,
                                                             &live_paths,
                                                             session_menu.as_ref().as_ref(),
                                                             workspace_menu.as_ref().as_ref(),
@@ -494,8 +498,6 @@ impl Render for OrbitApp {
                                 div()
                                     .h(px(44.))
                                     .px_3()
-                                    .border_t_1()
-                                    .border_color(theme.border)
                                     .flex()
                                     .items_center()
                                     .child(
@@ -557,10 +559,7 @@ impl Render for OrbitApp {
                 if gen == 0 || theme::reduce_motion(cx) {
                     // Settled state — including the first frame, so the panel
                     // doesn't slide open on launch.
-                    panel
-                        .w(px(if open { panel_w } else { 0. }))
-                        .when(open, |p| p.border_r_1().border_color(theme.border))
-                        .into_any_element()
+                    panel.w(px(if open { panel_w } else { 0. })).into_any_element()
                 } else {
                     panel
                         .with_animation(
@@ -574,11 +573,7 @@ impl Render for OrbitApp {
                                     panel_w * (1.0 - d)
                                 };
                                 let el = el.w(px(w));
-                                if w > 0.5 {
-                                    el.border_r_1().border_color(theme.border)
-                                } else {
-                                    el
-                                }
+                                el
                             },
                         )
                         .into_any_element()
@@ -2486,66 +2481,61 @@ impl OrbitApp {
             .gap(px(TITLEBAR_CONTROLS_GAP))
             .pr(px(6.))
             .child(
-                header_icon_button(
+                header_ghost_button(
                     "toggle-sidebar",
                     &theme,
-                    false,
                     icon("icons/layout-left.svg", 16., theme.text_2),
                 )
                 .block_mouse_except_scroll()
                 .on_mouse_up(MouseButton::Left, cx.listener(Self::on_toggle_sidebar)),
             )
             .child(
-                header_chip(
-                    div()
-                        .id("history-back")
-                        .block_mouse_except_scroll()
-                        .size(px(HEADER_CTRL_H))
-                        .rounded(px(HEADER_CTRL_R))
-                        .flex()
-                        .items_center()
-                        .justify_center(),
-                    &theme,
-                )
-                .when(back_enabled, |b| {
-                    b.cursor_pointer()
-                        .on_mouse_up(MouseButton::Left, cx.listener(Self::on_history_back))
-                })
-                .child(icon(
-                    "icons/arrow-left.svg",
-                    15.,
-                    if back_enabled {
-                        theme.text_2
-                    } else {
-                        theme.text_3
-                    },
-                )),
+                div()
+                    .id("history-back")
+                    .block_mouse_except_scroll()
+                    .size(px(HEADER_CTRL_H))
+                    .rounded(px(HEADER_CTRL_R))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(back_enabled, |b| {
+                        b.cursor_pointer()
+                            .hover(|s| s.bg(theme.bg_hover))
+                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_history_back))
+                    })
+                    .child(icon(
+                        "icons/arrow-left.svg",
+                        15.,
+                        if back_enabled {
+                            theme.text_2
+                        } else {
+                            theme.text_3
+                        },
+                    )),
             )
             .child(
-                header_chip(
-                    div()
-                        .id("history-forward")
-                        .block_mouse_except_scroll()
-                        .size(px(HEADER_CTRL_H))
-                        .rounded(px(HEADER_CTRL_R))
-                        .flex()
-                        .items_center()
-                        .justify_center(),
-                    &theme,
-                )
-                .when(forward_enabled, |b| {
-                    b.cursor_pointer()
-                        .on_mouse_up(MouseButton::Left, cx.listener(Self::on_history_forward))
-                })
-                .child(icon(
-                    "icons/arrow-right.svg",
-                    15.,
-                    if forward_enabled {
-                        theme.text_2
-                    } else {
-                        theme.text_3
-                    },
-                )),
+                div()
+                    .id("history-forward")
+                    .block_mouse_except_scroll()
+                    .size(px(HEADER_CTRL_H))
+                    .rounded(px(HEADER_CTRL_R))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(forward_enabled, |b| {
+                        b.cursor_pointer()
+                            .hover(|s| s.bg(theme.bg_hover))
+                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_history_forward))
+                    })
+                    .child(icon(
+                        "icons/arrow-right.svg",
+                        15.,
+                        if forward_enabled {
+                            theme.text_2
+                        } else {
+                            theme.text_3
+                        },
+                    )),
             )
     }
 

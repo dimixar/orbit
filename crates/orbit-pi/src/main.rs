@@ -65,6 +65,7 @@ mod model_selector_match;
 mod notifications;
 mod onboarding;
 mod pi_update;
+mod pins;
 mod platform;
 mod plugins;
 mod providers;

@@ -266,7 +266,7 @@ fn week_grid(
         .flex()
         .flex_col()
         .gap(px(geometry.gap));
-    for (row, name) in WEEKDAYS.iter().enumerate() {
+    for row in 0..WEEKDAYS.len() {
         // Every other row, like a calendar's own axis: Mon / Wed / Fri.
         let text = if show_labels && row % 2 == 0 {
             crate::i18n::translate(&format!("usage.weekday_{row}"))

@@ -44,6 +44,7 @@ fn collapsed_workspace_pins_the_open_session() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashSet::new(),
         &active,
     );
     let visible = session_row_paths(&rows, &sessions);
@@ -82,6 +83,7 @@ fn collapsed_workspace_without_the_open_session_stays_closed() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashSet::new(),
         &active,
     );
     assert!(
@@ -106,6 +108,7 @@ fn manually_collapsed_working_workspace_pins_the_open_session() {
         &workspace_paths(&["/work/alpha"]),
         "alpha",
         &collapsed,
+        &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
         &active,
@@ -136,6 +139,7 @@ fn unlisted_workspace_stays_out_of_the_sidebar() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashSet::new(),
         &None,
     );
     assert!(
@@ -159,6 +163,7 @@ fn listed_workspace_without_sessions_gets_a_header() {
         &sessions,
         &workspace_paths(&["/work/alpha", "/work/empty"]),
         "alpha",
+        &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
@@ -189,6 +194,7 @@ fn groups_follow_the_project_list_order() {
         &HashSet::new(),
         &HashSet::new(),
         &HashSet::new(),
+        &HashSet::new(),
         &None,
     );
     let labels: Vec<&str> = rows
@@ -199,4 +205,61 @@ fn groups_follow_the_project_list_order() {
         })
         .collect();
     assert_eq!(labels, vec!["alpha", "beta"]);
+}
+
+#[test]
+fn pinned_sessions_lead_their_group_and_beat_truncation() {
+    // More sessions in the group than fit collapsed. The pinned session is
+    // the oldest row, so without pinning it would be truncated away; the pin
+    // must lift it to the top of its group and keep it visible, while the
+    // rest stay in recency order.
+    let sessions: Vec<SessionInfo> = (0..SIDEBAR_GROUP_SESSIONS_VISIBLE + 2)
+        .map(|i| store_session(&format!("a{i}"), "/work/alpha"))
+        .collect();
+    let oldest = sessions.last().unwrap().path.clone();
+    let pinned: HashSet<PathBuf> = HashSet::from([oldest.clone()]);
+    let rows = build_sidebar_rows(
+        &sessions,
+        &workspace_paths(&["/work/alpha"]),
+        "alpha",
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &pinned,
+        &None,
+    );
+    let visible = session_row_paths(&rows, &sessions);
+    assert_eq!(visible.first(), Some(&oldest), "the pin leads the group");
+    assert_eq!(
+        visible.len(),
+        SIDEBAR_GROUP_SESSIONS_VISIBLE,
+        "the group still shows its visible cap"
+    );
+    assert_eq!(
+        visible[1], sessions[0].path,
+        "unpinned rows keep recency order after the pin"
+    );
+}
+
+#[test]
+fn pinned_sessions_stay_visible_in_a_collapsed_workspace() {
+    // Foreign projects are collapsed by default; a pin is a deliberate mark
+    // and must survive that — under its header, alongside the open row.
+    let sessions = vec![
+        store_session("b1", "/work/beta"),
+        store_session("b2", "/work/beta"),
+    ];
+    let pinned: HashSet<PathBuf> = HashSet::from([sessions[1].path.clone()]);
+    let rows = build_sidebar_rows(
+        &sessions,
+        &workspace_paths(&["/work/alpha", "/work/beta"]),
+        "alpha",
+        &HashSet::new(),
+        &HashSet::new(),
+        &HashSet::new(),
+        &pinned,
+        &None,
+    );
+    let visible = session_row_paths(&rows, &sessions);
+    assert_eq!(visible, vec![sessions[1].path.clone()]);
 }

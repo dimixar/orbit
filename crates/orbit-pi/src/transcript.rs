@@ -172,6 +172,15 @@ impl ChatMessage {
     fn from_value(value: &Value) -> Option<ChatMessage> {
         let value = value.get("message").unwrap_or(value);
         let role = value.get("role")?.as_str()?;
+        // Only user and assistant messages are conversation rows. pi
+        // interleaves context-only entries — the `system` loadout/tool-change
+        // update it emits right before a prompt's user echo, extension
+        // `custom` messages, summaries. Parsed as rows they would land
+        // between the optimistic prompt and pi's echo, defeating the
+        // identical-echo dedupe and showing the prompt twice.
+        if role != "user" && role != "assistant" {
+            return None;
+        }
         let user = role == "user";
         let error = message_error(value);
         let aborted = !user && value.get("stopReason").and_then(Value::as_str) == Some("aborted");
@@ -2222,6 +2231,66 @@ mod tests {
         let messages = t.messages.borrow();
         assert_eq!(messages.len(), 1);
         assert!(messages[0].user);
+    }
+
+    /// pi emits a context-only `system` loadout/tool-change update right
+    /// before the user echo (its session files show a system entry between
+    /// the prompt's turn and the echoed user message). It must not become a
+    /// row — and, critically, must not break the echo dedupe: a live event
+    /// sequence of system start/end then user start/end shows the prompt
+    /// twice when the system message lands in between.
+    #[test]
+    fn system_loadout_message_does_not_duplicate_the_user_echo() {
+        let mut t = Transcript::new();
+        assert!(t.append_user_message("hello", Vec::new()));
+        let system = json!({"type": "message_start", "message": {
+            "role": "system", "content": "",
+            "sections": {"preamble": "You are an expert…"}
+        }});
+        t.apply_event(&Event::MessageStart { value: system.clone() });
+        t.apply_event(&Event::MessageEnd {
+            value: json!({"type": "message_end", "message": {
+                "role": "system", "content": "",
+                "sections": {"preamble": "You are an expert…"}
+            }}),
+        });
+        t.apply_event(&Event::MessageStart {
+            value: json!({"type": "message_start", "message": {
+                "role": "user", "content": [{"type": "text", "text": "hello"}]
+            }}),
+        });
+        t.apply_event(&Event::MessageEnd {
+            value: json!({"type": "message_end", "message": {
+                "role": "user", "content": [{"type": "text", "text": "hello"}]
+            }}),
+        });
+        let messages = t.messages.borrow();
+        assert_eq!(messages.len(), 1, "the prompt must render once");
+        assert!(messages[0].user);
+        assert_eq!(messages[0].text(), "hello");
+    }
+
+    /// The same system entry in a `get_messages`/disk snapshot must be
+    /// skipped, not parsed as an empty assistant row between turns.
+    #[test]
+    fn system_messages_are_skipped_when_reloading() {
+        let message = ChatMessage::from_value(&json!({
+            "role": "system", "content": "",
+            "sections": {"preamble": "You are an expert…"}
+        }));
+        assert!(message.is_none());
+
+        let mut t = Transcript::new();
+        t.load_from(&json!({"messages": [
+            {"role": "user", "content": [{"type": "text", "text": "first"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "answer"}]},
+            {"role": "system", "content": "", "sections": {"preamble": "…"}},
+            {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+        ]}));
+        let messages = t.messages.borrow();
+        assert_eq!(messages.len(), 3, "two user turns plus one assistant row");
+        assert!(messages[2].user);
+        assert_eq!(messages[2].text(), "hello");
     }
 
     #[test]
