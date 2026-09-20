@@ -135,6 +135,8 @@ impl OrbitApp {
     pub(super) fn drop_client(&mut self) {
         self.client = None;
         self.runtime = RuntimeStatus::default();
+        // Extension widgets belonged to the departing process.
+        self.extension_widgets.clear();
         // A login in flight dies with its process; remember the provider so
         // the next `auth.list` can reconcile a completion that happened while
         // Orbit was reconnecting.

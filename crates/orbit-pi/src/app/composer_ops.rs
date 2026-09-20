@@ -200,6 +200,12 @@ impl OrbitApp {
                     _ => String::new(),
                 },
             };
+            // Commands carry a scope badge on the right (skills, orbit,
+            // custom, the project name…); files have no scope.
+            let scope_badge: Option<String> = match &entry {
+                AcEntry::Command { scope, .. } => Some(scope.label()),
+                AcEntry::File { .. } => None,
+            };
             list = list.child(
                 div()
                     .id(ElementId::NamedInteger("ac-row".into(), ix as u64))
@@ -252,7 +258,22 @@ impl OrbitApp {
                                         .child(subtitle),
                                 )
                             }),
-                    ),
+                    )
+                    .when_some(scope_badge, |row, badge| {
+                        row.child(
+                            div()
+                                .h(px(18.))
+                                .px(px(6.))
+                                .rounded(px(5.))
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .bg(theme.overlay_strong)
+                                .text_size(theme.ui_px(10.5))
+                                .text_color(theme.text_3)
+                                .child(badge),
+                        )
+                    }),
             );
         }
         // Full width of the chat box, so long paths are never cut.

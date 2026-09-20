@@ -616,6 +616,17 @@ impl OrbitApp {
                 }
                 self.sync_model_selector(cx);
                 self.refresh_context_stats();
+                // Capability probe: a pi that advertises `custom` will stream
+                // `method:"custom"` frames for `ctx.ui.custom()`.
+                if let Some(methods) = data
+                    .get("capabilities")
+                    .and_then(|caps| caps.get("extension_ui"))
+                    .and_then(Value::as_array)
+                {
+                    self.custom_ui_supported = methods
+                        .iter()
+                        .any(|method| method.as_str() == Some("custom"));
+                }
             }
             "get_messages" => {
                 self.apply_messages_snapshot(data);
@@ -659,6 +670,8 @@ impl OrbitApp {
                 self.sync_model_selector(cx);
             }
             "get_commands" => {
+                let home = crate::platform::home_dir_opt();
+                let workspace = self.current_workspace.clone();
                 self.slash_commands = data
                     .get("commands")
                     .and_then(serde_json::Value::as_array)
@@ -668,9 +681,26 @@ impl OrbitApp {
                                 let name = c.get("name").and_then(Value::as_str)?;
                                 let description =
                                     c.get("description").and_then(Value::as_str).unwrap_or("");
+                                // `source` + `sourceInfo` carry the command's
+                                // provenance; Orbit folds it into a scope badge.
+                                let source = c.get("source").and_then(Value::as_str).unwrap_or("");
+                                let info = c.get("sourceInfo");
+                                let scope =
+                                    info.and_then(|i| i.get("scope")).and_then(Value::as_str);
+                                let origin =
+                                    info.and_then(|i| i.get("origin")).and_then(Value::as_str);
+                                let path = info.and_then(|i| i.get("path")).and_then(Value::as_str);
                                 Some(SlashCommand {
                                     name: name.to_string(),
                                     description: description.to_string(),
+                                    scope: mentions::classify_scope(
+                                        source,
+                                        scope,
+                                        origin,
+                                        path,
+                                        workspace.as_deref(),
+                                        home.as_deref(),
+                                    ),
                                 })
                             })
                             .collect()
@@ -706,6 +736,8 @@ impl OrbitApp {
                 self.removed = 0;
                 self.context = None;
                 self.session_usage = None;
+                // Widgets belong to the process that sent them.
+                self.extension_widgets.clear();
                 self.reset_turns();
                 self.reset_queue();
                 *refresh_sessions = true;

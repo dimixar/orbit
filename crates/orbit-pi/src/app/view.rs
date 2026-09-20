@@ -2,6 +2,10 @@ use super::helpers::*;
 use super::sidebar::*;
 use super::*;
 
+use gpui::StyledText;
+
+use crate::widgets as ext_widgets;
+
 /// Height of a page's top bar (DESIGN.md: 44px header rows). The new-task
 /// backdrop is offset by it, so the picture starts below the title exactly
 /// where it always has — this is the one value the two must agree on.
@@ -335,6 +339,16 @@ impl Render for OrbitApp {
             if self.dialog_focus_pending {
                 self.dialog_focus_pending = false;
                 window.focus(&dialog.read(cx).focus_handle(cx));
+            }
+        }
+        // A custom-UI surface owns the keyboard while it is open; the newest
+        // (top of the stack) takes focus, and closing the last hands focus back
+        // to the composer so typing continues.
+        if self.custom_ui_focus_pending {
+            self.custom_ui_focus_pending = false;
+            match self.custom_ui.last().cloned() {
+                Some(ui) => window.focus(&ui.read(cx).focus_handle(cx)),
+                None => self.input.read(cx).focus(window),
             }
         }
         // The inline approval bar owns the keyboard the same way.
@@ -765,6 +779,9 @@ impl Render for OrbitApp {
                                     // Queued follow-ups wait here (sticky above
                                     // the composer) until the task finishes.
                                     .children(self.queue_bar(cx))
+                                    // Extension `setWidget` blocks placed
+                                    // above the editor.
+                                    .children(self.extension_widgets_above(cx))
                                     // composer box — the picker popups are
                                     // anchored above their own chips
                                     .child(
@@ -844,6 +861,9 @@ impl Render for OrbitApp {
                                                 }
                                             })),
                                     )
+                                    // Extension `setWidget` blocks placed
+                                    // below the editor.
+                                    .children(self.extension_widgets_below(cx))
                                     .child(self.status_bar(&workspace_label, cx)),
                             ),
                     )
@@ -937,6 +957,14 @@ impl Render for OrbitApp {
             // blocking modal above every other surface; pi holds the run until
             // the user answers. It cancels the incoming request otherwise.
             .children(dialog_layer.map(|dialog| crate::dialog::layer(dialog).into_any_element()))
+            // ── extension custom UI (`ctx.ui.custom`) — the component's own
+            // rendered frames, stacked with the newest on top.
+            .children(
+                self.custom_ui
+                    .iter()
+                    .cloned()
+                    .map(|ui| crate::custom_ui::layer(ui).into_any_element()),
+            )
             // ── update modal — the search, changelog, and install decision,
             // opened by the download control and Check for Updates. Below the
             // extension dialog (a run blocks on it) and the lightbox.
@@ -1020,6 +1048,61 @@ impl Render for OrbitApp {
 }
 
 impl OrbitApp {
+    /// The extension widgets placed above the composer, if any.
+    pub(super) fn extension_widgets_above(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        self.extension_widgets_element(WidgetPlacement::AboveEditor, cx)
+    }
+
+    /// The extension widgets placed below the composer, if any.
+    pub(super) fn extension_widgets_below(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        self.extension_widgets_element(WidgetPlacement::BelowEditor, cx)
+    }
+
+    /// Render every keyed `setWidget` block for one placement as a small
+    /// monospace card. The lines keep the extension's own SGR coloring (see
+    /// [`crate::widgets`]), so a todo list or status block reads as intended.
+    fn extension_widgets_element(
+        &self,
+        placement: WidgetPlacement,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        let items: Vec<&ExtensionWidget> = self
+            .extension_widgets
+            .iter()
+            .filter(|widget| widget.placement == placement && !widget.lines.is_empty())
+            .collect();
+        if items.is_empty() {
+            return None;
+        }
+        let theme = *theme::get(cx);
+        let font = ext_widgets::widget_font();
+        let mut column = div().w_full().flex().flex_col().gap(theme.space(6.));
+        for widget in items {
+            let mut card = div()
+                .id(ElementId::Name(format!("ext-widget-{}", widget.key).into()))
+                .w_full()
+                .px(theme.space(12.))
+                .py(theme.space(8.))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.code_bg)
+                .font_family(theme::code_font_family())
+                .text_size(theme.code_px(12.))
+                .line_height(theme.code_px(18.))
+                .text_color(theme.code_text)
+                .flex()
+                .flex_col()
+                .gap(theme.space(2.));
+            for line in &widget.lines {
+                let (text, runs) = ext_widgets::styled_line(line, &theme, &font);
+                card = card.child(StyledText::new(text).with_runs(runs));
+            }
+            column = column.child(card);
+        }
+        Some(column.into_any_element())
+    }
+
     /// Bottom row inside the composer: the "+" add menu and the access-mode
     /// chip on the left; model / thinking chips and the round send button on
     /// the right. `compact` (narrow window) drops the access chip and clamps

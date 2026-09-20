@@ -50,6 +50,7 @@ mod command_palette;
 mod commit_message;
 mod composer;
 mod context_meter;
+mod custom_ui;
 mod dialog;
 mod dither;
 mod favorites;
@@ -83,6 +84,7 @@ mod transcript_view;
 mod updater;
 mod usage;
 mod watch;
+mod widgets;
 mod workspace_picker;
 
 use std::time::Duration;
@@ -165,6 +167,10 @@ actions!(
 );
 // Terminal-panel actions (bound to the `Terminal` context on the grid).
 actions!(terminal_keys, [TerminalEscape]);
+
+// Custom-UI surface action (bound to the `CustomUi` context on the surface's
+// focus handle) so Escape reaches the component instead of aborting the run.
+actions!(custom_ui_keys, [CustomUiEscape]);
 
 // Composer "+" add-menu actions (bound to the `AddMenu` context, which
 // rides on the open menu's focus handle).
@@ -335,6 +341,10 @@ fn bind_keys(cx: &mut App) {
         // an equal-depth tie by registration order, so this wins while the
         // grid owns focus.
         KeyBinding::new("escape", TerminalEscape, Some("Terminal")),
+        // Custom-UI surface: Escape must reach the component (which cancels
+        // itself), but the global `escape`-to-`AbortRun` binding is always
+        // enabled, so the `CustomUi` context re-binds it and forwards ESC.
+        KeyBinding::new("escape", CustomUiEscape, Some("CustomUi")),
     ]);
 }
 

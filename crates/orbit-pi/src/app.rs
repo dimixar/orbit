@@ -54,6 +54,7 @@ use crate::bundled_extensions::BundledExtensions;
 use crate::checkpoint;
 use crate::command_palette::{self, CommandPalette, PaletteCommand, PaletteSnapshot};
 use crate::composer::ComposerInput;
+use crate::custom_ui::{CustomCancel, CustomFrame, CustomInput, CustomUi};
 use crate::context_meter::{self, ContextMeterData, ContextPopup};
 use crate::dialog::{ApprovalRequest, Dialog, DialogRequest, DialogResponse};
 use crate::git_panel::GitPanel;
@@ -76,6 +77,7 @@ use crate::toast;
 use crate::transcript::{self, Transcript};
 use crate::usage::page::UsagePage;
 use crate::watch;
+use crate::widgets::{ExtensionWidget, WidgetPlacement};
 use crate::workspace_picker::{WorkspaceEntry, WorkspacePicker};
 
 const SIDEBAR_DEFAULT_W: f32 = 248.;
@@ -144,6 +146,9 @@ struct ParkedSession {
     busy: bool,
     added: u64,
     removed: u64,
+    /// Extension `setWidget` blocks live at park time, so switching back to a
+    /// warm session restores them (a parked process never re-emits).
+    widgets: Vec<ExtensionWidget>,
     /// When this session was last parked; drives idle TTL reaping.
     parked_at: Instant,
 }
@@ -307,6 +312,18 @@ pub struct OrbitApp {
     ask_focus: FocusHandle,
     /// Focus the panel (or its text field) on the next paint.
     ask_focus_pending: bool,
+    /// Extension `setWidget` text blocks (above/below the composer), keyed by
+    /// the extension's `widgetKey`. Per-session, so it parks with the session.
+    extension_widgets: Vec<ExtensionWidget>,
+    /// Live `ctx.ui.custom()` surfaces, keyed by their RPC id. The newest
+    /// (last) owns focus; multiple may be open when a component nests.
+    custom_ui: Vec<Entity<CustomUi>>,
+    /// Focus the top custom surface on the next paint — `tick` has no window.
+    custom_ui_focus_pending: bool,
+    /// Whether pi advertises the `custom` extension-UI capability in
+    /// `get_state.capabilities`. Purely informational today: frames are
+    /// handled whenever they arrive.
+    custom_ui_supported: bool,
     /// Full-window image lightbox for a transcript attachment image. `None`
     /// is closed. Opened by clicking an image tile, dismissed by click or
     /// Escape.
@@ -896,6 +913,10 @@ impl OrbitApp {
             ask_replay: None,
             ask_focus: cx.focus_handle(),
             ask_focus_pending: false,
+            extension_widgets: Vec::new(),
+            custom_ui: Vec::new(),
+            custom_ui_focus_pending: false,
+            custom_ui_supported: false,
             lightbox: None,
             transcript_search: None,
             session_menu: None,

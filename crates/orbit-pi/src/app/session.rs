@@ -242,6 +242,7 @@ impl OrbitApp {
         };
         let busy = self.busy || self.transcript.is_streaming();
         let transcript = std::mem::replace(&mut self.transcript, Transcript::new());
+        let widgets = std::mem::take(&mut self.extension_widgets);
         self.park(
             path,
             ParkedSession {
@@ -250,6 +251,7 @@ impl OrbitApp {
                 busy,
                 added: self.added,
                 removed: self.removed,
+                widgets,
                 parked_at: Instant::now(),
             },
         );
@@ -660,6 +662,7 @@ impl OrbitApp {
             self.busy = parked.busy;
             self.added = parked.added;
             self.removed = parked.removed;
+            self.extension_widgets = parked.widgets;
             self.send(CommandBody::GetState, "get_state");
             self.refresh_context_stats();
             // A warm process already reported capabilities; a cheap refresh
@@ -669,6 +672,7 @@ impl OrbitApp {
             // Cold session (its process was torn down): paint the stored
             // transcript from disk in the same frame so the switch never waits
             // on pi boot. `get_messages` supersedes it moments later.
+            self.extension_widgets.clear();
             self.preview_session_transcript(session.path.clone(), cx);
             // Spawn a dedicated pi process rooted at the session's workspace
             // and point it at the session file.

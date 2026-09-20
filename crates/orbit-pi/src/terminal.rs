@@ -86,7 +86,7 @@ const RESTART_FEEDBACK: Duration = Duration::from_millis(650);
 /// active theme. Phase 1 derives every slot from an existing semantic role, so
 /// the terminal recolors with the workbench and needs no second palette file.
 #[derive(Debug, Clone, PartialEq)]
-struct Palette {
+pub(crate) struct Palette {
     ansi: [Hsla; 16],
     foreground: Hsla,
     background: Hsla,
@@ -94,7 +94,7 @@ struct Palette {
 }
 
 impl Palette {
-    fn from_theme(theme: &Theme) -> Self {
+    pub(crate) fn from_theme(theme: &Theme) -> Self {
         let foreground = theme.code_text;
         let background = theme.code_bg;
         Self {
@@ -137,7 +137,7 @@ impl Palette {
     }
 
     /// xterm's 256-color table: 16 system slots, a 6×6×6 cube, then greys.
-    fn indexed(&self, index: usize) -> Hsla {
+    pub(crate) fn indexed(&self, index: usize) -> Hsla {
         match index {
             0..=15 => self.ansi[index],
             16..=231 => {
@@ -164,7 +164,7 @@ impl Palette {
     }
 }
 
-fn rgb_to_hsla(rgb: Rgb) -> Hsla {
+pub(crate) fn rgb_to_hsla(rgb: Rgb) -> Hsla {
     Hsla::from(Rgba {
         r: rgb.r as f32 / 255.,
         g: rgb.g as f32 / 255.,
@@ -768,7 +768,7 @@ fn cursor_bytes(final_byte: u8, application: bool) -> Vec<u8> {
 
 /// Translate a GPUI keystroke into the bytes a terminal expects, or `None`
 /// when the key belongs to the app (every `cmd`/`super` combination).
-fn encode_key(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
+pub(crate) fn encode_key(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
     let modifiers = &keystroke.modifiers;
     // `cmd`/`super` is app territory; the terminal never sees it.
     if modifiers.platform {

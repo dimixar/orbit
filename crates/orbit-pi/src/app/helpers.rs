@@ -16,12 +16,13 @@ pub(crate) fn humanize_command(command: &str) -> String {
 /// One queued-message chip: a kind tag plus the message text.
 pub(crate) fn queue_chip(kind: &str, text: &str, follow: bool, theme: Theme) -> AnyElement {
     div()
-        .max_w(px(300.))
+        .w_full()
+        .min_w_0()
         .flex()
-        .items_center()
+        .items_start()
         .gap(px(6.))
         .px(px(8.))
-        .py(px(4.))
+        .py(px(5.))
         .rounded(px(6.))
         .border_1()
         .border_color(theme.border)
@@ -29,17 +30,20 @@ pub(crate) fn queue_chip(kind: &str, text: &str, follow: bool, theme: Theme) -> 
         .child(
             div()
                 .flex_none()
+                .pt(px(1.))
                 .text_size(theme.ui_px(10.))
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(if follow { theme.text_3 } else { theme.accent })
+                .text_color(if follow { theme.text_2 } else { theme.accent })
                 .child(kind.to_string()),
         )
         .child(
             div()
+                .flex_1()
                 .min_w_0()
-                .truncate()
+                .line_clamp(4)
                 .text_size(theme.ui_px(11.5))
-                .text_color(theme.text_2)
+                .line_height(theme.ui_px(16.))
+                .text_color(theme.text)
                 .child(text.to_string()),
         )
         .into_any_element()
