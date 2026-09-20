@@ -179,7 +179,20 @@ base64 -i orbit-update.pem
 Add both under Settings → Secrets and variables → Actions, and keep
 `orbit-update.pem` somewhere safe — lose it and you can never sign another
 update. With no public key the updater stays dormant, and debug builds never
-update themselves (`ORBIT_FORCE_UPDATER=1` arms the flow for testing).
+update themselves.
+
+To exercise the flow from a dev build, compile the public key in and force the
+updater on:
+
+```bash
+ORBIT_UPDATE_PUBLIC_KEY="$(openssl pkey -in orbit-update.pem -pubout -outform DER | tail -c 32 | base64)" \
+ORBIT_FORCE_UPDATER=1 cargo run
+```
+
+A run outside a managed install checks and opens the modal (search, changelog,
+Version History) but offers no **Update now** — installing needs the bundled
+`.app`. **Check for Updates** on a build with no updater at all opens the same
+modal with an explanation, never a toast.
 
 Each feed's `<enclosure>` must point at an artifact the updater can install —
 a Sparkle appcast cannot describe an architecture, which is why there is one

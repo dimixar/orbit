@@ -342,6 +342,11 @@ impl Render for OrbitApp {
             self.approval_focus_pending = false;
             window.focus(&self.approval_focus);
         }
+        // The update modal owns the keyboard (Escape dismisses) once open.
+        if self.updater_dialog_focus_pending {
+            self.updater_dialog_focus_pending = false;
+            window.focus(&self.updater_dialog_focus);
+        }
         // The inline ask panel owns the keyboard while it is open.
         if self.ask_focus_pending {
             self.ask_focus_pending = false;
@@ -372,6 +377,7 @@ impl Render for OrbitApp {
                     .flex_none()
                     .h_full()
                     .overflow_hidden()
+                    .bg(theme.bg_sidebar)
                     .child(
                         div()
                             .id("sidebar")
@@ -498,6 +504,8 @@ impl Render for OrbitApp {
                                 div()
                                     .h(px(44.))
                                     .px_3()
+                                    .border_t_1()
+                                    .border_color(theme.border)
                                     .flex()
                                     .items_center()
                                     .child(
@@ -559,7 +567,10 @@ impl Render for OrbitApp {
                 if gen == 0 || theme::reduce_motion(cx) {
                     // Settled state — including the first frame, so the panel
                     // doesn't slide open on launch.
-                    panel.w(px(if open { panel_w } else { 0. })).into_any_element()
+                    panel
+                        .w(px(if open { panel_w } else { 0. }))
+                        .when(open, |p| p.border_r_1().border_color(theme.border))
+                        .into_any_element()
                 } else {
                     panel
                         .with_animation(
@@ -573,7 +584,11 @@ impl Render for OrbitApp {
                                     panel_w * (1.0 - d)
                                 };
                                 let el = el.w(px(w));
-                                el
+                                if w > 0.5 {
+                                    el.border_r_1().border_color(theme.border)
+                                } else {
+                                    el
+                                }
                             },
                         )
                         .into_any_element()
@@ -922,6 +937,10 @@ impl Render for OrbitApp {
             // blocking modal above every other surface; pi holds the run until
             // the user answers. It cancels the incoming request otherwise.
             .children(dialog_layer.map(|dialog| crate::dialog::layer(dialog).into_any_element()))
+            // ── update modal — the search, changelog, and install decision,
+            // opened by the download control and Check for Updates. Below the
+            // extension dialog (a run blocks on it) and the lightbox.
+            .children(self.updater_dialog_layer(cx))
             // ── image lightbox — full-window, above everything; opened from a
             // transcript image tile, dismissed by click or Escape.
             .children(

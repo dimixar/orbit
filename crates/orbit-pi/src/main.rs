@@ -206,6 +206,10 @@ actions!(
     [AskNext, AskPrev, AskConfirm, AskSubmit, AskClose]
 );
 
+// Update-modal action (bound to the `UpdateDialog` context on the modal's
+// focus handle) so Escape dismisses the modal instead of aborting the run.
+actions!(update_dialog_keys, [UpdateDialogClose]);
+
 fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-q", Quit, None),
@@ -314,6 +318,9 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("enter", AskSubmit, Some("AskInput")),
         KeyBinding::new("up", AskPrev, Some("AskPanel")),
         KeyBinding::new("down", AskNext, Some("AskPanel")),
+        // Update modal. Registered after the Composer bindings so Escape
+        // dismisses the modal instead of aborting the run.
+        KeyBinding::new("escape", UpdateDialogClose, Some("UpdateDialog")),
         // In-transcript find (⌘F). The find field carries `Composer Search`,
         // so editing keys stay live; these bindings are registered after the
         // composer ones and win the same-depth tie, keeping Enter from

@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Version History** in the update modal, opened from the update and
+  up-to-date dialogs: every release the feed carries, newest first, each with
+  its changelog and the running build marked **Current**. Appcasts now
+  accumulate across releases (the newest 20 signed items), so the list grows
+  with each release.
+
+### Changed
+
+- The update modal leads with the app icon, checks against an indeterminate
+  progress bar, and names the current version when up to date.
+- **Check for Updates** always opens the modal. A build that can't check
+  (debug, or a binary outside a managed install) says so there instead of
+  posting a toast; with `ORBIT_FORCE_UPDATER=1` and the signing key compiled
+  in, such a build runs a real check-only flow without **Update now**.
+- The update flow now runs through a single modal. A staged release and
+  **Check for Updates…** both open it: the check shows a search progress bar,
+  then the release's changelog with **Cancel** / **Update now**, while an
+  already-staged release offers **Later** / **Update now**. The Settings
+  update control is an icon-only download button, and the sidebar shows a
+  20px download glyph that expands to **Update** on hover (the reference
+  app's pattern); the changelog rides in each appcast item's `<description>`
+  (written from `CHANGELOG.md` at release time).
+
 ## [0.0.8] - 2026-09-20
 
 ## [0.0.7] - 2026-09-20

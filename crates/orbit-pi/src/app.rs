@@ -20,6 +20,7 @@
 //! - [`helpers`] — icons, file glyphs, and small formatting helpers
 
 use std::{
+    cell::Cell,
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
@@ -571,6 +572,37 @@ pub struct OrbitApp {
     /// The staged release's version (e.g. `0.0.3`), mirrored beside
     /// `updater_status` so the settings buttons can name the download.
     updater_version: Option<String>,
+    /// The staged release's notes from the feed, mirrored for the update
+    /// modal's changelog.
+    updater_notes: Option<String>,
+    /// The feed's releases, newest first, mirrored for the modal's Version
+    /// History. Empty until the first check answers.
+    updater_history: Vec<crate::updater::Release>,
+    /// Whether the modal is showing Version History instead of the state's
+    /// body. The dialog underneath is preserved, so Back returns to it.
+    updater_history_open: bool,
+    /// The open update modal, if any. `None` leaves the download control and
+    /// the Check for Updates command running against `updater_status` alone.
+    updater_dialog: Option<UpdateDialog>,
+    /// Focus handle that carries the `UpdateDialog` key context while the
+    /// modal is open, so Escape dismisses it instead of aborting the run.
+    updater_dialog_focus: FocusHandle,
+    /// Focus the update modal on the next paint (`tick` has no window).
+    updater_dialog_focus_pending: bool,
+    /// True while the pointer is over the sidebar updater pill, which expands
+    /// it from the download icon into the "Update" label (the reference app's
+    /// pattern).
+    updater_button_hovered: bool,
+    /// In-flight pill width and label cross-fade. The animation closure writes
+    /// them, so a reversal mid-flight starts from the last painted frame
+    /// instead of snapping back to the collapsed width.
+    updater_button_width: Rc<Cell<f32>>,
+    updater_button_label_reveal: Rc<Cell<f32>>,
+    /// Width/reveal the current pill animation started from, plus a generation
+    /// that keys `with_animation` so each hover change restarts it.
+    updater_button_animation_from_width: f32,
+    updater_button_animation_from_reveal: f32,
+    updater_button_animation_generation: u64,
     /// Mirror of the persisted automatic-check preference, refreshed when the
     /// updater reports and on toggle, so frames never read the file.
     automatic_updates_enabled: bool,
@@ -947,6 +979,25 @@ impl OrbitApp {
                 .try_global::<crate::updater::UpdaterState>()
                 .and_then(|state| state.0.as_ref())
                 .and_then(|updater| updater.available_version()),
+            updater_notes: cx
+                .try_global::<crate::updater::UpdaterState>()
+                .and_then(|state| state.0.as_ref())
+                .and_then(|updater| updater.available_notes()),
+            updater_history: cx
+                .try_global::<crate::updater::UpdaterState>()
+                .and_then(|state| state.0.as_ref())
+                .map(|updater| updater.history())
+                .unwrap_or_default(),
+            updater_history_open: false,
+            updater_dialog: None,
+            updater_dialog_focus: cx.focus_handle(),
+            updater_dialog_focus_pending: false,
+            updater_button_hovered: false,
+            updater_button_width: Rc::new(Cell::new(updater_ui::UPDATER_PILL_COLLAPSED_W)),
+            updater_button_label_reveal: Rc::new(Cell::new(0.)),
+            updater_button_animation_from_width: updater_ui::UPDATER_PILL_COLLAPSED_W,
+            updater_button_animation_from_reveal: 0.,
+            updater_button_animation_generation: 0,
             automatic_updates_enabled: cx
                 .try_global::<crate::updater::UpdaterState>()
                 .and_then(|state| state.0.as_ref())
@@ -1284,6 +1335,31 @@ pub(crate) enum SettingsSection {
     Appearance,
     Providers,
     About,
+}
+
+/// The update modal's state. One surface serves both entry points: the
+/// download control starts at [`Self::Available`] (a signed release is
+/// already staged), while Check for Updates starts at [`Self::Checking`] and
+/// lands on `Available`, `UpToDate`, or `Failed` when the worker reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UpdateDialog {
+    /// A check is in flight; the modal shows "Searching for a new version…".
+    Checking,
+    /// A signed release is staged and ready. `from_check` picks the secondary
+    /// button's label: a check offers Cancel, the download control offers
+    /// Later.
+    Available {
+        version: String,
+        notes: Option<String>,
+        from_check: bool,
+    },
+    /// The check completed and this build is current.
+    UpToDate,
+    /// The check or install failed, with the message to show inline.
+    Failed(String),
+    /// This build can't check for updates itself — a dev run or a binary
+    /// outside a managed install. The modal explains instead of toasting.
+    Unavailable,
 }
 
 /// The provider editor's open state. Inputs are `ComposerInput` entities so
