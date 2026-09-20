@@ -441,6 +441,9 @@ pub struct OrbitApp {
     refreshing: bool,
     /// Whether the top-bar session-details popover is open.
     session_details_open: bool,
+    /// A popover-triggered title generation is in flight; the next
+    /// `session_info_changed` seeds the rename field from its result.
+    title_generating: bool,
     /// Whether the top-bar provider-quota popover is open.
     quota_popup_open: bool,
     /// The `sessionId` pi reports for the active session (its task id).
@@ -946,6 +949,7 @@ impl OrbitApp {
             host,
             refreshing: false,
             session_details_open: false,
+            title_generating: false,
             quota_popup_open: false,
             session_id: None,
             turn_count: 0,

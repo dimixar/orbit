@@ -122,18 +122,26 @@ impl OrbitApp {
                     cx.notify();
                 }
                 Event::SessionInfoChanged { name } => {
-                    // pi names the session after the first user message;
-                    // forward it live the way Waku does. An explicit
-                    // `set_session_name` already owns the header, so don't
-                    // clobber the rename field while the user is editing.
-                    if let Some(name) = name {
-                        self.current_title = Some(name.clone());
-                        if self.session_name.is_none() {
-                            let name = name.clone();
-                            self.session_name_input
-                                .update(cx, |input, cx| input.set_text(name, cx));
+                    // pi renamed the session (its own auto-title, the popover's
+                    // Generate title, or the rename field echoing back).
+                    // `session_name` wins over `current_title` in the header,
+                    // so both move together or a re-title would not show.
+                    match name {
+                        Some(name) => {
+                            self.current_title = Some(name.clone());
+                            // Seed the rename field from the new name, unless
+                            // the user is mid-edit; a manual generation owns
+                            // the field it asked to refresh.
+                            let seed = self.session_name.is_none() || self.title_generating;
+                            self.session_name = Some(name.clone());
+                            if seed {
+                                self.session_name_input
+                                    .update(cx, |input, cx| input.set_text(name, cx));
+                            }
                         }
+                        None => self.session_name = None,
                     }
+                    self.title_generating = false;
                     refresh_sessions = true;
                 }
                 Event::Auth(event) => {
@@ -205,6 +213,9 @@ impl OrbitApp {
                         hook = hook,
                         error = error
                     ));
+                    // A failed title command never sends its
+                    // `session_info_changed`, so drop the in-flight flag here.
+                    self.title_generating = false;
                 }
                 Event::AgentSettled => {
                     self.busy = false;

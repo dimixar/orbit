@@ -32,11 +32,16 @@ function setConfig(config) {
 
 function fakePi({ name = "" } = {}) {
   const handlers = new Map();
+  const commands = new Map();
   const state = { name, set: [] };
   return {
     state,
+    commands,
     on(event, handler) {
       handlers.set(event, handler);
+    },
+    registerCommand(name, options) {
+      commands.set(name, options);
     },
     fire(event, payload, ctx) {
       const handler = handlers.get(event);
@@ -73,8 +78,8 @@ function fakeCtx({ title = "Fix login redirect", model = { provider: "active", i
     modelRegistry: {
       find: () => undefined,
       hasConfiguredAuth: () => true,
-      complete: async (chosen, request) => {
-        calls.push({ chosen, request });
+      complete: async (chosen, request, options) => {
+        calls.push({ chosen, request, options });
         return { content: [{ type: "text", text: `"${title}"` }] };
       },
     },
@@ -93,6 +98,9 @@ test("titles the session from the first exchange with the active model", async (
   assert.equal(ctx.calls.length, 1);
   assert.deepEqual(ctx.calls[0].chosen, { provider: "active", id: "session-model" });
   assert.match(ctx.calls[0].request.messages[0].content[0].text, /fix the redirect loop on login/);
+  // The budget has to cover a reasoning model's thinking, or the answer is
+  // starved and no title is ever produced.
+  assert.ok(ctx.calls[0].options.maxTokens >= 256);
 });
 
 test("uses the configured model when the setting names one", async () => {
@@ -156,6 +164,82 @@ test("titles a first turn that called tools (several assistant messages)", async
   assert.deepEqual(pi.state.set, ["Fix login redirect"]);
   assert.equal(ctx.calls.length, 1);
   assert.match(ctx.calls[0].request.messages[0].content[0].text, /I traced it to the oauth callback/);
+});
+
+test("titles from a reply that leads with a thinking block", async () => {
+  setConfig({ enabled: true, model: null });
+  const pi = fakePi();
+  activate(pi);
+  const ctx = fakeCtx();
+  // Reasoning models emit a `thinking` block before the text answer; the
+  // title comes from the text, never the thinking.
+  ctx.modelRegistry.complete = async (chosen, request, options) => {
+    ctx.calls.push({ chosen, request, options });
+    return {
+      content: [
+        { type: "thinking", thinking: "The user wants a short title…" },
+        { type: "text", text: '"Fix login redirect"' },
+      ],
+    };
+  };
+  await pi.fire("agent_settled", {}, ctx);
+  await pendingTitle();
+
+  assert.deepEqual(pi.state.set, ["Fix login redirect"]);
+});
+
+test("does not retry a completed ask that produced no title", async () => {
+  setConfig({ enabled: true, model: null });
+  const pi = fakePi();
+  activate(pi);
+  const ctx = fakeCtx();
+  // A clean completion with no text (the whole budget went to thinking) is
+  // deterministic: asking again would only repeat the empty reply.
+  ctx.modelRegistry.complete = async (chosen, request, options) => {
+    ctx.calls.push({ chosen, request, options });
+    return { content: [{ type: "thinking", thinking: "…" }] };
+  };
+  await pi.fire("agent_settled", {}, ctx);
+  await pendingTitle();
+  await pi.fire("agent_settled", {}, ctx);
+  await pendingTitle();
+
+  assert.equal(ctx.calls.length, 1);
+  assert.deepEqual(pi.state.set, []);
+});
+
+test("the /generate-title command re-titles an already-named session", async () => {
+  // Manual titling is an explicit request: it works even when the automatic
+  // setting is off and even when the session already carries a name.
+  setConfig({ enabled: false });
+  const pi = fakePi({ name: "Old title" });
+  activate(pi);
+  const ctx = fakeCtx();
+  const command = pi.commands.get("generate-title");
+  assert.ok(command, "generate-title is registered");
+
+  await command.handler("", ctx);
+
+  assert.deepEqual(pi.state.set, ["Fix login redirect"]);
+  assert.equal(ctx.calls.length, 1);
+});
+
+test("the /generate-title command titles a resumed session", async () => {
+  setConfig({ enabled: true, model: null });
+  const pi = fakePi();
+  activate(pi);
+  const ctx = fakeCtx();
+  // More than one user prompt means the automatic pass would skip it; a
+  // manual request still describes the session from its first exchange.
+  ctx.sessionManager.getBranch = () => [
+    ...exchange(),
+    { type: "message", message: { role: "user", content: "again" } },
+    { type: "message", message: { role: "assistant", content: [{ type: "text", text: "done" }] } },
+  ];
+
+  await pi.commands.get("generate-title").handler("", ctx);
+
+  assert.deepEqual(pi.state.set, ["Fix login redirect"]);
 });
 
 test("leaves a resumed session with more than one user prompt alone", async () => {

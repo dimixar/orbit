@@ -2,20 +2,39 @@
 //!
 //! The primary path is a **one-shot, tool-free pi call**: `pi -p --no-tools
 //! --no-session …` processes the prompt and exits, so the diff never touches
-//! the user's active session and no tool can run in the workspace. If that
-//! fails (pi missing, no credentials, timeout), [`heuristic`] derives a plain
-//! message from the staged file statuses so the button always produces
-//! something editable.
+//! the user's active session and no tool can run in the workspace. Extensions
+//! stay enabled so the user's custom providers resolve. If that fails (pi
+//! missing, no credentials, timeout), [`heuristic`] derives a plain message
+//! from the staged file statuses so the button always produces something
+//! editable.
 
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::git::StatusRow;
+use crate::git::{self, StatusRow};
 
 const MAX_DIFF_BYTES: usize = 96 * 1024;
+const MAX_ORIGINAL_BYTES: usize = 48 * 1024;
+const MAX_TOTAL_ORIGINAL_BYTES: usize = 192 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Recent commit subjects sampled for style, kept separate so the prompt can
+/// prefer the author's own conventions over the repository's.
+#[derive(Default)]
+struct RecentCommits {
+    repository: Vec<String>,
+    user: Vec<String>,
+}
+
+/// One changed file as the prompt sees it: its previous content (for context)
+/// and its staged diff (the source of truth).
+struct Change {
+    path: String,
+    original: Option<String>,
+    diff: String,
+}
 
 /// Generate a conventional commit message from the staged diff (and the
 /// unstaged diff as context). Blocking; call on the background executor.
@@ -27,14 +46,24 @@ pub fn generate(
     unstaged: &str,
     rows: &[StatusRow],
 ) -> Result<String, String> {
-    let recent: Vec<String> = crate::git::history(cwd, 10, 0)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|commit| commit.subject)
-        .collect();
-    let prompt = build_prompt(staged, unstaged, rows, &recent);
-    let raw = run_pi(cwd, provider, model, &prompt)?;
-    let message = parse_message(&raw).ok_or_else(|| tr!("commit_message.no_message"))?;
+    let changes = collect_changes(cwd, staged, rows);
+    let recent = recent_commits(cwd);
+    let repo_name = cwd
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let branch = git::current_branch(cwd);
+    let system = system_prompt();
+    let prompt = user_prompt(
+        &repo_name,
+        branch.as_deref(),
+        rows,
+        &changes,
+        unstaged,
+        &recent,
+    );
+    let raw = run_pi(cwd, provider, model, &system, &prompt)?;
+    let message = process_response(&raw).ok_or_else(|| tr!("commit_message.no_message"))?;
     Ok(normalize(&message))
 }
 
@@ -211,55 +240,173 @@ fn staged_summary(rows: &[StatusRow]) -> String {
         .join("\n")
 }
 
-fn build_prompt(staged: &str, unstaged: &str, rows: &[StatusRow], recent: &[String]) -> String {
-    let staged = truncate(staged, MAX_DIFF_BYTES);
-    let unstaged = truncate(unstaged, MAX_DIFF_BYTES);
-    let mut prompt = String::from(
-        "Analyze the staged changes below and write ONE commit message.\n\
-         The changed-files list and the unified diff together are the source of truth.\n\
-         Return the message in exactly this shape — a subject line, a blank line, then a\n\
-         bulleted list with one line per change:\n\n\
-         <type>: <summary>\n\n\
-         - Past-tense sentence describing one change.\n\
-         - Past-tense sentence describing another change.\n\n\
-         Rules:\n\
-         - Inspect the actual diff before generating the message.\n\
-         - Identify the primary purpose of the changes.\n\
-         - Subject: one line, concise and preferably under 72 characters, lowercase imperative\n\
-           language (\"add\", not \"added\" or \"adds\"), with no trailing period.\n\
-         - Match the type prefix and scope style of the recent commits below when they are consistent.\n\
-         - When there is no consistent style, use <type>: <summary>, where type is one of feat, fix,\n\
-           refactor, perf, ui, style, docs, test, build, chore, ci, revert.\n\
-         - Body: one `- ` bullet per user-facing change, each a complete sentence starting with a\n\
-           capital letter, written in the past tense (\"Added\", \"Updated\", \"Fixed\"), and ending\n\
-           with a period.\n\
-         - Start every body line with `- `; never write body prose without the bullet marker.\n\
-         - Do not repeat the subject in the body, and never report a file count or list files line\n\
-           by line.\n\
-         - Do not include issue numbers unless they are present in the changes/context.\n\
-         - Do not invent functionality that is not present in the diff.\n\
-         - If changes contain unrelated work, describe the dominant change rather than listing everything.\n\
-         - Omit the body only for a single trivial edit.\n\
-         - Return ONLY the commit message: no code fences, quotes, or commentary.\n\n\
-         Recent commits on this branch (newest first):\n",
+/// The system rules, mirroring VS Code Copilot's git commit message prompt.
+fn system_prompt() -> String {
+    String::from(
+        "You are an AI programming assistant, helping a software developer come up with the best git commit message for their code changes.\n\
+         You excel in interpreting the purpose behind code changes to craft succinct, clear commit messages that adhere to the repository's guidelines.\n\n\
+         # First, think step-by-step:\n\
+         1. Analyze the CODE CHANGES thoroughly to understand what's been modified.\n\
+         2. Use the ORIGINAL CODE to understand the context of the CODE CHANGES. Use the line numbers to map the CODE CHANGES to the ORIGINAL CODE.\n\
+         3. Identify the purpose of the changes to answer the *why* for the commit message, also considering the optionally provided RECENT USER COMMITS.\n\
+         4. Review the provided RECENT REPOSITORY COMMITS to identify established commit message conventions. Focus on the format and style, ignoring commit-specific details like refs, tags, and authors.\n\
+         5. Generate a thoughtful and succinct commit message for the given CODE CHANGES. It MUST follow the established writing conventions.\n\
+         6. Remove any meta information like issue references, tags, or author names from the commit message. The developer will add them.\n\
+         7. Now only show your message, wrapped with a single markdown ```text codeblock! Do not provide any explanations or details.\n",
+    )
+}
+
+/// The user message, mirroring VS Code Copilot's tagged prompt structure:
+/// repository context, recent commits, per-file original code + diff, and the
+/// closing reminder.
+fn user_prompt(
+    repo_name: &str,
+    branch: Option<&str>,
+    rows: &[StatusRow],
+    changes: &[Change],
+    unstaged: &str,
+    recent: &RecentCommits,
+) -> String {
+    let mut prompt = String::new();
+    prompt.push_str("<repository-context>\n# REPOSITORY DETAILS:\n");
+    prompt.push_str(&format!("Repository name: {repo_name}\n"));
+    prompt.push_str(&format!(
+        "Branch name: {}\n",
+        branch.unwrap_or("(detached HEAD)")
+    ));
+    prompt.push_str("</repository-context>\n\n");
+
+    if !recent.user.is_empty() {
+        prompt.push_str(
+            "<user-commits>\n# RECENT USER COMMITS (For reference only, do not copy!):\n",
+        );
+        for subject in &recent.user {
+            prompt.push_str(&format!("- {subject}\n"));
+        }
+        prompt.push_str("</user-commits>\n\n");
+    }
+    if !recent.repository.is_empty() {
+        prompt.push_str(
+            "<recent-commits>\n# RECENT REPOSITORY COMMITS (For reference only, do not copy!):\n",
+        );
+        for subject in &recent.repository {
+            prompt.push_str(&format!("- {subject}\n"));
+        }
+        prompt.push_str("</recent-commits>\n\n");
+    }
+
+    prompt.push_str("<changes>\n# CHANGED FILES (status and line counts):\n");
+    prompt.push_str(&staged_summary(rows));
+    let mut budget = MAX_TOTAL_ORIGINAL_BYTES;
+    for change in changes {
+        prompt.push_str(&format!("\n<file path=\"{}\">\n", change.path));
+        prompt.push_str("<original-code>\n# ORIGINAL CODE:\n");
+        match &change.original {
+            Some(original) if budget > 0 => {
+                let original = truncate(original, MAX_ORIGINAL_BYTES.min(budget));
+                budget = budget.saturating_sub(original.len());
+                prompt.push_str(&format!("// File: {}\n", change.path));
+                prompt.push_str(&original);
+                prompt.push('\n');
+            }
+            Some(_) => prompt.push_str("// (original code omitted: prompt budget exhausted)\n"),
+            None => prompt.push_str(&format!(
+                "// File: {}\n// (new file — no previous version)\n",
+                change.path
+            )),
+        }
+        prompt.push_str("</original-code>\n<code-changes>\n# CODE CHANGES:\n```diff\n");
+        prompt.push_str(&truncate(&change.diff, MAX_DIFF_BYTES));
+        prompt.push_str("\n```\n</code-changes>\n</file>\n");
+    }
+    if !unstaged.trim().is_empty() {
+        prompt.push_str("\n# UNSTAGED CHANGES (context only, not part of this commit):\n```diff\n");
+        prompt.push_str(&truncate(unstaged, MAX_DIFF_BYTES));
+        prompt.push_str("\n```\n");
+    }
+    prompt.push_str("</changes>\n\n");
+
+    prompt.push_str(
+        "<reminder>\n\
+         Now generate a commit message that describes the CODE CHANGES.\n\
+         DO NOT COPY commits from RECENT COMMITS, but use them as reference for the commit style.\n\
+         ONLY return a single markdown code block, NO OTHER PROSE!\n\
+         ```text\n\
+         commit message goes here\n\
+         ```\n\
+         </reminder>",
     );
-    if recent.is_empty() {
-        prompt.push_str("(none)\n");
-    } else {
-        for subject in recent {
-            prompt.push_str(subject);
-            prompt.push('\n');
+    prompt
+}
+
+/// Sample the last 5 repository commits and the last 5 commits by the current
+/// author, matching VS Code's commit-message context.
+fn recent_commits(cwd: &Path) -> RecentCommits {
+    let repository = git::history(cwd, 5, 0)
+        .map(recent_subjects)
+        .unwrap_or_default();
+    let user = git::user_name(cwd)
+        .and_then(|name| git::history_by_author(cwd, &name, 5).ok())
+        .map(recent_subjects)
+        .unwrap_or_default();
+    RecentCommits { repository, user }
+}
+
+fn recent_subjects(entries: Vec<git::CommitEntry>) -> Vec<String> {
+    entries
+        .into_iter()
+        .map(|commit| commit.subject)
+        .filter(|subject| !subject.is_empty())
+        .collect()
+}
+
+/// Pair every changed file with its previous content and its staged diff.
+fn collect_changes(cwd: &Path, staged: &str, rows: &[StatusRow]) -> Vec<Change> {
+    let mut changes: Vec<Change> = split_diffs(staged)
+        .into_iter()
+        .map(|(path, diff)| Change {
+            original: git::file_at_head(cwd, &path),
+            path,
+            diff,
+        })
+        .collect();
+    // Binary files and anything git omitted still appear, with an empty diff.
+    for row in rows {
+        if !changes.iter().any(|change| change.path == row.path) {
+            changes.push(Change {
+                path: row.path.clone(),
+                original: git::file_at_head(cwd, &row.path),
+                diff: String::new(),
+            });
         }
     }
-    prompt.push_str("\nStaged files:\n");
-    prompt.push_str(&staged_summary(rows));
-    prompt.push_str("\n\nStaged diff:\n");
-    prompt.push_str(&staged);
-    if !unstaged.trim().is_empty() {
-        prompt.push_str("\n\nUnstaged changes (context only, not part of this commit):\n");
-        prompt.push_str(&unstaged);
+    changes
+}
+
+/// Split a unified diff into `(path, chunk)` pairs at `diff --git` boundaries.
+fn split_diffs(patch: &str) -> Vec<(String, String)> {
+    let mut diffs: Vec<(String, String)> = Vec::new();
+    let mut current: Option<(String, String)> = None;
+    for line in patch.split_inclusive('\n') {
+        if line.starts_with("diff --git ") {
+            if let Some(done) = current.take() {
+                diffs.push(done);
+            }
+            let path = line
+                .trim_end()
+                .rsplit(" b/")
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            current = Some((path, line.to_string()));
+        } else if let Some((_, diff)) = current.as_mut() {
+            diff.push_str(line);
+        }
     }
-    prompt
+    if let Some(done) = current.take() {
+        diffs.push(done);
+    }
+    diffs
 }
 
 fn truncate(text: &str, max: usize) -> String {
@@ -277,20 +424,27 @@ fn run_pi(
     cwd: &Path,
     provider: Option<&str>,
     model: Option<&str>,
+    system: &str,
     prompt: &str,
 ) -> Result<String, String> {
     let bin = orbit_rpc::pi_binary();
     let mut command = Command::new(&bin);
     command
         .arg("-p")
+        // Extensions are deliberately left enabled: custom providers
+        // (ollama-cloud, clinepass, …) are installed as pi extensions, so
+        // `--no-extensions` makes `--provider`/`--model` fail with "Unknown
+        // provider" and the call falls back to the generic heuristic. Every
+        // other capability that could run code is still disabled here.
         .args([
             "--no-tools",
             "--no-session",
-            "--no-extensions",
             "--no-skills",
             "--no-context-files",
             "--no-approve",
         ])
+        .arg("--system-prompt")
+        .arg(system)
         .env("PI_SKIP_VERSION_CHECK", "1")
         // `pi` is `#!/usr/bin/env node`; a bundled `.app` PATH lacks `node`.
         .env("PATH", orbit_rpc::augmented_path(Path::new(&bin).parent()))
@@ -360,20 +514,31 @@ fn first_line(text: &str) -> String {
         .to_string()
 }
 
-/// Strip an optional code fence and surrounding quotes from the model output.
-fn parse_message(raw: &str) -> Option<String> {
-    let mut text = raw.trim();
-    if text.starts_with("```") {
-        if let Some(newline) = text.find('\n') {
-            text = &text[newline + 1..];
-        }
-        if let Some(end) = text.rfind("```") {
-            text = &text[..end];
-        }
-        text = text.trim();
+/// Extract the first fenced ```text block from the model output, mirroring
+/// VS Code Copilot's `processGeneratedCommitMessage`. Unlike a strict prefix
+/// match this tolerates a preamble or trailing prose around the fence, which
+/// models often add despite the instructions. Falls back to the raw text when
+/// no fence is present.
+fn process_response(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let fenced = extract_fence(trimmed, "```text").or_else(|| extract_fence(trimmed, "```"));
+    let text = fenced.unwrap_or_else(|| trimmed.trim_matches('"').trim().to_string());
+    (!text.is_empty()).then_some(text)
+}
+
+/// The body of the first fence opened with `marker` at the start of a line.
+fn extract_fence(text: &str, marker: &str) -> Option<String> {
+    let start = text.find(marker)?;
+    if start != 0 && !text[..start].ends_with('\n') {
+        return None;
     }
-    let text = text.trim_matches('"').trim();
-    (!text.is_empty()).then(|| text.to_string())
+    let rest = &text[start + marker.len()..];
+    let rest = rest
+        .strip_prefix("\r\n")
+        .or_else(|| rest.strip_prefix('\n'))?;
+    let end = rest.find("\n```")?;
+    let body = rest[..end].trim();
+    (!body.is_empty()).then(|| body.to_string())
 }
 
 /// Force the model output into the app's commit shape regardless of how closely
@@ -438,16 +603,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strips_fences_and_quotes() {
+    fn extracts_a_single_text_fence() {
         assert_eq!(
-            parse_message("```\nfeat(ui): add git panel\n```").as_deref(),
+            process_response("```text\nfeat(ui): add git panel\n```").as_deref(),
             Some("feat(ui): add git panel")
         );
         assert_eq!(
-            parse_message("\"fix: guard empty input\"").as_deref(),
+            process_response("\"fix: guard empty input\"").as_deref(),
             Some("fix: guard empty input")
         );
-        assert_eq!(parse_message("   \n  "), None);
+        // A preamble and trailing prose around the fence are tolerated.
+        assert_eq!(
+            process_response(
+                "Here is the message:\n```text\nfix: guard input\n```\nLet me know if you want changes."
+            )
+            .as_deref(),
+            Some("fix: guard input")
+        );
+        assert_eq!(process_response("   \n  "), None);
+    }
+
+    #[test]
+    fn splits_a_patch_into_per_file_chunks() {
+        let patch = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@\n-old\n+new\n\
+                     diff --git a/b.rs b/b.rs\n--- /dev/null\n+++ b/b.rs\n@@\n+new\n";
+        let diffs = split_diffs(patch);
+        assert_eq!(diffs.len(), 2);
+        assert_eq!(diffs[0].0, "a.rs");
+        assert_eq!(diffs[1].0, "b.rs");
+        assert!(diffs[1].1.contains("+new"));
     }
 
     #[test]
@@ -539,7 +723,7 @@ mod tests {
     }
 
     #[test]
-    fn prompt_carries_the_file_summary_and_anti_count_rule() {
+    fn prompt_follows_the_vscode_structure() {
         let rows = vec![crate::git::StatusRow {
             path: "src/lib.rs".into(),
             orig_path: None,
@@ -550,24 +734,38 @@ mod tests {
             unstaged_additions: 0,
             unstaged_deletions: 0,
         }];
-        let recent = vec!["feat: add the review pane".to_string()];
-        let prompt = build_prompt("diff --git a/src/lib.rs b/src/lib.rs\n", "", &rows, &recent);
-        assert!(prompt.contains("Staged files:"), "{prompt}");
-        assert!(prompt.contains("  M src/lib.rs (+2 -0)"), "{prompt}");
-        assert!(prompt.contains("never report a file count"), "{prompt}");
-        assert!(prompt.contains("Staged diff:"), "{prompt}");
-        // New rule set: subject + blank line + one bullet per change, style matching.
-        assert!(prompt.contains("<type>: <summary>"), "{prompt}");
-        assert!(prompt.contains("ui"), "{prompt}");
+        let changes = vec![Change {
+            path: "src/lib.rs".into(),
+            original: Some("fn old() {}\n".into()),
+            diff: "diff --git a/src/lib.rs b/src/lib.rs\n".into(),
+        }];
+        let recent = RecentCommits {
+            repository: vec!["feat: add the review pane".into()],
+            user: vec!["fix: guard empty input".into()],
+        };
+        let user = user_prompt("orbit", Some("main"), &rows, &changes, "", &recent);
+        assert!(user.contains("<repository-context>"), "{user}");
+        assert!(user.contains("Repository name: orbit"), "{user}");
+        assert!(user.contains("Branch name: main"), "{user}");
+        assert!(user.contains("<user-commits>"), "{user}");
+        assert!(user.contains("<recent-commits>"), "{user}");
+        assert!(user.contains("feat: add the review pane"), "{user}");
+        assert!(user.contains("  M src/lib.rs (+2 -0)"), "{user}");
+        assert!(user.contains("<original-code>"), "{user}");
+        assert!(user.contains("fn old() {}"), "{user}");
+        assert!(user.contains("<code-changes>"), "{user}");
+        assert!(user.contains("```diff"), "{user}");
+        assert!(user.contains("<reminder>"), "{user}");
         assert!(
-            prompt.contains("bulleted list with one line per change"),
-            "{prompt}"
+            user.contains("ONLY return a single markdown code block"),
+            "{user}"
         );
-        assert!(prompt.contains("- Past-tense sentence"), "{prompt}");
-        assert!(prompt.contains("past tense"), "{prompt}");
-        assert!(prompt.contains("Recent commits on this branch"), "{prompt}");
-        assert!(prompt.contains("feat: add the review pane"), "{prompt}");
-        assert!(prompt.contains("Do not invent functionality"), "{prompt}");
-        assert!(prompt.contains("dominant change"), "{prompt}");
+
+        let system = system_prompt();
+        assert!(system.contains("think step-by-step"), "{system}");
+        assert!(
+            system.contains("single markdown ```text codeblock"),
+            "{system}"
+        );
     }
 }

@@ -34,7 +34,12 @@ import {
   titleFromResponse,
 } from "./title.js";
 
-const MAX_TITLE_TOKENS = 64;
+// Reasoning models bill thinking against the same output budget, and a title
+// is only a few tokens. 64 was consumed entirely by thinking — the model hit
+// `stopReason: "length"` and emitted no text — so leave room to think and
+// still answer. (Some models declare thinking unsupported (`"off": null`) and
+// cannot be asked to skip it, so the budget has to cover it.)
+const MAX_TITLE_TOKENS = 1024;
 
 /** Config path resolved per call, so a changed `HOME` (tests) is honored. */
 function configPath() {
@@ -60,22 +65,26 @@ function readConfig() {
 /** Generate and set the title. Never throws. Returns true when no further
  * attempt is worth making (titled, deliberately skipped, or the session went
  * stale); false when the ask failed transiently and the next settle should
- * retry. */
-async function generate(pi, ctx) {
+ * retry. `manual` (the `/generate-title` command Orbit's details popover
+ * runs) titles any session with an exchange to describe — even one already
+ * named, and even when automatic titling is off. */
+async function generate(pi, ctx, { manual = false } = {}) {
   const config = readConfig();
-  if (!config.enabled) {
+  if (!config.enabled && !manual) {
     return true;
   }
-  // A session the user has already named (or a previous run titled) is done.
-  if (pi.getSessionName()) {
+  // A session the user has already named (or a previous run titled) is done —
+  // unless the user asked again from the details popover.
+  if (pi.getSessionName() && !manual) {
     return true;
   }
   const { user, assistant, userCount } = firstExchange(ctx.sessionManager?.getBranch?.() ?? []);
-  // Only the very first exchange titles: a resumed session (or one on its
+  // Only the very first exchange auto-titles: a resumed session (or one on its
   // second prompt) is left with its existing name/first message. A tool-using
   // turn streams several assistant messages, so user prompts — not replies —
-  // are the fresh-vs-resumed signal.
-  if (userCount !== 1 || !isTitleable(user, assistant)) {
+  // are the fresh-vs-resumed signal. A manual request titles any session that
+  // has an exchange to describe.
+  if (!isTitleable(user, assistant) || (!manual && userCount !== 1)) {
     return true;
   }
   const model = resolveModel(ctx, config);
@@ -101,11 +110,17 @@ async function generate(pi, ctx) {
       },
     );
     const title = titleFromResponse(response);
-    // Never clobber a name the user set while the request was in flight.
-    if (title && !pi.getSessionName()) {
+    // Never clobber a name the user set while the request was in flight; the
+    // automatic pass also never replaces an existing name. A manual request
+    // owns the name it asked to regenerate.
+    if (title && (manual || !pi.getSessionName())) {
       pi.setSessionName(title);
     }
-    return Boolean(title);
+    // A completed ask is not retried: an empty title here is the model's
+    // answer (for example it spent the whole budget thinking), and asking
+    // again would only repeat it. Transient failures still retry via the
+    // catch below.
+    return true;
   } catch (error) {
     if (isStaleContext(error)) {
       return true;
@@ -117,6 +132,16 @@ async function generate(pi, ctx) {
 
 export default function activate(pi) {
   let considered = false;
+
+  // Orbit's session-details popover runs this to (re)name a session on
+  // demand. An extension command is not added to the transcript, and it
+  // executes even while a turn is running.
+  pi.registerCommand("generate-title", {
+    description: "Generate a title for this session",
+    handler: async (_args, ctx) => {
+      await generate(pi, ctx, { manual: true });
+    },
+  });
 
   pi.on("agent_settled", (_event, ctx) => {
     if (considered) {

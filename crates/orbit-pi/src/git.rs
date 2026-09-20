@@ -624,8 +624,11 @@ pub fn history(cwd: &Path, limit: usize, skip: usize) -> Result<Vec<CommitEntry>
             &format!("--format={format}"),
         ],
     )?;
-    Ok(out
-        .lines()
+    Ok(parse_history(&out))
+}
+
+fn parse_history(out: &str) -> Vec<CommitEntry> {
+    out.lines()
         .filter_map(|line| {
             let mut fields = line.split('\u{1f}');
             let hash = fields.next()?.to_string();
@@ -648,7 +651,46 @@ pub fn history(cwd: &Path, limit: usize, skip: usize) -> Result<Vec<CommitEntry>
                 refs,
             })
         })
-        .collect())
+        .collect()
+}
+
+/// Recent commits authored by `author`, newest first, for the commit-message
+/// style sample.
+pub fn history_by_author(
+    cwd: &Path,
+    author: &str,
+    limit: usize,
+) -> Result<Vec<CommitEntry>, String> {
+    let format = "%H%x1f%h%x1f%an%x1f%ae%x1f%ar%x1f%s%x1f%D";
+    let out = run_git(
+        cwd,
+        &[
+            "-c",
+            "core.quotePath=false",
+            "log",
+            "--date-order",
+            &format!("--max-count={limit}"),
+            &format!("--author={author}"),
+            &format!("--format={format}"),
+        ],
+    )?;
+    Ok(parse_history(&out))
+}
+
+/// The configured `user.name`, used to separate the author's own commits from
+/// the rest of the repository's when sampling commit style.
+pub fn user_name(cwd: &Path) -> Option<String> {
+    run_git(cwd, &["config", "user.name"])
+        .ok()
+        .filter(|name| !name.is_empty())
+}
+
+/// A file's content at HEAD, for the commit-message prompt's ORIGINAL CODE
+/// context. `None` when the path did not exist at HEAD (a new file) or looks
+/// binary.
+pub fn file_at_head(cwd: &Path, path: &str) -> Option<String> {
+    let content = run_git(cwd, &["show", &format!("HEAD:{path}")]).ok()?;
+    (!content.is_empty() && !content.contains('\u{0}')).then_some(content)
 }
 
 fn parse_refs(decor: &str) -> Vec<RefLabel> {

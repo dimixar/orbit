@@ -2,6 +2,7 @@ use super::helpers::*;
 use super::*;
 use crate::context_meter::context_ring;
 use crate::quota::{is_five_hour_window, QuotaHeadline};
+use crate::usage::tooltip::Tooltip;
 
 /// How a composer message is delivered while the agent is running. Both fall
 /// back to a normal `prompt` when the agent is idle, so a send never no-ops.
@@ -814,6 +815,100 @@ impl OrbitApp {
         cx.notify();
     }
 
+    /// The rename row's **Generate title** control: a magic-wand button
+    /// beside the name field that asks the bundled title extension to name
+    /// the session from its conversation. It swaps to a spinner and goes
+    /// inert while the command is in flight, so the wait reads as work rather
+    /// than a dropped click. Hidden when the running pi did not expose the
+    /// extension's command, so a stray `/generate-title` can never be sent as
+    /// an ordinary user prompt.
+    fn generate_title_button(&self, theme: Theme, this: Entity<OrbitApp>) -> Option<AnyElement> {
+        if !self.can_generate_title() {
+            return None;
+        }
+        let generating = self.title_generating;
+        let mut button = div()
+            .id("sess-generate-title")
+            .flex_none()
+            .h(px(28.))
+            .w(px(28.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(theme.border)
+            .bg(if generating {
+                theme.overlay
+            } else {
+                theme.bg_raised
+            })
+            .flex()
+            .items_center()
+            .justify_center();
+        if !generating {
+            button = button
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.bg_hover).border_color(theme.border_strong))
+                .tooltip({
+                    let label = tr!("session.generate_title");
+                    move |_, cx| cx.new(|_| Tooltip::new(label.clone())).into()
+                })
+                .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                    this.update(cx, |app, cx| app.generate_session_title(cx));
+                });
+        }
+        Some(
+            button
+                .child(if generating {
+                    gpui::svg()
+                        .path("icons/loader.svg")
+                        .flex_none()
+                        .size(px(12.))
+                        .text_color(theme.accent)
+                        .with_animation(
+                            "sess-generate-title-spinner",
+                            Animation::new(Duration::from_millis(900)).repeat(),
+                            |svg, delta| {
+                                svg.with_transformation(Transformation::rotate(radians(
+                                    delta * std::f32::consts::TAU,
+                                )))
+                            },
+                        )
+                        .into_any_element()
+                } else {
+                    icon("icons/magic-wand.svg", 12., theme.text_2).into_any_element()
+                })
+                .into_any_element(),
+        )
+    }
+
+    /// Whether the bundled title extension registered its command with pi.
+    fn can_generate_title(&self) -> bool {
+        self.slash_commands
+            .iter()
+            .any(|command| command.name == "generate-title")
+    }
+
+    /// Ask the bundled title extension to (re)name the open session. The
+    /// message is an extension command, so pi runs it without adding a turn
+    /// or transcript entry; its `setSessionName` comes back as
+    /// `session_info_changed` (handled in `events.rs`).
+    pub(super) fn generate_session_title(&mut self, cx: &mut Context<Self>) {
+        if self.session_id.is_none() || !self.can_generate_title() {
+            return;
+        }
+        self.title_generating = true;
+        if !self.send(
+            CommandBody::Prompt {
+                message: "/generate-title".into(),
+                images: None,
+                streaming_behavior: None,
+            },
+            "generate_title",
+        ) {
+            self.title_generating = false;
+        }
+        cx.notify();
+    }
+
     /// Open the full-page Git panel (Changes / History / Graph) and load it.
     pub(super) fn open_git(&mut self, cx: &mut Context<Self>) {
         self.git_open = true;
@@ -912,6 +1007,7 @@ impl OrbitApp {
     /// new or switched session before `get_state` arrives.
     pub(super) fn reset_session_name(&mut self, cx: &mut Context<Self>) {
         self.session_name = None;
+        self.title_generating = false;
         self.session_name_input
             .update(cx, |input, cx| input.set_text(String::new(), cx));
     }
@@ -965,9 +1061,9 @@ impl OrbitApp {
         let model = self.model_label.clone();
         let thinking = self.thinking_label.clone();
 
-        // Header names the surface. The rename field lives in its own block
-        // below so the title isn't competing with a 28px control for 2px of
-        // gap — the previous stack read as one jammed row.
+        // Header names the surface. The session's own title already lives in
+        // the rename field below, so repeating it here only crowded the card;
+        // the only line worth keeping is the no-session hint.
         let header = div()
             .px(px(12.))
             .py(px(10.))
@@ -983,21 +1079,12 @@ impl OrbitApp {
                     .text_color(theme.text)
                     .child(tr!("session.session_details")),
             )
-            .child(
+            .children(session_id.is_empty().then(|| {
                 div()
-                    .min_w_0()
-                    .truncate()
                     .text_size(theme.ui_px(11.))
                     .text_color(theme.text_3)
-                    .child(if session_id.is_empty() {
-                        tr!("session.no_active")
-                    } else {
-                        session_display_title(
-                            self.session_name.as_deref(),
-                            self.current_title.as_deref(),
-                        )
-                    }),
-            );
+                    .child(tr!("session.no_active"))
+            }));
 
         // pi owns the name; Enter or Update commits it (`set_session_name`).
         let name_block = (!session_id.is_empty()).then(|| {
@@ -1038,6 +1125,7 @@ impl OrbitApp {
                                 .text_size(theme.ui_px(12.))
                                 .child(self.session_name_input.clone()),
                         )
+                        .children(self.generate_title_button(theme, this.clone()))
                         .child(
                             div()
                                 .id("sess-rename")

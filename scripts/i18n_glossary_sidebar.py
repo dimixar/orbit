@@ -3,6 +3,7 @@
 GLOSSARY = {
     "zh-CN": {
         "Copy path": "复制路径",
+        "Generate title": "生成标题",
         "Reveal in Finder": "在访达中显示",
         "Clone session": "克隆会话",
         "Pin session": "固定会话",
@@ -16,6 +17,7 @@ GLOSSARY = {
     },
     "ja": {
         "Copy path": "パスをコピー",
+        "Generate title": "タイトルを生成",
         "Reveal in Finder": "Finder で表示",
         "Clone session": "セッションを複製",
         "Pin session": "セッションをピン留め",
@@ -29,6 +31,7 @@ GLOSSARY = {
     },
     "ko": {
         "Copy path": "경로 복사",
+        "Generate title": "제목 생성",
         "Reveal in Finder": "Finder에서 보기",
         "Clone session": "세션 복제",
         "Pin session": "세션 고정",
@@ -42,6 +45,7 @@ GLOSSARY = {
     },
     "es": {
         "Copy path": "Copiar ruta",
+        "Generate title": "Generar título",
         "Reveal in Finder": "Mostrar en el Finder",
         "Clone session": "Clonar sesión",
         "Pin session": "Fijar sesión",
@@ -55,6 +59,7 @@ GLOSSARY = {
     },
     "fr": {
         "Copy path": "Copier le chemin",
+        "Generate title": "Générer un titre",
         "Reveal in Finder": "Afficher dans le Finder",
         "Clone session": "Cloner la session",
         "Pin session": "Épingler la session",
@@ -68,6 +73,7 @@ GLOSSARY = {
     },
     "de": {
         "Copy path": "Pfad kopieren",
+        "Generate title": "Titel generieren",
         "Reveal in Finder": "Im Finder anzeigen",
         "Clone session": "Sitzung duplizieren",
         "Pin session": "Sitzung anpinnen",
@@ -81,6 +87,7 @@ GLOSSARY = {
     },
     "pt-BR": {
         "Copy path": "Copiar caminho",
+        "Generate title": "Gerar título",
         "Reveal in Finder": "Mostrar no Finder",
         "Clone session": "Clonar sessão",
         "Pin session": "Fixar sessão",
@@ -94,6 +101,7 @@ GLOSSARY = {
     },
     "ru": {
         "Copy path": "Копировать путь",
+        "Generate title": "Создать заголовок",
         "Reveal in Finder": "Показать в Finder",
         "Clone session": "Клонировать сеанс",
         "Pin session": "Закрепить сеанс",
@@ -107,6 +115,7 @@ GLOSSARY = {
     },
     "it": {
         "Copy path": "Copia percorso",
+        "Generate title": "Genera titolo",
         "Reveal in Finder": "Mostra nel Finder",
         "Clone session": "Clona sessione",
         "Pin session": "Fissa sessione",
