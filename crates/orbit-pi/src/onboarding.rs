@@ -68,8 +68,10 @@ pub struct Dependency {
     pub version: Option<String>,
     /// Shell command that installs it *on this host* (see [`install_hint`]).
     pub install_hint: &'static str,
-    /// One-line explanation of what it's used for.
-    pub detail: String,
+    /// Translation key for the one-line explanation. Stored as a key (not the
+    /// translated text) so the setup page follows a language change without
+    /// re-probing the host.
+    pub detail_key: &'static str,
 }
 
 /// A read-only fact about the machine, shown under the dependency list.
@@ -90,24 +92,9 @@ pub struct HostFact {
 /// Probe every known dependency, in display order (required first).
 pub fn check_dependencies() -> Vec<Dependency> {
     vec![
-        dependency(
-            "pi",
-            "pi",
-            true,
-            tr!("onboarding.pi_detail"),
-        ),
-        dependency(
-            "node",
-            "Node.js",
-            true,
-            tr!("onboarding.node_detail"),
-        ),
-        dependency(
-            "git",
-            "git",
-            false,
-            tr!("onboarding.git_detail"),
-        ),
+        dependency("pi", "pi", true, "onboarding.pi_detail"),
+        dependency("node", "Node.js", true, "onboarding.node_detail"),
+        dependency("git", "git", false, "onboarding.git_detail"),
     ]
 }
 
@@ -160,7 +147,7 @@ fn dependency(
     bin: &'static str,
     name: &'static str,
     required: bool,
-    detail: String,
+    detail_key: &'static str,
 ) -> Dependency {
     let found = locate(bin);
     let version = found.as_deref().and_then(version_of);
@@ -171,7 +158,7 @@ fn dependency(
         installed: found.is_some(),
         version,
         install_hint: install_hint(bin),
-        detail,
+        detail_key,
     }
 }
 

@@ -39,6 +39,19 @@ cat > "$APP/Contents/Info.plist" <<EOF
 <dict>
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>en</string>
+        <string>zh-CN</string>
+        <string>ja</string>
+        <string>ko</string>
+        <string>es</string>
+        <string>fr</string>
+        <string>de</string>
+        <string>pt-BR</string>
+        <string>ru</string>
+        <string>it</string>
+    </array>
     <key>CFBundleExecutable</key>
     <string>${EXEC_NAME}</string>
     <key>CFBundleIconFile</key>

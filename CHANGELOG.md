@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Search and filter placeholders (provider, model, settings, plugins, skills,
+  side pane, git panel, usage, in-transcript find, branch/workspace pickers)
+  now follow a language change immediately instead of keeping the language
+  they were created in. Placeholders are resolved from translation keys at
+  paint time.
+- With no saved language preference, `System` now walks the OS's ordered
+  preferred-language list and picks the first language Orbit ships (falling
+  back through unshipped choices such as Hindi) instead of defaulting to
+  English. The macOS bundle also declares its supported localizations.
+- The setup page's dependency descriptions follow a language change without
+  re-probing the host.
+
 ## [0.0.9] - 2026-09-21
 
 ### Added

@@ -2328,7 +2328,7 @@ impl OrbitApp {
                         div()
                             .text_size(theme.ui_px(11.5))
                             .text_color(theme.text_3)
-                            .child(dep.detail.clone()),
+                            .child(tr!(dep.detail_key)),
                     ),
             )
             .child(if dep.installed {

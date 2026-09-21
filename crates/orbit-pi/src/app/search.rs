@@ -37,7 +37,7 @@ impl OrbitApp {
     fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let input = cx.new(|cx| {
             ComposerInput::new(cx)
-                .with_placeholder(tr!("search.find_in_transcript"))
+                .with_placeholder_key("search.find_in_transcript")
                 // `Composer` keeps the editing keys live; `Search` adds the
                 // find-specific Enter/Escape bindings (registered after the
                 // composer ones, so they win while the bar is focused).

@@ -226,7 +226,7 @@ impl CommandPalette {
     ) -> Self {
         let filter = cx.new(|cx| {
             ComposerInput::new(cx)
-                .with_placeholder(tr!("command_palette.search_sessions_commands_settings"))
+                .with_placeholder_key("command_palette.search_sessions_commands_settings")
                 .with_key_context("Composer Picker")
         });
         Self {

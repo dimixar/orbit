@@ -113,7 +113,7 @@ impl SidePane {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let tree_filter = cx.new(|cx| {
             ComposerInput::new(cx)
-                .with_placeholder(tr!("sidepane.filter_files"))
+                .with_placeholder_key("sidepane.filter_files")
                 .with_key_context("Composer Picker")
         });
         Self {

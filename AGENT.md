@@ -150,6 +150,13 @@ cargo test -p orbit-pi i18n           # completeness guard
   translator sees context; identical English can appear under several keys.
 - **Native menu:** `set_app_menus` rebuilds the macOS menu bar when the
   language changes (`theme::set_ui_prefs` calls it).
+- **Placeholders:** a `ComposerInput` placeholder must be set with
+  `.with_placeholder_key("surface.slug")` (plus `.with_placeholder_var` for
+  `%{…}` values), not `.with_placeholder(tr!("…"))`. The key resolves at paint
+  time, so long-lived search fields (settings/provider/model filters, the
+  side pane, git panel, usage page) follow a language change without being
+  rebuilt. `.with_placeholder` is only for literal, untranslated text such as
+  `sk-…` or a URL example.
 
 ### Adding a string
 

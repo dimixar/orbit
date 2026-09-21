@@ -150,7 +150,7 @@ impl GitPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let message = cx.new(|cx| {
             crate::composer::ComposerInput::new(cx)
-                .with_placeholder(tr!("git_panel.commit_message_leave_blank_to_generate"))
+                .with_placeholder_key("git_panel.commit_message_leave_blank_to_generate")
                 .with_key_context("Composer Picker")
                 .with_max_lines(6)
         });

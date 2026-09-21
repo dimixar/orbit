@@ -174,14 +174,14 @@ impl ModelSelector {
         // The filter input carries both the `Composer` context (so backspace,
         // paste, etc. keep working) and the `Picker` flag (so the picker's
         // enter/escape/arrows take precedence at the same dispatch depth).
-        let placeholder = match kind {
-            PickerKind::Model => tr!("model_selector.search_models"),
-            PickerKind::Thinking => tr!("model_selector.search_levels"),
+        let placeholder_key = match kind {
+            PickerKind::Model => "model_selector.search_models",
+            PickerKind::Thinking => "model_selector.search_levels",
         };
         let filter = cx.new(|cx| {
             ComposerInput::new(cx)
                 .with_element_id("picker-filter")
-                .with_placeholder(placeholder)
+                .with_placeholder_key(placeholder_key)
                 .with_key_context("Composer Picker")
                 .with_max_lines(1)
         });

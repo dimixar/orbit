@@ -91,7 +91,7 @@ impl WorkspacePicker {
     ) -> Self {
         let filter = cx.new(|cx| {
             ComposerInput::new(cx)
-                .with_placeholder(tr!("workspace_picker.filter_folders"))
+                .with_placeholder_key("workspace_picker.filter_folders")
                 .with_key_context("Composer Picker")
         });
         Self {

@@ -6356,7 +6356,7 @@ impl OrbitApp {
                 .with_element_id("provider-editor-name")
                 .with_key_context("Composer Picker")
                 .with_max_lines(1)
-                .with_placeholder(tr!("settings.optional_display_name"))
+                .with_placeholder_key("settings.optional_display_name")
                 .with_text(name_text)
         });
         let base_url_input = cx.new(|cx| {
@@ -6383,7 +6383,7 @@ impl OrbitApp {
                 .with_element_id("provider-editor-models")
                 .with_key_context("Composer Picker")
                 .with_max_lines(4)
-                .with_placeholder(tr!("settings.model_id_model_id_2"))
+                .with_placeholder_key("settings.model_id_model_id_2")
                 .with_text(models_text)
         });
 

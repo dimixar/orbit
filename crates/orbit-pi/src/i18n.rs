@@ -141,32 +141,43 @@ impl AppLanguage {
         }
     }
 
+    /// Map an arbitrary BCP-47 tag onto a shipped locale, or `None` when
+    /// Orbit does not ship that language. Used by [`Self::resolved`] to walk
+    /// the OS's ordered preference list past unshipped languages. Only
+    /// Simplified Chinese is enabled — Traditional tags return `None` rather
+    /// than reading as the wrong script.
+    pub fn shipped_locale_id(locale: &str) -> Option<Self> {
+        let locale = locale.replace('_', "-").to_ascii_lowercase();
+        if locale == "en" || locale.starts_with("en-") {
+            Some(Self::English)
+        } else if locale == "zh-cn" || locale == "zh-sg" || locale.starts_with("zh-hans") {
+            Some(Self::SimplifiedChinese)
+        } else if locale == "ja" || locale.starts_with("ja-") {
+            Some(Self::Japanese)
+        } else if locale == "ko" || locale.starts_with("ko-") {
+            Some(Self::Korean)
+        } else if locale == "es" || locale.starts_with("es-") {
+            Some(Self::Spanish)
+        } else if locale == "fr" || locale.starts_with("fr-") {
+            Some(Self::French)
+        } else if locale == "de" || locale.starts_with("de-") {
+            Some(Self::German)
+        } else if locale == "pt-br" || locale == "pt" {
+            Some(Self::PortugueseBrazil)
+        } else if locale == "ru" || locale.starts_with("ru-") {
+            Some(Self::Russian)
+        } else if locale == "it" || locale.starts_with("it-") {
+            Some(Self::Italian)
+        } else {
+            None
+        }
+    }
+
     /// Map an arbitrary BCP-47 tag onto a shipped locale, defaulting to
     /// English. Only Simplified Chinese is enabled — Traditional tags stay
     /// English rather than reading as the wrong script.
     pub fn from_locale_id(locale: &str) -> Self {
-        let locale = locale.replace('_', "-").to_ascii_lowercase();
-        if locale == "zh-cn" || locale == "zh-sg" || locale.starts_with("zh-hans") {
-            Self::SimplifiedChinese
-        } else if locale == "ja" || locale.starts_with("ja-") {
-            Self::Japanese
-        } else if locale == "ko" || locale.starts_with("ko-") {
-            Self::Korean
-        } else if locale == "es" || locale.starts_with("es-") {
-            Self::Spanish
-        } else if locale == "fr" || locale.starts_with("fr-") {
-            Self::French
-        } else if locale == "de" || locale.starts_with("de-") {
-            Self::German
-        } else if locale == "pt-br" || locale == "pt" {
-            Self::PortugueseBrazil
-        } else if locale == "ru" || locale.starts_with("ru-") {
-            Self::Russian
-        } else if locale == "it" || locale.starts_with("it-") {
-            Self::Italian
-        } else {
-            Self::English
-        }
+        Self::shipped_locale_id(locale).unwrap_or(Self::English)
     }
 }
 
@@ -189,6 +200,14 @@ pub fn translate(key: &str) -> String {
     rust_i18n::t!(key).into_owned()
 }
 
+/// Translate a key in an explicit locale rather than the active one. Used by
+/// tests (and any caller that must resolve a string for a locale other than
+/// the one currently painted).
+#[allow(dead_code)]
+pub fn translate_in(locale: &str, key: &str) -> String {
+    rust_i18n::t!(key, locale = locale).into_owned()
+}
+
 /// Whether the active locale reads dates in an East-Asian order
 /// (`2026年2月3日`), which some call sites format by hand. Reserved for the
 /// date formatters; unused until those read it.
@@ -207,22 +226,47 @@ fn locale_uses_east_asian_date_format(locale: &str) -> bool {
 fn system_locale() -> String {
     use objc2_foundation::NSLocale;
 
-    NSLocale::preferredLanguages()
-        .firstObject()
-        .map(|locale| locale.to_string())
-        .unwrap_or_else(|| "en".to_owned())
+    // Walk the user's ordered preference list and take the first language
+    // Orbit ships. The list is ordered, so a user whose first choice is
+    // unshipped (say Hindi) still gets their second (say Chinese) instead of
+    // falling straight to English. Only when the list is empty do we fall
+    // back to the user's current locale.
+    let preferred = NSLocale::preferredLanguages();
+    first_shipped(preferred.iter().map(|locale| locale.to_string()))
+        .unwrap_or_else(|| NSLocale::currentLocale().localeIdentifier().to_string())
+}
+
+/// Pick the first language in an ordered preference list that Orbit ships,
+/// falling back to the first non-empty entry (which resolves to English via
+/// [`AppLanguage::from_locale_id`]) when none ships. `None` only for an empty
+/// list.
+#[cfg(target_os = "macos")]
+fn first_shipped(preferred: impl IntoIterator<Item = String>) -> Option<String> {
+    let mut top: Option<String> = None;
+    for tag in preferred {
+        if tag.is_empty() {
+            continue;
+        }
+        if AppLanguage::shipped_locale_id(&tag).is_some() {
+            return Some(tag);
+        }
+        top.get_or_insert(tag);
+    }
+    top
 }
 
 #[cfg(not(target_os = "macos"))]
 fn system_locale() -> String {
-    std::env::var("LC_ALL")
+    let raw = std::env::var("LC_ALL")
         .or_else(|_| std::env::var("LC_MESSAGES"))
         .or_else(|_| std::env::var("LANG"))
-        .unwrap_or_else(|_| "en".to_owned())
-        .split('.')
-        .next()
-        .unwrap_or("en")
-        .to_owned()
+        .unwrap_or_else(|_| "en".to_owned());
+    let tag = raw.split('.').next().unwrap_or("en");
+    // `LANG` is usually `ll_CC`, which `shipped_locale_id` normalizes; an
+    // unshipped value still resolves to English through `from_locale_id`.
+    AppLanguage::shipped_locale_id(tag)
+        .map(|language| language.locale().to_owned())
+        .unwrap_or_else(|| tag.to_owned())
 }
 
 #[cfg(test)]
@@ -298,6 +342,54 @@ mod tests {
         // Traditional Chinese is deliberately not enabled.
         assert_eq!(AppLanguage::from_locale_id("zh-Hant-TW"), AppLanguage::English);
         assert_eq!(AppLanguage::from_locale_id("nl-NL"), AppLanguage::English);
+    }
+
+    #[test]
+    fn shipped_locale_id_only_matches_shipped_languages() {
+        assert_eq!(
+            AppLanguage::shipped_locale_id("en-IN"),
+            Some(AppLanguage::English)
+        );
+        assert_eq!(
+            AppLanguage::shipped_locale_id("pt-PT"),
+            None,
+            "only Brazilian Portuguese is shipped"
+        );
+        assert_eq!(AppLanguage::shipped_locale_id("hi-IN"), None);
+        assert_eq!(AppLanguage::shipped_locale_id("zh-Hant-TW"), None);
+    }
+
+    /// A user whose top language Orbit does not ship should still get their
+    /// next shipped preference instead of English.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_preference_list_skips_unshipped_languages() {
+        assert_eq!(
+            first_shipped(["hi-IN".to_owned(), "zh-Hans-CN".to_owned()]),
+            Some("zh-Hans-CN".to_owned())
+        );
+        assert_eq!(
+            first_shipped(["nl-NL".to_owned(), "de-DE".to_owned()]),
+            Some("de-DE".to_owned())
+        );
+        // English is shipped, so it wins when it is the first preference.
+        assert_eq!(
+            first_shipped(["en-US".to_owned(), "ja-JP".to_owned()]),
+            Some("en-US".to_owned())
+        );
+        // Nothing ships: keep the top tag (it will resolve to English).
+        assert_eq!(
+            first_shipped(["hi-IN".to_owned()]),
+            Some("hi-IN".to_owned())
+        );
+        assert_eq!(first_shipped(std::iter::empty()), None);
+    }
+
+    /// The resolved `System` default must always land on a shipped locale —
+    /// this is what the app paints on a fresh install with no `ui.json`.
+    #[test]
+    fn system_default_resolves_to_a_shipped_locale() {
+        assert!(AppLanguage::EXPLICIT.contains(&AppLanguage::System.resolved()));
     }
 
     #[test]

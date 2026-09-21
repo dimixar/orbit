@@ -41,6 +41,15 @@ pub struct ComposerInput {
     /// True while the field still uses the shared default placeholder, which
     /// is resolved at paint time so a language change is picked up live.
     placeholder_is_default: bool,
+    /// Translation key for the placeholder, resolved at paint time (like the
+    /// default placeholder) so switching the interface language updates the
+    /// field without rebuilding it. Preferred over [`Self::with_placeholder`]
+    /// for user-facing copy; `with_placeholder` stays for literal text such
+    /// as `sk-…` or a URL example.
+    placeholder_key: Option<SharedString>,
+    /// Named `%{…}` values substituted into [`Self::placeholder_key`] at paint
+    /// time. Empty for keys without interpolation.
+    placeholder_vars: Vec<(SharedString, SharedString)>,
     /// Element id used in `render`. Defaults to `composer-input`; form
     /// fields override it so several inputs can coexist as siblings.
     element_id: SharedString,
@@ -98,6 +107,8 @@ impl ComposerInput {
             content: String::new(),
             placeholder: "".into(),
             placeholder_is_default: true,
+            placeholder_key: None,
+            placeholder_vars: Vec::new(),
             element_id: "composer-input".into(),
             key_context: "Composer".into(),
             selected_range: 0..0,
@@ -123,11 +134,50 @@ impl ComposerInput {
         }
     }
 
-    /// Override the placeholder text.
+    /// Override the placeholder with literal text (not translated). Prefer
+    /// [`Self::with_placeholder_key`] for any copy a translator should see.
     pub fn with_placeholder(mut self, placeholder: impl Into<SharedString>) -> Self {
         self.placeholder = placeholder.into();
+        self.placeholder_key = None;
+        self.placeholder_vars.clear();
         self.placeholder_is_default = false;
         self
+    }
+
+    /// Set the placeholder from a translation key, resolved at paint time so
+    /// a language change updates it live. Pair with
+    /// [`Self::with_placeholder_var`] when the key interpolates `%{…}`.
+    pub fn with_placeholder_key(mut self, key: impl Into<SharedString>) -> Self {
+        self.placeholder_key = Some(key.into());
+        self.placeholder = SharedString::default();
+        self.placeholder_vars.clear();
+        self.placeholder_is_default = false;
+        self
+    }
+
+    /// Supply a named interpolation value for the placeholder key
+    /// (`%{name}`), resolved at paint time.
+    pub fn with_placeholder_var(
+        mut self,
+        name: impl Into<SharedString>,
+        value: impl Into<SharedString>,
+    ) -> Self {
+        self.placeholder_vars.push((name.into(), value.into()));
+        self
+    }
+
+    /// The placeholder text to paint in the current locale. Default, keyed,
+    /// and literal placeholders all converge here so the paint path and tests
+    /// share one implementation.
+    pub(crate) fn resolved_placeholder(&self) -> SharedString {
+        resolve_placeholder(
+            self.placeholder_is_default,
+            self.placeholder_key.as_ref().map(|key| key.as_ref()),
+            &self.placeholder,
+            &self.placeholder_vars,
+            None,
+        )
+        .into()
     }
 
     /// Replace the key context flags for this input (space separated).
@@ -989,6 +1039,37 @@ fn scrollbar_thumb_height(track: Pixels, visible_rows: usize, total_rows: usize)
     (track * ratio).clamp(min_thumb, track)
 }
 
+/// Resolve a placeholder for `locale` (or the active locale when `locale` is
+/// `None`). Shared by the paint path and tests so both agree on precedence:
+/// default key → explicit key (+ interpolated vars) → literal.
+fn resolve_placeholder(
+    placeholder_is_default: bool,
+    placeholder_key: Option<&str>,
+    placeholder: &str,
+    vars: &[(SharedString, SharedString)],
+    locale: Option<&str>,
+) -> String {
+    if placeholder_is_default {
+        return match locale {
+            Some(locale) => crate::i18n::translate_in(locale, "composer.placeholder"),
+            None => tr!("composer.placeholder"),
+        };
+    }
+    let Some(key) = placeholder_key else {
+        return placeholder.to_owned();
+    };
+    let mut text = match locale {
+        Some(locale) => crate::i18n::translate_in(locale, key),
+        None => crate::i18n::translate(key),
+    };
+    if !vars.is_empty() {
+        let names: Vec<&str> = vars.iter().map(|(name, _)| name.as_ref()).collect();
+        let values: Vec<String> = vars.iter().map(|(_, value)| value.to_string()).collect();
+        text = rust_i18n::replace_patterns(&text, &names, &values);
+    }
+    text
+}
+
 /// Split the composer text into paint runs: the base ink plus the
 /// `/command` and `@file` token colors. Gaps keep `base`'s color. Runs span
 /// the whole text (newlines included) so `shape_text` never runs dry.
@@ -1119,12 +1200,7 @@ impl Element for TextElement {
             strikethrough: None,
         };
         let (display_text, runs) = if content.is_empty() {
-            let input = self.input.read(cx);
-            let placeholder: SharedString = if input.placeholder_is_default {
-                tr!("composer.placeholder").into()
-            } else {
-                input.placeholder.clone()
-            };
+            let placeholder = self.input.read(cx).resolved_placeholder();
             let mut run = base.clone();
             run.len = placeholder.len();
             run.color = theme.text_3;
@@ -1430,8 +1506,60 @@ impl Render for ComposerInput {
 
 #[cfg(test)]
 mod tests {
-    use super::{line_at_offset, line_range_at, scrollbar_thumb_height, word_range_at};
-    use gpui::px;
+    use super::{
+        line_at_offset, line_range_at, resolve_placeholder, scrollbar_thumb_height, word_range_at,
+    };
+    use gpui::{px, SharedString};
+
+    /// A placeholder built from a translation key must follow the locale it is
+    /// painted in, so switching the interface language updates search fields
+    /// that were constructed long before (the provider/model/settings filters).
+    #[test]
+    fn placeholder_keys_follow_the_locale() {
+        let en = resolve_placeholder(false, Some("app.search_providers"), "", &[], Some("en"));
+        let zh = resolve_placeholder(false, Some("app.search_providers"), "", &[], Some("zh-CN"));
+        assert_eq!(en, "Search providers…");
+        assert_ne!(en, zh, "keyed placeholder still renders English in zh-CN");
+        assert!(!zh.is_empty());
+
+        // A literal placeholder (`sk-…`, a URL example) is never translated.
+        assert_eq!(
+            resolve_placeholder(false, None, "sk-…", &[], Some("zh-CN")),
+            "sk-…"
+        );
+
+        // The shared default placeholder follows the locale too.
+        assert_ne!(
+            resolve_placeholder(true, None, "", &[], Some("en")),
+            resolve_placeholder(true, None, "", &[], Some("zh-CN")),
+        );
+    }
+
+    /// `%{…}` values in a keyed placeholder are substituted at paint time, so
+    /// the branch picker's "Search <workspace> branches" stays translated.
+    #[test]
+    fn keyed_placeholder_vars_are_interpolated() {
+        let vars = [(SharedString::from("workspace"), SharedString::from("orbit"))];
+        let text = resolve_placeholder(
+            false,
+            Some("branch_picker.search_branches"),
+            "",
+            &vars,
+            Some("en"),
+        );
+        assert!(text.contains("orbit"), "{text}");
+        assert!(!text.contains("%{workspace}"), "{text}");
+    }
+
+    /// The paint path resolves against the *active* locale (`None`), not a
+    /// string baked when the field was built. Tests never change the global
+    /// locale, so the active one is English here.
+    #[test]
+    fn resolved_placeholder_uses_the_active_locale() {
+        let live = resolve_placeholder(false, Some("app.search_providers"), "", &[], None);
+        let en = resolve_placeholder(false, Some("app.search_providers"), "", &[], Some("en"));
+        assert_eq!(live, en);
+    }
 
     /// A caret on the newline byte (`"abc\n"` at offset 3) must resolve to
     /// the end of the preceding line, not underflow into the next line's
