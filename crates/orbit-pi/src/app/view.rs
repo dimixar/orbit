@@ -1034,7 +1034,7 @@ impl Render for OrbitApp {
             // ── update modal — the search, changelog, and install decision,
             // opened by the download control and Check for Updates. Below the
             // extension dialog (a run blocks on it) and the lightbox.
-            .children(self.updater_dialog_layer(cx))
+            .children(self.updater_dialog_layer(window, cx))
             // ── image lightbox — full-window, above everything; opened from a
             // transcript image tile, dismissed by click or Escape.
             .children(
