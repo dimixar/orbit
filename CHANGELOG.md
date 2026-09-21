@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.11] - 2026-09-22
+
+### Contributors
+
+- **Dumitru Moloșnic** ([#11](https://github.com/imrj05/orbit/pull/11)) — light,
+  dark, and system appearance modes; transcript table sizing, streaming
+  scroll-position, and multiline command-preview fixes.
+
 ## [0.0.10] - 2026-09-21
 
 ### Added
@@ -196,7 +204,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In-transcript find (⌘F) and a full-window image lightbox.
 - Native macOS app bundle, Developer-ID signed and notarizable.
 
-[Unreleased]: https://github.com/imrj05/orbit/compare/v0.0.10...HEAD
+[Unreleased]: https://github.com/imrj05/orbit/compare/v0.0.11...HEAD
 [0.0.1]: https://github.com/imrj05/orbit/releases/tag/v0.0.1
 [0.0.2]: https://github.com/imrj05/orbit/releases/tag/v0.0.2
 [0.0.3]: https://github.com/imrj05/orbit/releases/tag/v0.0.3
@@ -207,3 +215,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.0.8]: https://github.com/imrj05/orbit/releases/tag/v0.0.8
 [0.0.9]: https://github.com/imrj05/orbit/releases/tag/v0.0.9
 [0.0.10]: https://github.com/imrj05/orbit/releases/tag/v0.0.10
+[0.0.11]: https://github.com/imrj05/orbit/releases/tag/v0.0.11
