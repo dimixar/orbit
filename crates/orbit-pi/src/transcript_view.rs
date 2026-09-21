@@ -1780,12 +1780,6 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
             // visible as a collapsed, expandable group.
             let show_work = paint.live || paint.fold_open || !before_answer;
             if show_work {
-                let open = paint
-                    .expanded_activities
-                    .borrow()
-                    .get(&(ix, 0))
-                    .copied()
-                    .unwrap_or(paint.live);
                 // The group covers the work up to and including the step
                 // that produced the first answer text; work in later steps
                 // gets its own group further down, so tool calls stay in
@@ -1793,6 +1787,14 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
                 // and then works again must not hoist that work above the
                 // answer that preceded it.
                 let group_end = answer_start.map_or(message.steps.len(), |answer| answer + 1);
+                let group_live =
+                    activity_group_is_live(paint.live, group_end, &message.steps);
+                let open = paint
+                    .expanded_activities
+                    .borrow()
+                    .get(&(ix, 0))
+                    .copied()
+                    .unwrap_or(group_live);
                 let group_has_work = message.steps[..group_end]
                     .iter()
                     .any(|step| !step.thinking.is_empty() || !step.tools.is_empty());
@@ -1802,7 +1804,7 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
                         0..group_end,
                         &message.steps,
                         open,
-                        paint.live,
+                        group_live,
                         live_elapsed,
                         theme,
                         paint.expanded_activities.clone(),
@@ -1857,18 +1859,20 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
                 group_end += 1;
             }
             covered_until = group_end;
+            let group_live =
+                activity_group_is_live(paint.live, group_end, &message.steps);
             let open = paint
                 .expanded_activities
                 .borrow()
                 .get(&(ix, step_ix))
                 .copied()
-                .unwrap_or(paint.live);
+                .unwrap_or(group_live);
             content = content.child(render_activity_group(
                 ix,
                 step_ix..group_end,
                 &message.steps,
                 open,
-                paint.live,
+                group_live,
                 live_elapsed,
                 theme,
                 paint.expanded_activities.clone(),
@@ -2206,10 +2210,14 @@ fn render_activity_group(
             }
             body = body.children(step.tools.iter().enumerate().map(|(tool_ix, tool)| {
                 let flat = tool_base + tool_ix;
+                // Only the turn's newest call can still be running; every
+                // earlier call is done and shows its check even while a
+                // later step streams.
+                let pulse = live && flat == last_tool;
                 render_activity_card(
                     tool,
-                    live && flat == last_tool,
-                    !live,
+                    pulse,
+                    !pulse,
                     elapsed,
                     theme,
                     (ix, flat),
@@ -2252,6 +2260,18 @@ fn step_thinking_duration(steps: &[Step], step_ix: usize) -> Option<Duration> {
 /// not the turn's end — is what settles the card.
 fn thinking_is_live(live: bool, is_last_step: bool, step: &Step) -> bool {
     live && is_last_step && step.text.trim().is_empty() && step.tools.is_empty()
+}
+
+/// Whether an activity group is the one still streaming: the row must be
+/// live, the group must include the turn's newest step, and that step must
+/// not have moved on to answer text. Older groups settle as soon as a newer
+/// step starts, instead of waiting for the whole turn to end.
+fn activity_group_is_live(row_live: bool, group_end: usize, all_steps: &[Step]) -> bool {
+    row_live
+        && group_end == all_steps.len()
+        && all_steps
+            .last()
+            .is_some_and(|step| step.text.trim().is_empty())
 }
 
 /// The reasoning card body inside a turn's activity group ("Thinking" live,
@@ -6971,6 +6991,30 @@ mod tests {
         assert!(!thinking_is_live(true, true, &answered));
         // A settled row is never live.
         assert!(!thinking_is_live(false, true, &thinking));
+    }
+
+    #[test]
+    fn activity_group_live_follows_the_newest_step() {
+        let work = |thinking: &str| Step {
+            thinking: thinking.into(),
+            ..Step::default()
+        };
+        let answered = Step {
+            text: "the answer".into(),
+            ..Step::default()
+        };
+        // A group running to the newest work-only step is live.
+        assert!(activity_group_is_live(true, 1, &[work("reasoning")]));
+        // Once the newest step holds answer text, the work group settles.
+        assert!(!activity_group_is_live(true, 2, &[work("a"), answered]));
+        // An earlier group is never live, even while the row streams.
+        assert!(!activity_group_is_live(
+            true,
+            1,
+            &[work("first"), work("second")]
+        ));
+        // A settled row is never live.
+        assert!(!activity_group_is_live(false, 1, &[work("reasoning")]));
     }
 
     #[test]
