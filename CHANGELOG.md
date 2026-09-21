@@ -11,6 +11,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Contributors
 
+### Added
+
+- **Ten more palettes** — the appearance catalog grows from 32 to 42. Two new
+  Orbit-family light palettes join the set: **Orbit Paper**, a cooler neutral
+  paper canvas that is the light counterpart to Orbit's warm off-white (same
+  ember accent), and **Orbit Contrast**, a near-white, high-contrast palette
+  with deeper ink and a stronger hairline for maximum legibility. The curated
+  light counterparts of the editor themes also land — **Ayu Light**,
+  **Catppuccin Latte**, **Flexoki Light**, **Gruvbox Light**, **Nord Light**,
+  **One Light**, **Solarized Light**, and **Tokyonight Light** — so light is a
+  family in the Appearance dropdown rather than a single option. The picker
+  partitions the catalog by mode, so every choice it offers matches the active
+  mode.
+
+- **`toggle_knob` palette role** — a mode-aware token for the knob of a toggle
+  switch, kept light in both modes so it reads on the accent (on) and the
+  raised track (off). The knob previously used `text`, which painted a black
+  dot on the light track in light mode.
+
+### Changed
+
+- The saved theme keys `one-light` and `flexoki-light` now resolve to the real
+  **One Light** and **Flexoki Light** palettes instead of being folded into
+  Orbit Light; the generic `light` alias still maps to Orbit Light.
+
+### Fixed
+
+- Clicking a radio row no longer leaves a stray accent focus ring behind.
+  gpui 0.2 has no `:focus-visible`, so the automatic focus transfer on
+  mouse-down is suppressed; the ring appears only for keyboard focus, while
+  the row's own click still selects on mouse-up.
+
 - **Dumitru Moloșnic** ([#11](https://github.com/imrj05/orbit/pull/11)) — light,
   dark, and system appearance modes; transcript table sizing, streaming
   scroll-position, and multiline command-preview fixes.
