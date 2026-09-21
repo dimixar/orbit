@@ -2183,11 +2183,18 @@ fn render_activity_group(
                 // thoughts are settled and must not chase the live edge.
                 // Measured against ALL steps, not this group: a live group
                 // can end before the turn's last (still-streaming) step.
-                let streaming = live && range.start + step_ix + 1 == all_steps.len();
+                // The card also settles the moment its step moves on to
+                // answer text or a tool call — pi sends no `thinking_end`, so
+                // the turn's own end is too late to close it.
+                let thinking_live = thinking_is_live(
+                    live,
+                    range.start + step_ix + 1 == all_steps.len(),
+                    step,
+                );
                 body = body.child(render_thinking_body(
                     &step.thinking,
-                    live,
-                    streaming,
+                    thinking_live,
+                    thinking_live,
                     duration,
                     theme,
                     (ix, range.start + step_ix),
@@ -2237,6 +2244,14 @@ fn step_thinking_duration(steps: &[Step], step_ix: usize) -> Option<Duration> {
     let end = steps.get(step_ix + 1).and_then(|next| next.timestamp)?;
     let millis = end.checked_sub(start)?;
     (millis > 0).then(|| Duration::from_millis(millis as u64))
+}
+
+/// Whether a step's reasoning card is still the active phase: the row is
+/// live, this is the turn's last step, and it has not moved on to answer
+/// text or a tool call yet. pi emits no `thinking_end`, so that transition —
+/// not the turn's end — is what settles the card.
+fn thinking_is_live(live: bool, is_last_step: bool, step: &Step) -> bool {
+    live && is_last_step && step.text.trim().is_empty() && step.tools.is_empty()
 }
 
 /// The reasoning card body inside a turn's activity group ("Thinking" live,
@@ -4167,7 +4182,9 @@ fn working_activity_label(step: &Step) -> Option<String> {
             format!("{verb} {detail}")
         });
     }
-    if !step.thinking.is_empty() {
+    // Reasoning is only the current activity while the step has no answer
+    // text yet; once the model is writing, the thinking phase is over.
+    if !step.thinking.is_empty() && step.text.trim().is_empty() {
         return Some(tr!("transcript_view.thinking_ellipsis"));
     }
     None
@@ -6924,7 +6941,36 @@ mod tests {
             working_activity_label(&thinking).as_deref(),
             Some("Thinking…")
         );
+        // Once the step carries answer text, reasoning is done and the label
+        // falls back to the generic working form instead of "Thinking…".
+        let answered = Step {
+            thinking: "reasoning".into(),
+            text: "the answer".into(),
+            ..Step::default()
+        };
+        assert_eq!(working_activity_label(&answered).as_deref(), None);
         assert_eq!(working_activity_label(&Step::default()), None);
+    }
+
+    #[test]
+    fn thinking_card_settles_when_the_step_moves_on() {
+        let thinking = Step {
+            thinking: "reasoning".into(),
+            ..Step::default()
+        };
+        // The last step of a live row is the one still reasoning.
+        assert!(thinking_is_live(true, true, &thinking));
+        // An earlier step is settled even while the row streams.
+        assert!(!thinking_is_live(true, false, &thinking));
+        // Answer text ends the reasoning phase without waiting for the turn.
+        let answered = Step {
+            thinking: "reasoning".into(),
+            text: "the answer".into(),
+            ..Step::default()
+        };
+        assert!(!thinking_is_live(true, true, &answered));
+        // A settled row is never live.
+        assert!(!thinking_is_live(false, true, &thinking));
     }
 
     #[test]
