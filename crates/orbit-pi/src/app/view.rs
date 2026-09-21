@@ -190,12 +190,36 @@ impl Render for OrbitApp {
             panel.set_context(git_workspace, git_provider, git_model, cx);
             panel.set_chrome_leading(page_leading, cx);
         });
+        // ── project panel (right dock) ── hidden while Settings owns the
+        // window, like the sessions sidebar. Sync the workspace each render;
+        // a change rebuilds the tree off-thread.
+        let explorer_visible = self.project_panel.read(cx).is_open() && !self.settings_open;
+        let explorer_width = if explorer_visible {
+            self.project_panel.read(cx).width()
+        } else {
+            px(0.)
+        };
+        let explorer_workspace = self
+            .current_workspace
+            .clone()
+            .or_else(|| std::env::current_dir().ok());
+        let explorer_active = self.file_viewer.read(cx).active_display();
+        // On Windows the caption is painted into the top-right corner. The dock
+        // owns that corner whenever the Review pane is not open, so it carries
+        // the control clearance itself (the pane does when it is open).
+        let explorer_reserve_controls = platform::draws_window_controls() && !pane_visible;
+        self.project_panel.update(cx, |panel, cx| {
+            panel.set_workspace(explorer_workspace, cx);
+            panel.set_active(explorer_active, cx);
+            panel.set_reserve_controls(explorer_reserve_controls, cx);
+        });
         let main_width = viewport.width
             - if self.sidebar_visible && !self.settings_open {
                 self.sidebar_width
             } else {
                 px(0.)
             }
+            - explorer_width
             - pane_width;
         // Composer toolbar compaction: below this column width the access
         // pill drops out and the model label clamps (Send stays reachable).
@@ -270,6 +294,27 @@ impl Render for OrbitApp {
                         )
                         .on_mouse_up(MouseButton::Left, cx.listener(Self::on_info_click)),
                     ),
+            )
+            // Explorer (project panel) toggle — the right file tree.
+            .child(
+                header_icon_button(
+                    "toggle-project-panel",
+                    &theme,
+                    explorer_visible,
+                    icon(
+                        "icons/folder.svg",
+                        16.,
+                        if explorer_visible {
+                            theme.text
+                        } else {
+                            theme.text_2
+                        },
+                    ),
+                )
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(Self::on_toggle_project_panel_click),
+                ),
             )
             // side-pane toggle sits right after the about (info) button
             .child(
@@ -611,6 +656,8 @@ impl Render for OrbitApp {
             // ── main ──
             .child(if self.settings_open {
                 self.render_settings(cx).into_any_element()
+            } else if self.file_viewer.read(cx).is_open() {
+                self.file_viewer.clone().into_any_element()
             } else if self.git_open {
                 self.git_panel.clone().into_any_element()
             } else if self.usage_open {
@@ -658,7 +705,10 @@ impl Render for OrbitApp {
                             // right cluster stops short of them — unless the
                             // side pane owns the window's right edge, and
                             // carries the clearance itself.
-                            .pr(px(if platform::draws_window_controls() && !pane_visible {
+                            .pr(px(if platform::draws_window_controls()
+                                && !pane_visible
+                                && !explorer_visible
+                            {
                                 platform::WINDOW_CONTROLS_W
                             } else {
                                 12.
@@ -874,6 +924,11 @@ impl Render for OrbitApp {
                     )
                     .into_any_element()
             })
+            // ── project panel ── the Explorer's right dock, between the main
+            // column and the Review pane so the pane keeps the window edge.
+            .children(explorer_visible.then(|| {
+                self.project_panel.clone().into_any_element()
+            }))
             // ── right side pane (Review) ──
             .children(pane_visible.then(|| self.sidepane.clone().into_any_element()))
             // ── titlebar controls ── a fixed overlay pinned just past the
@@ -1001,6 +1056,28 @@ impl Render for OrbitApp {
             ))
             .on_drag_move(cx.listener(
                 |app: &mut Self,
+                 event: &DragMoveEvent<crate::explorer::ExplorerResize>,
+                 _: &mut Window,
+                 cx: &mut Context<Self>| {
+                    // The dock sits between the main column and the Review
+                    // pane, so its width is the pointer's distance to its
+                    // right edge — which the pane owns when it is open.
+                    let pane = if app.sidepane.read(cx).is_open()
+                        && !app.settings_open
+                        && !app.usage_open
+                        && app.dependencies_ready()
+                    {
+                        app.sidepane.read(cx).width()
+                    } else {
+                        px(0.)
+                    };
+                    let width = event.bounds.size.width - pane - event.event.position.x;
+                    app.project_panel
+                        .update(cx, |panel, cx| panel.set_width(width, cx));
+                },
+            ))
+            .on_drag_move(cx.listener(
+                |app: &mut Self,
                  event: &DragMoveEvent<SidePaneResize>,
                  _: &mut Window,
                  cx: &mut Context<Self>| {
@@ -1040,6 +1117,8 @@ impl Render for OrbitApp {
             .on_action(cx.listener(Self::on_open_settings))
             .on_action(cx.listener(Self::on_open_about))
             .on_action(cx.listener(Self::on_toggle_usage))
+            .on_action(cx.listener(Self::on_toggle_project_panel))
+            .on_action(cx.listener(Self::on_close_files))
             .on_action(cx.listener(Self::on_toggle_terminal))
             .on_action(cx.listener(Self::on_toggle_command_palette))
             .on_action(cx.listener(Self::on_check_for_updates))

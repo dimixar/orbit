@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Explorer** — a Zed-style file-and-folder explorer for the active workspace.
+  A left **project panel** (`cmd-shift-e`, top-bar folder toggle, or the ⌘P
+  row) renders the workspace as a virtualized tree: expand/collapse,
+  case-insensitive filter, a hidden-files toggle, devicon glyphs, `M/A/D/R/U`
+  git-status badges, and keyboard navigation (arrows, home/end,
+  `cmd-←`/`cmd-→`, enter/space). The walk is gitignore-aware (nested
+  `.gitignore`/`.ignore`, global and repo excludes; symlinks never followed)
+  and runs off-thread with a bounded entry cap surfaced honestly as
+  "truncated". Right-clicking a row offers Open, Open in Default App, Reveal
+  in File Manager, and Copy Path / Relative Path. Clicking a file opens a
+  full-page read-only **Files** viewer: a tab strip over syntax-highlighted
+  code, rendered Markdown, or an image, with a path/size/line-count toolbar and
+  a Read-only mark. Binary files, oversized files (2 MiB), and directories get
+  an honest notice instead of a lossy dump; the workspace watcher refreshes the
+  tree and the open file on change. `cmd-w` or the toolbar X returns to the
+  chat.
+
 ### Fixed
 
 - Search and filter placeholders (provider, model, settings, plugins, skills,

@@ -1662,6 +1662,68 @@ impl OrbitApp {
         cx.notify();
     }
 
+    // ── Explorer (project panel + Files surface) ───────────────────────
+
+    /// Flip the left project-panel dock (cmd-shift-e).
+    pub(super) fn on_toggle_project_panel(
+        &mut self,
+        _: &crate::ToggleProjectPanel,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_project_panel(cx);
+    }
+
+    /// The top-bar Files button.
+    pub(super) fn on_toggle_project_panel_click(
+        &mut self,
+        _: &MouseUpEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_project_panel(cx);
+    }
+
+    pub(super) fn toggle_project_panel(&mut self, cx: &mut Context<Self>) {
+        self.project_panel.update(cx, |panel, cx| panel.toggle(cx));
+        cx.notify();
+    }
+
+    /// Open a workspace file in the Files surface — the project panel's open
+    /// callback. One main-area page at a time, like Git and Usage. The panel
+    /// passes the workspace-relative path for the toolbar label; the app must
+    /// not re-read the panel here — this runs inside the panel's own listener,
+    /// so the entity is already leased and `read` would abort.
+    pub(super) fn open_file_in_viewer(
+        &mut self,
+        path: PathBuf,
+        display: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings_open = false;
+        self.git_open = false;
+        self.usage_open = false;
+        self.file_viewer
+            .update(cx, |viewer, cx| viewer.show(path, display, cx));
+        cx.notify();
+    }
+
+    /// Leave the Files surface and return to the chat.
+    pub(super) fn close_files(&mut self, cx: &mut Context<Self>) {
+        self.file_viewer.update(cx, |viewer, cx| viewer.hide(cx));
+        cx.notify();
+    }
+
+    /// `cmd-w` while the Files surface owns the keyboard.
+    pub(super) fn on_close_files(
+        &mut self,
+        _: &crate::CloseFiles,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_files(cx);
+    }
+
     /// The top-bar `+N -M` chip opens Review on the working tree's
     /// **Uncommitted** changes.
     pub(super) fn on_open_uncommitted_review(

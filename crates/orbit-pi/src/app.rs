@@ -473,6 +473,10 @@ pub struct OrbitApp {
     latest_turn: Option<usize>,
     /// Right side pane — Review (git diff).
     sidepane: Entity<SidePane>,
+    /// Right dock — the workspace file tree (cmd-shift-e).
+    project_panel: Entity<crate::explorer::ProjectPanel>,
+    /// Full-page read-only file viewer (the Files surface).
+    file_viewer: Entity<crate::explorer::FileViewer>,
     /// Bottom panel — an integrated shell (cmd-j).
     terminal_panel: Entity<TerminalPanel>,
     /// Whether the Git page replaces the chat area.
@@ -854,6 +858,33 @@ impl OrbitApp {
         let git_panel = cx.new(GitPanel::new);
         // Usage analytics over pi's own session store.
         let usage = cx.new(UsagePage::new);
+        // Right dock — the workspace file tree. A row click routes to the app,
+        // which opens the Files surface; the panel stays viewer-agnostic.
+        let app_weak = cx.entity().downgrade();
+        let project_panel = cx.new(|cx| {
+            crate::explorer::ProjectPanel::new(
+                Rc::new(move |path, display, cx: &mut App| {
+                    let _ = app_weak.update(cx, |app, cx| {
+                        app.open_file_in_viewer(path, display, cx)
+                    });
+                }),
+                cx,
+            )
+        });
+        // Full-page read-only file viewer.
+        let viewer_weak = cx.entity().downgrade();
+        let file_viewer = cx.new(|cx| {
+            crate::explorer::FileViewer::new(
+                Rc::new(move |cx: &mut App| {
+                    // The viewer hides itself inside its own listener (it already
+                    // holds that entity's lease), so this only repaints the
+                    // shell. Calling back into `file_viewer.update` here would
+                    // double-lease the entity and abort.
+                    let _ = viewer_weak.update(cx, |_app, cx| cx.notify());
+                }),
+                cx,
+            )
+        });
 
         let mut app = Self {
             client,
@@ -977,6 +1008,8 @@ impl OrbitApp {
             turn_open: false,
             latest_turn: None,
             sidepane,
+            project_panel,
+            file_viewer,
             terminal_panel,
             git_open: false,
             git_panel: git_panel.clone(),
@@ -1713,5 +1746,5 @@ mod titlebar_layout_tests;
 
 // `icon` and friends are part of the crate-wide UI kit; keep their original
 // `crate::app::…` paths stable for the other modules that import them.
-pub(crate) use helpers::{file_glyph, icon, icon_dyn, nerd_font_family};
+pub(crate) use helpers::{file_badge, file_glyph, icon, icon_dyn, nerd_font_family};
 use sidebar::sessions_with_placeholder;

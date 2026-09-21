@@ -4610,7 +4610,6 @@ impl OrbitApp {
                 session.title = name;
             }
         }
-        self.toast_success(tr!("settings.session_renamed"));
         cx.notify();
     }
 

@@ -61,6 +61,12 @@ impl OrbitApp {
             self.sidepane
                 .update(cx, |pane, cx| pane.mark_review_stale(cx));
             self.git_panel.update(cx, |panel, cx| panel.refresh(cx));
+            self.project_panel
+                .update(cx, |panel, cx| panel.mark_stale(cx));
+            if let Some(path) = self.file_viewer.read(cx).active_path() {
+                self.file_viewer
+                    .update(cx, |viewer, cx| viewer.reload(&path, cx));
+            }
             self.refresh_branch_status(cx);
             cx.notify();
         }
@@ -551,7 +557,6 @@ impl OrbitApp {
                     }
                 }
                 *refresh_sessions = true;
-                self.toast_success(tr!("events.session_cloned"));
                 self.send(CommandBody::GetMessages, "get_messages");
                 self.send(CommandBody::GetState, "get_state");
                 self.refresh_catalogs();

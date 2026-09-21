@@ -1171,7 +1171,6 @@ impl OrbitApp {
         match sessions::clone_session_file(&menu.path) {
             Ok(_) => {
                 self.sessions = sessions::load_sessions();
-                self.toast_success(tr!("sidebar.session_cloned"));
             }
             Err(err) => self.toast_error(tr!("sidebar.clone_failed", error = err)),
         }
@@ -1210,7 +1209,6 @@ impl OrbitApp {
             } else {
                 // A deleted session must not leave a stale pin behind.
                 crate::pins::remove(&menu.path);
-                self.toast_info(tr!("sidebar.session_deleted"));
             }
             self.sessions = sessions::load_sessions();
             cx.notify();
@@ -1280,7 +1278,6 @@ impl OrbitApp {
         self.collapsed_workspaces.remove(&menu.label);
         self.expanded_workspace_groups.remove(&menu.label);
         self.expanded_session_groups.remove(&menu.label);
-        self.toast_info(tr!("sidebar.removed_from_sidebar", name = menu.label));
         cx.notify();
     }
 

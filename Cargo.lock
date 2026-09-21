@@ -4125,6 +4125,7 @@ dependencies = [
  "flate2",
  "futures",
  "gpui",
+ "ignore",
  "image",
  "include_dir",
  "libc",

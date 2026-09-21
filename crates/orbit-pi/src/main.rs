@@ -53,6 +53,7 @@ mod context_meter;
 mod custom_ui;
 mod dialog;
 mod dither;
+mod explorer;
 mod favorites;
 mod git;
 mod git_panel;
@@ -150,7 +151,9 @@ actions!(
         SearchNext,
         SearchPrev,
         SearchClose,
-        ToggleTerminal
+        ToggleTerminal,
+        ToggleProjectPanel,
+        CloseFiles
     ]
 );
 
@@ -264,6 +267,10 @@ fn bind_keys(cx: &mut App) {
         // panel toggle (and stays live while the shell has focus, since app
         // actions are not scoped to a key context).
         KeyBinding::new("cmd-j", ToggleTerminal, None),
+        // Left project panel (Explorer): cmd-shift-e is the convention.
+        KeyBinding::new("cmd-shift-e", ToggleProjectPanel, None),
+        // On the Files surface, cmd-w closes the active tab's surface.
+        KeyBinding::new("cmd-w", CloseFiles, Some("Files")),
         KeyBinding::new("cmd-p", ToggleCommandPalette, None),
         KeyBinding::new("cmd-period", AbortRun, None),
         // Transcript accelerators (work regardless of focus):
@@ -401,6 +408,7 @@ pub(crate) fn app_menus() -> Vec<Menu> {
                 MenuItem::action(tr!("menu.find_in_transcript"), ToggleSearch),
                 MenuItem::separator(),
                 MenuItem::action(tr!("menu.toggle_terminal"), ToggleTerminal),
+                MenuItem::action(tr!("explorer.toggle"), ToggleProjectPanel),
                 MenuItem::separator(),
                 MenuItem::action(tr!("menu.usage"), ToggleUsage),
             ],

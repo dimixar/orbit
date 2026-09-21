@@ -43,6 +43,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 unicode-segmentation = "1"
 include_dir = "0.7"
+# The Explorer's workspace walker. Ripgrep's recursive walker already exists
+# transitively (via `notify`/`globset`), so naming it adds no new package; it
+# brings correct nested `.gitignore` / `.ignore` / global-ignore handling and
+# hidden-file filtering, which a hand-rolled `read_dir` walk cannot.
+ignore = "0.4"
 # Watch pi's on-disk session store so sessions written by the CLI or another
 # Orbit window refresh the sidebar live (debounced FSEvents on macOS, the
 # notify backend elsewhere). Scans run off-thread; the UI only drains a list.

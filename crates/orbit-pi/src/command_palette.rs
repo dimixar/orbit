@@ -69,6 +69,7 @@ pub enum PaletteCommand {
     ToggleSidebar,
     ToggleSidePanel,
     ToggleTerminal,
+    ToggleProjectPanel,
     ReviewChanges,
     OpenGit,
     ChooseModel,
@@ -93,6 +94,7 @@ pub struct PaletteSnapshot {
     pub sidebar_visible: bool,
     pub side_panel_visible: bool,
     pub terminal_visible: bool,
+    pub project_panel_visible: bool,
     pub can_choose_model: bool,
     pub can_choose_thinking: bool,
 }
@@ -379,6 +381,18 @@ impl CommandPalette {
                 Some("⌘J"),
                 PaletteCommand::ToggleTerminal,
                 "toggle show hide terminal shell console command line pty",
+                next(),
+            ),
+            PaletteItem::command(
+                if self.snapshot.project_panel_visible {
+                    tr!("explorer.hide")
+                } else {
+                    tr!("explorer.show")
+                },
+                "icons/folder.svg",
+                Some("⌘⇧E"),
+                PaletteCommand::ToggleProjectPanel,
+                "explorer files project panel tree folders workspace toggle show hide",
                 next(),
             ),
             PaletteItem::command(
