@@ -37,7 +37,7 @@ pub struct ExtensionWidget {
 }
 
 /// A styled span of one widget line.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct StyledSegment {
     text: String,
     fg: Option<Hsla>,
@@ -75,6 +75,14 @@ pub fn styled_line(line: &str, theme: &Theme, font: &Font) -> (String, Vec<TextR
         display.push_str(&segment.text);
     }
     if display.is_empty() {
+        // An empty line still occupies a row. The fallback space needs a run:
+        // `StyledText::with_runs` panics unless the runs cover the text
+        // exactly, so a bare space with no runs aborts the whole render.
+        let space = StyledSegment {
+            text: " ".to_string(),
+            ..Default::default()
+        };
+        runs.push(space.run(theme, font));
         display.push(' ');
     }
     (display, runs)
@@ -369,6 +377,25 @@ mod tests {
     fn empty_line_keeps_its_row() {
         let (text, runs) = runs("");
         assert_eq!(text, " ");
-        assert!(runs.is_empty());
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].len, 1);
+    }
+
+    /// `StyledText::with_runs` panics unless the runs consume the text exactly,
+    /// so every line — blank, SGR-only, or mixed — must come back covered.
+    #[test]
+    fn runs_always_cover_the_display_text() {
+        for line in [
+            "",
+            "\x1b[0m",
+            "\x1b[1mbold\x1b[0m plain",
+            "\x1b[38;5;2mé中\x1b[39m",
+            "\x1b]52;c;YWJj\x07",
+            "   ",
+        ] {
+            let (text, runs) = runs(line);
+            let covered: usize = runs.iter().map(|run| run.len).sum();
+            assert_eq!(covered, text.len(), "runs must cover {line:?}");
+        }
     }
 }

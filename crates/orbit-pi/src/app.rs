@@ -55,7 +55,7 @@ use crate::checkpoint;
 use crate::command_palette::{self, CommandPalette, PaletteCommand, PaletteSnapshot};
 use crate::composer::ComposerInput;
 use crate::context_meter::{self, ContextMeterData, ContextPopup};
-use crate::custom_ui::{CustomCancel, CustomFrame, CustomInput, CustomUi};
+use crate::custom_ui::{CustomCancel, CustomFrame, CustomInput, CustomUi, CustomUiSurfaces};
 use crate::dialog::{ApprovalRequest, Dialog, DialogRequest, DialogResponse};
 use crate::git_panel::GitPanel;
 use crate::mentions::{self, AcEntry, SharedAutocomplete, SlashCommand, Trigger, TriggerKind};
@@ -178,6 +178,9 @@ pub struct OrbitApp {
     client: Option<PiClient>,
     /// Live state of the active pi process, surfaced in Settings → Runtime.
     runtime: RuntimeStatus,
+    /// Result of auto-applying pi's RPC patches before this launch, surfaced
+    /// in Settings → Runtime. See [`crate::rpc_patches`].
+    rpc_patches: crate::rpc_patches::PatchReport,
     /// Sessions with a live pi process, keyed by session-file path. The
     /// active session lives in `client`/`transcript` above; this map holds
     /// the background ones (see `ParkedSession`).
@@ -315,9 +318,9 @@ pub struct OrbitApp {
     /// Extension `setWidget` text blocks (above/below the composer), keyed by
     /// the extension's `widgetKey`. Per-session, so it parks with the session.
     extension_widgets: Vec<ExtensionWidget>,
-    /// Live `ctx.ui.custom()` surfaces, keyed by their RPC id. The newest
-    /// (last) owns focus; multiple may be open when a component nests.
-    custom_ui: Vec<Entity<CustomUi>>,
+    /// Live `ctx.ui.custom()` surfaces, newest (last) owning focus; multiple
+    /// may be open when a component nests.
+    custom_ui: CustomUiSurfaces,
     /// Focus the top custom surface on the next paint — `tick` has no window.
     custom_ui_focus_pending: bool,
     /// Whether pi advertises the `custom` extension-UI capability in
@@ -797,6 +800,10 @@ impl OrbitApp {
         // ~/.pi/agent/sessions so they are shared with the CLI.
         let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let extensions = BundledExtensions::install();
+        // Teach the installed pi's RPC mode the capabilities Orbit uses
+        // (custom UI, quota, auth) before spawning it. Best-effort and cached
+        // across launches; see `rpc_patches`.
+        let rpc_patches = crate::rpc_patches::apply_on_launch();
         // Load the access mode and write it back so the guard extension finds
         // the file on the very first tool call of the session.
         let access_mode = AccessMode::load();
@@ -911,6 +918,7 @@ impl OrbitApp {
         let mut app = Self {
             client,
             runtime,
+            rpc_patches,
             sidebar_width: px(SIDEBAR_DEFAULT_W),
             lives: HashMap::new(),
             transcript: Transcript::new(),
@@ -967,7 +975,7 @@ impl OrbitApp {
             ask_focus: cx.focus_handle(),
             ask_focus_pending: false,
             extension_widgets: Vec::new(),
-            custom_ui: Vec::new(),
+            custom_ui: CustomUiSurfaces::default(),
             custom_ui_focus_pending: false,
             custom_ui_supported: false,
             lightbox: None,

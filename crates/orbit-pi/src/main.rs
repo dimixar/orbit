@@ -75,6 +75,7 @@ mod plugins;
 mod providers;
 mod quota;
 mod review;
+mod rpc_patches;
 mod sessions;
 mod shimmer;
 mod sidepane;

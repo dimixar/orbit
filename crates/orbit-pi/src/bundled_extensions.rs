@@ -69,6 +69,11 @@ impl BundledExtensions {
     /// Spawn a pi session process with every available bundled extension
     /// loaded. Every session spawn in the app goes through here.
     pub(crate) fn spawn(&self, workspace: &Path) -> anyhow::Result<PiClient> {
+        // A `pi update` can restore the pristine RPC bundle while Orbit is
+        // running; re-check before every spawn so a session switch or Runtime
+        // restart still gets custom UI, quota, and auth. The unchanged fast
+        // path is a stat, so this costs nothing in the common case.
+        crate::rpc_patches::apply_on_launch();
         let extensions: Vec<PathBuf> = [&self.quota, &self.guard, &self.title]
             .into_iter()
             .flatten()

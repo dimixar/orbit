@@ -481,8 +481,8 @@ pub(crate) fn dynamic_providers() -> Option<&'static [DynamicProvider]> {
 }
 
 /// The `node` executable, from PATH then the usual install dirs (a bundled
-/// `.app` launches with a minimal PATH).
-fn node_binary() -> Option<String> {
+/// `.app` launches with a minimal PATH). Shared with the RPC-patch runner.
+pub(crate) fn node_binary() -> Option<String> {
     let name = if cfg!(windows) { "node.exe" } else { "node" };
     if let Some(path) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path) {

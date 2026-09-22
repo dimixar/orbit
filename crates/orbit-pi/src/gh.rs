@@ -80,7 +80,9 @@ pub fn status(cwd: &Path) -> GhStatus {
     }
 }
 
-/// The resolved `gh` executable path.
+/// The resolved `gh` executable path. Falls back to the same Homebrew,
+/// system, and shim dirs as `pi`/`node`, since a bundled `.app` launches
+/// with a minimal PATH that omits a user's install.
 pub fn binary() -> String {
     if let Ok(bin) = std::env::var(GH_BIN_ENV) {
         if !bin.is_empty() {
@@ -88,8 +90,8 @@ pub fn binary() -> String {
         }
     }
     for name in GH_BIN_NAMES {
-        if let Some(found) = find_on_path(name) {
-            return found;
+        if let Some(found) = crate::onboarding::locate(name) {
+            return found.to_string_lossy().into_owned();
         }
     }
     GH_BIN_NAMES[0].to_string()
@@ -127,18 +129,6 @@ fn run(cwd: &Path, args: &[&str]) -> Result<String, String> {
     } else {
         Err(stderr)
     }
-}
-
-/// Walk `PATH` and return the first file named `name` found on it.
-fn find_on_path(name: &str) -> Option<String> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate.to_string_lossy().into_owned());
-        }
-    }
-    None
 }
 
 /// Parse a semantic version out of `gh --version` output, e.g.

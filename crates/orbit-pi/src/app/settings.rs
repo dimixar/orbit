@@ -4156,6 +4156,19 @@ impl OrbitApp {
         ));
         process.push(self.setting_row(
             theme,
+            "RPC patches",
+            Some(&self.rpc_patches.summary()),
+            None,
+            Some(self.settings_toggle(
+                "rpc-patches-toggle",
+                self.rpc_patches.enabled,
+                theme,
+                this.clone(),
+                OrbitApp::toggle_rpc_patches,
+            )),
+        ));
+        process.push(self.setting_row(
+            theme,
             &tr!("settings.workspace"),
             None,
             None,
@@ -4533,6 +4546,20 @@ impl OrbitApp {
             })
             .child(div().size(px(14.)).rounded_full().bg(theme.toggle_knob))
             .into_any_element()
+    }
+
+    /// Toggle auto-applying pi's RPC patches. Persisted; the patches run
+    /// before the next launch, so an agent restart is needed to load a change.
+    pub(super) fn toggle_rpc_patches(&mut self, cx: &mut Context<Self>) {
+        let enabled = !self.rpc_patches.enabled;
+        crate::rpc_patches::set_enabled(enabled);
+        self.rpc_patches.enabled = enabled;
+        self.set_status(if enabled {
+            "RPC patches enabled — restart the agent to load them".to_string()
+        } else {
+            "RPC patches disabled — pi keeps the current patches until it updates".to_string()
+        });
+        cx.notify();
     }
 
     pub(super) fn toggle_auto_compaction(&mut self, cx: &mut Context<Self>) {

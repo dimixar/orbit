@@ -196,7 +196,7 @@ fn install_hint(bin: &str) -> &'static str {
 /// the common install dirs, Home-relative shim dirs, and version-manager
 /// version dirs. This keeps detection working from a bundled `.app` whose
 /// PATH doesn't include a user's node install (e.g. nvm, volta, mise).
-fn locate(name: &str) -> Option<PathBuf> {
+pub(crate) fn locate(name: &str) -> Option<PathBuf> {
     if name == "pi" {
         if let Ok(bin) = std::env::var("PI_BIN") {
             if !bin.is_empty() {

@@ -119,12 +119,7 @@ impl OrbitApp {
             CustomFrame::Open(surface) => {
                 // A repeat `open` for a live id (e.g. a re-render) updates in
                 // place rather than stacking a duplicate surface.
-                if let Some(existing) = self
-                    .custom_ui
-                    .iter()
-                    .find(|ui| ui.read(cx).id() == surface.id)
-                    .cloned()
-                {
+                if let Some(existing) = self.custom_ui.find(&surface.id) {
                     existing.update(cx, |ui, cx| {
                         ui.apply(surface);
                         cx.notify();
@@ -151,18 +146,13 @@ impl OrbitApp {
                     let _ = this.update(cx, |app, cx| app.close_custom_ui(&cancel_id, cx));
                 });
                 let ui = cx.new(|cx| CustomUi::new(surface, on_input, on_cancel, cx));
-                self.custom_ui.push(ui);
+                self.custom_ui.push(id.clone(), ui);
                 self.custom_ui_focus_pending = true;
                 self.send_custom_resize(&id);
             }
             CustomFrame::Render(surface) => {
                 let id = surface.id.clone();
-                if let Some(ui) = self
-                    .custom_ui
-                    .iter()
-                    .find(|ui| ui.read(cx).id() == id)
-                    .cloned()
-                {
+                if let Some(ui) = self.custom_ui.find(&id) {
                     ui.update(cx, |ui, cx| {
                         ui.apply(surface);
                         cx.notify();
@@ -170,7 +160,7 @@ impl OrbitApp {
                 }
             }
             CustomFrame::Close { id, .. } => {
-                self.custom_ui.retain(|ui| ui.read(cx).id() != id);
+                self.custom_ui.remove(&id);
                 // Focus the new top surface, or the composer if none is left.
                 self.custom_ui_focus_pending = true;
             }
@@ -194,7 +184,7 @@ impl OrbitApp {
     /// resolves instead of waiting forever. Used by the scrim and on session
     /// switches.
     pub(super) fn close_custom_ui(&mut self, id: &str, cx: &mut Context<Self>) {
-        if !self.custom_ui.iter().any(|ui| ui.read(cx).id() == id) {
+        if !self.custom_ui.contains(id) {
             return;
         }
         let payload = serde_json::json!({
@@ -203,7 +193,7 @@ impl OrbitApp {
             "cancelled": true,
         });
         self.send(CommandBody::Raw(payload), "extension_ui_response");
-        self.custom_ui.retain(|ui| ui.read(cx).id() != id);
+        self.custom_ui.remove(id);
         // Focus the new top surface, or the composer if none is left.
         self.custom_ui_focus_pending = true;
         cx.notify();
@@ -339,11 +329,7 @@ impl OrbitApp {
         self.ask_focus_pending = false;
         // Custom-UI surfaces belong to the departing session too; cancel them
         // so their parked runs can settle.
-        let custom_ids: Vec<String> = self
-            .custom_ui
-            .iter()
-            .map(|ui| ui.read(cx).id().to_string())
-            .collect();
+        let custom_ids: Vec<String> = self.custom_ui.ids().map(str::to_string).collect();
         for id in custom_ids {
             self.close_custom_ui(&id, cx);
         }

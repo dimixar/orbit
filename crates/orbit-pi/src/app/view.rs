@@ -463,7 +463,7 @@ impl Render for OrbitApp {
         // to the composer so typing continues.
         if self.custom_ui_focus_pending {
             self.custom_ui_focus_pending = false;
-            match self.custom_ui.last().cloned() {
+            match self.custom_ui.last() {
                 Some(ui) => window.focus(&ui.read(cx).focus_handle(cx)),
                 None => self.input.read(cx).focus(window),
             }
@@ -1110,8 +1110,7 @@ impl Render for OrbitApp {
             .children(
                 self.custom_ui
                     .iter()
-                    .cloned()
-                    .map(|ui| crate::custom_ui::layer(ui).into_any_element()),
+                    .map(|ui| crate::custom_ui::layer(ui.clone()).into_any_element()),
             )
             // ── update modal — the search, changelog, and install decision,
             // opened by the download control and Check for Updates. Below the

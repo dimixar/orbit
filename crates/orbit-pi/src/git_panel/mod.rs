@@ -2750,27 +2750,47 @@ impl GitPanel {
             out.push(self.stash_section(theme, cx));
         }
         if !self.staged.is_empty() {
-            out.push(self.section_header(
-                theme,
-                cx,
-                &tr!("git_panel.section_staged"),
-                "staged",
-                self.staged.len(),
-                true,
-                Some(cx.listener(|this, _: &ClickEvent, _, cx| this.unstage_all(cx))),
-            ));
+            out.push(
+                self.section_header(
+                    theme,
+                    cx,
+                    &tr!("git_panel.section_staged"),
+                    "staged",
+                    self.staged.len(),
+                    self.staged
+                        .iter()
+                        .map(|row| row.staged_additions)
+                        .sum::<u64>(),
+                    self.staged
+                        .iter()
+                        .map(|row| row.staged_deletions)
+                        .sum::<u64>(),
+                    true,
+                    Some(cx.listener(|this, _: &ClickEvent, _, cx| this.unstage_all(cx))),
+                ),
+            );
             out.push(self.change_rows(self.staged.clone(), true, theme, cx));
         }
         if !self.unstaged.is_empty() {
-            out.push(self.section_header(
-                theme,
-                cx,
-                &tr!("git_panel.section_changes"),
-                "changes",
-                self.unstaged.len(),
-                false,
-                Some(cx.listener(|this, _: &ClickEvent, _, cx| this.stage_all(cx))),
-            ));
+            out.push(
+                self.section_header(
+                    theme,
+                    cx,
+                    &tr!("git_panel.section_changes"),
+                    "changes",
+                    self.unstaged.len(),
+                    self.unstaged
+                        .iter()
+                        .map(|row| row.unstaged_additions)
+                        .sum::<u64>(),
+                    self.unstaged
+                        .iter()
+                        .map(|row| row.unstaged_deletions)
+                        .sum::<u64>(),
+                    false,
+                    Some(cx.listener(|this, _: &ClickEvent, _, cx| this.stage_all(cx))),
+                ),
+            );
             out.push(self.change_rows(self.unstaged.clone(), false, theme, cx));
         }
         out
@@ -2791,6 +2811,7 @@ impl GitPanel {
             .items_center()
             .gap(theme.space(8.))
             .cursor_pointer()
+            .hover(|s| s.bg(theme.bg_hover))
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.stash_open = !this.stash_open;
                 cx.notify();
@@ -2804,32 +2825,34 @@ impl GitPanel {
                 11.,
                 theme.text_3,
             ))
-            .child(
-                div()
-                    .text_size(theme.ui_px(11.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.text_3)
-                    .child(format!(
-                        "{} \u{b7} {count}",
-                        tr!("git_panel.stashes").to_uppercase()
-                    )),
-            )
+            .child(section_title(&tr!("git_panel.stashes"), count, theme))
             .child(div().flex_1());
         if has_changes {
             header = header.child(
                 div()
                     .id("git-stash-all")
-                    .h(px(28.))
+                    .h(px(24.))
                     .px(theme.space(8.))
-                    .rounded(px(8.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.bg_raised)
                     .flex()
                     .items_center()
-                    .gap(theme.space(4.))
+                    .gap(px(5.))
                     .cursor_pointer()
                     .text_size(theme.ui_px(11.5))
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_2)
-                    .hover(|s| s.bg(theme.bg_hover).text_color(theme.text))
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.stash_push(cx)))
+                    .hover(|s| {
+                        s.bg(theme.bg_hover)
+                            .border_color(theme.border_strong)
+                            .text_color(theme.text)
+                    })
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.stash_push(cx);
+                    }))
                     .child(icon("icons/archive.svg", 11., theme.text_3))
                     .child(tr!("git_panel.stash_changes")),
             );
@@ -2881,6 +2904,8 @@ impl GitPanel {
         label: &str,
         slug: &str,
         count: usize,
+        additions: u64,
+        deletions: u64,
         staged_section: bool,
         action: Option<impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static>,
     ) -> AnyElement {
@@ -2893,13 +2918,10 @@ impl GitPanel {
             .flex()
             .items_center()
             .gap(theme.space(8.))
-            .child(
-                div()
-                    .text_size(theme.ui_px(11.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.text_3)
-                    .child(format!("{} · {}", label.to_uppercase(), count)),
-            )
+            .child(section_title(label, count, theme))
+            .when(additions + deletions > 0, |row| {
+                row.child(delta_stats(additions, deletions, theme))
+            })
             .child(div().flex_1());
         if let Some(action) = action {
             row = row.child(
@@ -2907,17 +2929,34 @@ impl GitPanel {
                     .id(gpui::ElementId::Name(
                         format!("git-section-action-{slug}").into(),
                     ))
-                    .h(px(28.))
+                    .h(px(24.))
                     .px(theme.space(8.))
-                    .rounded(px(8.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.bg_raised)
                     .flex()
                     .items_center()
-                    .gap(theme.space(4.))
+                    .gap(px(5.))
                     .cursor_pointer()
                     .text_size(theme.ui_px(11.5))
+                    .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_2)
-                    .hover(|s| s.bg(theme.bg_hover).text_color(theme.text))
+                    .hover(|s| {
+                        s.bg(theme.bg_hover)
+                            .border_color(theme.border_strong)
+                            .text_color(theme.text)
+                    })
                     .on_click(action)
+                    .child(icon(
+                        if staged_section {
+                            "icons/minus.svg"
+                        } else {
+                            "icons/plus.svg"
+                        },
+                        11.,
+                        theme.text_3,
+                    ))
                     .child(if staged_section {
                         tr!("git_panel.unstage_all")
                     } else {
@@ -3062,15 +3101,7 @@ impl GitPanel {
                     on_open(path.clone(), window, cx);
                 }
             }))
-            .child(
-                div()
-                    .w(px(16.))
-                    .flex_none()
-                    .text_size(theme.ui_px(11.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(color)
-                    .child(badge.to_string()),
-            )
+            .child(letter_tile(badge, color, theme))
             .child(glyph)
             .child(
                 div()
@@ -3084,20 +3115,7 @@ impl GitPanel {
                     .child(div().text_color(theme.text_3).child(dir))
                     .child(div().text_color(theme.text).child(name)),
             )
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(theme.ui_px(11.))
-                    .text_color(theme.add_green)
-                    .child(format!("+{additions}")),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(theme.ui_px(11.))
-                    .text_color(theme.del_red)
-                    .child(format!("-{deletions}")),
-            )
+            .child(delta_stats(additions, deletions, theme))
             .child(actions)
             .into_any_element()
     }
@@ -3357,15 +3375,7 @@ impl GitPanel {
                     .items_center()
                     .gap(theme.space(8.))
                     .h(px(26.))
-                    .child(
-                        div()
-                            .w(px(14.))
-                            .flex_none()
-                            .text_size(theme.ui_px(10.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(color)
-                            .child(file.status.to_string()),
-                    )
+                    .child(letter_tile(file.status, color, theme))
                     .child(glyph)
                     .child(
                         div()
@@ -3377,20 +3387,7 @@ impl GitPanel {
                             .text_color(theme.text)
                             .child(path.clone()),
                     )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(theme.ui_px(10.5))
-                            .text_color(theme.add_green)
-                            .child(format!("+{}", file.additions)),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(theme.ui_px(10.5))
-                            .text_color(theme.del_red)
-                            .child(format!("-{}", file.deletions)),
-                    )
+                    .child(delta_stats(file.additions, file.deletions, theme))
                     .child(row_button(
                         format!("git-detail-more-{path}"),
                         "icons/more.svg",
@@ -3851,6 +3848,7 @@ impl GitPanel {
                             div()
                                 .flex()
                                 .items_center()
+                                .flex_wrap()
                                 .gap(px(6.))
                                 .child(state_chip(
                                     &state_label,
@@ -3871,15 +3869,39 @@ impl GitPanel {
                                 ),
                         ),
                 )
-                .child(action_button(
-                    "git-issue-back",
-                    &tr!("git_panel.back"),
-                    Some(icon("icons/arrow-left.svg", 12., theme.text_2).into_any_element()),
-                    false,
-                    false,
-                    theme,
-                    cx.listener(|this, _: &ClickEvent, _, cx| this.close_issue_detail(cx)),
-                )),
+                .child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .children((!issue.url.is_empty()).then(|| {
+                            let url = issue.url.clone();
+                            action_button(
+                                "git-issue-web",
+                                &tr!("git_panel.open_on_github"),
+                                Some(
+                                    icon("icons/arrow-up-right.svg", 12., theme.text_2)
+                                        .into_any_element(),
+                                ),
+                                false,
+                                false,
+                                theme,
+                                cx.listener(move |_, _: &ClickEvent, _, cx| cx.open_url(&url)),
+                            )
+                        }))
+                        .child(action_button(
+                            "git-issue-back",
+                            &tr!("git_panel.back"),
+                            Some(
+                                icon("icons/arrow-left.svg", 12., theme.text_2).into_any_element(),
+                            ),
+                            false,
+                            false,
+                            theme,
+                            cx.listener(|this, _: &ClickEvent, _, cx| this.close_issue_detail(cx)),
+                        )),
+                ),
         );
         content = content.child(
             div()
@@ -3920,6 +3942,12 @@ impl GitPanel {
                     )),
             );
         }
+        for comment in &issue.comments {
+            content = content.child(issue_comment_card(comment, theme));
+        }
+        content = content.child(composer_field(theme, self.issue_comment.clone()));
+        // State toggle and submit share the footer row — close/reopen on the
+        // left, comment on the right, the way GitHub groups them.
         content = content.child(
             div()
                 .flex()
@@ -3949,31 +3977,8 @@ impl GitPanel {
                     theme,
                     cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_issue_state(cx)),
                 ))
-                .children((!issue.url.is_empty()).then(|| {
-                    let url = issue.url.clone();
-                    action_button(
-                        "git-issue-web",
-                        &tr!("git_panel.open_on_github"),
-                        Some(
-                            icon("icons/arrow-up-right.svg", 12., theme.text_2).into_any_element(),
-                        ),
-                        false,
-                        false,
-                        theme,
-                        cx.listener(move |_, _: &ClickEvent, _, cx| cx.open_url(&url)),
-                    )
-                })),
-        );
-        for comment in &issue.comments {
-            content = content.child(issue_comment_card(comment, theme));
-        }
-        content = content.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(theme.space(6.))
-                .child(composer_field(theme, self.issue_comment.clone()))
-                .child(div().flex().justify_end().child(action_button(
+                .child(div().flex_1())
+                .child(action_button(
                     "git-issue-comment",
                     &tr!("git_panel.comment"),
                     Some(icon("icons/chat.svg", 12., theme.send_fg).into_any_element()),
@@ -3981,7 +3986,7 @@ impl GitPanel {
                     self.issue_busy,
                     theme,
                     cx.listener(|this, _: &ClickEvent, _, cx| this.comment_issue(cx)),
-                ))),
+                )),
         );
         div()
             .id("git-issue-detail-scroll")
@@ -4337,9 +4342,12 @@ impl GitPanel {
                                 .child(pull.title.clone()),
                         )
                         .child(
+                            // Wraps instead of clipping when branch names run
+                            // long on a narrow pane.
                             div()
                                 .flex()
                                 .items_center()
+                                .flex_wrap()
                                 .gap(px(6.))
                                 .child(state_chip(
                                     &state_label,
@@ -4392,16 +4400,12 @@ impl GitPanel {
                 )
                 .children(review_chip(pull, theme))
                 .children(check_bucket_chip(pull.checks_summary(), theme))
+                .child(delta_stats(pull.additions, pull.deletions, theme))
                 .child(
                     div()
                         .text_size(theme.ui_px(11.))
                         .text_color(theme.text_3)
-                        .child(format!(
-                            "+{} -{} \u{b7} {}",
-                            pull.additions,
-                            pull.deletions,
-                            tr!("git_panel.files_count", count = pull.changed_files)
-                        )),
+                        .child(tr!("git_panel.files_count", count = pull.changed_files)),
                 ),
         );
         if !pull.body.trim().is_empty() {
@@ -4433,11 +4437,14 @@ impl GitPanel {
                 let link = check.link().to_string();
                 let mut row = div()
                     .id(gpui::ElementId::Name(format!("git-check-{label}").into()))
+                    .group("git-row")
                     .px(theme.space(12.))
                     .py(theme.space(6.))
+                    .rounded(px(6.))
                     .flex()
                     .items_center()
                     .gap(px(8.))
+                    .hover(|s| s.bg(theme.bg_hover))
                     .child(
                         check_bucket_chip(Some(check.bucket_kind()), theme).unwrap_or_else(|| {
                             icon("icons/check.svg", 11., theme.text_3).into_any_element()
@@ -4454,13 +4461,19 @@ impl GitPanel {
                             .child(label.clone()),
                     );
                 if !link.is_empty() {
-                    row = row.child(row_button(
-                        "git-check-open",
-                        "icons/arrow-up-right.svg",
-                        "git_panel.open_on_github",
-                        theme,
-                        move |_, _, cx| cx.open_url(&link),
-                    ));
+                    row = row.child(
+                        div()
+                            .flex_none()
+                            .opacity(0.)
+                            .group_hover("git-row", |s| s.opacity(1.))
+                            .child(row_button(
+                                "git-check-open",
+                                "icons/arrow-up-right.svg",
+                                "git_panel.open_on_github",
+                                theme,
+                                move |_, _, cx| cx.open_url(&link),
+                            )),
+                    );
                 }
                 checks = checks.child(row);
             }
@@ -4517,27 +4530,25 @@ impl GitPanel {
                 .flex()
                 .flex_col()
                 .child(section_label(theme, &tr!("git_panel.files_changed")));
+            let nerd = nerd_font_family(cx);
+            let dark = theme.mode == ThemeMode::Dark;
             for file in pull.files.iter().take(MAX_FILE_ROWS) {
                 let path = file.path.clone();
+                let status = file.change_type.chars().next().unwrap_or('M');
+                let fallback = icon("icons/file.svg", 12., theme.text_3).into_any_element();
+                let glyph = crate::app::file_glyph(&path, dark, nerd.as_ref(), 12., fallback);
                 files = files.child(
                     div()
+                        .group("git-row")
                         .px(theme.space(12.))
                         .py(theme.space(5.))
+                        .rounded(px(6.))
                         .flex()
                         .items_center()
-                        .gap(px(8.))
-                        .child(
-                            div()
-                                .w(px(14.))
-                                .flex_none()
-                                .text_size(theme.ui_px(10.5))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(status_color(
-                                    file.change_type.chars().next().unwrap_or('M'),
-                                    theme,
-                                ))
-                                .child(file.change_type.chars().next().unwrap_or('M').to_string()),
-                        )
+                        .gap(theme.space(8.))
+                        .hover(|s| s.bg(theme.bg_hover))
+                        .child(letter_tile(status, status_color(status, theme), theme))
+                        .child(glyph)
                         .child(
                             div()
                                 .flex_1()
@@ -4548,32 +4559,29 @@ impl GitPanel {
                                 .text_color(theme.text)
                                 .child(path.clone()),
                         )
+                        .child(delta_stats(file.additions, file.deletions, theme))
                         .child(
+                            // The diff affordance reveals on hover, like every
+                            // other row's secondary action.
                             div()
-                                .text_size(theme.ui_px(10.5))
-                                .text_color(theme.add_green)
-                                .child(format!("+{}", file.additions)),
-                        )
-                        .child(
-                            div()
-                                .text_size(theme.ui_px(10.5))
-                                .text_color(theme.del_red)
-                                .child(format!("-{}", file.deletions)),
-                        )
-                        .child(row_button(
-                            format!("git-pr-file-{path}"),
-                            "icons/git-compare.svg",
-                            "git_panel.open_diff",
-                            theme,
-                            cx.listener({
-                                let path = path.clone();
-                                move |this, _: &ClickEvent, window, cx| {
-                                    if let Some(on_open) = this.on_open_file.clone() {
-                                        on_open(path.clone(), window, cx);
-                                    }
-                                }
-                            }),
-                        )),
+                                .flex_none()
+                                .opacity(0.)
+                                .group_hover("git-row", |s| s.opacity(1.))
+                                .child(row_button(
+                                    format!("git-pr-file-{path}"),
+                                    "icons/git-compare.svg",
+                                    "git_panel.open_diff",
+                                    theme,
+                                    cx.listener({
+                                        let path = path.clone();
+                                        move |this, _: &ClickEvent, window, cx| {
+                                            if let Some(on_open) = this.on_open_file.clone() {
+                                                on_open(path.clone(), window, cx);
+                                            }
+                                        }
+                                    }),
+                                )),
+                        ),
                 );
             }
             if pull.files.len() > MAX_FILE_ROWS {
@@ -4599,49 +4607,16 @@ impl GitPanel {
             content = content.child(review_card(review, theme));
         }
 
-        content = content.child(composer_field(theme, self.pr_comment.clone()));
-        content = content.child(
-            div()
-                .flex()
-                .items_center()
-                .flex_wrap()
-                .gap(px(8.))
-                .child(action_button(
-                    "git-pr-comment",
-                    &tr!("git_panel.comment"),
-                    Some(icon("icons/chat.svg", 12., theme.text_2).into_any_element()),
-                    false,
-                    self.pr_busy,
-                    theme,
-                    cx.listener(|this, _: &ClickEvent, _, cx| this.comment_pull(cx)),
-                ))
-                .child(action_button(
-                    "git-pr-approve",
-                    &tr!("git_panel.approve"),
-                    Some(icon("icons/check.svg", 12., theme.add_green).into_any_element()),
-                    false,
-                    self.pr_busy,
-                    theme,
-                    cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.review_pull(gh::ReviewAction::Approve, cx)
-                    }),
-                ))
-                .child(action_button(
-                    "git-pr-changes",
-                    &tr!("git_panel.request_changes"),
-                    Some(icon("icons/pencil.svg", 12., theme.warn).into_any_element()),
-                    false,
-                    self.pr_busy,
-                    theme,
-                    cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.review_pull(gh::ReviewAction::RequestChanges, cx)
-                    }),
-                )),
-        );
-
-        // Merge controls.
+        // Merge controls come before the composer: the primary action of the
+        // page sits in a card above the comment field, GitHub-style.
         if pull.is_open() {
             let merge_row = div()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.bg_raised)
+                .px(theme.space(12.))
+                .py(theme.space(10.))
                 .flex()
                 .items_center()
                 .flex_wrap()
@@ -4749,6 +4724,48 @@ impl GitPanel {
                         cx.listener(move |_, _: &ClickEvent, _, cx| cx.open_url(&url)),
                     )
                 })),
+        );
+
+        // The composer stays last on the page: timeline, then the merge box,
+        // then the field the reader writes in.
+        content = content.child(composer_field(theme, self.pr_comment.clone()));
+        content = content.child(
+            div()
+                .flex()
+                .items_center()
+                .flex_wrap()
+                .gap(px(8.))
+                .child(action_button(
+                    "git-pr-comment",
+                    &tr!("git_panel.comment"),
+                    Some(icon("icons/chat.svg", 12., theme.text_2).into_any_element()),
+                    false,
+                    self.pr_busy,
+                    theme,
+                    cx.listener(|this, _: &ClickEvent, _, cx| this.comment_pull(cx)),
+                ))
+                .child(action_button(
+                    "git-pr-approve",
+                    &tr!("git_panel.approve"),
+                    Some(icon("icons/check.svg", 12., theme.add_green).into_any_element()),
+                    false,
+                    self.pr_busy,
+                    theme,
+                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.review_pull(gh::ReviewAction::Approve, cx)
+                    }),
+                ))
+                .child(action_button(
+                    "git-pr-changes",
+                    &tr!("git_panel.request_changes"),
+                    Some(icon("icons/pencil.svg", 12., theme.warn).into_any_element()),
+                    false,
+                    self.pr_busy,
+                    theme,
+                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.review_pull(gh::ReviewAction::RequestChanges, cx)
+                    }),
+                )),
         );
         div()
             .id("git-pr-detail-scroll")
@@ -5651,13 +5668,14 @@ fn stash_row(stash: &git_ops::StashEntry, theme: Theme, cx: &Context<GitPanel>) 
     let index = stash.index;
     div()
         .id(gpui::ElementId::Name(format!("git-stash-{index}").into()))
+        .group("git-row")
         .mx(theme.space(12.))
-        .h(px(30.))
+        .h(px(32.))
         .px(theme.space(8.))
         .rounded(px(8.))
         .flex()
         .items_center()
-        .gap(theme.space(8.))
+        .gap(theme.space(10.))
         .hover(|s| s.bg(theme.bg_hover))
         .child(icon("icons/clock.svg", 12., theme.text_3))
         .child(
@@ -5670,27 +5688,37 @@ fn stash_row(stash: &git_ops::StashEntry, theme: Theme, cx: &Context<GitPanel>) 
                 .text_color(theme.text)
                 .child(stash.message.clone()),
         )
-        .child(row_button(
-            format!("git-stash-pop-{index}"),
-            "icons/arrow-down.svg",
-            "git_panel.tip_stash_pop",
-            theme,
-            cx.listener(move |this, _: &ClickEvent, _, cx| this.stash_pop(index, cx)),
-        ))
-        .child(row_button(
-            format!("git-stash-apply-{index}"),
-            "icons/check.svg",
-            "git_panel.tip_stash_apply",
-            theme,
-            cx.listener(move |this, _: &ClickEvent, _, cx| this.stash_apply(index, cx)),
-        ))
-        .child(row_button(
-            format!("git-stash-drop-{index}"),
-            "icons/trash.svg",
-            "git_panel.tip_stash_drop",
-            theme,
-            cx.listener(move |this, _: &ClickEvent, _, cx| this.stash_drop(index, cx)),
-        ))
+        // Row actions reveal on hover, matching the changed-file rows above.
+        .child(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .opacity(0.)
+                .group_hover("git-row", |s| s.opacity(1.))
+                .child(row_button(
+                    format!("git-stash-pop-{index}"),
+                    "icons/arrow-down.svg",
+                    "git_panel.tip_stash_pop",
+                    theme,
+                    cx.listener(move |this, _: &ClickEvent, _, cx| this.stash_pop(index, cx)),
+                ))
+                .child(row_button(
+                    format!("git-stash-apply-{index}"),
+                    "icons/check.svg",
+                    "git_panel.tip_stash_apply",
+                    theme,
+                    cx.listener(move |this, _: &ClickEvent, _, cx| this.stash_apply(index, cx)),
+                ))
+                .child(row_button(
+                    format!("git-stash-drop-{index}"),
+                    "icons/trash.svg",
+                    "git_panel.tip_stash_drop",
+                    theme,
+                    cx.listener(move |this, _: &ClickEvent, _, cx| this.stash_drop(index, cx)),
+                )),
+        )
         .into_any_element()
 }
 
@@ -5804,6 +5832,7 @@ fn issue_row(issue: &gh::GhIssue, theme: Theme, cx: &Context<GitPanel>) -> AnyEl
     };
     let mut row = div()
         .id(gpui::ElementId::Name(format!("git-issue-{number}").into()))
+        .group("git-row")
         .mx(theme.space(12.))
         .px(theme.space(8.))
         .py(theme.space(8.))
@@ -5814,7 +5843,7 @@ fn issue_row(issue: &gh::GhIssue, theme: Theme, cx: &Context<GitPanel>) -> AnyEl
         .cursor_pointer()
         .hover(|s| s.bg(theme.bg_hover))
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_issue(number, cx)))
-        .child(icon(state_glyph, 15., state_color))
+        .child(state_tile(state_glyph, state_color))
         .child(
             div()
                 .flex_1()
@@ -5891,13 +5920,20 @@ fn issue_row(issue: &gh::GhIssue, theme: Theme, cx: &Context<GitPanel>) -> AnyEl
         ));
     if !issue.url.is_empty() {
         let url = issue.url.clone();
-        row = row.child(row_button(
-            "git-issue-open",
-            "icons/arrow-up-right.svg",
-            "git_panel.open_on_github",
-            theme,
-            move |_, _, cx| cx.open_url(&url),
-        ));
+        row = row.child(
+            // The open-on-GitHub affordance reveals on hover, like file rows.
+            div()
+                .flex_none()
+                .opacity(0.)
+                .group_hover("git-row", |s| s.opacity(1.))
+                .child(row_button(
+                    "git-issue-open",
+                    "icons/arrow-up-right.svg",
+                    "git_panel.open_on_github",
+                    theme,
+                    move |_, _, cx| cx.open_url(&url),
+                )),
+        );
     }
     row.into_any_element()
 }
@@ -5929,6 +5965,23 @@ fn issue_label_chip(label: &gh::GhLabel, theme: Theme) -> AnyElement {
 fn label_color(hex: &str) -> Hsla {
     let value = u32::from_str_radix(hex.trim_start_matches('#'), 16).unwrap_or(0x80_80_80);
     Hsla::from(gpui::rgba((value << 8) | 0xff))
+}
+
+/// The leading marker of an issue/PR row: the state glyph on a softly tinted
+/// tile, the same treatment the Changes rows give their status letter — the
+/// glyph carries the signal and the color only washes it (paired, never color
+/// alone).
+fn state_tile(glyph: &'static str, color: Hsla) -> AnyElement {
+    div()
+        .size(px(22.))
+        .flex_none()
+        .rounded(px(6.))
+        .bg(color.opacity(0.12))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(icon(glyph, 13., color))
+        .into_any_element()
 }
 
 /// A pill chip for an issue/PR state: an optional leading glyph (circle-dot,
@@ -6025,6 +6078,7 @@ fn pr_row(pull: &gh::GhPull, theme: Theme, cx: &Context<GitPanel>) -> AnyElement
     };
     let mut row = div()
         .id(gpui::ElementId::Name(format!("git-pr-{number}").into()))
+        .group("git-row")
         .mx(theme.space(12.))
         .px(theme.space(8.))
         .py(theme.space(8.))
@@ -6035,7 +6089,7 @@ fn pr_row(pull: &gh::GhPull, theme: Theme, cx: &Context<GitPanel>) -> AnyElement
         .cursor_pointer()
         .hover(|s| s.bg(theme.bg_hover))
         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_pull(number, cx)))
-        .child(icon("icons/git-pull-request.svg", 15., state_color))
+        .child(state_tile("icons/git-pull-request.svg", state_color))
         .child(
             div()
                 .flex_1()
@@ -6101,12 +6155,7 @@ fn pr_row(pull: &gh::GhPull, theme: Theme, cx: &Context<GitPanel>) -> AnyElement
                         )
                         .children(review_chip(pull, theme))
                         .children(check_bucket_chip(pull.checks_summary(), theme))
-                        .child(
-                            div()
-                                .text_size(theme.ui_px(11.))
-                                .text_color(theme.text_3)
-                                .child(format!("+{} -{}", pull.additions, pull.deletions)),
-                        )
+                        .child(delta_stats(pull.additions, pull.deletions, theme))
                         .child(
                             div()
                                 .text_size(theme.ui_px(11.))
@@ -6117,13 +6166,20 @@ fn pr_row(pull: &gh::GhPull, theme: Theme, cx: &Context<GitPanel>) -> AnyElement
         );
     if !pull.url.is_empty() {
         let url = pull.url.clone();
-        row = row.child(row_button(
-            "git-pr-open",
-            "icons/arrow-up-right.svg",
-            "git_panel.open_on_github",
-            theme,
-            move |_, _, cx| cx.open_url(&url),
-        ));
+        row = row.child(
+            // The open-on-GitHub affordance reveals on hover, like file rows.
+            div()
+                .flex_none()
+                .opacity(0.)
+                .group_hover("git-row", |s| s.opacity(1.))
+                .child(row_button(
+                    "git-pr-open",
+                    "icons/arrow-up-right.svg",
+                    "git_panel.open_on_github",
+                    theme,
+                    move |_, _, cx| cx.open_url(&url),
+                )),
+        );
     }
     row.into_any_element()
 }
@@ -6307,6 +6363,7 @@ fn graph_row(
         .id(gpui::ElementId::Name(
             format!("git-graph-{}", commit.short).into(),
         ))
+        .group("git-row")
         .mx(px(12.))
         .px(px(8.))
         .py(px(6.))
@@ -6360,13 +6417,19 @@ fn graph_row(
                 .child(commit.short.clone()),
         );
     if let Some(url) = url.map(str::to_string) {
-        element = element.child(row_button(
-            "git-graph-open",
-            "icons/arrow-up-right.svg",
-            "git_panel.open_on_github",
-            theme,
-            move |_, _, cx| cx.open_url(&url),
-        ));
+        element = element.child(
+            div()
+                .flex_none()
+                .opacity(0.)
+                .group_hover("git-row", |s| s.opacity(1.))
+                .child(row_button(
+                    "git-graph-open",
+                    "icons/arrow-up-right.svg",
+                    "git_panel.open_on_github",
+                    theme,
+                    move |_, _, cx| cx.open_url(&url),
+                )),
+        );
     }
     element
         .child(icon(
@@ -6743,6 +6806,96 @@ fn avatar_hue(email: &str, name: &str) -> f32 {
     HUES[(hash % HUES.len() as u64) as usize] / 360.
 }
 
+/// The Changes-tab section heading: an uppercase label paired with a rounded
+/// count chip, so the number reads as quiet metadata instead of trailing
+/// punctuation in the label itself.
+fn section_title(label: &str, count: usize, theme: Theme) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            div()
+                .text_size(theme.ui_px(11.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text_3)
+                .child(label.to_uppercase()),
+        )
+        .child(
+            div()
+                .h(px(17.))
+                .min_w(px(17.))
+                .px(px(5.))
+                .rounded_full()
+                .bg(theme.overlay)
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(theme.ui_px(10.5))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text_2)
+                .child(count.to_string()),
+        )
+        .into_any_element()
+}
+
+/// A status letter on a softly tinted tile: the letter is the signal, the
+/// semantic color only washes it (paired, never color alone). Shared by the
+/// working-tree rows, the commit-detail files, and a PR's changed files.
+fn letter_tile(letter: char, color: Hsla, theme: Theme) -> AnyElement {
+    div()
+        .size(px(18.))
+        .flex_none()
+        .rounded(px(5.))
+        .bg(color.opacity(0.12))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(theme.ui_px(10.5))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(color)
+        .child(letter.to_string())
+        .into_any_element()
+}
+
+/// A compact diffstat pair (`+N` / `−N`) in the semantic add/delete colors.
+/// Right-aligned fixed slots keep the columns from jumping as counts change
+/// width, and a zero side dims instead of vanishing — a zero is a real fact,
+/// not missing data. Shared by the Changes headers and rows, the commit-detail
+/// files, and the pull-request diffstats, so the same numbers always look
+/// identical no matter which tab renders them.
+fn delta_stats(additions: u64, deletions: u64, theme: Theme) -> AnyElement {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .text_size(theme.ui_px(11.))
+        .child(
+            div()
+                .min_w(px(26.))
+                .text_align(gpui::TextAlign::Right)
+                .text_color(if additions > 0 {
+                    theme.add_green
+                } else {
+                    theme.text_3
+                })
+                .child(format!("+{additions}")),
+        )
+        .child(
+            div()
+                .min_w(px(26.))
+                .text_align(gpui::TextAlign::Right)
+                .text_color(if deletions > 0 {
+                    theme.del_red
+                } else {
+                    theme.text_3
+                })
+                .child(format!("-{deletions}")),
+        )
+        .into_any_element()
+}
+
 /// A hairline between changed-file rows, inset to the 20px page gutter so it
 /// lines up with the section label and the path — not a full-bleed rule.
 fn changes_separator(theme: Theme) -> AnyElement {
@@ -6809,7 +6962,10 @@ mod tests {
         );
         // A display name with spaces no longer hides the login in the email.
         assert_eq!(
-            github_avatar_url("Rajeshwar Kashyap", "76556671+imrj05@users.noreply.github.com"),
+            github_avatar_url(
+                "Rajeshwar Kashyap",
+                "76556671+imrj05@users.noreply.github.com"
+            ),
             Some("https://avatars.githubusercontent.com/imrj05?size=48".into())
         );
         // Legacy noreply addresses carry the login as the whole local part.

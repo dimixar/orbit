@@ -152,6 +152,58 @@ pub type CustomInput = Box<dyn Fn(String, &mut Window, &mut App)>;
 /// Ask the app to cancel the surface (host-side dismissal).
 pub type CustomCancel = Box<dyn Fn(&mut Window, &mut App)>;
 
+/// The stack of open custom surfaces, newest last.
+///
+/// Each entry caches its RPC id beside the entity. The app must locate and
+/// drop a surface from inside that surface's own scrim/close handler, where
+/// gpui has leased the entity for the duration of the handler — reading it
+/// back out would panic with "already being updated". Every lookup here goes
+/// through the cached id and never reads an entity.
+#[derive(Default)]
+pub struct CustomUiSurfaces {
+    entries: Vec<(String, Entity<CustomUi>)>,
+}
+
+impl CustomUiSurfaces {
+    /// Add a surface under its RPC id.
+    pub fn push(&mut self, id: String, ui: Entity<CustomUi>) {
+        self.entries.push((id, ui));
+    }
+
+    /// The live surface for `id`, if any.
+    pub fn find(&self, id: &str) -> Option<Entity<CustomUi>> {
+        self.entries
+            .iter()
+            .find(|(entry_id, _)| entry_id == id)
+            .map(|(_, ui)| ui.clone())
+    }
+
+    /// Whether a surface for `id` is open.
+    pub fn contains(&self, id: &str) -> bool {
+        self.entries.iter().any(|(entry_id, _)| entry_id == id)
+    }
+
+    /// Drop the surface for `id`.
+    pub fn remove(&mut self, id: &str) {
+        self.entries.retain(|(entry_id, _)| entry_id != id);
+    }
+
+    /// The newest surface (top of the stack), which owns focus.
+    pub fn last(&self) -> Option<Entity<CustomUi>> {
+        self.entries.last().map(|(_, ui)| ui.clone())
+    }
+
+    /// The RPC ids of every open surface.
+    pub fn ids(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().map(|(id, _)| id.as_str())
+    }
+
+    /// Every open surface, bottom to top.
+    pub fn iter(&self) -> impl Iterator<Item = &Entity<CustomUi>> {
+        self.entries.iter().map(|(_, ui)| ui)
+    }
+}
+
 /// One live custom surface: the latest frame plus the app callbacks that
 /// answer it.
 pub struct CustomUi {
@@ -176,11 +228,6 @@ impl CustomUi {
             on_input,
             on_cancel,
         }
-    }
-
-    /// The RPC id this surface answers.
-    pub fn id(&self) -> &str {
-        &self.surface.id
     }
 
     /// Apply a `render` frame in place.
@@ -562,7 +609,7 @@ mod tests {
 mod render_tests {
     use super::*;
     use crate::theme::ThemeId;
-    use gpui::{point, size, TestAppContext};
+    use gpui::{point, size, Modifiers, TestAppContext};
 
     struct Harness {
         ui: Entity<CustomUi>,
@@ -649,5 +696,107 @@ mod render_tests {
             "body is inset from the card edges"
         );
         assert!(close.origin.y < body.origin.y, "close lives in the header");
+    }
+
+    /// A blank line (or a line of only SGR codes) in the component's output
+    /// must not abort the render. Regression: `styled_line` returned a fallback
+    /// space with no runs, and `StyledText::with_runs` panicked with "invalid
+    /// text run" because the runs did not cover the text.
+    #[gpui::test]
+    fn blank_surface_lines_render(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let ui = cx.update(|_, cx| {
+            cx.set_global(theme::Theme::for_id(ThemeId::Orbit));
+            let mut surface = surface();
+            surface.lines = vec!["header".into(), "".into(), "\x1b[0m".into()];
+            cx.new(|cx| {
+                CustomUi::new(
+                    surface,
+                    Box::new(|_: String, _: &mut Window, _: &mut App| {}),
+                    Box::new(|_: &mut Window, _: &mut App| {}),
+                    cx,
+                )
+            })
+        });
+        let harness = cx.update(|_, cx| cx.new(|_| Harness { ui }));
+
+        let _ = cx.draw(point(px(0.), px(0.)), size(px(900.), px(700.)), |_, _| {
+            harness.clone()
+        });
+
+        assert!(
+            cx.debug_bounds("custom-ui-card").is_some(),
+            "the card still paints"
+        );
+    }
+
+    /// The surface stack the app owns. Removal goes through the cached RPC id,
+    /// exactly like `OrbitApp::close_custom_ui`.
+    struct Host {
+        surfaces: CustomUiSurfaces,
+        cancels: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .children(self.surfaces.iter().map(|ui| ui.clone()))
+        }
+    }
+
+    /// Clicking the scrim dismisses the surface from inside that surface's own
+    /// mouse-down handler. Regression: the dismiss path used to read the
+    /// surface entity back out to match its id, but gpui leases the entity for
+    /// the duration of the handler, so the read double-leased it — a panic that
+    /// aborted inside AppKit's `mouseDown:` (`panic_cannot_unwind`).
+    #[gpui::test]
+    fn clicking_the_scrim_dismisses_without_a_double_lease(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        cx.update(|_, cx| cx.set_global(theme::Theme::for_id(ThemeId::Orbit)));
+
+        let cancels = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let host = cx.update(|_, cx| {
+            cx.new(|_| Host {
+                surfaces: CustomUiSurfaces::default(),
+                cancels: cancels.clone(),
+            })
+        });
+
+        let weak = host.downgrade();
+        let ui = cx.update(|_, cx| {
+            let on_cancel: CustomCancel = Box::new(move |_window, cx| {
+                let _ = weak.update(cx, |host, cx| {
+                    host.surfaces.remove("surface-1");
+                    host.cancels.set(host.cancels.get() + 1);
+                    cx.notify();
+                });
+            });
+            cx.new(|cx| CustomUi::new(surface(), Box::new(|_, _, _| {}), on_cancel, cx))
+        });
+        cx.update(|_, cx| {
+            host.update(cx, |host, cx| {
+                host.surfaces.push("surface-1".into(), ui.clone());
+                cx.notify();
+            })
+        });
+
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            let _ = cx.draw(point(px(0.), px(0.)), size(px(900.), px(700.)), |_, _| {
+                host.clone()
+            });
+        };
+        draw(cx);
+        let card = cx.debug_bounds("custom-ui-card").expect("card painted");
+
+        // A point on the scrim, well clear of the centered card.
+        cx.simulate_click(point(px(8.), card.origin.y), Modifiers::none());
+        draw(cx);
+
+        assert_eq!(cancels.get(), 1, "the scrim click cancels the surface");
+        assert!(
+            !cx.update(|_, cx| host.read(cx).surfaces.contains("surface-1")),
+            "the surface is dismissed"
+        );
     }
 }
