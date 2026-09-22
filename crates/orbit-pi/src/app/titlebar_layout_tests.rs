@@ -53,25 +53,6 @@ fn open_controls_hug_the_sidebar_edge() {
     }
 }
 
-/// Windows paints its own caption buttons on the window's *right*, so the
-/// titlebar row is empty at the left and the cluster left-aligns there —
-/// open or collapsed, and never moving with the sidebar's width (there is no
-/// column edge to hug). The lead still clears the window edge.
-#[cfg(windows)]
-#[test]
-fn windows_controls_left_align_at_the_edge() {
-    let lead = view::TRAFFIC_LIGHT_CLEARANCE + view::TITLEBAR_CONTROLS_LEAD;
-    for visible in [false, true] {
-        for width in [SIDEBAR_MIN_W, SIDEBAR_DEFAULT_W, 420.] {
-            assert_eq!(
-                view::titlebar_controls_left(visible, width),
-                lead,
-                "with the sidebar visible={visible} at {width}px the controls must left-align"
-            );
-        }
-    }
-}
-
 /// Full-window pages (Git, Usage, Files) own the window's left edge when the
 /// sidebar is collapsed, so their headers must inset past the overlaid
 /// titlebar controls. The FileViewer's tab strip uses this same rule — before
@@ -91,4 +72,23 @@ fn collapsed_pages_clear_the_overlaid_controls() {
         12.,
         "with the sidebar open the page starts after it and needs only page padding"
     );
+}
+
+/// Windows paints its own caption buttons on the window's *right*, so the
+/// titlebar row is empty at the left and the cluster left-aligns there —
+/// open or collapsed, and never moving with the sidebar's width (there is no
+/// column edge to hug). The lead still clears the window edge.
+#[cfg(windows)]
+#[test]
+fn windows_controls_left_align_at_the_edge() {
+    let lead = view::TRAFFIC_LIGHT_CLEARANCE + view::TITLEBAR_CONTROLS_LEAD;
+    for visible in [false, true] {
+        for width in [SIDEBAR_MIN_W, SIDEBAR_DEFAULT_W, 420.] {
+            assert_eq!(
+                view::titlebar_controls_left(visible, width),
+                lead,
+                "with the sidebar visible={visible} at {width}px the controls must left-align"
+            );
+        }
+    }
 }
