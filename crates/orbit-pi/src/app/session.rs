@@ -1345,13 +1345,7 @@ impl OrbitApp {
         // Hairline between the account identity and the meter block: the
         // two halves of the chip answer different questions (whose usage /
         // how much is left) and deserve a visible seam.
-        let divider = || {
-            div()
-                .flex_none()
-                .w(px(1.))
-                .h(px(13.))
-                .bg(theme.border)
-        };
+        let divider = || div().flex_none().w(px(1.)).h(px(13.)).bg(theme.border);
 
         // The provider mark and name anchor every headline: the meter is
         // only truthful if the account it belongs to is named beside it.
@@ -1418,17 +1412,14 @@ impl OrbitApp {
                 } else {
                     format!("{} {}", quota_amount(balance.amount), balance.currency)
                 };
-                pill = pill
-                    .child(provider_head(report))
-                    .child(divider())
-                    .child(
-                        div()
-                            .font(crate::usage::view::num_font())
-                            .text_size(theme.ui_px(11.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.text)
-                            .child(text),
-                    );
+                pill = pill.child(provider_head(report)).child(divider()).child(
+                    div()
+                        .font(crate::usage::view::num_font())
+                        .text_size(theme.ui_px(11.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.text)
+                        .child(text),
+                );
             }
             // Nothing metered anywhere (notes, errors): a quiet label keeps
             // the popover reachable.
@@ -1668,6 +1659,15 @@ impl OrbitApp {
         self.terminal_panel
             .update(cx, |panel, cx| panel.toggle(window, cx));
         cx.notify();
+    }
+
+    /// Switch the Git page's tab (⌘1–⌘5). A no-op unless the page is open, so
+    /// the shortcuts never surprise a chat session.
+    pub(super) fn on_git_tab(&mut self, index: usize, _: &mut Window, cx: &mut Context<Self>) {
+        if self.git_open {
+            self.git_panel
+                .update(cx, |panel, cx| panel.set_tab(index, cx));
+        }
     }
 
     // ── Explorer (project panel + Files surface) ───────────────────────
@@ -2050,10 +2050,7 @@ fn quota_reset_hint(resets_at: i64, now_ms: i64) -> String {
     const DAY: i64 = 24 * HOUR;
     let remaining = resets_at.saturating_sub(now_ms);
     let hint = if remaining <= 0 {
-        return tr!(
-            "session.resets_at",
-            time = format_epoch_ms(resets_at)
-        );
+        return tr!("session.resets_at", time = format_epoch_ms(resets_at));
     } else if remaining < MINUTE {
         tr!("session.in_lt_1m")
     } else if remaining < HOUR {
@@ -2064,11 +2061,7 @@ fn quota_reset_hint(resets_at: i64, now_ms: i64) -> String {
         if minutes == 0 {
             tr!("session.in_hours", hours = hours)
         } else {
-            tr!(
-                "session.in_hours_minutes",
-                hours = hours,
-                minutes = minutes
-            )
+            tr!("session.in_hours_minutes", hours = hours, minutes = minutes)
         }
     } else if remaining < 7 * DAY {
         let days = remaining / DAY;
@@ -2076,17 +2069,10 @@ fn quota_reset_hint(resets_at: i64, now_ms: i64) -> String {
         if hours == 0 {
             tr!("session.in_days", days = days)
         } else {
-            tr!(
-                "session.in_days_hours",
-                days = days,
-                hours = hours
-            )
+            tr!("session.in_days_hours", days = days, hours = hours)
         }
     } else {
-        return tr!(
-            "session.resets_at",
-            time = format_epoch_ms(resets_at)
-        );
+        return tr!("session.resets_at", time = format_epoch_ms(resets_at));
     };
     tr!("session.resets_in", hint = hint)
 }
@@ -2140,7 +2126,11 @@ fn quota_provider_card(app: &OrbitApp, report: &QuotaReport, theme: Theme) -> An
         let value = if let Some(percent) = window.used_percent {
             tr!("session.percent_used", percent = format!("{percent:.0}"))
         } else if let (Some(used), Some(limit)) = (window.used, window.limit) {
-            tr!("session.used_of_limit", used = amount(used), limit = amount(limit))
+            tr!(
+                "session.used_of_limit",
+                used = amount(used),
+                limit = amount(limit)
+            )
         } else if let Some(used) = window.used {
             match &window.unit {
                 Some(unit) => tr!("session.amount_unit", amount = amount(used), unit = unit),

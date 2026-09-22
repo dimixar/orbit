@@ -54,8 +54,8 @@ use crate::bundled_extensions::BundledExtensions;
 use crate::checkpoint;
 use crate::command_palette::{self, CommandPalette, PaletteCommand, PaletteSnapshot};
 use crate::composer::ComposerInput;
-use crate::custom_ui::{CustomCancel, CustomFrame, CustomInput, CustomUi};
 use crate::context_meter::{self, ContextMeterData, ContextPopup};
+use crate::custom_ui::{CustomCancel, CustomFrame, CustomInput, CustomUi};
 use crate::dialog::{ApprovalRequest, Dialog, DialogRequest, DialogResponse};
 use crate::git_panel::GitPanel;
 use crate::mentions::{self, AcEntry, SharedAutocomplete, SlashCommand, Trigger, TriggerKind};
@@ -373,8 +373,11 @@ pub struct OrbitApp {
     /// Non-active workspace groups the user has explicitly expanded.
     expanded_workspace_groups: HashSet<String>,
     /// Workspace groups whose session list is expanded past
-    /// [`SIDEBAR_GROUP_SESSIONS_VISIBLE`] (Show more).
-    expanded_session_groups: HashSet<String>,
+    /// [`SIDEBAR_GROUP_SESSIONS_VISIBLE`]. The value is how many extra
+    /// sessions are revealed; each "Show more" click adds one step of
+    /// [`SIDEBAR_GROUP_SESSIONS_VISIBLE`], so a long history grows ten rows
+    /// at a time instead of landing all at once.
+    expanded_session_groups: HashMap<String, usize>,
     /// The projects Orbit lists in its sidebar — its own, user-curated folder
     /// list. pi owns the session files; this only records which folders the
     /// user added, persisted to `~/.orbit-pi/workspaces.json`. A workspace is
@@ -873,9 +876,19 @@ impl OrbitApp {
                         });
                     }
                 }),
-                Rc::new(move |request, cx: &mut App| {
-                    let _ = app_weak
-                        .update(cx, |app, cx| app.on_file_op(request, cx));
+                Rc::new({
+                    let app_weak = app_weak.clone();
+                    move |request, cx: &mut App| {
+                        let _ = app_weak
+                            .update(cx, |app, cx| app.on_file_op(request, cx));
+                    }
+                }),
+                Rc::new(move |cx: &mut App| {
+                    // The panel closes itself inside its own listener (it already
+                    // holds that entity's lease), so this only repaints the
+                    // shell. Calling back into `project_panel.update` here would
+                    // double-lease the entity and abort.
+                    let _ = app_weak.update(cx, |_app, cx| cx.notify());
                 }),
                 cx,
             )
@@ -976,7 +989,7 @@ impl OrbitApp {
             history_index: 0,
             collapsed_workspaces: HashSet::new(),
             expanded_workspace_groups: HashSet::new(),
-            expanded_session_groups: HashSet::new(),
+            expanded_session_groups: HashMap::new(),
             workspaces: load_workspaces(),
             workspace_menu: None,
             current_session_path: None,
@@ -1118,6 +1131,17 @@ impl OrbitApp {
         app.git_panel.update(cx, |panel, _| {
             panel.set_open_file(Rc::new(move |path, _window, cx| {
                 review_sidepane.update(cx, |pane, cx| pane.show_file(path, cx));
+            }));
+        });
+        // A conflicted (or history) file on the Git page opens in the Files
+        // editor. `open_file_in_viewer` leaves the Git page, which is the
+        // intended "resolve it, then continue the merge" flow.
+        let app_weak = cx.entity().downgrade();
+        app.git_panel.update(cx, |panel, _| {
+            panel.set_open_path(Rc::new(move |path, display, _window, cx| {
+                let _ = app_weak.update(cx, |app, cx| {
+                    app.open_file_in_viewer(path, display, cx);
+                });
             }));
         });
         // The Git page's Back button leaves the page. The panel closes itself
@@ -1348,8 +1372,16 @@ enum SideRow {
     },
     /// Session row — index into the (newest-first) sessions list.
     Session(usize),
-    /// Expand a workspace group to reveal hidden sessions (`count` = how many).
-    ShowMore { label: String, count: usize },
+    /// Reveal the next batch of hidden sessions in a workspace group
+    /// (`count` = the step size, at most one
+    /// [`SIDEBAR_GROUP_SESSIONS_VISIBLE`]). `can_collapse` adds the
+    /// right-side collapse affordance once the group has grown past the
+    /// base cap.
+    ShowMore {
+        label: String,
+        count: usize,
+        can_collapse: bool,
+    },
     /// Collapse a workspace group back to the truncated list.
     ShowLess { label: String },
 }
