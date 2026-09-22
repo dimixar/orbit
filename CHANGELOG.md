@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.13] - 2026-09-22
+
 ## [0.0.12] - 2026-09-22
 
 ## [0.0.11] - 2026-09-22
@@ -246,7 +248,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In-transcript find (⌘F) and a full-window image lightbox.
 - Native macOS app bundle, Developer-ID signed and notarizable.
 
-[Unreleased]: https://github.com/imrj05/orbit/compare/v0.0.12...HEAD
+[Unreleased]: https://github.com/imrj05/orbit/compare/v0.0.13...HEAD
 [0.0.1]: https://github.com/imrj05/orbit/releases/tag/v0.0.1
 [0.0.2]: https://github.com/imrj05/orbit/releases/tag/v0.0.2
 [0.0.3]: https://github.com/imrj05/orbit/releases/tag/v0.0.3
@@ -259,3 +261,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.0.10]: https://github.com/imrj05/orbit/releases/tag/v0.0.10
 [0.0.11]: https://github.com/imrj05/orbit/releases/tag/v0.0.11
 [0.0.12]: https://github.com/imrj05/orbit/releases/tag/v0.0.12
+[0.0.13]: https://github.com/imrj05/orbit/releases/tag/v0.0.13
