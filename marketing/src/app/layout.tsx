@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Geist_Mono, Sora } from "next/font/google";
 import Script from "next/script";
+import { JsonLd } from "@/components/json-ld";
 import { SITE } from "@/lib/site";
 import "./globals.css";
 
@@ -103,6 +104,7 @@ const JSON_LD = {
     },
     {
       "@type": "SoftwareApplication",
+      "@id": `${SITE.url}/#softwareapplication`,
       name: SITE.name,
       applicationCategory: "DeveloperApplication",
       operatingSystem: "macOS, Windows, Linux",
@@ -129,10 +131,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           strategy="beforeInteractive"
           dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }}
         />
-        <script
-          type="application/ld+json"
-          dangerouslySetInnerHTML={{ __html: JSON.stringify(JSON_LD) }}
-        />
+        <JsonLd data={JSON_LD} />
         {children}
       </body>
     </html>
