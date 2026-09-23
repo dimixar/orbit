@@ -25,12 +25,12 @@ use std::{
 
 use gpui::{
     anchored, canvas, deferred, div, img, linear_color_stop, linear_gradient, list, point,
-    prelude::*, px, svg, Animation, AnimationExt, AnyElement, App, Bounds, ClipboardItem,
+    prelude::*, px, radians, svg, Animation, AnimationExt, AnyElement, App, Bounds, ClipboardItem,
     CursorStyle, DispatchPhase, Element, ElementId, Font, FontFeatures, FontStyle, FontWeight,
     GlobalElementId, Hitbox, HitboxBehavior, Hsla, Image, ImageSource, InspectorElementId,
     InteractiveText, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ObjectFit, Pixels, ScrollHandle, ScrollWheelEvent, SharedString, StrikethroughStyle,
-    StyledText, TextAlign, TextLayout, TextRun, UnderlineStyle, Window,
+    StyledText, TextAlign, TextLayout, TextRun, Transformation, UnderlineStyle, Window,
 };
 
 use std::ops::Range;
@@ -41,12 +41,13 @@ use serde_json::Value;
 
 use orbit_rpc::MessageUsage;
 
+use crate::app::BUTTON_GROUP;
 use crate::context_meter::{format_tokens, hit_percent_label};
 use crate::highlight::{self, Token};
 use crate::message_scroller::{self, MessageScrollerState};
 use crate::shimmer::ShimmerText;
 use crate::theme::{self, Theme, ThemeMode};
-use crate::transcript::{ChatMessage, Step, ToolCall};
+use crate::transcript::{ChatMessage, Step, ToolCall, ToolFacts};
 
 /// Opens the changed-files Review in the side pane (see `sidepane.rs`) —
 /// handed down from the app so the transcript's Review buttons can point
@@ -1792,7 +1793,6 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
         .steps
         .iter()
         .position(|step| !step.thinking.is_empty() || !step.tools.is_empty());
-    let live_elapsed = paint.live_elapsed.unwrap_or(Duration::ZERO);
     // First step index whose post-answer work is NOT yet absorbed into a
     // rendered activity group (see the in-sequence group block below).
     let mut covered_until = 0usize;
@@ -1831,7 +1831,6 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
                         &message.steps,
                         open,
                         group_live,
-                        live_elapsed,
                         theme,
                         paint.expanded_activities.clone(),
                         paint.expanded_tools.clone(),
@@ -1900,7 +1899,6 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
                 &message.steps,
                 open,
                 group_live,
-                live_elapsed,
                 theme,
                 paint.expanded_activities.clone(),
                 paint.expanded_tools.clone(),
@@ -2039,8 +2037,9 @@ fn activity_title(steps: &[Step], live: bool) -> String {
     for step in steps {
         for tool in &step.tools {
             match tool.name.as_str() {
-                "bash" | "shell" => commands += 1,
-                "read" | "grep" | "find" | "glob" | "search" => reads += 1,
+                "bash" | "shell" | "terminal" | "exec" | "run" => commands += 1,
+                "read" | "view" | "grep" | "find" | "glob" | "search" | "list" | "ls"
+                | "tree" => reads += 1,
                 "edit" | "write" => edits += 1,
                 _ => other += 1,
             }
@@ -2102,7 +2101,7 @@ fn activity_title(steps: &[Step], live: bool) -> String {
             tr!("transcript.worked")
         };
     }
-    parts.join(" \u{b} ")
+    parts.join(" · ")
 }
 
 /// A turn's activity group: a single collapsed summary line ("Ran 2
@@ -2117,7 +2116,6 @@ fn render_activity_group(
     all_steps: &[Step],
     open: bool,
     live: bool,
-    elapsed: Duration,
     theme: Theme,
     expanded_activities: ExpandedActivities,
     expanded_tools: ExpandedTools,
@@ -2130,6 +2128,13 @@ fn render_activity_group(
 ) -> impl IntoElement {
     let steps = &all_steps[range.clone()];
     let title = activity_title(steps, live);
+    // Leading glyph cluster: one icon per distinct work kind (fixed
+    // canonical order, the reasoning bulb last) so a folded group reads as
+    // "what ran", not another line of prose.
+    let icons = activity_group_icons(steps);
+    let any_failed = steps
+        .iter()
+        .any(|step| step.tools.iter().any(|tool| tool.failed));
     let tool_base = all_steps[..range.start]
         .iter()
         .map(|step| step.tools.len())
@@ -2142,6 +2147,16 @@ fn render_activity_group(
         .sum::<usize>()
         .saturating_sub(1);
     let key = (ix, range.start);
+    // State color for the glyph cluster: danger when anything failed, ember
+    // while the group streams. Settled clusters tint per work kind instead
+    // (see `work_tint`).
+    let cluster_state = if any_failed {
+        Some(theme.del_red)
+    } else if live {
+        Some(theme.accent)
+    } else {
+        None
+    };
     let mut group = div()
         .debug_selector(move || format!("activity-group-{ix}-{}", key.1))
         .w_full()
@@ -2149,22 +2164,51 @@ fn render_activity_group(
         .flex()
         .flex_col()
         .gap(px(4.))
+        // Let the summary chip hug its content so it reads as a control
+        // instead of a full-width band across the answer column.
+        .items_start()
         .child(
             div()
                 .id(ElementId::NamedInteger(
                     "activity-toggle".into(),
                     ((ix as u64) << 20) | range.start as u64,
                 ))
-                .w_full()
                 .min_w_0()
+                .max_w_full()
                 .h(px(26.))
                 .flex()
                 .items_center()
                 .gap(px(6.))
+                // Raised fill + hairline = DESIGN.md's chip treatment: the
+                // open state steps the border up for emphasis.
+                .pl(px(8.))
+                .pr(px(10.))
+                .bg(theme.bg_raised)
+                .border_1()
+                .border_color(if open {
+                    theme.border_strong
+                } else {
+                    theme.border
+                })
+                .rounded(px(8.))
                 .cursor_pointer()
                 .text_size(theme.ui_px(12.5))
                 .line_height(theme.ui_px(16.))
-                .hover(|style| style.text_color(theme.text))
+                .hover(|style| style.bg(theme.bg_hover).text_color(theme.text))
+                .child(
+                    div()
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .children(icons.iter().copied().map(|icon| {
+                            glyph(
+                                icon,
+                                11.,
+                                cluster_state.unwrap_or_else(|| work_tint(icon, theme)),
+                            )
+                        })),
+                )
                 .child(
                     div()
                         .min_w_0()
@@ -2246,7 +2290,6 @@ fn render_activity_group(
                     tool,
                     pulse,
                     !pulse,
-                    elapsed,
                     theme,
                     (ix, flat),
                     expanded_tools.borrow().contains(&(ix, flat)),
@@ -2350,6 +2393,26 @@ fn render_thinking_body(
         handle.scroll_to_bottom();
     }
     let id = (key.0 as u64) << 16 | key.1 as u64;
+    // The reasoning glyph: brand accent while the card streams (with a slow
+    // opacity pulse, reduce-motion aware), muted once it settles.
+    let thought_icon: AnyElement = if live && !theme.ui.reduce_motion {
+        div()
+            .flex_none()
+            .child(glyph("icons/tools/thinking.svg", 13., theme.accent))
+            .with_animation(
+                ElementId::NamedInteger("thought-icon".into(), id),
+                Animation::new(Duration::from_millis(1600)).repeat(),
+                |el, delta| el.opacity(0.4 + 0.6 * (delta * std::f32::consts::TAU).sin().abs()),
+            )
+            .into_any_element()
+    } else {
+        glyph(
+            "icons/tools/thinking.svg",
+            13.,
+            if live { theme.accent } else { theme.text_3 },
+        )
+        .into_any_element()
+    };
     let mut card = div()
         .debug_selector(move || format!("thought-card-{}-{}", key.0, key.1))
         .rounded(px(9.))
@@ -2364,6 +2427,7 @@ fn render_thinking_body(
         .child(
             div()
                 .id(ElementId::NamedInteger("thought-toggle".into(), id))
+                .group(BUTTON_GROUP)
                 .w_full()
                 .min_w_0()
                 .flex()
@@ -2373,7 +2437,7 @@ fn render_thinking_body(
                 .text_size(theme.ui_px(13.))
                 .line_height(theme.ui_px(17.))
                 .hover(|style| style.text_color(theme.text))
-                .child(glyph("icons/spark.svg", 13., theme.text_3))
+                .child(thought_icon)
                 .child(
                     div()
                         .flex_1()
@@ -2780,7 +2844,6 @@ fn render_activity_card(
     tool: &ToolCall,
     pulse: bool,
     complete: bool,
-    elapsed: Duration,
     theme: Theme,
     key: (usize, usize),
     tool_open: bool,
@@ -2798,6 +2861,16 @@ fn render_activity_card(
     }
     let action = activity_action_label(&tool.name);
     let detail = activity_preview(tool);
+    let icon = activity_icon(&tool.name);
+    // The glyph tone: strong state color while the call runs or once it
+    // failed; otherwise the work kind's soft tint (see `work_tint`).
+    let tone = if tool.failed {
+        theme.del_red
+    } else if pulse {
+        theme.accent
+    } else {
+        work_tint(icon, theme)
+    };
     let is_command = tool_command(tool).is_some();
     let has_diff = tool.added > 0 || tool.removed > 0;
     let added = tool.added;
@@ -2834,12 +2907,12 @@ fn render_activity_card(
                 .line_height(theme.ui_px(17.))
                 .when(has_detail, |row| row.cursor_pointer())
                 .hover(|style| style.bg(theme.overlay_strong))
-                .child(glyph(activity_icon(&tool.name), 13., theme.text_3))
+                .child(activity_badge(icon, tone, theme))
                 .child(
                     div()
                         .flex_none()
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(theme.accent)
+                        .text_color(theme.text)
                         .child(action),
                 )
                 .when(!detail.is_empty(), |row| {
@@ -2881,11 +2954,17 @@ fn render_activity_card(
                         )
                     }
                 })
+                .when_some(truncation_chip(&tool.facts, theme), |row, chip| {
+                    row.child(chip)
+                })
                 .when(has_diff, |row| {
                     row.child(render_line_delta(added, removed, theme, 12.5))
                 })
                 .when(pulse, |row| {
-                    row.child(pulse_dot(theme, elapsed.as_millis()))
+                    row.child(activity_spinner(
+                        theme,
+                        (key.0 as u64) << 16 | key.1 as u64,
+                    ))
                 })
                 .when(tool.failed, |row| {
                     row.child(glyph("icons/stop.svg", 12., theme.del_red))
@@ -2979,6 +3058,41 @@ fn render_activity_card(
         ));
     }
     card.into_any_element()
+}
+
+/// The header label for a capped result: "truncated" alone, or
+/// "truncated · 1,172/1,303" when pi reported the line budget. `None` for an
+/// uncapped tool.
+fn truncation_label(facts: &ToolFacts) -> Option<String> {
+    if !facts.truncated {
+        return None;
+    }
+    Some(match (facts.output_lines, facts.total_lines) {
+        (Some(shown), Some(total)) if total > shown => {
+            format!("{} · {shown}/{total}", tr!("transcript.truncated"))
+        }
+        _ => tr!("transcript.truncated"),
+    })
+}
+
+/// A compact header chip for a tool whose result pi capped. Warn-colored —
+/// the agent saw only part of the data — so the reader learns it without
+/// expanding the output.
+fn truncation_chip(facts: &ToolFacts, theme: Theme) -> Option<AnyElement> {
+    let label = truncation_label(facts)?;
+    Some(
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(3.))
+            .text_size(theme.ui_px(11.))
+            .line_height(theme.ui_px(15.))
+            .text_color(theme.warn)
+            .child(glyph("icons/tools/truncated.svg", 11., theme.warn))
+            .child(label)
+            .into_any_element(),
+    )
 }
 
 /// First human-readable error line from a failed tool's captured output.
@@ -4069,20 +4183,34 @@ fn format_time(millis: i64) -> Option<String> {
 }
 
 fn glyph(path: &'static str, size: f32, color: Hsla) -> impl IntoElement {
-    svg()
-        .path(path)
-        .flex_none()
-        .size(px(size))
-        .text_color(color)
+    // The shared icon carries the button hover ink-lift, so every control in
+    // the transcript that opts into `BUTTON_GROUP` brightens its glyph.
+    crate::app::icon(path, size, color)
 }
 
-fn pulse_dot(theme: Theme, elapsed_ms: u128) -> impl IntoElement {
-    let on = elapsed_ms.is_multiple_of(400);
-    div().size(px(5.)).rounded_full().bg(if on {
-        theme.accent
-    } else {
-        theme.accent.opacity(0.35)
-    })
+/// The in-flight spinner on a tool card. Reuses the sidebar's rotating
+/// `loader.svg` so "working" reads the same everywhere; reduce-motion keeps
+/// the glyph but drops the spin.
+fn activity_spinner(theme: Theme, id: u64) -> AnyElement {
+    let loader = svg()
+        .path("icons/loader.svg")
+        .flex_none()
+        .size(px(12.))
+        .text_color(theme.accent);
+    if theme.ui.reduce_motion {
+        return loader.into_any_element();
+    }
+    loader
+        .with_animation(
+            ElementId::NamedInteger("activity-spin".into(), id),
+            Animation::new(Duration::from_millis(900)).repeat(),
+            |el, delta| {
+                el.with_transformation(Transformation::rotate(radians(
+                    delta * std::f32::consts::TAU,
+                )))
+            },
+        )
+        .into_any_element()
 }
 
 fn fold_label(elapsed: Option<Duration>) -> String {
@@ -4158,6 +4286,7 @@ fn render_turn_fold(
         .child(
             div()
                 .id(ElementId::NamedInteger("turn-fold".into(), ix as u64))
+                .group(BUTTON_GROUP)
                 .h(px(24.))
                 .px(px(2.))
                 .flex_none()
@@ -4214,7 +4343,7 @@ fn working_activity_label(step: &Step) -> Option<String> {
             "bash" | "shell" | "terminal" | "exec" | "run" => {
                 tr!("transcript_view.verb_running")
             }
-            "read" => tr!("transcript_view.verb_reading"),
+            "read" | "view" => tr!("transcript_view.verb_reading"),
             "grep" | "find" | "glob" | "search" => tr!("transcript_view.verb_searching"),
             "edit" | "write" => tr!("transcript_view.verb_editing"),
             other => {
@@ -4692,6 +4821,13 @@ enum Block {
         rows: Vec<Vec<String>>,
         aligns: Vec<TableAlign>,
     },
+    /// A standalone image: a Markdown `![alt](url)` line or an HTML
+    /// `<img src="…">` tag. GitHub issue screenshots usually land on their
+    /// own line, so the block model is enough to render them inline.
+    Image {
+        alt: String,
+        url: String,
+    },
 }
 
 /// GFM column alignment parsed from a table's delimiter row.
@@ -4793,6 +4929,55 @@ fn is_rule(trimmed: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// Parse a line that is solely an image into `(alt, url)`.
+///
+/// Handles Markdown `![alt](url "title")` (with optional `<…>` wrapping) and
+/// the HTML `<img src="…">` form GitHub sometimes stores. Returns `None` for
+/// a line that merely contains an image among other text, so prose is never
+/// split mid-sentence.
+fn image_line(trimmed: &str) -> Option<(String, String)> {
+    let t = trimmed.trim();
+    if let Some(rest) = t.strip_prefix("![") {
+        let close = rest.find("](")?;
+        let alt = rest[..close].to_string();
+        let after = &rest[close + 2..];
+        let end = after.find(')')?;
+        // A title follows the URL after whitespace; the URL itself may be
+        // wrapped in angle brackets (Markdown's escape for spaces).
+        let raw = after[..end].trim();
+        let url = raw
+            .strip_prefix('<')
+            .and_then(|rest| rest.split('>').next())
+            .unwrap_or_else(|| raw.split_whitespace().next().unwrap_or(""));
+        if !url.is_empty() {
+            return Some((alt, url.to_string()));
+        }
+        return None;
+    }
+    if t.starts_with("<img") {
+        let src = html_attr(t, "src")?;
+        if !src.is_empty() {
+            return Some((html_attr(t, "alt").unwrap_or_default(), src));
+        }
+    }
+    None
+}
+
+/// Read `name="value"` (single or double quoted) from a tag's source text.
+fn html_attr(tag: &str, name: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let key = format!("{name}=");
+    let start = lower.find(&key)? + key.len();
+    let rest = &tag[start..];
+    let quote = rest.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let rest = &rest[1..];
+    let end = rest.find(quote)?;
+    Some(rest[..end].to_string())
 }
 
 fn list_item_line(line: &str) -> Option<(usize, bool, u64, Option<bool>, String)> {
@@ -4939,6 +5124,16 @@ fn parse_blocks(text: &str) -> Vec<Block> {
         if is_rule(trimmed) {
             flush_paragraph(&mut paragraph, &mut blocks);
             blocks.push(Block::Rule);
+            i += 1;
+            continue;
+        }
+
+        // A line that is only an image becomes its own block, so a screenshot
+        // pasted under a heading actually paints instead of rendering as a
+        // stray `!` and a link.
+        if let Some((alt, url)) = image_line(trimmed) {
+            flush_paragraph(&mut paragraph, &mut blocks);
+            blocks.push(Block::Image { alt, url });
             i += 1;
             continue;
         }
@@ -5201,7 +5396,7 @@ pub(crate) fn render_markdown_document(text: &str, theme: Theme) -> impl IntoEle
 /// heading than below it, tight joins for lists and their introducer, and a
 /// clear break around code and tables (the brief's rhythm table).
 fn block_gap(prev: &Block, next: &Block) -> f32 {
-    use Block::{Alert, Code, Heading, List, Paragraph, Quote, Rule, Table};
+    use Block::{Alert, Code, Heading, Image, List, Paragraph, Quote, Rule, Table};
     match (prev, next) {
         (_, Heading(..)) => 20.0,
         (Heading(..), _) => 8.0,
@@ -5214,6 +5409,7 @@ fn block_gap(prev: &Block, next: &Block) -> f32 {
         (_, Alert(..)) | (Alert(..), _) => 12.0,
         (_, Table { .. }) | (Table { .. }, _) => 14.0,
         (Rule, _) => 14.0,
+        (_, Image { .. }) | (Image { .. }, _) => 14.0,
         _ => 10.0,
     }
 }
@@ -5320,7 +5516,69 @@ fn render_block(
             rows,
             aligns,
         } => render_table(header, rows, aligns, ix, salt, block_ix, theme).into_any_element(),
+        Block::Image { alt, url } => {
+            render_markdown_image(alt, url, ix, salt, block_ix, theme).into_any_element()
+        }
     }
+}
+
+/// A block-level image. Remote sources (the GitHub issue screenshots) load
+/// through gpui's image cache; a load failure falls back to the alt text or a
+/// quiet "image unavailable" note instead of leaving a hole. Clicking opens
+/// the source in the browser so a private/expired URL is still reachable.
+fn render_markdown_image(
+    alt: &str,
+    url: &str,
+    ix: usize,
+    salt: u64,
+    block_ix: usize,
+    theme: Theme,
+) -> impl IntoElement {
+    let url = url.to_string();
+    let open = url.clone();
+    let fallback_alt = alt.to_string();
+    div().w_full().min_w_0().flex().child(
+        img(url)
+            .id(md_id(ix, salt, block_ix, 0))
+            // `min_w_0` is load-bearing: a replaced element's automatic minimum
+            // width is its intrinsic width, so without it `max_w_full` loses
+            // and a large screenshot overflows the column and the rail.
+            .min_w_0()
+            .max_w_full()
+            // Height 0 lets taffy derive the box from the image's aspect ratio
+            // once it decodes, so the image scales to the column instead of
+            // keeping its intrinsic height and leaving a tall empty band (gpui
+            // seeds `size.height` with the intrinsic value otherwise).
+            .h(px(0.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(theme.border)
+            .object_fit(ObjectFit::Contain)
+            .cursor_pointer()
+            .with_fallback(move || markdown_image_fallback(&fallback_alt, theme))
+            .on_click(move |_, _, cx| cx.open_url(&open)),
+    )
+}
+
+/// The fallback shown when a markdown image cannot load: the alt text when it
+/// says something, otherwise a muted "image unavailable" note.
+fn markdown_image_fallback(alt: &str, theme: Theme) -> AnyElement {
+    let label = if alt.trim().is_empty() {
+        tr!("markdown.image_unavailable")
+    } else {
+        alt.to_string()
+    };
+    div()
+        .px(theme.space(10.))
+        .py(theme.space(8.))
+        .rounded(px(8.))
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.overlay)
+        .text_size(theme.ui_px(12.))
+        .text_color(theme.text_3)
+        .child(label)
+        .into_any_element()
 }
 
 /// A GitHub-style callout: a tinted, rounded container with a semantic
@@ -6218,16 +6476,159 @@ fn toggle_index(set: &Rc<RefCell<HashSet<usize>>>, ix: usize) {
     }
 }
 
+/// The leading glyph for a tool card — a HugeIcons stroke-rounded SVG from
+/// `assets/icons/tools/`. Tools are grouped by the kind of work so a turn
+/// scans by shape: explore (read/search/find/list), mutate (edit/write),
+/// execute (bash), delegate (task/skill/mcp/web), and a wrench fallback so
+/// an unknown tool still renders a real mark.
 pub(crate) fn activity_icon(name: &str) -> &'static str {
     match name {
-        "edit" | "write" => "icons/file-diff.svg",
-        "read" | "grep" | "find" | "glob" | "search" => "icons/search.svg",
-        "bash" | "shell" => "icons/spark.svg",
-        _ => "icons/task.svg",
+        "edit" => "icons/tools/edit.svg",
+        "write" => "icons/tools/write.svg",
+        "read" | "view" => "icons/tools/read.svg",
+        "grep" | "search" => "icons/tools/search.svg",
+        "find" | "glob" => "icons/tools/find.svg",
+        "list" | "ls" | "tree" => "icons/tools/list.svg",
+        "bash" | "shell" | "terminal" | "exec" | "run" => "icons/tools/bash.svg",
+        "task" | "agent" | "subagent" => "icons/tools/task.svg",
+        "web_search" | "websearch" | "search_web" | "browse" => "icons/tools/web.svg",
+        "web_fetch" | "webfetch" | "fetch" | "open_url" => "icons/tools/fetch.svg",
+        "skill" => "icons/tools/skill.svg",
+        "ask" | "ask_user" | "question" | "elicit" => "icons/tools/ask.svg",
+        "todo" | "todo_write" | "plan" | "update_plan" => "icons/tools/todo.svg",
+        "notebook" | "eval" | "execute_code" => "icons/tools/code.svg",
+        name if name.starts_with("mcp") => "icons/tools/mcp.svg",
+        _ => "icons/tools/tool.svg",
     }
 }
 
+/// One glyph per distinct work kind in a group, deduped and ordered
+/// canonically (run → read → edit → web → other), the reasoning bulb last
+/// when any step thought. The cluster is an index of what ran; the counts
+/// in the title stay the truth.
+fn activity_group_icons(steps: &[Step]) -> Vec<&'static str> {
+    let mut icons: Vec<&'static str> = Vec::new();
+    for step in steps {
+        for tool in &step.tools {
+            let icon = activity_icon(&tool.name);
+            if !icons.contains(&icon) {
+                icons.push(icon);
+            }
+        }
+    }
+    icons.sort_unstable_by_key(|icon| activity_icon_rank(icon));
+    if steps.iter().any(|step| !step.thinking.is_empty()) {
+        icons.push("icons/tools/thinking.svg");
+    }
+    // Six glyphs is all a compact summary chip can afford before the cluster
+    // starts competing with the title.
+    icons.truncate(6);
+    icons
+}
+
+/// Canonical cluster order: run, then explore, then mutate, then web, then
+/// everything else (task/skill/ask/mcp/wrench).
+fn activity_icon_rank(icon: &'static str) -> usize {
+    match icon {
+        "icons/tools/bash.svg" => 0,
+        "icons/tools/read.svg"
+        | "icons/tools/search.svg"
+        | "icons/tools/find.svg"
+        | "icons/tools/list.svg" => 1,
+        "icons/tools/edit.svg" | "icons/tools/write.svg" => 2,
+        "icons/tools/web.svg" | "icons/tools/fetch.svg" => 3,
+        _ => 4,
+    }
+}
+
+/// Rotate the accent's hue by `offset` turns while keeping the palette's
+/// tuned chroma and lightness — the same mechanism `Theme::mention_file`
+/// uses for the `@file` complement. Chroma-less palettes (Ashwood, Mono;
+/// `accent.s < 0.15`) return `None` so the caller falls back to ink and
+/// separates kinds by tone instead of hue.
+fn accent_shifted(accent: Hsla, offset: f32) -> Option<Hsla> {
+    if accent.s < 0.15 {
+        return None;
+    }
+    let mut color = accent;
+    color.h = (color.h + offset).fract();
+    color.s = color.s.max(0.5);
+    Some(color)
+}
+
+/// The soft category tint for a work kind, keyed by its glyph path. These
+/// tints are content, not chrome — they describe what the agent did, the
+/// same exemption the composer's `/command` / `@file` tokens already take —
+/// so they sit outside the One Accent budget. State (run/fail) still wins:
+/// callers override with `theme.accent` / `theme.del_red` when it applies.
+///
+/// With the ember accent (h ≈ 0.04): run reads amber, explore reads the
+/// complement (cool), mutate reads green, web reads violet; the reasoning
+/// bulb keeps the accent itself. Unknown kinds and chroma-less palettes
+/// stay neutral ink.
+fn work_tint(icon: &'static str, theme: Theme) -> Hsla {
+    let shifted = |offset: f32| accent_shifted(theme.accent, offset).unwrap_or(theme.text_2);
+    match icon {
+        "icons/tools/bash.svg" => shifted(0.07),
+        "icons/tools/read.svg"
+        | "icons/tools/search.svg"
+        | "icons/tools/find.svg"
+        | "icons/tools/list.svg" => shifted(0.50),
+        "icons/tools/edit.svg" | "icons/tools/write.svg" => shifted(0.32),
+        "icons/tools/web.svg" | "icons/tools/fetch.svg" => shifted(0.62),
+        "icons/tools/thinking.svg" => theme.accent,
+        _ => theme.text_2,
+    }
+}
+
+/// A tool glyph in its category badge: a 22px rounded square washed at a low
+/// alpha of the tone, the glyph at full strength. The wash lifts the icon out
+/// of the prose column so a tool row reads as a control at a glance, in every
+/// palette. `tone` is the state color while the call runs/fails, the work
+/// kind's tint once it settles (see `work_tint`).
+fn activity_badge(icon: &'static str, tone: Hsla, theme: Theme) -> impl IntoElement {
+    let wash = match theme.mode {
+        ThemeMode::Dark => 0.16,
+        ThemeMode::Light => 0.12,
+    };
+    div()
+        .flex_none()
+        .size(px(22.))
+        .rounded(px(6.))
+        .bg(tone.opacity(wash))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(glyph(icon, 13., tone))
+}
+
+/// Human label for a tool card header. Known pi tools get a short, scannable
+/// verb ("Run", "Read", "Find files"); anything else falls back to the
+/// capitalized tool name so an unknown tool never renders blank.
 fn activity_action_label(name: &str) -> String {
+    let known = match name {
+        "bash" | "shell" | "terminal" | "exec" | "run" => Some("Run"),
+        "read" | "view" => Some("Read"),
+        "edit" => Some("Edit"),
+        "write" => Some("Write"),
+        "grep" | "search" => Some("Search"),
+        "find" | "glob" => Some("Find files"),
+        "list" | "ls" | "tree" => Some("List"),
+        "task" | "agent" | "subagent" => Some("Task"),
+        "web_search" | "websearch" | "search_web" | "browse" => Some("Web search"),
+        "web_fetch" | "webfetch" | "fetch" | "open_url" => Some("Fetch"),
+        "skill" => Some("Skill"),
+        "ask" | "ask_user" | "question" | "elicit" => Some("Ask"),
+        "todo" | "todo_write" | "plan" | "update_plan" => Some("Plan"),
+        "notebook" | "eval" | "execute_code" => Some("Run code"),
+        _ => None,
+    };
+    if let Some(label) = known {
+        return label.to_string();
+    }
+    if name.starts_with("mcp") {
+        return "MCP".to_string();
+    }
     let mut chars = name.chars();
     match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
@@ -6376,6 +6777,7 @@ mod tests {
             args: None,
             output: None,
             failed: false,
+            facts: Default::default(),
         };
         // Two steps' worth of work lands on one summary line — counts span
         // every step instead of one "Ran …" row per step.
@@ -6393,13 +6795,86 @@ mod tests {
         ];
         assert_eq!(
             activity_title(&steps, false),
-            "Ran 1 command \u{b} Ran 1 file read \u{b} Ran 1 file edit \u{b} 2 thoughts"
+            "Ran 1 command · Ran 1 file read · Ran 1 file edit · 2 thoughts"
         );
         assert_eq!(
             activity_title(&steps, true),
-            "Ran 1 command \u{b} Ran 1 file read \u{b} Ran 1 file edit \u{b} Thinking"
+            "Ran 1 command · Ran 1 file read · Ran 1 file edit · Thinking"
         );
         assert_eq!(activity_title(&[], false), "Worked");
+    }
+
+    #[test]
+    fn activity_group_icons_dedupe_order_and_cap() {
+        let step = |thinking: &str, tools: &[&str]| Step {
+            thinking: thinking.into(),
+            tools: tools
+                .iter()
+                .map(|name| ToolCall {
+                    name: name.to_string(),
+                    summary: String::new(),
+                    path: None,
+                    added: 0,
+                    removed: 0,
+                    id: None,
+                    args: None,
+                    output: None,
+                    failed: false,
+                    facts: Default::default(),
+                })
+                .collect(),
+            ..Step::default()
+        };
+        // Canonical order regardless of arrival order, deduped, bulb last.
+        let icons = activity_group_icons(&[
+            step("", &["read", "bash", "edit", "read", "bash"]),
+            step("hmm", &["bash"]),
+        ]);
+        assert_eq!(
+            icons,
+            vec![
+                "icons/tools/bash.svg",
+                "icons/tools/read.svg",
+                "icons/tools/edit.svg",
+                "icons/tools/thinking.svg",
+            ]
+        );
+        // A thought-only group carries just the bulb; a tools-only group
+        // carries none.
+        assert_eq!(
+            activity_group_icons(&[step("hmm", &[])]),
+            vec!["icons/tools/thinking.svg"]
+        );
+        assert_eq!(
+            activity_group_icons(&[step("", &["bash", "shell"])]),
+            vec!["icons/tools/bash.svg"]
+        );
+    }
+
+    #[test]
+    fn accent_shifted_rotates_hue_and_keeps_the_palettes_chroma() {
+        let ember = gpui::hsla(0.04, 0.45, 0.62, 1.0);
+        let shifted = accent_shifted(ember, 0.5).unwrap();
+        assert!((shifted.h - 0.54).abs() < 1e-6);
+        assert!((shifted.s - 0.5).abs() < 1e-6);
+        assert!((shifted.l - 0.62).abs() < 1e-6);
+        // Chroma-less palettes (Ashwood, Mono) drop the hue so kinds
+        // separate by tone instead — callers paint ink.
+        assert_eq!(accent_shifted(gpui::hsla(0.0, 0.0, 0.5, 1.0), 0.5), None);
+        // Wrapping past 1.0 is modulo, not clamping.
+        assert!((accent_shifted(gpui::hsla(0.9, 0.6, 0.5, 1.0), 0.3).unwrap().h - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn work_tint_uses_ink_for_unknown_kinds_and_low_chroma_palettes() {
+        // Chroma-less palette (accent.s < 0.15): every kind falls back to ink.
+        let theme = Theme {
+            accent: gpui::hsla(0.0, 0.0, 0.5, 1.0),
+            ..Theme::default()
+        };
+        assert_eq!(work_tint("icons/tools/bash.svg", theme), theme.text_2);
+        assert_eq!(work_tint("icons/tools/edit.svg", theme), theme.text_2);
+        assert_eq!(work_tint("icons/tools/tool.svg", theme), theme.text_2);
     }
 
     #[test]
@@ -6513,10 +6988,52 @@ mod tests {
 
     #[test]
     fn activity_icon_maps_pi_tools() {
-        assert_eq!(activity_icon("edit"), "icons/file-diff.svg");
-        assert_eq!(activity_icon("bash"), "icons/spark.svg");
-        assert_eq!(activity_icon("grep"), "icons/search.svg");
-        assert_eq!(activity_icon("mcp"), "icons/task.svg");
+        assert_eq!(activity_icon("edit"), "icons/tools/edit.svg");
+        assert_eq!(activity_icon("write"), "icons/tools/write.svg");
+        assert_eq!(activity_icon("read"), "icons/tools/read.svg");
+        assert_eq!(activity_icon("bash"), "icons/tools/bash.svg");
+        assert_eq!(activity_icon("grep"), "icons/tools/search.svg");
+        assert_eq!(activity_icon("glob"), "icons/tools/find.svg");
+        assert_eq!(activity_icon("mcp"), "icons/tools/mcp.svg");
+        assert_eq!(activity_icon("mcp__filesystem"), "icons/tools/mcp.svg");
+        // An unknown tool keeps a real mark instead of a blank slot.
+        assert_eq!(activity_icon("frobnicate"), "icons/tools/tool.svg");
+    }
+
+    #[test]
+    fn activity_action_label_reads_as_a_verb() {
+        assert_eq!(activity_action_label("bash"), "Run");
+        assert_eq!(activity_action_label("read"), "Read");
+        assert_eq!(activity_action_label("glob"), "Find files");
+        assert_eq!(activity_action_label("mcp__github"), "MCP");
+        // Unknown tools still get a readable, never-blank label.
+        assert_eq!(activity_action_label("frobnicate"), "Frobnicate");
+        assert_eq!(activity_action_label(""), "Tool");
+    }
+
+    #[test]
+    fn truncation_label_reports_the_line_budget() {
+        // A capped read: the agent saw 1,172 of 1,303 lines.
+        assert_eq!(
+            truncation_label(&ToolFacts {
+                truncated: true,
+                output_lines: Some(1172),
+                total_lines: Some(1303),
+            })
+            .as_deref(),
+            Some("truncated · 1172/1303")
+        );
+        // A cap with no reported budget still reads as truncated.
+        assert_eq!(
+            truncation_label(&ToolFacts {
+                truncated: true,
+                ..ToolFacts::default()
+            })
+            .as_deref(),
+            Some("truncated")
+        );
+        // A complete result never shows the chip.
+        assert_eq!(truncation_label(&ToolFacts::default()), None);
     }
 
     #[test]
@@ -6531,6 +7048,7 @@ mod tests {
             args: Some(serde_json::json!({ "command": "ls -la" })),
             output: None,
             failed: false,
+            facts: Default::default(),
         };
         assert_eq!(tool_command(&bash).as_deref(), Some("ls -la"));
         // The header preview shows the command, not the raw JSON summary.
@@ -6556,6 +7074,7 @@ mod tests {
             args: Some(serde_json::json!({ "command": command })),
             output: None,
             failed: false,
+            facts: Default::default(),
         };
         assert_eq!(
             activity_preview(&tool),
@@ -6603,6 +7122,7 @@ mod tests {
             })),
             output: None,
             failed: false,
+            facts: Default::default(),
         };
         let rows = build_edit_diff(&tool).expect("diff");
         assert_eq!(rows.len(), 2);
@@ -6629,6 +7149,7 @@ mod tests {
             args: Some(serde_json::json!({ "path": "src/new.rs", "content": "a\nb\n" })),
             output: None,
             failed: false,
+            facts: Default::default(),
         };
         let rows = build_edit_diff(&tool).expect("diff");
         assert_eq!(rows.len(), 2);
@@ -6876,6 +7397,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_blocks_turns_standalone_images_into_image_blocks() {
+        // Markdown image on its own line, with a title and an angle-wrapped
+        // URL (GitHub's escape for spaces).
+        let blocks = parse_blocks(
+            "Screenshots or recordings\n\n![shot](<https://example.com/a b.png> \"title\")\n\n<img src=\"https://example.com/c.png\" alt=\"html\" />",
+        );
+        assert!(
+            matches!(&blocks[0], Block::Paragraph(lines) if lines == &["Screenshots or recordings".to_string()])
+        );
+        assert!(matches!(&blocks[1], Block::Image { alt, url }
+                if alt == "shot" && url == "https://example.com/a b.png"));
+        assert!(matches!(&blocks[2], Block::Image { alt, url }
+                if alt == "html" && url == "https://example.com/c.png"));
+    }
+
+    #[test]
+    fn image_markdown_inside_prose_is_not_split() {
+        // A line that only *contains* an image stays prose; only a standalone
+        // image line becomes a block, so sentences are never cut in half.
+        let blocks = parse_blocks("see ![inline](https://example.com/x.png) here");
+        assert!(matches!(&blocks[0], Block::Paragraph(lines)
+                if lines.join(" ") == "see ![inline](https://example.com/x.png) here"));
+    }
+
+    #[test]
     fn parse_blocks_reads_task_list_state() {
         let blocks = parse_blocks("- [ ] open\n- [x] done\n- plain");
         let Block::List(items) = &blocks[0] else {
@@ -7007,6 +7553,7 @@ mod tests {
             args: Some(serde_json::json!({ "command": "cargo test" })),
             output: None,
             failed: false,
+            facts: Default::default(),
         };
         let step = Step {
             tools: vec![bash],
@@ -7027,6 +7574,7 @@ mod tests {
             args: Some(serde_json::json!({ "path": "src/auth.rs" })),
             output: None,
             failed: false,
+            facts: Default::default(),
         };
         let step = Step {
             tools: vec![read],
@@ -7690,6 +8238,7 @@ mod tests {
             args: Some(serde_json::json!({"url": "https://example.com"})),
             output: None,
             failed: false,
+            facts: Default::default(),
         };
         messages.borrow_mut()[0].steps = vec![
             Step { text: prose.clone(), thinking: "First thought\nChecking references".into(), tools: vec![tool.clone()], ..Step::default() },
@@ -7817,6 +8366,7 @@ mod tests {
                     args: None,
                     output: None,
                     failed: false,
+                    facts: Default::default(),
                 }],
                 ..Step::default()
             });
