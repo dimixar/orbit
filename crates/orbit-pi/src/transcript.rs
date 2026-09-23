@@ -294,6 +294,11 @@ impl ChatMessage {
             _ => {}
         }
         if user {
+            // pi appends image hints (resize/conversion notes) to the prompt
+            // text it echoes and persists. They are protocol metadata for the
+            // model, not what the user typed — strip them so the echo matches
+            // the optimistic row and reloads don't render the note.
+            message.steps[0].text = strip_image_hints(&message.steps[0].text).to_string();
             if let Some((name, trailing)) = injected_skill(&message.steps[0].text) {
                 message.steps[0].text = compact_skill_prompt(&name, &trailing);
             }
@@ -303,6 +308,34 @@ impl ChatMessage {
         message.steps[0].timestamp = timestamp;
         Some(message)
     }
+}
+
+/// pi appends image hints to a user prompt when an attachment was resized or
+/// converted — `[Image: original …]`, `[Image converted from … to ….]`,
+/// `[Image omitted: …]`. The model needs them for coordinate mapping, but they
+/// are not the user's words. Drop the trailing hint paragraph(s) so a live echo
+/// dedupes against the optimistic row and a reload shows only the prompt.
+fn strip_image_hints(text: &str) -> &str {
+    let trimmed = text.trim_end();
+    let mut end = trimmed.len();
+    while let Some(sep) = trimmed[..end].rfind("\n\n") {
+        let tail = trimmed[sep + 2..end].trim();
+        if tail.lines().all(is_image_hint_line) {
+            end = sep;
+        } else {
+            break;
+        }
+    }
+    trimmed[..end].trim_end()
+}
+
+/// One line of pi's image-hint block (`[Image: …]`, `[Image converted …]`,
+/// `[Image omitted: …]`).
+fn is_image_hint_line(line: &str) -> bool {
+    let line = line.trim();
+    line.starts_with("[Image:")
+        || line.starts_with("[Image converted")
+        || line.starts_with("[Image omitted")
 }
 
 /// pi records a loaded skill as an ordinary user message: a
@@ -2317,6 +2350,48 @@ mod tests {
         let messages = t.messages.borrow();
         assert_eq!(messages.len(), 1);
         assert!(messages[0].user);
+    }
+
+    /// An attached image that pi resized gets a dimension note appended to
+    /// the echoed prompt text. The optimistic row carries the typed text only,
+    /// so the echo must still dedupe instead of stacking a second bubble.
+    #[test]
+    fn image_hint_in_user_echo_does_not_duplicate_the_prompt() {
+        let mut t = Transcript::new();
+        let prompt = "can you check the attached og image";
+        assert!(t.append_user_message(prompt, Vec::new()));
+        let echo = format!(
+            "{prompt}\n\n[Image: original 2400x1260, displayed at 2000x1050. \
+             Multiply coordinates by 1.20 to map to original image.]"
+        );
+        t.apply_event(&Event::MessageStart {
+            value: json!({"type": "message_start", "message": {
+                "role": "user", "content": [{"type": "text", "text": echo}]
+            }}),
+        });
+        t.apply_event(&Event::MessageEnd {
+            value: json!({"type": "message_end", "message": {
+                "role": "user", "content": [{"type": "text", "text": echo}]
+            }}),
+        });
+        let messages = t.messages.borrow();
+        assert_eq!(messages.len(), 1, "the prompt must render once");
+        assert_eq!(messages[0].text(), prompt);
+    }
+
+    /// Reloading from disk parses the persisted prompt with its image hint;
+    /// the note must not render as user copy.
+    #[test]
+    fn reloaded_user_prompt_strips_image_hint() {
+        let mut t = Transcript::new();
+        t.load_from(&json!({"messages": [
+            {"role": "user", "content": [{"type": "text", "text":
+                "see this\n\n[Image converted from image/heic to image/png.]\n[Image: original 800x600, displayed at 400x300. Multiply coordinates by 2.00 to map to original image.]"}]
+            },
+        ]}));
+        let messages = t.messages.borrow();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text(), "see this");
     }
 
     /// pi emits a context-only `system` loadout/tool-change update right
