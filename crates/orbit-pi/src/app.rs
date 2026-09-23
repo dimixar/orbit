@@ -36,7 +36,7 @@ use gpui::{
     AnyElement, App, ClipboardItem, Context, Corner, CursorStyle, DragMoveEvent, ElementId, Entity,
     ExternalPaths, FocusHandle, Focusable, FontWeight, Hsla, Image, ImageSource, IntoElement,
     ListAlignment, ListState, MouseButton, MouseDownEvent, MouseUpEvent, ObjectFit,
-    PathPromptOptions, Pixels, Render, Resource, ScrollStrategy, SharedString,
+    PathPromptOptions, Pixels, Point, Render, Resource, ScrollStrategy, SharedString,
     StatefulInteractiveElement, Subscription, TextAlign, Transformation, UniformListScrollHandle,
     Window,
 };
@@ -209,6 +209,13 @@ pub struct OrbitApp {
     /// would let the repeat skip) while the first frame — generation 0 — draws
     /// the settled state with no launch animation.
     sidebar_slide_gen: u64,
+    /// Keyboard cursor for the sessions sidebar: an index into the current
+    /// sidebar rows. `None` until the sidebar takes keyboard focus (⌘⇧B);
+    /// the row it names paints the focused surface in `render_side_row`.
+    sidebar_cursor: Option<usize>,
+    /// Focus handle carrying the `Sidebar` key context while the sidebar is
+    /// being keyboard-navigated (↑/↓/⏎/Esc).
+    sidebar_focus: FocusHandle,
     pub(crate) input: Entity<ComposerInput>,
     model_label: String,
     /// Pi model id of the active model (stable match key for the picker).
@@ -264,6 +271,9 @@ pub struct OrbitApp {
     status_at: Option<Instant>,
     current_title: Option<String>,
     current_workspace: Option<PathBuf>,
+    /// Logo found at a conventional path in the current workspace, shown in
+    /// the new-task page's folder field; `None` keeps the folder glyph.
+    workspace_logo: Option<Arc<Image>>,
     /// Status-bar branch chip: the checked-out branch and its divergence from
     /// upstream, fetched off-thread so render never shells out to git.
     branch: Option<BranchStatus>,
@@ -495,7 +505,7 @@ pub struct OrbitApp {
     latest_turn: Option<usize>,
     /// Right side pane — Review (git diff).
     sidepane: Entity<SidePane>,
-    /// Right dock — the workspace file tree (cmd-shift-e).
+    /// Right dock — the workspace file tree (⌘⇧E / Ctrl+Shift+E).
     project_panel: Entity<crate::explorer::ProjectPanel>,
     /// Full-page read-only file viewer (the Files surface).
     file_viewer: Entity<crate::explorer::FileViewer>,
@@ -596,6 +606,9 @@ pub struct OrbitApp {
     plugin_install_project: bool,
     /// Description of the plugin operation in flight, if any.
     plugin_action: Option<String>,
+    /// Manual-refresh feedback: the toolbar button turns until this instant,
+    /// so an instant reload still acknowledges the click.
+    plugin_refresh_spin_until: Option<Instant>,
     /// Plugin source awaiting inline remove confirmation.
     plugin_remove_confirm: Option<String>,
     /// Re-render the toolbar as the install field is typed.
@@ -810,9 +823,14 @@ impl OrbitApp {
                 .with_max_lines(1)
         });
 
-        // Spawn pi rooted at the repo; sessions live in the real
-        // ~/.pi/agent/sessions so they are shared with the CLI.
-        let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        // Spawn pi rooted at the folder the user last worked in. Launched
+        // from Finder the process cwd is `/`, so the store is the real
+        // default; a deleted folder falls back to cwd. Sessions live in the
+        // real ~/.pi/agent/sessions so they are shared with the CLI.
+        let workspace = load_last_workspace()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let workspace_logo = crate::workspace_logo::load(&workspace);
         let extensions = BundledExtensions::install();
         // Teach the installed pi's RPC mode the capabilities Orbit uses
         // (custom UI, quota, auth) before spawning it. Best-effort and cached
@@ -933,7 +951,9 @@ impl OrbitApp {
             client,
             runtime,
             rpc_patches,
-            sidebar_width: px(SIDEBAR_DEFAULT_W),
+            sidebar_width: px(crate::layout::sidebar_width()
+                .unwrap_or(SIDEBAR_DEFAULT_W)
+                .max(SIDEBAR_MIN_W)),
             lives: HashMap::new(),
             transcript: Transcript::new(),
             sessions: sessions::load_sessions(),
@@ -943,6 +963,8 @@ impl OrbitApp {
             sidebar_list: ListState::new(0, ListAlignment::Top, px(44.)),
             sidebar_visible: true,
             sidebar_slide_gen: 0,
+            sidebar_cursor: None,
+            sidebar_focus: cx.focus_handle(),
             input,
             model_label: "…".into(),
             model_id: String::new(),
@@ -966,7 +988,8 @@ impl OrbitApp {
             status: connect_error.clone(),
             status_at: (!connect_error.is_empty()).then(Instant::now),
             current_title: None,
-            current_workspace: None,
+            current_workspace: Some(workspace),
+            workspace_logo,
             branch: None,
             branch_fetch: 0,
             added: 0,
@@ -1098,6 +1121,7 @@ impl OrbitApp {
             plugin_source_input: plugin_source_input.clone(),
             plugin_install_project: false,
             plugin_action: None,
+            plugin_refresh_spin_until: None,
             plugin_remove_confirm: None,
             _plugin_source_sub: plugin_source_sub,
             plugins_filter: plugins_filter.clone(),
@@ -1305,6 +1329,15 @@ impl OrbitApp {
             })
     }
 
+    /// Point the app at `cwd` and remember it for the next launch, so the
+    /// new-task page opens on the last folder instead of the process cwd
+    /// (which is `/` when the app is launched from Finder).
+    pub(super) fn set_current_workspace(&mut self, cwd: PathBuf) {
+        persist_last_workspace(&cwd);
+        self.workspace_logo = crate::workspace_logo::load(&cwd);
+        self.current_workspace = Some(cwd);
+    }
+
     /// Add `cwd` to Orbit's project list if it isn't already there. Called
     /// whenever the user picks a folder to work in — starting a task there,
     /// browsing for one, or opening one of its sessions. Never writes to pi.
@@ -1453,6 +1486,35 @@ fn persist_workspaces(workspaces: &[PathBuf]) {
     let _ = fs::write(path, payload.to_string());
 }
 
+/// `~/.orbit-pi/last-workspace.json` — the folder the last task ran in. The
+/// process cwd is `/` when the app is launched from Finder/Dock, so the
+/// new-task page restores this instead of showing `/`. Orbit-owned, like the
+/// workspaces list.
+fn last_workspace_path() -> PathBuf {
+    crate::platform::home_dir()
+        .join(".orbit-pi")
+        .join("last-workspace.json")
+}
+
+/// The remembered folder, if the store is readable and the folder still
+/// exists on disk.
+fn load_last_workspace() -> Option<PathBuf> {
+    let raw = fs::read_to_string(last_workspace_path()).ok()?;
+    let value = serde_json::from_str::<Value>(&raw).ok()?;
+    let path = normalize_workspace_path(value.get("path")?.as_str()?);
+    path.is_dir().then_some(path)
+}
+
+fn persist_last_workspace(path: &Path) {
+    let file = last_workspace_path();
+    if let Some(parent) = file.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let path = normalize_workspace_path(&path.to_string_lossy());
+    let payload = serde_json::json!({ "path": path.to_string_lossy() });
+    let _ = fs::write(file, payload.to_string());
+}
+
 /// A workspace path without a trailing separator, so it compares equal to
 /// pi's `cwd` values (which never carry one). An empty remainder (`/`) is
 /// kept as-is.
@@ -1478,6 +1540,10 @@ struct SessionMenu {
     deletable: bool,
     /// The popup is showing the delete confirmation instead of the menu.
     confirm_delete: bool,
+    /// Right-click origin in window coordinates: the popup floats at the
+    /// pointer, context-menu style. `None` anchors it below the row's `…`
+    /// button (the pointer-triggered path).
+    at: Option<Point<Pixels>>,
 }
 
 /// State of the row-actions popup on a workspace group header: which
@@ -1486,6 +1552,8 @@ struct SessionMenu {
 struct WorkspaceMenu {
     label: String,
     cwd: PathBuf,
+    /// Right-click origin in window coordinates (see [`SessionMenu::at`]).
+    at: Option<Point<Pixels>>,
 }
 
 /// Sections of the settings surface.
@@ -1499,6 +1567,7 @@ pub(crate) enum SettingsSection {
     Models,
     Appearance,
     Providers,
+    Shortcuts,
     About,
 }
 
@@ -1823,6 +1892,7 @@ mod titlebar_layout_tests;
 // `icon` and friends are part of the crate-wide UI kit; keep their original
 // `crate::app::…` paths stable for the other modules that import them.
 pub(crate) use helpers::{
-    file_badge, file_glyph, icon, icon_dyn, nerd_font_family, press, BUTTON_GROUP, PRESS_DIM,
+    empty_state, file_badge, file_glyph, icon, icon_dyn, nerd_font_family, press,
+    refresh_glyph, spinner, EmptyFill, PopoverSurface, BUTTON_GROUP, PRESS_DIM,
 };
 use sidebar::sessions_with_placeholder;
