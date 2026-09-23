@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Per-tool glyph badges in the transcript, tinted by work kind, with a
+  chip-style folded activity group
+- Surface pi's capped-result facts on tool cards as a `truncated` chip
+- Success check on the session-details Update button after a rename commits
+
+### Changed
+
+- Refactor the transcript UI: readable tool labels, a real shared spinner,
+  shared button hover/press feedback, and redesigned git issue/PR details
+
 ## [0.0.14] - 2026-09-23
 
 ### Changed

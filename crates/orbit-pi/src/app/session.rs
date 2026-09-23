@@ -1067,6 +1067,29 @@ impl OrbitApp {
         }
     }
 
+    /// The Update button's success glyph: a green check that scales and fades
+    /// in when a rename commits. Reduce motion renders it statically.
+    fn rename_check(theme: Theme, cx: &App) -> AnyElement {
+        let svg = gpui::svg()
+            .path("icons/check.svg")
+            .flex_none()
+            .size(px(12.))
+            .text_color(theme.send_fg);
+        if theme::reduce_motion(cx) {
+            return svg.into_any_element();
+        }
+        svg.with_animation(
+            "sess-rename-check",
+            Animation::new(Duration::from_millis(200)).with_easing(|d| 1.0 - (1.0 - d).powi(3)),
+            |svg, d| {
+                let scale = 0.5 + 0.5 * d;
+                svg.opacity(d)
+                    .with_transformation(Transformation::scale(gpui::size(scale, scale)))
+            },
+        )
+        .into_any_element()
+    }
+
     /// The top-bar info popover: active session's environment + identifiers.
     pub(super) fn render_session_details_popup(&self, cx: &Context<Self>) -> Option<AnyElement> {
         if !self.session_details_open {
@@ -1091,6 +1114,9 @@ impl OrbitApp {
             });
         let model = self.model_label.clone();
         let thinking = self.thinking_label.clone();
+        // Set on a successful commit and cleared by its timer; drives the
+        // button's brief success check.
+        let rename_saved = self.rename_saved_at.is_some();
 
         // Header names the surface. The session's own title already lives in
         // the rename field below, so repeating it here only crowded the card;
@@ -1157,32 +1183,44 @@ impl OrbitApp {
                                 .child(self.session_name_input.clone()),
                         )
                         .children(self.generate_title_button(theme, this.clone()))
-                        .child(
-                            div()
+                        .child({
+                            let mut button = div()
                                 .id("sess-rename")
                                 .flex_none()
                                 .h(px(28.))
                                 .px(px(10.))
                                 .rounded(px(8.))
-                                .bg(theme.bg_raised)
                                 .border_1()
-                                .border_color(theme.border)
                                 .flex()
                                 .items_center()
                                 .justify_center()
                                 .cursor_pointer()
                                 .text_size(theme.ui_px(12.))
                                 .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.text)
-                                .hover(|s| s.bg(theme.bg_hover))
                                 .on_mouse_up(MouseButton::Left, {
                                     let this = this.clone();
                                     move |_, _, cx| {
                                         this.update(cx, |app, cx| app.rename_session(cx));
                                     }
-                                })
-                                .child(tr!("session.update")),
-                        ),
+                                });
+                            if rename_saved {
+                                // Commit succeeded: the label becomes a check
+                                // that pops in, so the button confirms the
+                                // rename instead of silently doing nothing.
+                                button = button
+                                    .bg(theme.ok_green)
+                                    .border_color(theme.ok_green)
+                                    .child(Self::rename_check(theme, cx));
+                            } else {
+                                button = button
+                                    .bg(theme.bg_raised)
+                                    .border_color(theme.border)
+                                    .text_color(theme.text)
+                                    .hover(|s| s.bg(theme.bg_hover))
+                                    .child(tr!("session.update"));
+                            }
+                            button
+                        }),
                 )
         });
 

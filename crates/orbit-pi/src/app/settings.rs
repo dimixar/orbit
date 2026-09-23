@@ -4645,6 +4645,22 @@ impl OrbitApp {
                 session.title = name;
             }
         }
+        // Flash a check on the Update button so a successful commit reads as
+        // done rather than a silent no-op. Only the timer for this exact stamp
+        // clears it, so a second click extends the flash instead of cutting it
+        // short when the first timer lands.
+        let saved_at = Instant::now();
+        self.rename_saved_at = Some(saved_at);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(RENAME_FEEDBACK).await;
+            let _ = this.update(cx, |app, cx| {
+                if app.rename_saved_at == Some(saved_at) {
+                    app.rename_saved_at = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         cx.notify();
     }
 

@@ -135,6 +135,10 @@ const MAX_LIVE_SESSIONS: usize = 6;
 /// instead of paying Node startup again; the TTL bounds the memory cost.
 const PARKED_IDLE_TTL: Duration = Duration::from_secs(300);
 
+/// How long the session-details Update button shows its success check after a
+/// rename commits, before reverting to the label.
+const RENAME_FEEDBACK: Duration = Duration::from_millis(1400);
+
 /// A session kept warm in the background: its own pi process, its own live
 /// transcript, and its own agent-run state. Both running and idle sessions
 /// are parked when the user switches away, so reopening is a resume (no
@@ -469,6 +473,10 @@ pub struct OrbitApp {
     /// A popover-triggered title generation is in flight; the next
     /// `session_info_changed` seeds the rename field from its result.
     title_generating: bool,
+    /// When the last successful session rename committed, so the popover's
+    /// Update button can flash its check before reverting to the label. The
+    /// stamp lets a second click extend the flash instead of clearing early.
+    rename_saved_at: Option<Instant>,
     /// Whether the top-bar provider-quota popover is open.
     quota_popup_open: bool,
     /// A manual quota refresh is in flight: the popover's refresh button spins
@@ -1039,6 +1047,7 @@ impl OrbitApp {
             refreshing: false,
             session_details_open: false,
             title_generating: false,
+            rename_saved_at: None,
             quota_popup_open: false,
             quota_refreshing: false,
             quota_refresh_started: None,

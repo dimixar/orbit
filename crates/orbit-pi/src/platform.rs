@@ -682,7 +682,6 @@ pub mod shortcuts {
     pub const TERMINAL: &str = "⌘J";
     pub const SETTINGS: &str = "⌘,";
     pub const PALETTE: &str = "⌘P";
-    pub const TURNS: &str = "⌘↑ ⌘↓";
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -692,7 +691,6 @@ pub mod shortcuts {
     pub const TERMINAL: &str = "Ctrl+J";
     pub const SETTINGS: &str = "Ctrl+,";
     pub const PALETTE: &str = "Ctrl+P";
-    pub const TURNS: &str = "Ctrl+↑ Ctrl+↓";
 }
 
 /// The catalog id of the platform's own file manager, preferred when the user
