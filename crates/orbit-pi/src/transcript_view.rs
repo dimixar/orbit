@@ -1845,8 +1845,9 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
         if !step.text.is_empty() {
             // Live rows never collapse code blocks — a growing block's tail
             // edge must stay visible while it streams.
+            let prose = step.text.as_str();
             content = content.child(div().w_full().min_w_0().pt(px(4.)).child(render_prose(
-                &step.text,
+                prose,
                 ix,
                 (step_ix as u64 + 1) * 4096,
                 theme,
@@ -2950,6 +2951,9 @@ fn render_activity_card(
                                 .child(detail),
                         )
                     }
+                })
+                .when_some(truncation_chip(&tool.facts, theme), |row, chip| {
+                    row.child(chip)
                 })
                 .when_some(truncation_chip(&tool.facts, theme), |row, chip| {
                     row.child(chip)

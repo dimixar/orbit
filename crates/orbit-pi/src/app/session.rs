@@ -508,6 +508,7 @@ impl OrbitApp {
             return;
         }
         self.send(CommandBody::NewSession, "new_session");
+        self.discard_ai_review();
         self.input.read(cx).focus(window);
         cx.notify();
     }
@@ -535,6 +536,7 @@ impl OrbitApp {
             && !self.is_running()
         {
             self.send(CommandBody::NewSession, "new_session");
+            self.discard_ai_review();
             self.input.read(cx).focus(window);
             cx.notify();
             return;
@@ -555,6 +557,7 @@ impl OrbitApp {
         // parked run never waits on a modal tied to the previous session.
         self.cancel_open_dialog(cx);
         self.park_active_session();
+        self.discard_ai_review();
 
         self.busy = false;
         self.transcript.clear();
@@ -566,6 +569,12 @@ impl OrbitApp {
         self.context = None;
         self.reset_turns();
         self.reset_queue();
+        // A brand-new task starts unscoped (Build) and waits for its own id:
+        // clearing the id keeps a mode chosen on the New Task page pending
+        // instead of writing it to the session we just parked.
+        self.session_id = None;
+        self.workflow_pending = None;
+        self.workflow_mode = WorkflowMode::default();
         self.add_workspace(cwd.clone());
         self.set_current_workspace(cwd.clone());
 
@@ -669,6 +678,7 @@ impl OrbitApp {
         self.cancel_open_dialog(cx);
         // ── park the outgoing session (running or idle) ──
         self.park_active_session();
+        self.discard_ai_review();
         self.busy = false;
         self.added = 0;
         self.removed = 0;
@@ -926,25 +936,31 @@ impl OrbitApp {
         cx.notify();
     }
 
-    /// Open the full-page Git panel (Changes / History / Graph) and load it.
+    /// Open the Git card (Changes / History / Graph) and load it.
     pub(super) fn open_git(&mut self, cx: &mut Context<Self>) {
         self.git_open = true;
-        // One main-area page at a time.
+        // One main-area feature at a time.
         self.usage_open = false;
         self.session_details_open = false;
+        // Files is another main-area feature; leave it for the Git card.
+        self.close_files(cx);
         self.git_panel.update(cx, |panel, cx| panel.show(cx));
         cx.notify();
     }
 
-    /// Top-bar GitHub affordance: same destination as the session-details
-    /// **Commit or push** row.
+    /// Top-bar GitHub affordance: opens the Git card below the top bar, and
+    /// closes it again when it is already open (accordion).
     pub(super) fn on_open_git_click(
         &mut self,
         _: &MouseUpEvent,
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_git(cx);
+        if self.git_open {
+            self.close_git(cx);
+        } else {
+            self.open_git(cx);
+        }
     }
 
     /// Close the Git page and return to the chat.
@@ -954,11 +970,13 @@ impl OrbitApp {
         cx.notify();
     }
 
-    /// Open the Usage page and let it load (or refresh) the session store.
+    /// Open the Usage card and let it load (or refresh) the session store.
     pub(super) fn open_usage(&mut self, cx: &mut Context<Self>) {
         self.usage_open = true;
         self.git_open = false;
         self.session_details_open = false;
+        // Files is another main-area feature; leave it for the Usage card.
+        self.close_files(cx);
         self.usage.update(cx, |page, cx| page.open(cx));
         cx.notify();
     }

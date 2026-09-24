@@ -3850,4 +3850,5 @@ mod debug_tests {
             "load_from collapsed the trail to one message!"
         );
     }
+
 }

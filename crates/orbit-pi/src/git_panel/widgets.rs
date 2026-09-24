@@ -170,7 +170,7 @@ pub fn load_more(
             .mx(px(12.))
             .mt(px(6.))
             .h(px(32.))
-            .rounded_lg()
+            .rounded_md()
             .border_1()
             .border_color(theme.border)
             .flex()

@@ -47,6 +47,7 @@ use orbit_rpc::{
 use serde_json::Value;
 
 use crate::access::AccessMode;
+use crate::ai_review::{Report, ReviewKind, ReviewStatus};
 use crate::ask::{AskPrompt, AskQuestion};
 use crate::auth::{AuthEffect, AuthManager, AuthSupport, LoginPhase, ProviderStatus};
 use crate::branch_picker::BranchPicker;
@@ -78,6 +79,7 @@ use crate::transcript::{self, Transcript};
 use crate::usage::page::UsagePage;
 use crate::watch;
 use crate::widgets::{ExtensionWidget, WidgetPlacement};
+use crate::workflow::WorkflowMode;
 use crate::workspace_picker::{WorkspaceEntry, WorkspacePicker};
 
 const SIDEBAR_DEFAULT_W: f32 = 248.;
@@ -505,7 +507,19 @@ pub struct OrbitApp {
     latest_turn: Option<usize>,
     /// Right side pane — Review (git diff).
     sidepane: Entity<SidePane>,
-    /// Right dock — the workspace file tree (⌘⇧E / Ctrl+Shift+E).
+    /// The dedicated AI reviewer process, when one is running. Kept out of
+    /// `lives` — it is not a user session and must never appear in the sidebar.
+    ai_review: Option<ai_review::ReviewAgent>,
+    /// What the running/last reviewer was asked to inspect.
+    ai_review_kind: Option<ReviewKind>,
+    /// The reviewer's lifecycle, mirrored into the Review pane each frame.
+    ai_review_status: ReviewStatus,
+    /// The parsed findings (and prose) of the last completed review.
+    ai_report: Option<Report>,
+    /// Monotonic id guarding against a superseded review's async diff
+    /// collection launching a process after the user started or cancelled one.
+    ai_review_generation: u64,
+    /// Right dock — the workspace file tree (cmd-shift-e).
     project_panel: Entity<crate::explorer::ProjectPanel>,
     /// Full-page read-only file viewer (the Files surface).
     file_viewer: Entity<crate::explorer::FileViewer>,
@@ -551,6 +565,19 @@ pub struct OrbitApp {
     /// Focus handle that carries the `AccessMenu` key context while the picker
     /// is open (focus moves here so ↑/↓/Enter/Escape hit it).
     access_menu_focus: FocusHandle,
+    /// The active session's workflow mode (Plan / Build / Ask). Persisted per
+    /// session to `~/.orbit-pi/workflow.json`, which the workflow extension
+    /// reads fresh on every agent hook.
+    workflow_mode: WorkflowMode,
+    /// A mode chosen on the New Task page, before a session id exists to key
+    /// it to.
+    workflow_pending: Option<WorkflowMode>,
+    /// Whether the composer's workflow-mode picker popover is open.
+    workflow_menu_open: bool,
+    /// Highlighted row in the workflow-mode picker.
+    workflow_menu_highlight: usize,
+    /// Focus handle that carries the `WorkflowMenu` key context while open.
+    workflow_menu_focus: FocusHandle,
     /// `get_entries` cursor for the bridge's quota snapshots. Entry ids are
     /// per-session, so this resets when the active session changes.
     quota_entries_cursor: Option<String>,
@@ -1079,6 +1106,11 @@ impl OrbitApp {
             turn_open: false,
             latest_turn: None,
             sidepane,
+            ai_review: None,
+            ai_review_kind: None,
+            ai_review_status: ReviewStatus::default(),
+            ai_report: None,
+            ai_review_generation: 0,
             project_panel,
             file_viewer,
             terminal_panel,
@@ -1097,6 +1129,11 @@ impl OrbitApp {
             access_menu_open: false,
             access_menu_highlight: 0,
             access_menu_focus: cx.focus_handle(),
+            workflow_mode: WorkflowMode::default(),
+            workflow_pending: None,
+            workflow_menu_open: false,
+            workflow_menu_highlight: 0,
+            workflow_menu_focus: cx.focus_handle(),
             quota_entries_cursor: None,
             quota_entries_inflight: false,
             quota_entries_bootstrap: QUOTA_ENTRY_BOOTSTRAP_POLLS,
@@ -1175,17 +1212,24 @@ impl OrbitApp {
                 .unwrap_or(false),
         };
 
-        // A changed-file row on the Git page opens its diff in Review.
+        let app_weak = cx.entity().downgrade();
+        // A changed-file row on the Git page opens its diff in Review. The
+        // Review pane replaces the Git page, so the diff gets the column and
+        // the change list is not left behind.
         let review_sidepane = app.sidepane.clone();
+        let review_app = app_weak.clone();
         app.git_panel.update(cx, |panel, _| {
             panel.set_open_file(Rc::new(move |path, _window, cx| {
                 review_sidepane.update(cx, |pane, cx| pane.show_file(path, cx));
+                let _ = review_app.update(cx, |app, cx| {
+                    app.git_open = false;
+                    cx.notify();
+                });
             }));
         });
         // A conflicted (or history) file on the Git page opens in the Files
         // editor. `open_file_in_viewer` leaves the Git page, which is the
         // intended "resolve it, then continue the merge" flow.
-        let app_weak = cx.entity().downgrade();
         app.git_panel.update(cx, |panel, _| {
             panel.set_open_path(Rc::new(move |path, display, _window, cx| {
                 let _ = app_weak.update(cx, |app, cx| {
@@ -1856,6 +1900,7 @@ enum SettingsSelect {
 // `app.rs` keeps the `OrbitApp` model, the shared types, and the controller
 // wiring. Rendering and feature-specific logic live in child modules; they
 // are descendants of `app`, so they reach private fields/methods directly.
+mod ai_review;
 mod ask;
 mod composer_ops;
 mod dialogs;
