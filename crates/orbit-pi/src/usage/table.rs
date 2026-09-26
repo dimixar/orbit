@@ -20,6 +20,7 @@ use gpui::{
     Hsla, IntoElement, MouseButton, Pixels, Render, SharedString, Window,
 };
 
+use crate::theme::tokens::{Radius, DynamicSpacing, IconSize, TextSize};
 use crate::theme::Theme;
 
 /// A body row's height. Every table height is a whole number of these plus the
@@ -241,7 +242,7 @@ pub fn data_table(
 
     div()
         .w_full()
-        .rounded(px(12.))
+        .rounded(Radius::XLarge.px(&theme))
         .border_1()
         .border_color(theme.border)
         .overflow_hidden()
@@ -284,7 +285,7 @@ fn header_cell(ix: usize, column: &Column, theme: Theme, handlers: TableHandlers
         .relative()
         .flex()
         .items_center()
-        .gap(px(6.))
+        .gap(DynamicSpacing::Base06.px(&theme))
         .px(px(CELL_PADDING))
         .when(column.numeric, |cell| cell.justify_end())
         .when(column.sortable, |cell| {
@@ -298,7 +299,7 @@ fn header_cell(ix: usize, column: &Column, theme: Theme, handlers: TableHandlers
             div()
                 .min_w_0()
                 .truncate()
-                .text_size(theme.ui_px(13.))
+                .text_size(TextSize::Default.px(&theme))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.text)
                 .child(column.label.clone()),
@@ -363,8 +364,16 @@ fn sort_caret(sort: SortState, theme: Theme) -> AnyElement {
         .flex_col()
         .items_center()
         .when(!visible, |caret| caret.opacity(0.))
-        .child(crate::app::icon("icons/chevron-up.svg", 8., color))
-        .child(crate::app::icon("icons/chevron-down.svg", 8., color))
+        .child(crate::app::icon(
+            "icons/chevron-up.svg",
+            IconSize::Indicator.px(&theme),
+            color,
+        ))
+        .child(crate::app::icon(
+            "icons/chevron-down.svg",
+            IconSize::Indicator.px(&theme),
+            color,
+        ))
         .into_any_element()
 }
 
@@ -397,7 +406,7 @@ pub(super) fn text_cell(column: &Column, text: String, color: Hsla, theme: Theme
                 div()
                     .font(super::view::num_font())
                     .whitespace_nowrap()
-                    .text_size(theme.ui_px(13.))
+                    .text_size(TextSize::Default.px(&theme))
                     .text_color(color)
                     .child(text),
             )
@@ -409,7 +418,7 @@ pub(super) fn text_cell(column: &Column, text: String, color: Hsla, theme: Theme
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_size(theme.ui_px(13.))
+                .text_size(TextSize::Default.px(&theme))
                 .text_color(color)
                 .child(text),
         )
@@ -419,10 +428,10 @@ pub(super) fn text_cell(column: &Column, text: String, color: Hsla, theme: Theme
 /// The empty state, centered in the table body.
 pub(super) fn empty_cell(text: &str, theme: Theme) -> AnyElement {
     div()
-        .py(px(28.))
+        .py(DynamicSpacing::Base24.px(&theme))
         .flex()
         .justify_center()
-        .text_size(theme.ui_px(13.))
+        .text_size(TextSize::Default.px(&theme))
         .text_color(theme.text_3)
         .child(text.to_string())
         .into_any_element()

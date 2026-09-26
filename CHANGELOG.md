@@ -7,6 +7,151 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Zed design tokens** — `theme/tokens.rs` ports Zed's sizing system: dynamic
+  spacing with Compact / Default / Comfortable density, text / headline / icon /
+  button sizes, list, popover, context-menu, modal, tooltip, input and scrollbar
+  metrics, the corner-radius scale, elevation shadows with `elevation_1/2/3`, and
+  motion durations. Tokens equal Zed's default pixels at Orbit's defaults and
+  follow the UI font size and Spacing Density settings.
+
+### Changed
+
+- Context menus (sidebar session / workspace, Explorer, Git sync / branch / file)
+  now follow Zed's context-menu metrics: 200px minimum width, 23px entries,
+  14px text and icons, Base04 / Base06 insets, `ListSeparator` spacing, an 8px
+  radius with Zed's lighter popover shadow, and an 8px window-edge margin.
+  Their sizes now scale with the UI font size.
+- Tooltips use Zed's tooltip metrics: offset off the cursor, 14px text, and
+  wrapping at 288px instead of overflowing on one line.
+- Extension dialogs use Zed's modal layout: `ModalHeader` / section / footer
+  insets, a Small headline, a 32px input field, 32px confirm buttons, and the
+  four-layer modal shadow.
+- The remaining floating modals — provider usage / API key / provider editor
+  (Settings), the update dialog, and the custom-UI card — use Zed's
+  `ModalSurface` (`elevation_3`): the four-layer shadow, an 8px radius, and
+  `ModalHeader` / section / `ModalFooter` insets. The legacy heavier
+  `popover_shadow` helper is gone.
+- Sidebar session and workspace rows use Zed's list-item tokens: a 4px
+  (`rounded_sm`) hover/selection radius, `TextSize` for title / label / metadata
+  text, and `DynamicSpacing` for their padding and gaps.
+- Transcript chrome follows the token scales: message-row padding, user-bubble
+  radius / padding / text, tool and question card shells and headers, tool error
+  strips, and the usage footer metric and breakdown card now read `TextSize`,
+  `DynamicSpacing`, `Radius`, and `BufferLineHeight` instead of ad-hoc px.
+- Settings chrome follows the token scales: the page header, section labels,
+  grouped boards, and `setting_row` layout use `TextSize` / `DynamicSpacing` /
+  `Radius`, the row separators use the 1px hairline token, and keycap chips size
+  to `ButtonSize::Default` height. Setting cards and toolbars migrate next.
+- Spacing is unified on `DynamicSpacing`. The ad-hoc `Theme::space` helper — which
+  scaled with density but ignored the UI font size — is removed, and its ~185
+  call sites (mostly the Git panel, Usage page, and Settings) now resolve through
+  the token scale, so they follow the UI font size too.
+- UI type is unified on `TextSize`. ~370 `.text_size(theme.ui_px(…))` sites snap
+  onto the 10 / 12 / 14 / 16 scale (`XSmall` / `Small` / `Default` / `Large`); at
+  most a 1px shift each. Sub-10px badge glyphs and 17px+ display headings, which
+  the UI scale doesn't cover, keep their sizing.
+- Corner radii are unified on `Radius`. gpui's fixed `rounded_sm/md/lg/xl` helpers
+  and every on-scale `rounded(px(N))` (`2/4/6/8/12`) now resolve through the theme,
+  so card, chip, and input corners also follow the UI font size.
+- One-shot transitions adopt `AnimationDuration` (`Fast`, 150ms). Looping affordances
+  (spinner, shimmer, streaming) and feedback timers keep their own cadences, which
+  the three-value token scale doesn't cover.
+- The settings page is fully on the token scales. Its side nav, headers, sections,
+  rows, toolbars, select popups, cards, and modals now read `DynamicSpacing` /
+  `TextSize` / `Radius` / `ButtonSize`; the last gpui spacing utilities and raw px
+  literals are gone, leaving only bespoke geometry (avatar / dot / toggle sizes,
+  fixed panel and modal widths).
+- The Usage page (and its chart / heatmap / table / filters / tooltip modules) is on
+  the same scales: all spacing, type, and on-scale radii resolve through the tokens;
+  only chart and table geometry keeps its own px.
+- Every input box follows the `InputField` tokens. The branch picker's create-branch
+  field (previously frameless) now uses `input_field_frame`, and the Ask panel's
+  custom-answer field uses `DynamicSpacing` offsets; all other single-line inputs
+  already routed through `input_field_frame` / `picker_search_frame`. The main
+  composer, file editor, and inline tree rename stay bespoke components.
+- Every search box is the picker search row (`picker_search_frame`), matching the
+  command palette: the settings / Git / Usage searches and the skills filter were
+  boxed `InputField`s and now share the palette's flat 36px row, so all searches
+  read identically. The Git panel's issue / pull-request search grows to fill its
+  filter bar and shrinks when tight (min 160px) instead of a fixed 200px, so the
+  Pulls tab no longer overflows with its extra state chip.
+- The session-details title (rename) input follows the `InputField` tokens: its
+  block uses `DynamicSpacing` / `input::gap` / `input_label` / `input_field_frame`,
+  and the Generate-title and Update buttons size to `ButtonSize::Large` (32px) so
+  the row lines up with the 32px field.
+- Picker ↑/↓ now scroll the focused row into view. The command palette,
+  workspace picker, and branch picker set a **positive** `ScrollHandle` offset,
+  but gpui stores it **negative** once scrolled down (the model selector already
+  negated it) — so the list never actually scrolled and the highlight walked
+  off-screen, looking like ↑/↓ did nothing. They negate it now, and the palette
+  also scrolls against its actual (window-capped) list height instead of the
+  uncapped `list_max_h`. Two command-palette tests cover the ↑/↓ move and its
+  scroll-into-view; the scroll test fails on the old sign.
+- The model picker had the same ↑/↓-doesn't-stick symptom for four reasons,
+  all now fixed. (1) Its open-time "pin the highlight to the active model"
+  re-ran on **every** render for the first 400 ms (the hover-suppression
+  window), so a ↓ pressed right after opening was silently snapped back; the
+  pin now runs only on a genuine open / catalog change. (2) Its deferred scroll
+  re-targeted the active model for up to 250 ms after open; it now follows the
+  current highlight. (3) pi re-reports the whole catalog on every `get_state`,
+  and `set_catalog` re-armed the pin and re-scrolled to the active model each
+  time — so any periodic sync undid an ↑/↓ while the popup was open. An
+  unchanged `set_catalog` is now a no-op. (4) The pin stayed armed until the
+  popup's *first* render, so a ↑/↓ arriving before that frame (or right after a
+  scope change / catalog refresh re-armed it) was undone by it; a deliberate
+  ↑/↓ now cancels the pin. Covered end to end as well: a test opens the real
+  `OrbitApp` with the real `bind_keys`, asserts the popup's filter actually
+  holds focus, and steps the highlight through several presses.
+- Picker rows no longer move the keyboard highlight on hover: the command
+  palette, workspace picker, and extension-dialog option rows used `on_hover` to
+  follow the pointer, and `on_hover` re-fires whenever hit-testing changes — so
+  scrolling a row under a stationary pointer hijacked the highlight. They use
+  `on_mouse_move` now, so only real pointer movement moves it.
+- Single-line inputs no longer wrap. Every `ComposerInput` capped at
+  `with_max_lines(1)` — the session-details name, the Git branch field, the
+  provider / model / plugin / skill filters, the usage searches, the extension
+  dialog, and the find bar — now also sets `with_wrap(false)`, so a long value is
+  clipped at the edge instead of wrapping into a second row and painting the
+  editor's vertical scrollbar. Non-wrapping text also scrolls horizontally to
+  follow the caret, so typing past the field's width still shows what you type
+  (clipped to the text area, so the code editor's gutter stays put).
+- The Git panel's tab strip is on the §5 button language: each tab is a
+  `button_frame(ButtonSize::Medium)` — the same 28px height, `Base08` padding,
+  `Base04` gap, `button::RADIUS` (4px), and Default label as the branch chip and
+  the panel's filter chips — so the tabs and the chips beside them read as one
+  system. The tab strip and branch row are `Base40` tall, and the whole panel's
+  spacing resolves through `DynamicSpacing` (one shared `tab_bar` for Changes /
+  History / Graph / Issues / Pulls).
+- The sidebar's New Task, Search, and Usage controls share one
+  `button_frame(ButtonSize::Large)`: the hand-rolled 28px Search / Usage rows
+  now match the New Task button's height, `Base08` padding, `button::RADIUS`
+  (4px), and Default label, while keeping their ghost treatment (no fill or
+  border, hover only) — one evenly sized stack.
+- The model selector's option rows keep the picker's two-line token height. A
+  capped list is a flex column, so without `flex_none` every row shrinks toward
+  the `picker_entry` minimum (31px) instead of `picker::two_line_entry_height`
+  (50px), leaving the 28px leading provider / thinking chip with almost no
+  vertical padding. The no-match empty row, its provider-header gap, and the
+  row's hover highlight are on the same tokens / `on_mouse_move` as the other
+  pickers.
+
+### Fixed
+
+- The model and thinking chip pickers keep keyboard focus when opened from
+  their composer chip. The composer box's own mouse-up handler (which focuses
+  the input) is an ancestor of the chip and ran after it in gpui's bubble
+  order, so ↑/↓/Enter/Escape went to the composer instead of the popup. The
+  composer box now leaves focus alone while any of its popovers is open, and a
+  click inside the model popup no longer bubbles out to it.
+- The top-bar provider-quota popover no longer clips its last provider card
+  when several accounts are connected: the card list scrolls inside the
+  popover's height cap instead of stretching past it. The list now carries its
+  own max height rather than living in a `flex_1` body — inside the deferred,
+  anchored popover the available height is zero, where a flexible child
+  collapses and the overflow is clipped.
+
 ## [0.0.17] - 2026-09-25
 
 ### Added

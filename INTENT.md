@@ -149,6 +149,53 @@ for example, has no account-quota API). **Residual:** coverage is per-provider a
 a report is cached 60 s, and a provider without a verified adapter reports `unsupported` rather
 than an invented number.
 
+### D11 — Design tokens: Zed's sizing vocabulary, resolved through Orbit's theme
+**Choice:** `crates/orbit-pi/src/theme/tokens.rs` is a one-to-one port of Zed's `ui` crate sizing
+tokens: `DynamicSpacing` (Base00–Base48 × three densities), `TextSize` / `HeadlineSize` /
+`BufferLineHeight`, `IconSize`, `ButtonSize`, `ListItemSpacing`, the rounded scale, `ElevationIndex`
+(Zed's exact shadow stacks) with the `elevation_1/2/3` `StyledExt` helpers, `AnimationDuration`,
+and the per-component metrics (list item, list, popover, context menu, modal, tooltip, input
+field, scrollbar). Names and numbers follow Zed's source so any value is checkable against it.
+Zed's rem (its UI font size, 16px by default) maps onto Orbit's 14px-authored UI font like
+`Theme::ui_px`, so every token equals Zed's default pixel value at Orbit's defaults and scales
+with the UI font size setting. Zed's Compact / Default / Comfortable densities are anchored at
+Spacing Density 80 / 100 / 120 % (exact at the anchors, interpolated between). Colors stay
+Orbit's semantic palette — Zed's token set is sizing, elevation, and motion only.
+**Rationale:** the UI audit found no shared sizing layer: ~1,200 per-call-site px literals, 17
+distinct text sizes, 12 radii, and chrome heights that did not follow the UI font size. Zed is
+the canonical GPUI design system, and porting its tokens (rather than inventing a scale) gives
+every surface one vocabulary with a proven precedent. **Consequence:** new chrome sizes through
+`tokens` instead of literals; surfaces migrate one at a time. Context menus (sidebar session /
+workspace, Explorer, Git sync / branch / file), the tooltip, and the extension dialog are on
+the tokens, as are the floating modals (provider usage / API-key / provider editor, the update
+dialog, and the custom-UI card) via `elevation_3` and the `modal` metrics; the legacy heavier
+`popover_shadow` is gone. Sidebar session / workspace rows use Zed's list-item radius and the
+`TextSize` / `DynamicSpacing` scales, as do the transcript's message rows, user bubbles, tool /
+question card shells, error strips, the usage footer, and the settings section / group / row
+chrome and keycap chips. The sidebar's New Task / Search / Usage controls share one
+`button_frame(ButtonSize::Large)`. The ad-hoc `Theme::space` (density-only) helper is gone: every spacing
+site now resolves through `DynamicSpacing`, so chrome tracks the UI font size as well as
+density. UI type is on the `TextSize` scale across every surface (471 of 517 `.text_size` sites);
+what remains is sub-10px badge glyphs, 17px+ display headings, and editor / code text. Corner
+radii are on the `Radius` scale: gpui's fixed `rounded_sm/md/lg/xl` helpers and every on-scale
+`rounded(px(N))` are gone (only 23 off-scale bespoke radii remain). One-shot transitions use
+`AnimationDuration`; the looping affordances (spinner, shimmer, streaming pulses) and feedback
+timers keep their own cadences, which the three-value scale does not cover. The settings page is
+on the token scales throughout — its side nav, headers, sections, rows, toolbars, selects, cards,
+and modals read `DynamicSpacing` / `TextSize` / `Radius` / `ButtonSize`, and it has no `ui_px` or
+gpui spacing utility left; only bespoke geometry remains (avatar / dot / toggle sizes, fixed
+panel and modal widths). The Usage page and its `chart` / `heatmap` / `table` / `filters` /
+`tooltip` modules are likewise on the token scales for spacing, type, and radius; only their
+chart / table geometry is bespoke. Every single-line input box in the app routes through
+`input_field_frame` (or the `input::*` metrics directly, in the extension dialog) — the main
+composer, the file editor, and the inline tree rename are the deliberate exceptions, and each is
+its own component rather than an `InputField`. Every search box in the app shares one look — the
+picker search row (`picker_search_frame`): the command palette, all pickers, the Explorer /
+Sidepane filters, the settings / Git / Usage searches, and the transcript find bar. The Git
+panel's tab strip and branch row are on the tokens too (one shared `tab_bar` for Changes /
+History / Graph / Issues / Pulls). The transcript's inner content (activity bodies, thinking,
+edit diffs, detail sections) still carries bespoke layout px.
+
 ## The feature parity contract
 
 Everything below must behave identically in the GPUI app (against the pi CLI) as it does in the
@@ -171,9 +218,9 @@ legacy app today:
 
 ### Implementation status (living)
 
-Done: streaming transcript + virtualization; markdown + highlighting; composer with steering, follow-ups, cancel, autocomplete, attachments; extension dialogs; diff/Review + Git page + GitHub issues/PRs (where `gh` is available); sessions (list/switch/new/delete/clone/cross-workspace) over an Orbit-owned project list (only folders the user added; removing one never touches pi) with a **warm process pool** so re-opening a recent session is a resume, not a Node spawn; Explorer project panel + editable Files surface; integrated terminal (⌘J); usage, skills, plugins, models, providers, settings pages; transcript find; image lightbox; theming (dark/light/system, 42 palettes) + reduce-motion; localization (ten locales + System, D9); in-app signed updater + Version History; notifications; open-in-editor; signed/notarizable macOS packaging + best-effort Windows/Linux bundles (D5); CI; AI review agent (a read-only reviewer over the selected change set or the whole project that renders findings in the Review pane, on its own Ask-mode process); access modes (a guard, not a sandbox), workflow modes (Plan/Build/Ask per D8), and the auto-title / quota extension bridges (D10).
+Done: streaming transcript + virtualization; markdown + highlighting; composer with steering, follow-ups, cancel, autocomplete, attachments; extension dialogs; diff/Review + Git page + GitHub issues/PRs (where `gh` is available); sessions (list/switch/new/delete/clone/cross-workspace) over an Orbit-owned project list (only folders the user added; removing one never touches pi) with a **warm process pool** so re-opening a recent session is a resume, not a Node spawn; Explorer project panel + editable Files surface; integrated terminal (⌘J); usage, skills, plugins, models, providers, settings pages; transcript find; image lightbox; theming (dark/light/system, 42 palettes) + reduce-motion; localization (ten locales + System, D9); in-app signed updater + Version History; notifications; open-in-editor; signed/notarizable macOS packaging + best-effort Windows/Linux bundles (D5); CI; AI review agent (a read-only reviewer over the selected change set or the whole project that renders findings in the Review pane, on its own Ask-mode process); access modes (a guard, not a sandbox), workflow modes (Plan/Build/Ask per D8), and the auto-title / quota extension bridges (D10); Zed design tokens (D11) with context menus, the tooltip, the extension dialog, the floating modal cards (provider usage / API-key / editor, update dialog, custom UI), the sidebar session / workspace rows, the transcript's message / card chrome, the settings section / group / row chrome, UI type on `TextSize` across every surface, corner radii on `Radius`, and one-shot motion on `AnimationDuration` migrated onto them.
 
-Open: conversation **fork/rewind** (clone exists; rewind needs entry ids); on-device scroll-perf measurement; stream veil + an explicit ≤8.3 Hz streaming commit pipeline; focus rings / screen-reader labeling; richer per-tool renderers (bash/thinking are dedicated, the rest generic). An "Auto" AI reviewer awaits a pi reviewer API.
+Open: migrating the remaining surfaces (the settings page's toolbars / cards / controls, transcript inner content, the modal bodies' inner text, the remaining sub-10px / 17px+ type, and off-scale radii) onto the D11 tokens; drawn scrollbars (gpui 0.2.2 draws none); conversation **fork/rewind** (clone exists; rewind needs entry ids); on-device scroll-perf measurement; stream veil + an explicit ≤8.3 Hz streaming commit pipeline; focus rings / screen-reader labeling; richer per-tool renderers (bash/thinking are dedicated, the rest generic). An "Auto" AI reviewer awaits a pi reviewer API.
 
 ## Non-goals (explicitly out of scope)
 

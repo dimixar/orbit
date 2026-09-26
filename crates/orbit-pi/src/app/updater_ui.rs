@@ -9,16 +9,21 @@
 
 use super::helpers::*;
 use super::*;
+use crate::theme::tokens::{
+    AnimationDuration, TextSize, button, modal, ButtonSize, DynamicSpacing, IconSize, StyledExt,
+};
 use crate::updater::{UpdateStatus, UpdaterEvent, UpdaterState};
 use crate::usage::tooltip::Tooltip;
 
-/// The sidebar updater pill: 20×20 at rest (the download icon), expanding
-/// sideways to reveal the "Update" label while hovered — the reference app's
-/// pattern. `UPDATER_PILL_COLLAPSED_W` is shared with `OrbitApp::new` so the
-/// animation state starts parked at the right width.
-pub(super) const UPDATER_PILL_COLLAPSED_W: f32 = 20.;
+/// The sidebar updater pill: a `ButtonSize::Compact` disc at rest (the
+/// download icon), expanding sideways to reveal the "Update" label while
+/// hovered — the reference app's pattern. `UPDATER_PILL_COLLAPSED_W` is
+/// shared with `OrbitApp::new` so the animation state starts parked at the
+/// right width. Widths are unscaled px resolved through `theme.ui_px`, like
+/// the button tokens, so the collapsed width (Compact's 18px) keeps the
+/// resting pill a disc at every UI font size.
+pub(super) const UPDATER_PILL_COLLAPSED_W: f32 = 18.;
 pub(super) const UPDATER_PILL_EXPANDED_W: f32 = 58.;
-const UPDATER_PILL_H: f32 = 20.;
 
 impl OrbitApp {
     /// Whether this build can update itself at all (release, managed install,
@@ -320,20 +325,14 @@ impl OrbitApp {
             // The install is in flight: a spinner in the pill's footprint,
             // with the label in its tooltip.
             let label = tr!("updater_ui.updating");
-            let button = div()
-                .id("sidebar-update")
-                .size(px(UPDATER_PILL_COLLAPSED_W))
-                .flex_none()
+            let button = icon_button_frame(div().id("sidebar-update"), &theme, ButtonSize::Compact)
                 .rounded_full()
-                .flex()
-                .items_center()
-                .justify_center()
                 .bg(theme.accent)
                 .cursor_default()
                 .tooltip(move |_, cx| cx.new(|_| Tooltip::new(label.clone())).into())
                 .child(crate::app::spinner(
                     ElementId::NamedInteger("update-spin".into(), 0),
-                    14.,
+                    IconSize::Small.px(&theme),
                     theme.bg_main,
                     theme,
                 ));
@@ -341,19 +340,13 @@ impl OrbitApp {
         }
 
         let label = tr!("updater_ui.update");
-        let button = div()
-            .id("sidebar-update")
-            .h(px(UPDATER_PILL_H))
-            .flex_none()
+        let button = icon_button_frame(div().id("sidebar-update"), &theme, ButtonSize::Compact)
             .overflow_hidden()
             .rounded_full()
             .relative()
-            .flex()
-            .items_center()
-            .justify_center()
             .bg(theme.accent)
             .text_color(theme.bg_main)
-            .text_size(theme.ui_px(11.5))
+            .text_size(button::label_size(ButtonSize::Compact).px(&theme))
             .font_weight(FontWeight::MEDIUM)
             .cursor_pointer()
             .hover(|s| s.opacity(0.9))
@@ -374,7 +367,7 @@ impl OrbitApp {
         let generation = self.updater_button_animation_generation;
         let button = if generation == 0 {
             button
-                .w(px(UPDATER_PILL_COLLAPSED_W))
+                .w(theme.ui_px(UPDATER_PILL_COLLAPSED_W))
                 .child(updater_pill_content(theme, label, 0.0))
                 .into_any_element()
         } else {
@@ -386,14 +379,14 @@ impl OrbitApp {
             button
                 .with_animation(
                     ElementId::NamedInteger("sidebar-update-expand".into(), generation),
-                    Animation::new(Duration::from_millis(150))
+                    Animation::new(AnimationDuration::Fast.duration())
                         .with_easing(|d| 1.0 - (1.0 - d).powi(3)),
                     move |button, delta| {
                         let width = from_width + (target_width - from_width) * delta;
                         let reveal = from_reveal + (target_reveal - from_reveal) * delta;
                         width_cell.set(width);
                         reveal_cell.set(reveal);
-                        button.w(px(width)).child(updater_pill_content(
+                        button.w(theme.ui_px(width)).child(updater_pill_content(
                             theme,
                             label.clone(),
                             reveal,
@@ -511,15 +504,8 @@ impl OrbitApp {
         match self.updater_status {
             UpdateStatus::Available => {
                 let label = tr!("updater_ui.update");
-                div()
-                    .id("settings-update-action")
+                icon_button_frame(div().id("settings-update-action"), &theme, ButtonSize::Medium)
                     .group(BUTTON_GROUP)
-                    .size(px(26.))
-                    .flex_none()
-                    .rounded_lg()
-                    .flex()
-                    .items_center()
-                    .justify_center()
                     .bg(theme.send_bg)
                     .cursor_pointer()
                     .hover(|s| s.bg(theme.send_bg_hover))
@@ -527,47 +513,35 @@ impl OrbitApp {
                     .on_mouse_up(MouseButton::Left, move |_, _, cx| {
                         this.update(cx, |app, cx| app.open_staged_update_dialog(cx));
                     })
-                    .child(icon("icons/arrow-down.svg", 14., theme.send_fg))
+                    .child(icon("icons/arrow-down.svg", IconSize::Small.px(&theme), theme.send_fg))
                     .into_any_element()
             }
-            UpdateStatus::Updating => div()
-                .id("settings-update-action")
-                .h(px(26.))
-                .px(px(12.))
-                .rounded_lg()
-                .flex()
-                .items_center()
-                .gap_1p5()
-                .text_size(theme.ui_px(12.))
-                .font_weight(FontWeight::MEDIUM)
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.bg_raised)
-                .text_color(theme.text_3)
-                .cursor_default()
-                .child(tr!("updater_ui.updating"))
-                .into_any_element(),
-            UpdateStatus::Idle => div()
-                .id("settings-update-action")
-                .h(px(26.))
-                .px(px(12.))
-                .rounded_lg()
-                .flex()
-                .items_center()
-                .gap_1p5()
-                .text_size(theme.ui_px(12.))
-                .font_weight(FontWeight::MEDIUM)
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.bg_raised)
-                .text_color(theme.text_2)
-                .cursor_pointer()
-                .hover(|s| s.bg(theme.bg_hover))
-                .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-                    this.update(cx, |app, cx| app.begin_update_check(cx));
-                })
-                .child(tr!("updater_ui.check_for_updates"))
-                .into_any_element(),
+            UpdateStatus::Updating => {
+                button_frame(div().id("settings-update-action"), &theme, ButtonSize::Medium)
+                    .font_weight(FontWeight::MEDIUM)
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.bg_raised)
+                    .text_color(theme.text_3)
+                    .cursor_default()
+                    .child(tr!("updater_ui.updating"))
+                    .into_any_element()
+            }
+            UpdateStatus::Idle => {
+                button_frame(div().id("settings-update-action"), &theme, ButtonSize::Medium)
+                    .font_weight(FontWeight::MEDIUM)
+                    .border_1()
+                    .border_color(theme.border)
+                    .bg(theme.bg_raised)
+                    .text_color(theme.text_2)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                        this.update(cx, |app, cx| app.begin_update_check(cx));
+                    })
+                    .child(tr!("updater_ui.check_for_updates"))
+                    .into_any_element()
+            }
         }
     }
 
@@ -598,8 +572,7 @@ impl OrbitApp {
             .id("update-dialog-card")
             .w(card_width)
             .max_h(card_max_height)
-            .rounded(px(14.))
-            .popover_surface(theme)
+            .elevation_3(&theme)
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -609,11 +582,12 @@ impl OrbitApp {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 div()
-                    .px(px(18.))
-                    .pt(px(16.))
-                    .pb(px(10.))
+                    .px(modal::header_padding_x(&theme))
+                    .pt(modal::header_padding_top(&theme))
+                    .pb(modal::header_padding_bottom(&theme))
                     .flex_none()
-                    .text_size(theme.ui_px(14.5))
+                    .text_size(modal::HEADLINE.px(&theme))
+                    .line_height(modal::HEADLINE.line_height(&theme))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text)
                     .child(title),
@@ -621,6 +595,7 @@ impl OrbitApp {
 
         let mut body: AnyElement = match dialog {
             UpdateDialog::Checking => update_dialog_body(
+                theme,
                 div()
                     .flex_1()
                     .min_w_0()
@@ -629,7 +604,7 @@ impl OrbitApp {
                     .gap(px(10.))
                     .child(
                         div()
-                            .text_size(theme.ui_px(13.))
+                            .text_size(TextSize::Default.px(&theme))
                             .text_color(theme.text_2)
                             .child(tr!("updater_ui.searching_for_new_version")),
                     )
@@ -645,7 +620,7 @@ impl OrbitApp {
                 let notes: AnyElement = match notes.as_deref() {
                     Some(notes) if !notes.trim().is_empty() => release_notes_view(notes, theme),
                     _ => div()
-                        .text_size(theme.ui_px(12.5))
+                        .text_size(TextSize::Small.px(&theme))
                         .text_color(theme.text_3)
                         .child(tr!("updater_ui.no_release_notes"))
                         .into_any_element(),
@@ -659,7 +634,7 @@ impl OrbitApp {
                     .child(
                         div()
                             .whitespace_normal()
-                            .text_size(theme.ui_px(13.))
+                            .text_size(TextSize::Default.px(&theme))
                             .text_color(theme.text_2)
                             .child(intro),
                     );
@@ -667,16 +642,17 @@ impl OrbitApp {
                     column = column.child(
                         div()
                             .whitespace_normal()
-                            .text_size(theme.ui_px(12.5))
+                            .text_size(TextSize::Small.px(&theme))
                             .text_color(theme.text_3)
                             .child(tr!("updater_ui.check_only")),
                     );
                 }
                 update_dialog_body(
+                    theme,
                     column
                         .child(
                             div()
-                                .text_size(theme.ui_px(11.))
+                                .text_size(TextSize::Small.px(&theme))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme.text_3)
                                 .child(tr!("updater_ui.whats_new")),
@@ -692,11 +668,12 @@ impl OrbitApp {
                 )
             }
             UpdateDialog::UpToDate => update_dialog_body(
+                theme,
                 div()
                     .flex_1()
                     .min_w_0()
                     .whitespace_normal()
-                    .text_size(theme.ui_px(13.))
+                    .text_size(TextSize::Default.px(&theme))
                     .text_color(theme.text_2)
                     .child(tr!(
                         "updater_ui.up_to_date_detail",
@@ -705,21 +682,23 @@ impl OrbitApp {
                     .into_any_element(),
             ),
             UpdateDialog::Failed(error) => update_dialog_body(
+                theme,
                 div()
                     .flex_1()
                     .min_w_0()
                     .whitespace_normal()
-                    .text_size(theme.ui_px(13.))
+                    .text_size(TextSize::Default.px(&theme))
                     .text_color(theme.text_2)
                     .child(error.clone())
                     .into_any_element(),
             ),
             UpdateDialog::Unavailable => update_dialog_body(
+                theme,
                 div()
                     .flex_1()
                     .min_w_0()
                     .whitespace_normal()
-                    .text_size(theme.ui_px(13.))
+                    .text_size(TextSize::Default.px(&theme))
                     .text_color(theme.text_2)
                     .child(tr!("updater_ui.update_unavailable_detail"))
                     .into_any_element(),
@@ -745,12 +724,12 @@ impl OrbitApp {
             }
         };
         let mut footer = div()
-            .px(px(18.))
-            .py(px(14.))
+            .px(modal::footer_padding(&theme))
+            .py(modal::footer_padding(&theme))
             .flex_none()
             .flex()
             .justify_end()
-            .gap(px(8.));
+            .gap(modal::footer_gap(&theme));
         if !self.updater_history_open
             && !self.updater_history.is_empty()
             && matches!(
@@ -917,7 +896,7 @@ fn release_notes_view(notes: &str, theme: Theme) -> AnyElement {
         column = column.child(match block {
             NoteBlock::Heading(text) => div()
                 .pt(px(6.))
-                .text_size(theme.ui_px(11.))
+                .text_size(TextSize::Small.px(&theme))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.text_3)
                 .child(inline_notes_text(&text))
@@ -939,14 +918,14 @@ fn release_notes_view(notes: &str, theme: Theme) -> AnyElement {
                         .flex_1()
                         .min_w_0()
                         .whitespace_normal()
-                        .text_size(theme.ui_px(12.5))
+                        .text_size(TextSize::Small.px(&theme))
                         .text_color(theme.text_2)
                         .child(inline_notes_text(&text)),
                 )
                 .into_any_element(),
             NoteBlock::Paragraph(text) => div()
                 .whitespace_normal()
-                .text_size(theme.ui_px(12.5))
+                .text_size(TextSize::Small.px(&theme))
                 .text_color(theme.text_2)
                 .child(inline_notes_text(&text))
                 .into_any_element(),
@@ -967,7 +946,7 @@ fn version_history_view(
     for release in history {
         let mut heading = div().flex().items_center().gap(px(8.)).child(
             div()
-                .text_size(theme.ui_px(13.))
+                .text_size(TextSize::Default.px(&theme))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.text)
                 .child(format!("v{}", release.version)),
@@ -979,7 +958,7 @@ fn version_history_view(
                     .py(px(1.))
                     .rounded_full()
                     .bg(theme.bg_hover)
-                    .text_size(theme.ui_px(10.5))
+                    .text_size(TextSize::XSmall.px(&theme))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.text_3)
                     .child(tr!("updater_ui.current")),
@@ -988,7 +967,7 @@ fn version_history_view(
         let notes: AnyElement = match release.notes.as_deref() {
             Some(notes) if !notes.trim().is_empty() => release_notes_view(notes, theme),
             _ => div()
-                .text_size(theme.ui_px(12.5))
+                .text_size(TextSize::Small.px(&theme))
                 .text_color(theme.text_3)
                 .child(tr!("updater_ui.no_release_notes"))
                 .into_any_element(),
@@ -1021,17 +1000,9 @@ fn dialog_button(
     label: String,
     on_mouse_up: impl Fn(&MouseUpEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    let button = div()
-        .id(id)
+    let button = button_frame(div().id(id), &theme, ButtonSize::Large)
         .group(BUTTON_GROUP)
-        .h(px(32.))
-        .px(px(14.))
-        .rounded(px(8.))
-        .flex()
-        .items_center()
-        .justify_center()
         .cursor_pointer()
-        .text_size(theme.ui_px(12.5))
         .font_weight(FontWeight::MEDIUM)
         .on_mouse_up(MouseButton::Left, on_mouse_up);
     let button = if primary {
@@ -1064,7 +1035,11 @@ fn updater_pill_content(theme: Theme, label: String, reveal: f32) -> impl IntoEl
                 .items_center()
                 .justify_center()
                 .opacity(1.0 - reveal)
-                .child(icon("icons/arrow-down.svg", 12., theme.bg_main)),
+                .child(icon(
+                    "icons/arrow-down.svg",
+                    IconSize::XSmall.px(&theme),
+                    theme.bg_main,
+                )),
         )
         .child(
             div()
@@ -1095,19 +1070,22 @@ fn update_dialog_card_size(viewport: gpui::Size<gpui::Pixels>) -> (gpui::Pixels,
 /// The body of an update dialog: the app icon at the leading edge, then the
 /// state's content. Shared by every state, so the icon lands in the same
 /// place whichever dialog is open.
-fn update_dialog_body(content: AnyElement) -> AnyElement {
+fn update_dialog_body(theme: Theme, content: AnyElement) -> AnyElement {
     div()
         .id("update-dialog-body")
         .debug_selector(|| "update-dialog-body".to_string())
-        .px(px(18.))
-        .pb(px(16.))
+        .px(modal::section_padding_x(&theme, false))
+        .pb(modal::section_padding_bottom(&theme))
         .flex()
         .flex_1()
         .min_h_0()
         .overflow_y_scroll()
         .items_start()
-        .gap(px(12.))
-        .child(embedded_image(crate::app_icon::ASSET, 48.))
+        .gap(DynamicSpacing::Base12.px(&theme))
+        .child(embedded_image(
+            crate::app_icon::ASSET,
+            f32::from(IconSize::XLarge.px(&theme)),
+        ))
         .child(content)
         .into_any_element()
 }
@@ -1199,6 +1177,7 @@ mod tests {
                     .debug_selector(|| "probe-update-card".to_string())
                     .w(px(520.))
                     .child(update_dialog_body(
+                        Theme::dark(),
                         div()
                             .id("probe-update-copy")
                             .debug_selector(|| "probe-update-copy".to_string())
@@ -1228,7 +1207,7 @@ mod tests {
             "the probe stands in for the modal card"
         );
         assert!(
-            copy.right() <= card.right() - px(18.),
+            copy.right() <= card.right() - modal::section_padding_x(&Theme::dark(), false),
             "long copy must wrap inside the card padding: copy {copy:?}, card {card:?}"
         );
     }
@@ -1267,6 +1246,7 @@ mod tests {
                                     .child("Update available"),
                             )
                             .child(update_dialog_body(
+                                theme,
                                 div()
                                     .flex_1()
                                     .min_w_0()
@@ -1276,7 +1256,7 @@ mod tests {
                                     .child("Orbit Pi v0.0.11 is available.")
                                     .child(
                                         div()
-                                            .text_size(theme.ui_px(11.))
+                                            .text_size(TextSize::Small.px(&theme))
                                             .child("What's new"),
                                     )
                                     .child(

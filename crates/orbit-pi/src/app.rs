@@ -763,7 +763,7 @@ impl Attachment {
 }
 
 /// A model choice from the pi runtime catalog.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ModelEntry {
     pub(crate) id: String,
     pub(crate) name: String,
@@ -797,6 +797,7 @@ impl OrbitApp {
                 .with_placeholder_key("app.search_providers")
                 .with_key_context("Composer Picker")
                 .with_max_lines(1)
+                .with_wrap(false)
         });
         let provider_filter_sub = cx.observe(&provider_filter, |_, _, cx| cx.notify());
         let models_filter = cx.new(|cx| {
@@ -805,6 +806,7 @@ impl OrbitApp {
                 .with_placeholder_key("app.search_models")
                 .with_key_context("Composer Picker")
                 .with_max_lines(1)
+                .with_wrap(false)
         });
         let models_filter_sub = cx.observe(&models_filter, |_, _, cx| cx.notify());
 
@@ -817,6 +819,7 @@ impl OrbitApp {
                 .with_placeholder_key("app.plugin_source_placeholder")
                 .with_key_context("Composer Picker")
                 .with_max_lines(1)
+                .with_wrap(false)
         });
         let plugin_source_sub = cx.observe(&plugin_source_input, |_, _, cx| cx.notify());
         let plugins_filter = cx.new(|cx| {
@@ -825,6 +828,7 @@ impl OrbitApp {
                 .with_placeholder_key("app.search_installed_plugins")
                 .with_key_context("Composer Picker")
                 .with_max_lines(1)
+                .with_wrap(false)
         });
         let plugins_filter_sub = cx.observe(&plugins_filter, |_, _, cx| cx.notify());
 
@@ -836,6 +840,7 @@ impl OrbitApp {
                 .with_placeholder_key("app.search_skills")
                 .with_key_context("Composer Picker")
                 .with_max_lines(1)
+                .with_wrap(false)
         });
         let skills_filter_sub = cx.observe(&skills_filter, |_, _, cx| cx.notify());
 
@@ -848,6 +853,7 @@ impl OrbitApp {
                 .with_element_id("session-name-input")
                 .with_placeholder_key("app.session_name")
                 .with_max_lines(1)
+                .with_wrap(false)
         });
 
         // Spawn pi rooted at the folder the user last worked in. Launched
@@ -1937,7 +1943,9 @@ mod titlebar_layout_tests;
 // `icon` and friends are part of the crate-wide UI kit; keep their original
 // `crate::app::…` paths stable for the other modules that import them.
 pub(crate) use helpers::{
-    empty_state, file_badge, file_glyph, icon, icon_dyn, nerd_font_family, press,
-    refresh_glyph, spinner, EmptyFill, PopoverSurface, BUTTON_GROUP, PRESS_DIM,
+    button_frame, context_menu_entry, context_menu_separator, context_menu_surface, empty_state,
+    file_badge, file_glyph, icon, icon_button_frame, icon_dyn, input_field_frame, menu_header,
+    nerd_font_family, picker_entry, picker_search_frame, picker_surface, press, refresh_glyph,
+    spinner, EmptyFill, BUTTON_GROUP, PRESS_DIM,
 };
 use sidebar::sessions_with_placeholder;

@@ -23,9 +23,13 @@ use gpui::{
     StyledText, Subscription, TextRun, Timer, Window,
 };
 
-use crate::app::{empty_state, file_badge, file_glyph, icon, nerd_font_family, EmptyFill};
+use crate::app::{
+    button_frame, empty_state, file_badge, file_glyph, icon, icon_button_frame, nerd_font_family,
+    EmptyFill,
+};
 use crate::composer::ComposerInput;
 use crate::highlight::{self, Lang, Token};
+use crate::theme::tokens::{Radius, TextSize, ButtonSize, DynamicSpacing, IconSize};
 use crate::theme::{self, Theme, ThemeMode};
 
 /// Files above this are not previewed. Two megabytes is far past any source
@@ -789,7 +793,7 @@ impl FileViewer {
             .h_full()
             .flex()
             .items_center()
-            .gap(theme.space(6.))
+            .gap(DynamicSpacing::Base06.px(&theme))
             .overflow_x_scroll()
             .track_scroll(&self.tab_scroll);
         for (index, tab) in self.tabs.iter().enumerate() {
@@ -803,7 +807,13 @@ impl FileViewer {
             let nerd = nerd_font_family(cx);
             let dark = theme.mode == ThemeMode::Dark;
             let fallback = file_badge(&tab.display, theme);
-            let glyph = file_glyph(&tab.display, dark, nerd.as_ref(), 12., fallback);
+            let glyph = file_glyph(
+                &tab.display,
+                dark,
+                nerd.as_ref(),
+                IconSize::XSmall.px(&theme),
+                fallback,
+            );
             tabs = tabs.child(
                 div()
                     .id(gpui::ElementId::Name(format!("viewer-tab-{index}").into()))
@@ -816,9 +826,9 @@ impl FileViewer {
                     .flex()
                     .items_center()
                     .gap(px(6.))
-                    .rounded(px(8.))
+                    .rounded(Radius::Large.px(&theme))
                     .cursor_pointer()
-                    .text_size(theme.ui_px(12.5))
+                    .text_size(TextSize::Small.px(&theme))
                     .when(active, |el| el.bg(theme.active))
                     .when(!active, |el| {
                         el.text_color(theme.text_3)
@@ -857,35 +867,32 @@ impl FileViewer {
                         )
                     })
                     .child(
-                        div()
-                            .id(gpui::ElementId::Name(
+                        icon_button_frame(
+                            div().id(gpui::ElementId::Name(
                                 format!("viewer-tab-close-{index}").into(),
-                            ))
-                            .size(px(16.))
-                            .flex_none()
-                            .rounded(px(4.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .hover(|el| el.bg(theme.overlay))
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.close_tab(index, cx);
-                                // Click handlers bubble: without this the tab's
-                                // own `on_click` below would also run with the
-                                // now-stale `index` and index past the shrunken
-                                // tab list (out-of-bounds panic).
-                                cx.stop_propagation();
-                            }))
-                            .child(icon(
-                                "icons/x.svg",
-                                10.,
-                                if active {
-                                    theme.active_fg
-                                } else {
-                                    theme.text_3
-                                },
                             )),
+                            &theme,
+                            ButtonSize::None,
+                        )
+                        .cursor_pointer()
+                        .hover(|el| el.bg(theme.overlay))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.close_tab(index, cx);
+                            // Click handlers bubble: without this the tab's
+                            // own `on_click` below would also run with the
+                            // now-stale `index` and index past the shrunken
+                            // tab list (out-of-bounds panic).
+                            cx.stop_propagation();
+                        }))
+                        .child(icon(
+                            "icons/x.svg",
+                            IconSize::Indicator.px(&theme),
+                            if active {
+                                theme.active_fg
+                            } else {
+                                theme.text_3
+                            },
+                        )),
                     ),
             );
         }
@@ -894,7 +901,7 @@ impl FileViewer {
             .flex_none()
             .flex()
             .items_center()
-            .gap(theme.space(6.))
+            .gap(DynamicSpacing::Base06.px(&theme))
             // The surface spans the window when the sidebar is collapsed, so
             // the leading inset keeps the first tab clear of the macOS traffic
             // lights and the overlaid titlebar controls; the trailing inset
@@ -903,20 +910,13 @@ impl FileViewer {
             .pr(px(if self.reserve_controls {
                 crate::platform::WINDOW_CONTROLS_W
             } else {
-                f32::from(theme.space(16.))
+                f32::from(DynamicSpacing::Base16.px(&theme))
             }))
             .border_b_1()
             .border_color(theme.border)
             .child(tabs.flex_1().min_w_0())
             .child(
-                div()
-                    .id("viewer-close")
-                    .size(px(24.))
-                    .flex_none()
-                    .rounded(px(6.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
+                icon_button_frame(div().id("viewer-close"), &theme, ButtonSize::Default)
                     .cursor_pointer()
                     .hover(|el| el.bg(theme.bg_hover))
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
@@ -927,7 +927,7 @@ impl FileViewer {
                         this.hide(cx);
                         on_close(cx);
                     }))
-                    .child(icon("icons/x.svg", 13., theme.text_3)),
+                    .child(icon("icons/x.svg", IconSize::Small.px(&theme), theme.text_3)),
             )
             .into_any_element()
     }
@@ -944,14 +944,14 @@ impl FileViewer {
         div()
             .h(px(34.))
             .flex_none()
-            .px(theme.space(16.))
+            .px(DynamicSpacing::Base16.px(&theme))
             .flex()
             .items_center()
             .gap(px(12.))
             .border_b_1()
             .border_color(theme.border)
             .font_family(theme::code_font_family())
-            .text_size(theme.ui_px(11.5))
+            .text_size(TextSize::Small.px(&theme))
             .text_color(theme.text_3)
             .child(
                 div()
@@ -978,18 +978,11 @@ impl FileViewer {
                 content.mode == Mode::Markdown && content.editable(),
                 |el| {
                     el.child(
-                        div()
-                            .id("viewer-md-toggle")
-                            .flex_none()
-                            .h(px(20.))
-                            .px(px(7.))
-                            .rounded(px(6.))
+                        button_frame(div().id("viewer-md-toggle"), &theme, ButtonSize::Compact)
                             .bg(theme.bg_raised)
                             .border_1()
                             .border_color(theme.border)
                             .font_family(theme::ui_font_family())
-                            .flex()
-                            .items_center()
                             .cursor_pointer()
                             .text_color(theme.text_2)
                             .hover(|el| el.bg(theme.bg_hover))
@@ -1029,7 +1022,7 @@ impl FileViewer {
             .flex_none()
             .h(px(20.))
             .px(px(6.))
-            .rounded(px(6.))
+            .rounded(Radius::Medium.px(&theme))
             .bg(theme.bg_raised)
             .border_1()
             .border_color(theme.border)
@@ -1038,7 +1031,7 @@ impl FileViewer {
             .items_center()
             .gap(px(4.))
             .when(!tab.editable(), |el| {
-                el.child(icon("icons/lock.svg", 10., theme.text_3))
+                el.child(icon("icons/lock.svg", IconSize::Indicator.px(&theme), theme.text_3))
             })
             .child(div().text_color(color).child(label))
             .into_any_element()
@@ -1085,7 +1078,7 @@ impl FileViewer {
                             .w_full()
                             .max_w(px(760.))
                             .mx_auto()
-                            .p(theme.space(20.))
+                            .p(DynamicSpacing::Base20.px(&theme))
                             .child(crate::transcript_view::render_markdown_document(
                                 &text, theme,
                             )),
@@ -1100,7 +1093,7 @@ impl FileViewer {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .p(theme.space(24.))
+                    .p(DynamicSpacing::Base24.px(&theme))
                     .child(
                         img(ImageSource::Image(image))
                             .max_w_full()
@@ -1240,10 +1233,15 @@ fn loading_state(theme: &Theme) -> AnyElement {
         .items_center()
         .justify_center()
         .gap(px(8.))
-        .child(crate::app::spinner("viewer-loading", 14., theme.text_3, *theme))
+        .child(crate::app::spinner(
+            "viewer-loading",
+            IconSize::Small.px(theme),
+            theme.text_3,
+            *theme,
+        ))
         .child(
             div()
-                .text_size(theme.ui_px(12.5))
+                .text_size(TextSize::Small.px(&theme))
                 .text_color(theme.text_3)
                 .child(tr!("explorer.loading")),
         )

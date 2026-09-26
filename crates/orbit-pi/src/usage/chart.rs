@@ -18,6 +18,7 @@ use gpui::{
 
 use super::aggregate::{ChartMetric, LatencyMetric, TimeSeries};
 use super::format;
+use crate::theme::tokens::{TextSize, DynamicSpacing, StyledExt};
 use crate::theme::Theme;
 
 const PLOT_H: f32 = 168.;
@@ -144,7 +145,7 @@ pub fn timeline(
                 .left_0()
                 .w_full()
                 .h(px(plot_h))
-                .text_size(theme.ui_px(10.))
+                .text_size(TextSize::XSmall.px(&theme))
                 .text_color(theme.text_3)
                 .children((0..=4).map(|step| {
                     // step 4 = the axis maximum (top line), 0 = the baseline.
@@ -321,7 +322,7 @@ fn x_axis_labels(
         .left_0()
         .w_full()
         .h(px(AXIS_GAP))
-        .text_size(theme.ui_px(10.))
+        .text_size(TextSize::XSmall.px(&theme))
         .text_color(theme.text_3);
     for (i, point) in series.points.iter().enumerate() {
         if (i + 1) % tick_margin != 0 {
@@ -370,7 +371,7 @@ fn marker(ix: usize, count: usize, value: f64, max: f64, theme: Theme) -> AnyEle
                 .absolute()
                 .bottom(relative(value_fraction))
                 .left(px(-3.5))
-                .mt(px(3.5))
+                .mt(DynamicSpacing::Base04.px(&theme))
                 .size(px(7.))
                 .rounded_full()
                 .border_2()
@@ -488,11 +489,11 @@ fn readout(
     let mut body = div()
         .flex()
         .flex_col()
-        .gap(px(2.))
+        .gap(DynamicSpacing::Base02.px(&theme))
         .line_height(theme.ui_px(11.5) * 1.25)
         .child(
             div()
-                .text_size(theme.ui_px(11.5))
+                .text_size(TextSize::Small.px(&theme))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.text)
                 .child(bucket.stamp.clone()),
@@ -512,20 +513,16 @@ fn readout(
         .absolute()
         .top(px(4.))
         .w(px(TOOLTIP_W))
-        .p(px(8.))
-        .rounded(px(8.))
-        .border_1()
-        .border_color(theme.border_strong)
-        .bg(theme.menu_bg)
-        .shadow(theme.card_shadow())
+        .p(DynamicSpacing::Base08.px(&theme))
+        .elevation_2(&theme)
         .flex()
         .flex_col()
         .child(body)
         .occlude();
     if on_left_half {
-        card.ml(px(12.)).left(relative(fraction)).into_any_element()
+        card.ml(DynamicSpacing::Base12.px(&theme)).left(relative(fraction)).into_any_element()
     } else {
-        card.mr(px(12.))
+        card.mr(DynamicSpacing::Base12.px(&theme))
             .right(relative(1.0 - fraction))
             .into_any_element()
     }
@@ -550,9 +547,9 @@ fn readout_row(label: &str, value: &str, theme: Theme) -> AnyElement {
         .flex()
         .items_center()
         .justify_between()
-        .gap(px(12.))
+        .gap(DynamicSpacing::Base12.px(&theme))
         .whitespace_nowrap()
-        .text_size(theme.ui_px(11.5))
+        .text_size(TextSize::Small.px(&theme))
         .child(
             div()
                 .flex_none()

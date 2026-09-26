@@ -5,6 +5,10 @@ use gpui::{point, Pixels};
 
 use crate::sessions::cap_chars;
 use crate::shimmer::ShimmerText;
+use crate::theme::tokens::{
+    context_menu, list_item, popover, BufferLineHeight, ButtonSize, DynamicSpacing, IconSize,
+    TextSize,
+};
 
 /// Whether a workspace group is collapsed in the sidebar. The active
 /// workspace is expanded by default; all others are collapsed unless the
@@ -342,19 +346,19 @@ pub(crate) fn render_side_row(
             // flex_none, so nothing shifts when they appear).
             div()
                 .w_full()
-                .pt(px(12.))
-                .pb(px(2.))
+                .pt(DynamicSpacing::Base12.px(&theme))
+                .pb(DynamicSpacing::Base02.px(&theme))
                 .group("workspace-row")
                 .child(
                     div()
                         .w_full()
                         .h(px(26.))
-                        .pl(px(6.))
-                        .pr(px(8.))
-                        .rounded_md()
+                        .pl(DynamicSpacing::Base06.px(&theme))
+                        .pr(DynamicSpacing::Base08.px(&theme))
+                        .rounded(list_item::RADIUS.px(&theme))
                         .flex()
                         .items_center()
-                        .gap(px(6.))
+                        .gap(DynamicSpacing::Base06.px(&theme))
                         .cursor_pointer()
                         .when(cursor, |s| s.bg(theme.overlay))
                         .hover(|s| s.bg(theme.bg_hover))
@@ -395,16 +399,16 @@ pub(crate) fn render_side_row(
                             } else {
                                 "icons/chevron-down.svg"
                             },
-                            10.,
+                            IconSize::Indicator.px(&theme),
                             theme.text_3,
                         ))
-                        .child(icon("icons/folder.svg", 13., theme.text_3))
+                        .child(icon("icons/folder.svg", IconSize::Small.px(&theme), theme.text_3))
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(theme.ui_px(11.5))
+                                .text_size(TextSize::Small.px(&theme))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.text_3)
                                 .child(label.clone()),
@@ -419,37 +423,38 @@ pub(crate) fn render_side_row(
                             theme,
                         ))
                         .child(
-                            div()
-                                .id(ElementId::Name(format!("workspace-new-{label}").into()))
-                                .flex_none()
-                                .size(px(18.))
-                                .rounded_sm()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                // Revealed on row hover — the quiet default
-                                // keeps group headers to just label + count.
-                                .opacity(0.)
-                                .group_hover("workspace-row", |s| s.opacity(1.))
-                                .hover(|s| s.bg(theme.overlay))
-                                .on_mouse_up(MouseButton::Left, {
-                                    let this = this_new.clone();
-                                    move |_, window, cx| {
-                                        cx.stop_propagation();
-                                        let cwd = cwd_for_new.clone();
-                                        this.update(cx, |app, cx| {
-                                            app.on_new_session_in_workspace(cwd, window, cx);
-                                        });
-                                    }
-                                })
-                                .child(icon("icons/plus.svg", 13., theme.text_3)),
+                            icon_button_frame(
+                                div().id(ElementId::Name(format!("workspace-new-{label}").into())),
+                                &theme,
+                                ButtonSize::Compact,
+                            )
+                            .cursor_pointer()
+                            // Revealed on row hover — the quiet default
+                            // keeps group headers to just label + count.
+                            .opacity(0.)
+                            .group_hover("workspace-row", |s| s.opacity(1.))
+                            .hover(|s| s.bg(theme.overlay))
+                            .on_mouse_up(MouseButton::Left, {
+                                let this = this_new.clone();
+                                move |_, window, cx| {
+                                    cx.stop_propagation();
+                                    let cwd = cwd_for_new.clone();
+                                    this.update(cx, |app, cx| {
+                                        app.on_new_session_in_workspace(cwd, window, cx);
+                                    });
+                                }
+                            })
+                            .child(icon(
+                                "icons/plus.svg",
+                                IconSize::Small.px(&theme),
+                                theme.text_3,
+                            )),
                         )
                         // Session count, pinned to the header's right edge.
                         .child(
                             div()
                                 .flex_none()
-                                .text_size(theme.ui_px(10.5))
+                                .text_size(TextSize::XSmall.px(&theme))
                                 .text_color(theme.text_3)
                                 .child(format!("{count}")),
                         ),
@@ -477,7 +482,7 @@ pub(crate) fn render_side_row(
                 .min_w_0()
                 .flex()
                 .items_center()
-                .gap(px(6.))
+                .gap(DynamicSpacing::Base06.px(&theme))
                 .cursor_pointer()
                 .on_mouse_up(MouseButton::Left, move |_, _, cx| {
                     let label = label_for_click.clone();
@@ -489,10 +494,10 @@ pub(crate) fn render_side_row(
                         cx.notify();
                     });
                 })
-                .child(icon("icons/chevron-down.svg", 11., theme.text_3))
+                .child(icon("icons/chevron-down.svg", IconSize::XSmall.px(&theme), theme.text_3))
                 .child(
                     div()
-                        .text_size(theme.ui_px(11.))
+                        .text_size(TextSize::Small.px(&theme))
                         .text_color(theme.text_3)
                         .child(tr!("sidebar.show_count_more", count = count)),
                 );
@@ -500,22 +505,16 @@ pub(crate) fn render_side_row(
                 .w_full()
                 .h(px(26.))
                 .pl(px(22.))
-                .pr(px(4.))
+                .pr(DynamicSpacing::Base04.px(&theme))
                 .flex()
                 .items_center()
-                .rounded_md()
+                .rounded(list_item::RADIUS.px(&theme))
                 .when(cursor, |s| s.bg(theme.overlay))
                 .hover(|s| s.bg(theme.bg_hover))
                 .child(more);
             if can_collapse {
                 row = row.child(
-                    div()
-                        .flex_none()
-                        .size(px(18.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(4.))
+                    icon_button_frame(div(), &theme, ButtonSize::Compact)
                         .cursor_pointer()
                         .hover(|s| s.bg(theme.overlay))
                         .on_mouse_up(MouseButton::Left, move |_, _, cx| {
@@ -526,7 +525,11 @@ pub(crate) fn render_side_row(
                                 cx.notify();
                             });
                         })
-                        .child(icon("icons/chevron-up.svg", 11., theme.text_3)),
+                        .child(icon(
+                            "icons/chevron-up.svg",
+                            IconSize::XSmall.px(&theme),
+                            theme.text_3,
+                        )),
                 );
             }
             row.into_any_element()
@@ -538,11 +541,11 @@ pub(crate) fn render_side_row(
                 .w_full()
                 .h(px(26.))
                 .pl(px(22.))
-                .pr_2()
+                .pr(DynamicSpacing::Base08.px(&theme))
                 .flex()
                 .items_center()
-                .gap(px(6.))
-                .rounded_md()
+                .gap(DynamicSpacing::Base06.px(&theme))
+                .rounded(list_item::RADIUS.px(&theme))
                 .cursor_pointer()
                 .when(cursor, |s| s.bg(theme.overlay))
                 .hover(|s| s.bg(theme.bg_hover))
@@ -553,10 +556,10 @@ pub(crate) fn render_side_row(
                         cx.notify();
                     });
                 })
-                .child(icon("icons/chevron-up.svg", 11., theme.text_3))
+                .child(icon("icons/chevron-up.svg", IconSize::XSmall.px(&theme), theme.text_3))
                 .child(
                     div()
-                        .text_size(theme.ui_px(11.))
+                        .text_size(TextSize::Small.px(&theme))
                         .text_color(theme.text_3)
                         .child(tr!("sidebar.show_less")),
                 )
@@ -594,7 +597,7 @@ pub(crate) fn render_side_row(
             let mut row = div()
                 .id(ElementId::NamedInteger("side-session".into(), *ix as u64))
                 .w_full()
-                .py(px(1.))
+                .py(DynamicSpacing::Base01.px(&theme))
                 .cursor_pointer()
                 // Right-click anywhere on the row opens its actions menu at
                 // the pointer, context-menu style (context menus are the
@@ -634,12 +637,12 @@ pub(crate) fn render_side_row(
                 .group("srow")
                 .w_full()
                 .pl(px(22.))
-                .pr(px(8.))
-                .py(theme.space(5.))
-                .rounded_md()
+                .pr(DynamicSpacing::Base08.px(&theme))
+                .py(DynamicSpacing::Base04.px(&theme))
+                .rounded(list_item::RADIUS.px(&theme))
                 .flex()
                 .items_center()
-                .gap(px(6.))
+                .gap(DynamicSpacing::Base06.px(&theme))
                 .when(active, |card| card.bg(theme.active))
                 .when(cursor && !active, |card| card.bg(theme.overlay))
                 .when(!active && !cursor, |card| card.hover(|s| s.bg(theme.bg_hover)));
@@ -657,7 +660,7 @@ pub(crate) fn render_side_row(
                     .flex()
                     .flex_col()
                     .justify_center()
-                    .gap(px(2.))
+                    .gap(DynamicSpacing::Base02.px(&theme))
                     // Line 1 — title with the row actions pinned to its
                     // right: a small running spinner leads, the hover-revealed
                     // `…` menu trails. Wrapped in a flex row so the
@@ -669,17 +672,21 @@ pub(crate) fn render_side_row(
                             .w_full()
                             .flex()
                             .items_center()
-                            .gap(px(6.))
+                            .gap(DynamicSpacing::Base06.px(&theme))
                             .when(running, |line| {
                                 line.child(crate::app::spinner(
                                     ElementId::NamedInteger("side-spin".into(), *ix as u64),
-                                    11.,
+                                    IconSize::XSmall.px(&theme),
                                     theme.accent,
                                     theme,
                                 ))
                             })
                             .when(pinned, |line| {
-                                line.child(icon("icons/pin.svg", 16., theme.text_3))
+                                line.child(icon(
+                                    "icons/pin.svg",
+                                    IconSize::Medium.px(&theme),
+                                    theme.text_3,
+                                ))
                             })
                             .child(title)
                             .child(session_menu_button(
@@ -695,7 +702,7 @@ pub(crate) fn render_side_row(
                                 line.child(
                                     div()
                                         .flex_none()
-                                        .text_size(theme.ui_px(10.5))
+                                        .text_size(TextSize::XSmall.px(&theme))
                                         .text_color(theme.text_3)
                                         .child(age.clone()),
                                 )
@@ -710,21 +717,21 @@ pub(crate) fn render_side_row(
                                 .w_full()
                                 .flex()
                                 .items_center()
-                                .gap(px(6.))
+                                .gap(DynamicSpacing::Base06.px(&theme))
                                 .child(
                                     div()
                                         .flex_1()
                                         .min_w_0()
                                         .truncate()
-                                        .text_size(theme.ui_px(11.))
-                                        .line_height(px(14.))
+                                        .text_size(TextSize::Small.px(&theme))
+                                        .line_height(BufferLineHeight::Standard.relative())
                                         .text_color(theme.text_3)
                                         .child(session.first_message.clone()),
                                 )
                                 .child(
                                     div()
                                         .flex_none()
-                                        .text_size(theme.ui_px(10.5))
+                                        .text_size(TextSize::XSmall.px(&theme))
                                         .text_color(theme.text_3)
                                         .child(age),
                                 ),
@@ -751,56 +758,53 @@ pub(crate) fn session_menu_button(
 ) -> impl IntoElement + use<> {
     let menu_open = menu.is_some();
     let this_for_popup = this.clone();
-    div()
-        .id(ElementId::NamedInteger("side-more".into(), ix as u64))
-        .group(BUTTON_GROUP)
-        .relative()
-        .flex_none()
-        .size(px(18.))
-        .rounded_sm()
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        // Hidden until the row (or the button itself) is hovered, or while
-        // this row's menu is open. Icon-only, no background — a filled hover
-        // square reads as a patch covering the row's right edge.
-        .opacity(if menu_open { 1.0 } else { 0.0 })
-        .group_hover("srow", |s| s.opacity(1.))
-        .active(|s| s.opacity(PRESS_DIM))
-        .on_mouse_up(MouseButton::Left, move |_, window, cx| {
-            // Keep the click from also opening the session via the row.
-            cx.stop_propagation();
-            let (path, title, deletable) = (path.clone(), title.clone(), deletable);
-            this.update(cx, |app, cx| {
-                app.toggle_session_menu(
-                    SessionMenu {
-                        path,
-                        title,
-                        deletable,
-                        confirm_delete: false,
-                        at: None,
-                    },
-                    window,
-                    cx,
-                );
-            });
-        })
-        .child(icon("icons/more.svg", 14., theme.text_3))
-        // The dropdown hangs off a zero-size anchor pinned to the button's
-        // top-left corner. The button centers its icon (`items_center` +
-        // `justify_center`), and Taffy lays absolutely-positioned children out
-        // with the container's alignment — without the pin, the popup's
-        // static position is pulled toward the button's center and it opens
-        // up-left of the trigger instead of just below it.
-        .children(menu.map(|menu| {
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .size(px(0.))
-                .child(session_menu_popup(menu, this_for_popup.clone(), theme))
-        }))
+    icon_button_frame(
+        div().id(ElementId::NamedInteger("side-more".into(), ix as u64)),
+        &theme,
+        ButtonSize::Compact,
+    )
+    .group(BUTTON_GROUP)
+    .relative()
+    .cursor_pointer()
+    // Hidden until the row (or the button itself) is hovered, or while
+    // this row's menu is open. Icon-only, no background — a filled hover
+    // square reads as a patch covering the row's right edge.
+    .opacity(if menu_open { 1.0 } else { 0.0 })
+    .group_hover("srow", |s| s.opacity(1.))
+    .active(|s| s.opacity(PRESS_DIM))
+    .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+        // Keep the click from also opening the session via the row.
+        cx.stop_propagation();
+        let (path, title, deletable) = (path.clone(), title.clone(), deletable);
+        this.update(cx, |app, cx| {
+            app.toggle_session_menu(
+                SessionMenu {
+                    path,
+                    title,
+                    deletable,
+                    confirm_delete: false,
+                    at: None,
+                },
+                window,
+                cx,
+            );
+        });
+    })
+    .child(icon("icons/more.svg", IconSize::Small.px(&theme), theme.text_3))
+    // The dropdown hangs off a zero-size anchor pinned to the button's
+    // top-left corner. The button centers its icon (`items_center` +
+    // `justify_center`), and Taffy lays absolutely-positioned children out
+    // with the container's alignment — without the pin, the popup's
+    // static position is pulled toward the button's center and it opens
+    // up-left of the trigger instead of just below it.
+    .children(menu.map(|menu| {
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size(px(0.))
+            .child(session_menu_popup(menu, this_for_popup.clone(), theme))
+    }))
 }
 
 /// A session row's title. Quiet rows render as one truncated line; a running
@@ -823,8 +827,8 @@ fn session_title(
     } else {
         FontWeight::NORMAL
     };
-    let size = theme.ui_px(13.);
-    let line_height = px(18.);
+    let size = TextSize::Default.px(&theme);
+    let line_height = BufferLineHeight::Standard.relative();
     if !running {
         return div()
             .flex_1()
@@ -892,22 +896,22 @@ pub(crate) fn session_menu_popup(
             .w_full()
             .flex()
             .flex_col()
-            .gap(px(6.))
+            .gap(DynamicSpacing::Base06.px(&theme))
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(2.))
+                    .gap(DynamicSpacing::Base02.px(&theme))
                     .child(
                         div()
-                            .text_size(theme.ui_px(12.5))
+                            .text_size(TextSize::Small.px(&theme))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
                             .child(tr!("sidebar.delete_this_session")),
                     )
                     .child(
                         div()
-                            .text_size(theme.ui_px(11.))
+                            .text_size(TextSize::Small.px(&theme))
                             .text_color(theme.text_2)
                             .child(tr!("sidebar.removes_the_session_file_from_disk")),
                     ),
@@ -916,19 +920,12 @@ pub(crate) fn session_menu_popup(
                 div()
                     .flex()
                     .justify_end()
-                    .gap(px(6.))
+                    .gap(DynamicSpacing::Base06.px(&theme))
                     .child(
-                        div()
-                            .id("menu-cancel")
-                            .h(px(24.))
-                            .px(px(10.))
-                            .flex()
-                            .items_center()
-                            .rounded(px(6.))
+                        button_frame(div().id("menu-cancel"), &theme, ButtonSize::Default)
                             .bg(theme.bg_raised)
                             .cursor_pointer()
                             .hover(|s| s.bg(theme.bg_hover))
-                            .text_size(theme.ui_px(11.5))
                             .text_color(theme.text_2)
                             .on_mouse_down(MouseButton::Left, {
                                 let this = this.clone();
@@ -940,17 +937,10 @@ pub(crate) fn session_menu_popup(
                             .child(tr!("sidebar.cancel")),
                     )
                     .child(
-                        div()
-                            .id("menu-confirm-delete")
-                            .h(px(24.))
-                            .px(px(10.))
-                            .flex()
-                            .items_center()
-                            .rounded(px(6.))
+                        button_frame(div().id("menu-confirm-delete"), &theme, ButtonSize::Default)
                             .bg(theme.stop_red)
                             .cursor_pointer()
                             .hover(|s| s.bg(theme.stop_red_hover))
-                            .text_size(theme.ui_px(11.5))
                             .text_color(theme.send_fg)
                             .on_mouse_down(MouseButton::Left, {
                                 let this = this.clone();
@@ -1009,7 +999,7 @@ pub(crate) fn session_menu_popup(
                 |app, cx| app.on_menu_clone_session(cx),
             ))
             .when(deletable, |menu| {
-                menu.child(div().h(px(1.)).w_full().bg(theme.border).my(px(4.)))
+                menu.child(context_menu_separator(&theme))
                     .child(menu_item(
                         "menu-delete",
                         "icons/trash.svg",
@@ -1023,12 +1013,10 @@ pub(crate) fn session_menu_popup(
             .into_any_element()
     };
 
-    let popup = div()
-        .w(px(190.))
-        .p(px(4.))
-        .when(confirm, |pop| pop.w(px(210.)).p(px(10.)))
-        .rounded(px(10.))
-        .popover_surface(theme)
+    // Zed's context-menu shell sizes the action list to its entries from a
+    // 200px minimum; the delete confirmation keeps its own fixed card.
+    let popup = context_menu_surface(div(), &theme)
+        .when(confirm, |pop| pop.w(px(210.)).p(DynamicSpacing::Base12.px(&theme)))
         .flex()
         .flex_col()
         .overflow_hidden()
@@ -1052,9 +1040,9 @@ pub(crate) fn session_menu_popup(
     // Float the popup: `anchored` takes it out of the layout (no other row
     // moves). A right-clicked menu lands at the pointer in window
     // coordinates; the '…' button's menu pins its top-left corner just
-    // below the trigger (the button is 18px, so +20px drops the top edge
-    // 2px under it, left-aligned to the trigger — the standard app dropdown
-    // position). `deferred` paints it above the rest of the list — same
+    // below the trigger (a `ButtonSize::Compact` button, so its height plus
+    // `popover::MENU_OFFSET` drops the top edge Zed's menu gap under it,
+    // left-aligned to the trigger — the standard app dropdown position). `deferred` paints it above the rest of the list — same
     // convention as the composer chip pickers. `snap_to_window` keeps it
     // inside the window near the edges.
     let anchor = if let Some(at) = menu.at {
@@ -1063,10 +1051,10 @@ pub(crate) fn session_menu_popup(
         anchored()
             .position_mode(AnchoredPositionMode::Local)
             .anchor(Corner::TopLeft)
-            .offset(point(px(0.), px(20.)))
+            .offset(point(px(0.), ButtonSize::Compact.height(&theme) + popover::MENU_OFFSET))
     };
     anchor
-        .snap_to_window()
+        .snap_to_window_with_margin(popover::WINDOW_MARGIN)
         .child(deferred(popup))
         .into_any_element()
 }
@@ -1084,39 +1072,36 @@ pub(crate) fn workspace_menu_button(
     let this_for_popup = this.clone();
     let label_for_click = label.clone();
     let cwd_for_click = cwd.clone();
-    div()
-        .id(ElementId::Name(format!("workspace-more-{label}").into()))
-        .group(BUTTON_GROUP)
-        .relative()
-        .flex_none()
-        .size(px(18.))
-        .rounded_sm()
-        .flex()
-        .items_center()
-        .justify_center()
-        .cursor_pointer()
-        // Revealed on row hover, or while this header's menu is open.
-        .opacity(if menu.is_some() { 1.0 } else { 0.0 })
-        .group_hover("workspace-row", |s| s.opacity(1.))
-        .active(|s| s.opacity(PRESS_DIM))
-        .on_mouse_up(MouseButton::Left, move |_, window, cx| {
-            cx.stop_propagation();
-            let menu = WorkspaceMenu {
-                label: label_for_click.clone(),
-                cwd: cwd_for_click.clone(),
-                at: None,
-            };
-            this.update(cx, |app, cx| app.toggle_workspace_menu(menu, window, cx));
-        })
-        .child(icon("icons/more.svg", 14., theme.text_3))
-        .children(menu.map(|menu| {
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .size(px(0.))
-                .child(workspace_menu_popup(menu, this_for_popup.clone(), theme))
-        }))
+    icon_button_frame(
+        div().id(ElementId::Name(format!("workspace-more-{label}").into())),
+        &theme,
+        ButtonSize::Compact,
+    )
+    .group(BUTTON_GROUP)
+    .relative()
+    .cursor_pointer()
+    // Revealed on row hover, or while this header's menu is open.
+    .opacity(if menu.is_some() { 1.0 } else { 0.0 })
+    .group_hover("workspace-row", |s| s.opacity(1.))
+    .active(|s| s.opacity(PRESS_DIM))
+    .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+        cx.stop_propagation();
+        let menu = WorkspaceMenu {
+            label: label_for_click.clone(),
+            cwd: cwd_for_click.clone(),
+            at: None,
+        };
+        this.update(cx, |app, cx| app.toggle_workspace_menu(menu, window, cx));
+    })
+    .child(icon("icons/more.svg", IconSize::Small.px(&theme), theme.text_3))
+    .children(menu.map(|menu| {
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .size(px(0.))
+            .child(workspace_menu_popup(menu, this_for_popup.clone(), theme))
+    }))
 }
 
 /// The actions popup anchored to a workspace header: Copy path / Remove
@@ -1127,11 +1112,7 @@ pub(crate) fn workspace_menu_popup(
     this: Entity<OrbitApp>,
     theme: Theme,
 ) -> AnyElement {
-    let popup = div()
-        .w(px(200.))
-        .p(px(4.))
-        .rounded(px(10.))
-        .popover_surface(theme)
+    let popup = context_menu_surface(div(), &theme)
         .flex()
         .flex_col()
         .overflow_hidden()
@@ -1157,7 +1138,7 @@ pub(crate) fn workspace_menu_popup(
             false,
             |app, cx| app.on_workspace_copy_path(cx),
         ))
-        .child(div().h(px(1.)).w_full().bg(theme.border).my(px(4.)))
+        .child(context_menu_separator(&theme))
         .child(menu_item(
             "wm-remove",
             "icons/minus.svg",
@@ -1174,14 +1155,16 @@ pub(crate) fn workspace_menu_popup(
         anchored()
             .position_mode(AnchoredPositionMode::Local)
             .anchor(Corner::TopLeft)
-            .offset(point(px(0.), px(20.)))
+            .offset(point(px(0.), ButtonSize::Compact.height(&theme) + popover::MENU_OFFSET))
     };
     anchor
-        .snap_to_window()
+        .snap_to_window_with_margin(popover::WINDOW_MARGIN)
         .child(deferred(popup))
         .into_any_element()
 }
 
+/// One entry of the sidebar's session / workspace menus, on Zed's context
+/// menu metrics ([`context_menu_entry`]).
 pub(crate) fn menu_item<C, L>(
     id: &'static str,
     icon_path: &'static str,
@@ -1202,24 +1185,16 @@ where
     } else {
         (theme.bg_hover, theme.text_2, theme.text_3)
     };
-    div()
-        .id(id)
-        .h(px(30.))
-        .px(px(8.))
-        .rounded(px(6.))
-        .flex()
-        .items_center()
-        .gap(px(8.))
+    context_menu_entry(div().id(id), &theme)
         .cursor_pointer()
         .when(danger, |s| s.bg(theme.stop_red))
         .hover(move |s| s.bg(hover_bg))
-        .text_size(theme.ui_px(12.5))
         .text_color(text_color)
         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
             cx.stop_propagation();
             this.update(cx, |app, cx| (on_click)(app, cx));
         })
-        .child(icon(icon_path, 13., icon_color))
+        .child(icon(icon_path, context_menu::ICON.px(&theme), icon_color))
         .child(label.to_string())
 }
 
@@ -1250,9 +1225,9 @@ pub(crate) fn empty_sessions_state(theme: Theme) -> impl IntoElement + use<> {
         .flex_col()
         .items_center()
         .justify_center()
-        .gap(px(6.))
-        .px(px(20.))
-        .pb(px(40.))
+        .gap(DynamicSpacing::Base06.px(&theme))
+        .px(DynamicSpacing::Base20.px(&theme))
+        .pb(DynamicSpacing::Base40.px(&theme))
         .child(
             div()
                 .size(px(36.))
@@ -1261,18 +1236,18 @@ pub(crate) fn empty_sessions_state(theme: Theme) -> impl IntoElement + use<> {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(icon("icons/spark.svg", 16., theme.accent)),
+                .child(icon("icons/spark.svg", IconSize::Medium.px(&theme), theme.accent)),
         )
         .child(
             div()
-                .text_size(theme.ui_px(12.5))
+                .text_size(TextSize::Default.px(&theme))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(theme.text_2)
                 .child(tr!("sidebar.no_projects_yet")),
         )
         .child(
             div()
-                .text_size(theme.ui_px(11.5))
+                .text_size(TextSize::Small.px(&theme))
                 .text_color(theme.text_3)
                 .text_align(TextAlign::Center)
                 .child(tr!("sidebar.pick_a_folder_to_start_your_first_task")),

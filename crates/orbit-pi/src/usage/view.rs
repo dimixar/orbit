@@ -60,8 +60,12 @@ use super::table::{
     TableKind, HEADER_H, ROW_H,
 };
 use super::tooltip::Tooltip;
-use crate::app::{icon, press, BUTTON_GROUP, PopoverSurface};
+use crate::app::{
+    button_frame, context_menu_entry, context_menu_separator, context_menu_surface, icon,
+    icon_button_frame, picker_search_frame, press, BUTTON_GROUP,
+};
 use crate::composer::ComposerInput;
+use crate::theme::tokens::{button, TextSize, popover, ButtonSize, DynamicSpacing, IconSize, Radius};
 use crate::theme::{self, Theme};
 
 /// Inner column width for a data surface (§58): wide enough for a full table,
@@ -69,9 +73,10 @@ use crate::theme::{self, Theme};
 pub(super) const CONTENT_MAX_W: f32 = 1180.;
 /// The page column's horizontal padding (both sides), which the tables sit inside.
 pub(super) const PAGE_PAD: f32 = 40.;
-/// Inner padding of a section card (each side). Tables budget against this
-/// so their last column is not squeezed into a scrollbar.
-pub(super) const SECTION_PAD: f32 = 14.;
+/// Inner padding of a section card (each side), at the default density —
+/// [`DynamicSpacing::Base12`]. Tables budget against this so their last
+/// column is not squeezed into a scrollbar.
+pub(super) const SECTION_PAD: f32 = 12.;
 /// Below this column width the paired panels stack into one column.
 const TWO_COLUMN_MIN: f32 = 820.;
 const FOUR_KPI_MIN: f32 = 880.;
@@ -102,7 +107,7 @@ impl Render for UsagePage {
             .bg(theme.bg_main)
             .text_color(theme.text)
             .font_family(theme::ui_font_family())
-            .text_size(theme.ui_px(13.))
+            .text_size(TextSize::Default.px(&theme))
             .child(self.header(theme, cx))
             .child(self.filter_bar(theme, cx))
             .child(
@@ -118,15 +123,15 @@ impl Render for UsagePage {
                             .flex_none()
                             .w(column_w)
                             .mx_auto()
-                            .pb(theme.space(56.))
+                            .pb(DynamicSpacing::Base48.px(&theme))
                             .flex()
                             .flex_col()
                             .children(self.active_filter_bar(theme, cx))
                             .child(
                                 div()
                                     .w_full()
-                                    .px(theme.space(20.))
-                                    .pt(theme.space(20.))
+                                    .px(DynamicSpacing::Base20.px(&theme))
+                                    .pt(DynamicSpacing::Base20.px(&theme))
                                     .flex()
                                     .flex_col()
                                     .child(self.body(theme, wide, kpi_cols, window, cx)),
@@ -160,53 +165,52 @@ impl UsagePage {
             // The page now sits in a card below the top bar, which owns the
             // caption buttons; the header only needs the normal page inset.
             .pl(px(self.header_leading()))
-            .pr(px(12.))
+            .pr(DynamicSpacing::Base12.px(&theme))
             .flex()
             .items_center()
-            .gap_2()
+            .gap(DynamicSpacing::Base08.px(&theme))
             .border_b_1()
             .border_color(theme.border)
             .child(
-                div()
-                    .id("usage-back")
-                    .px(px(8.))
-                    .h(px(28.))
-                    .rounded(px(8.))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(theme.bg_hover))
-                    .on_mouse_down(MouseButton::Left, {
-                        let entity = cx.entity();
-                        move |_, window, cx| {
-                            entity.update(cx, |page, cx| page.close_page(window, cx));
-                        }
-                    })
-                    .child(icon("icons/arrow-left.svg", 14., theme.text_2))
-                    .child(
-                        div()
-                            .text_size(theme.ui_px(12.5))
-                            .text_color(theme.text_2)
-                            .child(tr!("view.back")),
-                    ),
+                press(
+                    button_frame(div().id("usage-back"), &theme, ButtonSize::Medium)
+                        .group(BUTTON_GROUP)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.bg_hover)),
+                )
+                .on_mouse_down(MouseButton::Left, {
+                    let entity = cx.entity();
+                    move |_, window, cx| {
+                        entity.update(cx, |page, cx| page.close_page(window, cx));
+                    }
+                })
+                .child(icon(
+                    "icons/arrow-left.svg",
+                    IconSize::Small.px(&theme),
+                    theme.text_2,
+                ))
+                .child(div().text_color(theme.text_2).child(tr!("view.back"))),
             )
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(7.))
-                    .child(icon("icons/usage-total.svg", 15., theme.text_2))
+                    .gap(DynamicSpacing::Base06.px(&theme))
+                    .child(icon(
+                        "icons/usage-total.svg",
+                        IconSize::Medium.px(&theme),
+                        theme.text_2,
+                    ))
                     .child(
                         div()
-                            .text_size(theme.ui_px(15.))
+                            .text_size(TextSize::Large.px(&theme))
                             .font_weight(FontWeight::MEDIUM)
                             .child(tr!("view.usage")),
                     ),
             )
             .children(status.map(|status| {
                 div()
-                    .text_size(theme.ui_px(11.5))
+                    .text_size(TextSize::Small.px(&theme))
                     .text_color(theme.text_3)
                     .child(status)
             }))
@@ -258,6 +262,7 @@ impl UsagePage {
             button,
             true,
             Corner::TopRight,
+            theme,
             move || panel,
         )
     }
@@ -274,13 +279,13 @@ impl UsagePage {
         let mut bar = div()
             .w_full()
             .flex_none()
-            .px(theme.space(20.))
-            .py(theme.space(8.))
+            .px(DynamicSpacing::Base20.px(&theme))
+            .py(DynamicSpacing::Base08.px(&theme))
             .border_b_1()
             .border_color(theme.border)
             .flex()
             .items_center()
-            .gap(theme.space(8.));
+            .gap(DynamicSpacing::Base08.px(&theme));
 
         let entity = cx.entity();
         let range_open = self.menu() == Some(MenuKind::Range);
@@ -301,6 +306,7 @@ impl UsagePage {
             range_chip,
             range_open,
             Corner::TopLeft,
+            theme,
             move || range_panel.unwrap_or_else(|| div().into_any_element()),
         ));
 
@@ -386,6 +392,8 @@ impl UsagePage {
             self.usage_mode(),
             |choice| choice.label(),
             |choice| choice.as_str(),
+            |_| true,
+            false,
             theme,
             {
                 let entity = cx.entity();
@@ -431,12 +439,12 @@ impl UsagePage {
             },
         );
         if !open {
-            return filters::chip_with_menu(id, chip, false, Corner::TopLeft, || {
+            return filters::chip_with_menu(id, chip, false, Corner::TopLeft, theme, || {
                 div().into_any_element()
             });
         }
         let panel = filters::multi_menu(self, kind, ranked, all, selected, cx, theme);
-        filters::chip_with_menu(id, chip, true, Corner::TopLeft, move || panel)
+        filters::chip_with_menu(id, chip, true, Corner::TopLeft, theme, move || panel)
     }
 
     /// The active-filter bar (§45): every narrowing filter as a removable
@@ -563,16 +571,16 @@ impl UsagePage {
             div()
                 .id("usage-active-filters")
                 .w_full()
-                .px(theme.space(20.))
-                .pt(theme.space(14.))
+                .px(DynamicSpacing::Base20.px(&theme))
+                .pt(DynamicSpacing::Base12.px(&theme))
                 .flex()
                 .flex_wrap()
                 .items_center()
-                .gap(theme.space(6.))
+                .gap(DynamicSpacing::Base06.px(&theme))
                 .child(
                     div()
-                        .pr(px(2.))
-                        .text_size(theme.ui_px(11.))
+                        .pr(DynamicSpacing::Base02.px(&theme))
+                        .text_size(TextSize::Small.px(&theme))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text_3)
                         .child(tr!("view.filters")),
@@ -600,25 +608,21 @@ impl UsagePage {
             // The store could not be read at all: say so, and offer the retry.
             if let Some(error) = self.error().map(str::to_string) {
                 let entity = cx.entity();
-                let action = div()
-                    .id("usage-retry")
-                    .mt(px(2.))
-                    .h(px(28.))
-                    .px(px(10.))
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.bg_raised)
-                    .flex()
-                    .items_center()
-                    .cursor_pointer()
-                    .text_size(theme.ui_px(12.))
-                    .hover(|style| style.bg(theme.bg_hover))
-                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                        entity.update(cx, |page, cx| page.refresh(cx));
-                    })
-                    .child(tr!("view.try_again"))
-                    .into_any_element();
+                let action = press(
+                    button_frame(div().id("usage-retry"), &theme, ButtonSize::Medium)
+                        .group(BUTTON_GROUP)
+                        .mt(DynamicSpacing::Base02.px(&theme))
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(theme.bg_raised)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.bg_hover)),
+                )
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    entity.update(cx, |page, cx| page.refresh(cx));
+                })
+                .child(tr!("view.try_again"))
+                .into_any_element();
                 return self.message_state(
                     theme,
                     "icons/info.svg",
@@ -672,7 +676,7 @@ impl UsagePage {
                     .w_full()
                     .flex()
                     .flex_col()
-                    .gap(theme.space(20.))
+                    .gap(DynamicSpacing::Base20.px(&theme))
                     .child(self.summary_card(snapshot, theme, kpi_cols, cx))
                     .child(self.activity_section(snapshot, theme, cx));
                 if !snapshot.insights.is_empty() {
@@ -698,7 +702,7 @@ impl UsagePage {
                     .w_full()
                     .flex()
                     .flex_col()
-                    .gap(theme.space(20.))
+                    .gap(DynamicSpacing::Base20.px(&theme))
                     .child(self.breakdown_section(snapshot, theme, cx))
                     .child(self.details_section(snapshot, theme, window, cx))
                     .into_any_element(),
@@ -816,20 +820,13 @@ impl UsagePage {
         let entity = cx.entity();
         Some(
             press(
-                div()
-                    .id("usage-state-clear")
+                button_frame(div().id("usage-state-clear"), &theme, ButtonSize::Medium)
                     .group(BUTTON_GROUP)
-                    .mt(px(2.))
-                    .h(px(28.))
-                    .px(px(10.))
-                    .rounded(px(7.))
+                    .mt(DynamicSpacing::Base02.px(&theme))
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.bg_raised)
-                    .flex()
-                    .items_center()
                     .cursor_pointer()
-                    .text_size(theme.ui_px(12.))
                     .hover(|style| style.bg(theme.bg_hover)),
             )
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
@@ -847,7 +844,7 @@ impl UsagePage {
             div()
                 .w(px(width))
                 .h(px(height))
-                .rounded(px(4.))
+                .rounded(Radius::Small.px(&theme))
                 .bg(theme.trough)
                 .into_any_element()
         };
@@ -857,7 +854,7 @@ impl UsagePage {
             div()
                 .w_full()
                 .flex_none()
-                .rounded(px(12.))
+                .rounded(Radius::XLarge.px(&theme))
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.bg_raised)
@@ -868,7 +865,7 @@ impl UsagePage {
                     div()
                         .flex_none()
                         .h(px(42.))
-                        .px(px(14.))
+                        .px(DynamicSpacing::Base12.px(&theme))
                         .flex()
                         .items_center()
                         .border_b_1()
@@ -884,18 +881,18 @@ impl UsagePage {
             .w_full()
             .flex()
             .flex_wrap()
-            .gap(px(1.))
+            .gap(DynamicSpacing::Base01.px(&theme))
             .bg(theme.border);
         for _ in 0..4 {
             grid = grid.child(
                 div()
                     .flex_1()
                     .min_w(px(150.))
-                    .p(px(14.))
+                    .p(DynamicSpacing::Base12.px(&theme))
                     .bg(theme.bg_raised)
                     .flex()
                     .flex_col()
-                    .gap(px(8.))
+                    .gap(DynamicSpacing::Base08.px(&theme))
                     .child(bar(56., 10.))
                     .child(bar(88., 18.))
                     .child(bar(112., 10.)),
@@ -904,27 +901,27 @@ impl UsagePage {
 
         // Activity: the switcher row, the plot, then the always-open bands.
         let activity = div()
-            .p(px(14.))
+            .p(DynamicSpacing::Base12.px(&theme))
             .w_full()
             .flex()
             .flex_col()
-            .gap(px(12.))
+            .gap(DynamicSpacing::Base12.px(&theme))
             .child(bar(320., 26.))
-            .child(div().h(px(168.)).w_full().rounded(px(8.)).bg(theme.trough))
-            .child(div().h(px(96.)).w_full().rounded(px(8.)).bg(theme.trough))
-            .child(div().h(px(72.)).w_full().rounded(px(8.)).bg(theme.trough));
+            .child(div().h(px(168.)).w_full().rounded(Radius::Large.px(&theme)).bg(theme.trough))
+            .child(div().h(px(96.)).w_full().rounded(Radius::Large.px(&theme)).bg(theme.trough))
+            .child(div().h(px(72.)).w_full().rounded(Radius::Large.px(&theme)).bg(theme.trough));
 
         // Records: a header rule and a handful of rows.
-        let mut records = div().w_full().pt(theme.space(12.)).flex().flex_col();
+        let mut records = div().w_full().pt(DynamicSpacing::Base12.px(&theme)).flex().flex_col();
         for ix in 0..6 {
             records = records.child(
                 div()
                     .h(px(26.))
                     .w_full()
-                    .px(px(14.))
+                    .px(DynamicSpacing::Base12.px(&theme))
                     .flex()
                     .items_center()
-                    .gap(theme.space(12.))
+                    .gap(DynamicSpacing::Base12.px(&theme))
                     .when(ix > 0, |row| row.border_t_1().border_color(theme.border))
                     .child(bar(140., 10.))
                     .child(div().flex_1())
@@ -943,16 +940,16 @@ impl UsagePage {
                 .child(
                     div()
                         .w_full()
-                        .pb(theme.space(12.))
+                        .pb(DynamicSpacing::Base12.px(&theme))
                         .flex()
                         .flex_col()
-                        .gap(px(4.))
+                        .gap(DynamicSpacing::Base04.px(&theme))
                         .border_b_1()
                         .border_color(theme.border)
                         .child(bar(120., 12.))
                         .child(bar(220., 10.)),
                 )
-                .child(div().pt(theme.space(12.)).child(body))
+                .child(div().pt(DynamicSpacing::Base12.px(&theme)).child(body))
                 .into_any_element()
         };
 
@@ -961,7 +958,7 @@ impl UsagePage {
                 .w_full()
                 .flex()
                 .flex_col()
-                .gap(px(4.))
+                .gap(DynamicSpacing::Base04.px(&theme))
                 .child(bar(title_w, 10.))
                 .child(bar(desc_w, 10.))
                 .into_any_element()
@@ -972,7 +969,7 @@ impl UsagePage {
                 .w_full()
                 .flex()
                 .flex_col()
-                .gap(theme.space(20.))
+                .gap(DynamicSpacing::Base20.px(&theme))
                 .child(heading(72., 280.))
                 .child(shell(grid.into_any_element()))
                 .child(section_shell(activity.into_any_element())),
@@ -980,17 +977,17 @@ impl UsagePage {
                 .w_full()
                 .flex()
                 .flex_col()
-                .gap(theme.space(20.))
+                .gap(DynamicSpacing::Base20.px(&theme))
                 .child(heading(64., 320.))
                 .child(section_shell(
                     div()
-                        .p(px(14.))
+                        .p(DynamicSpacing::Base12.px(&theme))
                         .w_full()
                         .flex()
                         .flex_col()
-                        .gap(px(12.))
+                        .gap(DynamicSpacing::Base12.px(&theme))
                         .child(bar(220., 26.))
-                        .child(div().h(px(96.)).w_full().rounded(px(8.)).bg(theme.trough))
+                        .child(div().h(px(96.)).w_full().rounded(Radius::Large.px(&theme)).bg(theme.trough))
                         .into_any_element(),
                 ))
                 .child(section_shell(records.into_any_element())),
@@ -1024,7 +1021,7 @@ impl UsagePage {
                         .w_full()
                         .flex()
                         .justify_center()
-                        .text_size(theme.ui_px(11.))
+                        .text_size(TextSize::Small.px(&theme))
                         .text_color(theme.text_3)
                         .child(note),
                 )
@@ -1056,7 +1053,7 @@ impl UsagePage {
             .flex_col()
             .items_center()
             .justify_center()
-            .gap(px(10.))
+            .gap(DynamicSpacing::Base08.px(&theme))
             .child(
                 div()
                     .size(px(44.))
@@ -1065,11 +1062,15 @@ impl UsagePage {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(icon(icon_path, 20., theme.text_3)),
+                    .child(icon(
+                        icon_path,
+                        IconSize::Custom(20. / 16.).px(&theme),
+                        theme.text_3,
+                    )),
             )
             .child(
                 div()
-                    .text_size(theme.ui_px(15.))
+                    .text_size(TextSize::Large.px(&theme))
                     .line_height(theme.ui_px(20.))
                     .font_weight(FontWeight::MEDIUM)
                     .child(title.to_string()),
@@ -1078,7 +1079,7 @@ impl UsagePage {
                 div()
                     .max_w(px(440.))
                     .text_align(gpui::TextAlign::Center)
-                    .text_size(theme.ui_px(12.))
+                    .text_size(TextSize::Small.px(&theme))
                     .text_color(theme.text_3)
                     .child(body.to_string()),
             )
@@ -1118,11 +1119,11 @@ impl UsagePage {
                     .id(SharedString::from(format!("usage-kpi-{row_ix}-{col_ix}")))
                     .flex_1()
                     .min_w(px(150.))
-                    .px(px(14.))
-                    .py(px(13.))
+                    .px(DynamicSpacing::Base12.px(&theme))
+                    .py(DynamicSpacing::Base12.px(&theme))
                     .flex()
                     .flex_col()
-                    .gap(px(6.))
+                    .gap(DynamicSpacing::Base06.px(&theme))
                     .when(row_ix > 0, |cell| {
                         cell.border_t_1().border_color(theme.border)
                     })
@@ -1135,7 +1136,7 @@ impl UsagePage {
                     })
                     .child(
                         div()
-                            .text_size(theme.ui_px(11.))
+                            .text_size(TextSize::Small.px(&theme))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text_3)
                             .child(cell.label.clone()),
@@ -1150,7 +1151,7 @@ impl UsagePage {
                     )
                     .child(
                         div()
-                            .text_size(theme.ui_px(11.5))
+                            .text_size(TextSize::Small.px(&theme))
                             .text_color(theme.text_3)
                             .child(cell.sub.clone()),
                     );
@@ -1174,8 +1175,8 @@ impl UsagePage {
         let body = div().w_full().flex().flex_col().child(grid).child(
             div()
                 .w_full()
-                .px(px(14.))
-                .py(px(10.))
+                .px(DynamicSpacing::Base12.px(&theme))
+                .py(DynamicSpacing::Base08.px(&theme))
                 .border_t_1()
                 .border_color(theme.border)
                 .child(self.summary_strip(snapshot, theme, cx)),
@@ -1384,19 +1385,17 @@ impl UsagePage {
         if totals.errors > 0 {
             let fail_entity = cx.entity();
             values.push(
-                div()
-                    .id("usage-summary-failures")
-                    .flex()
-                    .items_center()
-                    .cursor_pointer()
-                    .text_size(theme.ui_px(11.5))
-                    .text_color(theme.crit)
-                    .hover(|style| style.text_color(theme.text))
-                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                        fail_entity.update(cx, |page, cx| page.set_errors_only(true, cx));
-                    })
-                    .child(tr!("view.view_failures"))
-                    .into_any_element(),
+                press(
+                    button_frame(div().id("usage-summary-failures"), &theme, ButtonSize::Compact)
+                        .text_color(theme.crit)
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(theme.text)),
+                )
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    fail_entity.update(cx, |page, cx| page.set_errors_only(true, cx));
+                })
+                .child(tr!("view.view_failures"))
+                .into_any_element(),
             );
         }
 
@@ -1404,15 +1403,15 @@ impl UsagePage {
             .w_full()
             .flex()
             .items_start()
-            .gap(px(12.))
+            .gap(DynamicSpacing::Base12.px(&theme))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .flex()
                     .flex_wrap()
-                    .gap_x(px(20.))
-                    .gap_y(px(6.))
+                    .gap_x(DynamicSpacing::Base20.px(&theme))
+                    .gap_y(DynamicSpacing::Base06.px(&theme))
                     .children(values),
             )
             .into_any_element()
@@ -1425,7 +1424,7 @@ impl UsagePage {
             .w_full()
             .flex()
             .flex_col()
-            .gap(px(8.))
+            .gap(DynamicSpacing::Base08.px(&theme))
             .children(insights.iter().map(|insight| {
                 let (path, color) = match insight.tone {
                     Tone::Positive => ("icons/check.svg", theme.ok_green),
@@ -1435,9 +1434,9 @@ impl UsagePage {
                 div()
                     .flex()
                     .items_start()
-                    .gap(px(8.))
-                    .text_size(theme.ui_px(12.))
-                    .child(div().pt(px(1.)).child(icon(path, 12., color)))
+                    .gap(DynamicSpacing::Base08.px(&theme))
+                    .text_size(TextSize::Small.px(&theme))
+                    .child(div().pt(DynamicSpacing::Base01.px(&theme)).child(icon(path, IconSize::XSmall.px(&theme), color)))
                     .child(
                         div()
                             .flex_1()
@@ -1467,104 +1466,47 @@ impl UsagePage {
         // Metric switcher: one visualization, several measures (§19). A metric
         // with no source data stays visible but disabled, and the line under
         // the chart says why.
-        let mut tabs = div()
-            .flex()
-            .items_center()
-            .gap(px(2.))
-            .p(px(2.))
-            .rounded(px(8.))
-            .border_1()
-            .border_color(theme.border)
-            .bg(theme.bg_main);
-        let mut unavailable: Vec<&str> = Vec::new();
-        for option in ChartMetric::ALL {
-            let available = option.available(&snapshot.summary);
-            if !available {
-                unavailable.push(option.as_str());
-            }
-            let active = option == metric;
-            let entity = cx.entity();
-            tabs = tabs.child(
-                div()
-                    .id(SharedString::from(format!(
-                        "usage-metric-{}",
-                        option.as_str()
-                    )))
-                    .h(px(24.))
-                    .px(px(9.))
-                    .rounded(px(6.))
-                    .flex()
-                    .items_center()
-                    .text_size(theme.ui_px(11.5))
-                    .when(active, |tab| {
-                        tab.bg(theme.active)
-                            .text_color(theme.active_fg)
-                            .font_weight(FontWeight::MEDIUM)
-                    })
-                    .when(!active, |tab| {
-                        tab.text_color(if available {
-                            theme.text_3
-                        } else {
-                            theme.text_3.opacity(0.55)
-                        })
-                    })
-                    .when(available && !active, |tab| {
-                        tab.cursor_pointer()
-                            .hover(|style| style.bg(theme.bg_hover).text_color(theme.text_2))
-                            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                                entity.update(cx, |page, cx| page.set_metric(option, cx));
-                            })
-                    })
-                    .child(option.label()),
-            );
-        }
+        let unavailable: Vec<&str> = ChartMetric::ALL
+            .iter()
+            .filter(|option| !option.available(&snapshot.summary))
+            .map(|option| option.as_str())
+            .collect();
+        let tabs = segmented(
+            "usage-metric",
+            &ChartMetric::ALL,
+            metric,
+            |option| option.label(),
+            |option| option.as_str(),
+            |option| option.available(&snapshot.summary),
+            true,
+            theme,
+            {
+                let entity = cx.entity();
+                move |option, _, cx| {
+                    entity.update(cx, |page, cx| page.set_metric(option, cx));
+                }
+            },
+        );
 
         // Latency register selector (§20): only offered when the window has
         // enough observations for percentiles to be meaningful.
         let latency_selector = (metric == ChartMetric::Latency).then(|| {
-            let mut segment = div()
-                .flex()
-                .items_center()
-                .gap(px(2.))
-                .p(px(2.))
-                .rounded(px(8.))
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.bg_main);
-            for choice in LatencyMetric::ALL {
-                let available = choice.available(&snapshot.latency);
-                let active = choice == latency_metric;
-                let entity = cx.entity();
-                segment = segment.child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "usage-latency-{}",
-                            choice.as_str()
-                        )))
-                        .h(px(24.))
-                        .px(px(9.))
-                        .rounded(px(6.))
-                        .flex()
-                        .items_center()
-                        .text_size(theme.ui_px(11.5))
-                        .when(active, |tab| {
-                            tab.bg(theme.active)
-                                .text_color(theme.active_fg)
-                                .font_weight(FontWeight::MEDIUM)
-                        })
-                        .when(!active, |tab| tab.text_color(theme.text_3))
-                        .when(available && !active, |tab| {
-                            tab.cursor_pointer()
-                                .hover(|style| style.bg(theme.bg_hover).text_color(theme.text_2))
-                                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                                    entity
-                                        .update(cx, |page, cx| page.set_latency_metric(choice, cx));
-                                })
-                        })
-                        .child(choice.label()),
-                );
-            }
-            segment.into_any_element()
+            segmented(
+                "usage-latency",
+                &LatencyMetric::ALL,
+                latency_metric,
+                |choice| choice.label(),
+                |choice| choice.as_str(),
+                |choice| choice.available(&snapshot.latency),
+                true,
+                theme,
+                {
+                    let entity = cx.entity();
+                    move |choice, _, cx| {
+                        entity.update(cx, |page, cx| page.set_latency_metric(choice, cx));
+                    }
+                },
+            )
         });
 
         // The metric switcher sits in the body, above the plot: a row of
@@ -1573,7 +1515,7 @@ impl UsagePage {
         let selectors = div()
             .flex()
             .items_center()
-            .gap(px(8.))
+            .gap(DynamicSpacing::Base08.px(&theme))
             .flex_wrap()
             .child(tabs)
             .children(latency_selector);
@@ -1624,7 +1566,7 @@ impl UsagePage {
             .w_full()
             .flex()
             .flex_col()
-            .gap(px(12.))
+            .gap(DynamicSpacing::Base12.px(&theme))
             .child(selectors)
             .child(chart::timeline(
                 "usage-timeline",
@@ -1645,7 +1587,7 @@ impl UsagePage {
         if !reason.is_empty() {
             content = content.child(
                 div()
-                    .text_size(theme.ui_px(11.))
+                    .text_size(TextSize::Small.px(&theme))
                     .text_color(theme.text_3)
                     .child(reason),
             );
@@ -1822,7 +1764,7 @@ impl UsagePage {
             .w_full()
             .flex()
             .flex_col()
-            .gap(theme.space(12.))
+            .gap(DynamicSpacing::Base12.px(&theme))
             .child(toolbar)
             .child(table)
             .child(self.series_totals(snapshot, &result, theme))
@@ -1853,6 +1795,7 @@ impl UsagePage {
                 chip,
                 false,
                 Corner::TopRight,
+                theme,
                 || div().into_any_element(),
             );
         }
@@ -1862,6 +1805,7 @@ impl UsagePage {
             chip,
             true,
             Corner::TopRight,
+            theme,
             move || panel,
         )
     }
@@ -1934,6 +1878,7 @@ impl UsagePage {
             size_chip,
             size_open,
             Corner::TopRight,
+            theme,
             move || size_panel.unwrap_or_else(|| div().into_any_element()),
         );
 
@@ -1979,6 +1924,7 @@ impl UsagePage {
                 chip,
                 false,
                 Corner::TopRight,
+                theme,
                 || div().into_any_element(),
             );
         }
@@ -1988,6 +1934,7 @@ impl UsagePage {
             chip,
             true,
             Corner::TopRight,
+            theme,
             move || panel,
         )
     }
@@ -2050,6 +1997,7 @@ impl UsagePage {
             size_chip,
             size_open,
             Corner::TopRight,
+            theme,
             move || size_panel.unwrap_or_else(|| div().into_any_element()),
         );
         let prev = filters::outline_button(
@@ -2103,6 +2051,7 @@ impl UsagePage {
                 chip,
                 false,
                 Corner::TopRight,
+                theme,
                 || div().into_any_element(),
             );
         }
@@ -2112,6 +2061,7 @@ impl UsagePage {
             chip,
             true,
             Corner::TopRight,
+            theme,
             move || panel,
         )
     }
@@ -2165,6 +2115,7 @@ impl UsagePage {
             size_chip,
             size_open,
             Corner::TopRight,
+            theme,
             move || size_panel.unwrap_or_else(|| div().into_any_element()),
         );
         let prev = filters::outline_button(
@@ -2210,12 +2161,12 @@ impl UsagePage {
             items.insert(3, ("p99", format::duration_ms(latency.p99_ms as f64)));
         }
         div()
-            .pt(px(10.))
+            .pt(DynamicSpacing::Base08.px(&theme))
             .flex()
             .items_center()
-            .gap(px(14.))
+            .gap(DynamicSpacing::Base12.px(&theme))
             .flex_wrap()
-            .text_size(theme.ui_px(11.))
+            .text_size(TextSize::Small.px(&theme))
             .child(
                 div()
                     .text_color(theme.text_3)
@@ -2226,14 +2177,14 @@ impl UsagePage {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(5.))
+                    .gap(DynamicSpacing::Base04.px(&theme))
                     .child(div().text_color(theme.text_3).child(label))
                     .child(div().font(num_font()).text_color(theme.text_2).child(value))
                     .into_any_element()
             }))
             .child(
                 div()
-                    .text_size(theme.ui_px(10.5))
+                    .text_size(TextSize::XSmall.px(&theme))
                     .text_color(theme.text_3)
                     .child(if latency.has_percentiles() {
                         tr!("usage.sub_measured", count = format::count(latency.samples))
@@ -2267,6 +2218,8 @@ impl UsagePage {
             tab,
             |choice| choice.label(),
             |choice| choice.as_str(),
+            |_| true,
+            true,
             theme,
             {
                 let entity = cx.entity();
@@ -2350,7 +2303,7 @@ impl UsagePage {
             .w_full()
             .flex()
             .flex_col()
-            .gap(theme.space(12.))
+            .gap(DynamicSpacing::Base12.px(&theme))
             .child(tabs)
             .child(chart)
             .child(toolbar)
@@ -2392,6 +2345,7 @@ impl UsagePage {
                 chip,
                 false,
                 Corner::TopRight,
+                theme,
                 || div().into_any_element(),
             );
         }
@@ -2401,6 +2355,7 @@ impl UsagePage {
             chip,
             true,
             Corner::TopRight,
+            theme,
             move || panel,
         )
     }
@@ -2488,6 +2443,7 @@ impl UsagePage {
             size_chip,
             size_open,
             Corner::TopRight,
+            theme,
             move || size_panel.unwrap_or_else(|| div().into_any_element()),
         );
 
@@ -2652,7 +2608,7 @@ impl UsagePage {
         theme: Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut chart = div().w_full().pb(px(12.)).flex().flex_col().gap(px(2.));
+        let mut chart = div().w_full().pb(DynamicSpacing::Base12.px(&theme)).flex().flex_col().gap(DynamicSpacing::Base02.px(&theme));
         if rows.is_empty() {
             chart = chart.child(empty_line(&tr!("usage.no_usage_in_range"), theme));
         }
@@ -2670,12 +2626,12 @@ impl UsagePage {
                         "usage-breakdown-chart-{kind}-{}",
                         row.label
                     )))
-                    .px(px(8.))
-                    .py(px(5.))
-                    .rounded(px(6.))
+                    .px(DynamicSpacing::Base08.px(&theme))
+                    .py(DynamicSpacing::Base04.px(&theme))
+                    .rounded(Radius::Medium.px(&theme))
                     .flex()
                     .items_center()
-                    .gap(px(10.))
+                    .gap(DynamicSpacing::Base08.px(&theme))
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.bg_hover))
                     .child(chart_label(&row.label, row.sub.as_deref(), theme))
@@ -2703,7 +2659,7 @@ impl UsagePage {
 
     /// The ranked bar chart above the Tools table: the busiest tools as bars.
     fn tools_chart(&self, rows: &[ToolRow], total: u64, theme: Theme) -> AnyElement {
-        let mut chart = div().w_full().pb(px(12.)).flex().flex_col().gap(px(2.));
+        let mut chart = div().w_full().pb(DynamicSpacing::Base12.px(&theme)).flex().flex_col().gap(DynamicSpacing::Base02.px(&theme));
         if rows.is_empty() {
             chart = chart.child(empty_line(&tr!("usage.no_tool_calls_in_range"), theme));
         }
@@ -2730,12 +2686,12 @@ impl UsagePage {
                         row.label
                     )))
                     .tooltip(move |_, cx| cx.new(|_| Tooltip::new(tooltip.clone())).into())
-                    .px(px(8.))
-                    .py(px(5.))
-                    .rounded(px(6.))
+                    .px(DynamicSpacing::Base08.px(&theme))
+                    .py(DynamicSpacing::Base04.px(&theme))
+                    .rounded(Radius::Medium.px(&theme))
                     .flex()
                     .items_center()
-                    .gap(px(10.))
+                    .gap(DynamicSpacing::Base08.px(&theme))
                     .child(chart_label(
                         &row.label,
                         Some(row.class.label().as_str()),
@@ -2773,13 +2729,13 @@ impl UsagePage {
             for column in &columns {
                 let cell = match column.id {
                     "tool" => cell_shell(column)
-                        .gap(px(8.))
+                        .gap(DynamicSpacing::Base08.px(&theme))
                         .child(
                             div()
                                 .flex_none()
                                 .max_w(px(column.width - 96.))
                                 .truncate()
-                                .text_size(theme.ui_px(13.))
+                                .text_size(TextSize::Default.px(&theme))
                                 .text_color(theme.text)
                                 .child(row.label.clone()),
                         )
@@ -2788,7 +2744,7 @@ impl UsagePage {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(theme.ui_px(10.5))
+                                .text_size(TextSize::XSmall.px(&theme))
                                 .text_color(theme.text_3)
                                 .child(row.class.label()),
                         )
@@ -2891,7 +2847,7 @@ impl UsagePage {
         let mut stack = div()
             .w_full()
             .h(px(8.))
-            .rounded(px(4.))
+            .rounded(Radius::Small.px(&theme))
             .overflow_hidden()
             .flex()
             .bg(theme.trough);
@@ -2907,7 +2863,7 @@ impl UsagePage {
             );
         }
 
-        let mut content = div().flex().flex_col().gap(px(10.)).child(stack);
+        let mut content = div().flex().flex_col().gap(DynamicSpacing::Base08.px(&theme)).child(stack);
         for (label, value, color, metric) in slices.iter() {
             // Clicking a component points the main chart at it (§19); hover
             // surfaces the exact figure (§42).
@@ -2928,22 +2884,22 @@ impl UsagePage {
                 div()
                     .id(SharedString::from(format!("usage-composition-{label}")))
                     .tooltip(move |_, cx| cx.new(|_| Tooltip::new(tooltip.clone())).into())
-                    .px(px(8.))
-                    .py(px(4.))
-                    .rounded(px(6.))
+                    .px(DynamicSpacing::Base08.px(&theme))
+                    .py(DynamicSpacing::Base04.px(&theme))
+                    .rounded(Radius::Medium.px(&theme))
                     .flex()
                     .items_center()
-                    .gap(px(10.))
+                    .gap(DynamicSpacing::Base08.px(&theme))
                     .cursor_pointer()
                     .hover(|style| style.bg(theme.bg_hover))
                     .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                         entity.update(cx, |page, cx| page.set_metric(metric, cx));
                     })
-                    .child(div().size(px(8.)).rounded(px(2.)).flex_none().bg(*color))
+                    .child(div().size(px(8.)).rounded(Radius::XSmall.px(&theme)).flex_none().bg(*color))
                     .child(
                         div()
                             .flex_1()
-                            .text_size(theme.ui_px(12.))
+                            .text_size(TextSize::Small.px(&theme))
                             .text_color(theme.text_2)
                             .child(label.clone()),
                     )
@@ -2951,7 +2907,7 @@ impl UsagePage {
                         div()
                             .whitespace_nowrap()
                             .font(num_font())
-                            .text_size(theme.ui_px(11.5))
+                            .text_size(TextSize::Small.px(&theme))
                             .text_color(theme.text)
                             .child(format::compact(*value)),
                     )
@@ -2961,7 +2917,7 @@ impl UsagePage {
                             .flex_none()
                             .whitespace_nowrap()
                             .font(num_font())
-                            .text_size(theme.ui_px(11.5))
+                            .text_size(TextSize::Small.px(&theme))
                             .text_color(theme.text_3)
                             .text_align(gpui::TextAlign::Right)
                             .child(share),
@@ -2971,8 +2927,8 @@ impl UsagePage {
         }
         content = content.child(
             div()
-                .px(px(8.))
-                .text_size(theme.ui_px(10.5))
+                .px(DynamicSpacing::Base08.px(&theme))
+                .text_size(TextSize::XSmall.px(&theme))
                 .text_color(theme.text_3)
                 .child(if total == 0 {
                     tr!("usage.no_tokens_in_range")
@@ -2998,7 +2954,7 @@ impl UsagePage {
         let cache = &snapshot.cache;
         let available = cache.is_available();
         let hit = cache.hit_rate;
-        let mut content = div().flex().flex_col().gap(px(10.));
+        let mut content = div().flex().flex_col().gap(DynamicSpacing::Base08.px(&theme));
         if !available {
             content = content.child(empty_line(&tr!("usage.cache_unavailable_range"), theme));
             return div().w_full().child(content).into_any_element();
@@ -3009,12 +2965,12 @@ impl UsagePage {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(7.))
+                    .gap(DynamicSpacing::Base06.px(&theme))
                     .child(
                         div()
                             .flex()
                             .items_baseline()
-                            .gap(px(8.))
+                            .gap(DynamicSpacing::Base08.px(&theme))
                             .child(
                                 div()
                                     .font(num_font())
@@ -3024,7 +2980,7 @@ impl UsagePage {
                             )
                             .child(
                                 div()
-                                    .text_size(theme.ui_px(11.5))
+                                    .text_size(TextSize::Small.px(&theme))
                                     .text_color(theme.text_3)
                                     .child(tr!("view.of_prompt_tokens_served_from_cache")),
                             ),
@@ -3033,14 +2989,14 @@ impl UsagePage {
                         div()
                             .w_full()
                             .h(px(6.))
-                            .rounded(px(3.))
+                            .rounded(Radius::Full.px(&theme))
                             .bg(theme.trough)
                             .overflow_hidden()
                             .child(
                                 div()
                                     .h_full()
                                     .w(relative((rate / 100.0).clamp(0.0, 1.0) as f32))
-                                    .rounded(px(3.))
+                                    .rounded(Radius::Full.px(&theme))
                                     .bg(theme.accent),
                             ),
                     ),
@@ -3048,7 +3004,7 @@ impl UsagePage {
         }
 
         content = content.child(
-            div().flex().flex_col().gap(px(2.)).children(
+            div().flex().flex_col().gap(DynamicSpacing::Base02.px(&theme)).children(
                 [
                     (tr!("usage.cache_reads"), format::compact(cache.cache_read)),
                     (
@@ -3087,10 +3043,10 @@ impl UsagePage {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(5.))
+                    .gap(DynamicSpacing::Base04.px(&theme))
                     .child(
                         div()
-                            .text_size(theme.ui_px(10.5))
+                            .text_size(TextSize::XSmall.px(&theme))
                             .text_color(theme.text_3)
                             .child(tr!("view.hit_rate_over_time")),
                     )
@@ -3102,30 +3058,35 @@ impl UsagePage {
         let cached_only = self.filter().cached_only;
         content = content.child(
             div()
-                .px(px(8.))
+                .px(DynamicSpacing::Base08.px(&theme))
                 .flex()
                 .items_center()
-                .gap(px(6.))
-                .text_size(theme.ui_px(10.5))
+                .gap(DynamicSpacing::Base06.px(&theme))
+                .text_size(TextSize::XSmall.px(&theme))
                 .child(
                     div()
                         .text_color(theme.text_3)
                         .child(tr!("usage.hit_rate_formula")),
                 )
                 .child(
-                    div()
-                        .id("usage-cache-toggle")
+                    press(
+                        button_frame(
+                            div().id("usage-cache-toggle"),
+                            &theme,
+                            ButtonSize::Compact,
+                        )
                         .text_color(theme.text_2)
                         .cursor_pointer()
-                        .hover(|style| style.text_color(theme.accent))
-                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                            entity.update(cx, |page, cx| page.set_cached_only(!cached_only, cx));
-                        })
-                        .child(if cached_only {
-                            tr!("usage.show_all_requests")
-                        } else {
-                            tr!("usage.show_cached_only")
-                        }),
+                        .hover(|style| style.text_color(theme.accent)),
+                    )
+                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        entity.update(cx, |page, cx| page.set_cached_only(!cached_only, cx));
+                    })
+                    .child(if cached_only {
+                        tr!("usage.show_all_requests")
+                    } else {
+                        tr!("usage.show_cached_only")
+                    }),
                 ),
         );
 
@@ -3174,7 +3135,7 @@ impl UsagePage {
                 .w_full()
                 .flex()
                 .items_start()
-                .gap(px(16.))
+                .gap(DynamicSpacing::Base16.px(&theme))
                 .child(div().flex_1().min_w_0().child(composition))
                 .child(div().flex_1().min_w_0().child(cache))
                 .into_any_element()
@@ -3183,7 +3144,7 @@ impl UsagePage {
                 .w_full()
                 .flex()
                 .flex_col()
-                .gap(px(16.))
+                .gap(DynamicSpacing::Base16.px(&theme))
                 .child(composition)
                 .child(cache)
                 .into_any_element()
@@ -3209,6 +3170,8 @@ impl UsagePage {
             tab,
             |choice| choice.label(),
             |choice| choice.as_str(),
+            |_| true,
+            true,
             theme,
             {
                 let entity = cx.entity();
@@ -3217,7 +3180,7 @@ impl UsagePage {
                 }
             },
         );
-        let tabs_row = div().pb(theme.space(12.)).child(tabs);
+        let tabs_row = div().pb(DynamicSpacing::Base12.px(&theme)).child(tabs);
 
         let (meta, content) = match tab {
             DetailTab::Sessions => {
@@ -3244,7 +3207,7 @@ impl UsagePage {
                         .w_full()
                         .flex()
                         .flex_col()
-                        .gap(theme.space(12.))
+                        .gap(DynamicSpacing::Base12.px(&theme))
                         .child(tabs_row)
                         .child(toolbar)
                         .child(table)
@@ -3281,7 +3244,7 @@ impl UsagePage {
                         .w_full()
                         .flex()
                         .flex_col()
-                        .gap(theme.space(12.))
+                        .gap(DynamicSpacing::Base12.px(&theme))
                         .child(tabs_row)
                         .child(toolbar)
                         .child(table)
@@ -3321,7 +3284,7 @@ impl UsagePage {
                         .w_full()
                         .flex()
                         .flex_col()
-                        .gap(theme.space(12.))
+                        .gap(DynamicSpacing::Base12.px(&theme))
                         .child(tabs_row)
                         .child(toolbar)
                         .child(table)
@@ -3877,16 +3840,16 @@ impl UsagePage {
                 if key == BucketSort::Date {
                     line = line.child(
                         cell_shell(column)
-                            .gap(px(8.))
+                            .gap(DynamicSpacing::Base08.px(&theme))
                             .child(
                                 div()
-                                    .text_size(theme.ui_px(12.))
+                                    .text_size(TextSize::Small.px(&theme))
                                     .text_color(theme.text)
                                     .child(row.label.clone()),
                             )
                             .child(
                                 div()
-                                    .text_size(theme.ui_px(10.5))
+                                    .text_size(TextSize::XSmall.px(&theme))
                                     .text_color(theme.text_3)
                                     .child(granularity.label()),
                             ),
@@ -4011,6 +3974,7 @@ impl UsagePage {
                 chip,
                 false,
                 Corner::TopRight,
+                theme,
                 || div().into_any_element(),
             );
         }
@@ -4020,6 +3984,7 @@ impl UsagePage {
             chip,
             true,
             Corner::TopRight,
+            theme,
             move || panel,
         )
     }
@@ -4049,11 +4014,11 @@ impl UsagePage {
         Some(
             div()
                 .w_full()
-                .pt(theme.space(8.))
+                .pt(DynamicSpacing::Base08.px(&theme))
                 .flex()
                 .items_center()
-                .gap(px(12.))
-                .text_size(theme.ui_px(12.))
+                .gap(DynamicSpacing::Base12.px(&theme))
+                .text_size(TextSize::Small.px(&theme))
                 .child(div().text_color(theme.text_3).child(filtered))
                 .child(div().flex_1())
                 .child(div().text_color(theme.text_3).child(page))
@@ -4102,6 +4067,7 @@ impl UsagePage {
             size_chip,
             size_open,
             Corner::TopRight,
+            theme,
             move || size_panel.unwrap_or_else(|| div().into_any_element()),
         );
 
@@ -4236,13 +4202,8 @@ fn open_session_cell(
         .items_center()
         .justify_center()
         .child(
-            div()
+            icon_button_frame(div(), &theme, ButtonSize::Default)
                 .id(SharedString::from(format!("usage-open-{session}")))
-                .size(px(22.))
-                .rounded(px(5.))
-                .flex()
-                .items_center()
-                .justify_center()
                 .cursor_pointer()
                 .opacity(0.)
                 .group_hover("usage-row", |style| style.opacity(1.))
@@ -4253,7 +4214,11 @@ fn open_session_cell(
                     cx.stop_propagation();
                     page.update(cx, |page, cx| page.open_session(window, cx, session));
                 })
-                .child(icon("icons/arrow-up-right.svg", 12., theme.text_3)),
+                .child(icon(
+                    "icons/arrow-up-right.svg",
+                    IconSize::XSmall.px(&theme),
+                    theme.text_3,
+                )),
         )
         .into_any_element()
 }
@@ -4332,18 +4297,15 @@ fn session_context_menu(row: &SessionRow, theme: Theme, page: Entity<UsagePage>)
     anchored()
         .position_mode(gpui::AnchoredPositionMode::Local)
         .anchor(Corner::TopLeft)
-        .snap_to_window()
+        .snap_to_window_with_margin(popover::WINDOW_MARGIN)
         .child(deferred(context_menu_shell(theme, page, items)))
         .into_any_element()
 }
 
-/// The menu shell: the app's popover register, dismissed by an outside click.
+/// The menu shell, on Zed's context-menu metrics ([`context_menu_surface`]),
+/// dismissed by an outside click.
 fn context_menu_shell(theme: Theme, page: Entity<UsagePage>, items: Vec<AnyElement>) -> AnyElement {
-    div()
-        .id("usage-row-menu")
-        .min_w(px(220.))
-        .rounded(px(9.))
-        .popover_surface(theme)
+    context_menu_surface(div().id("usage-row-menu"), &theme)
         .flex()
         .flex_col()
         .overflow_hidden()
@@ -4356,16 +4318,13 @@ fn context_menu_shell(theme: Theme, page: Entity<UsagePage>, items: Vec<AnyEleme
         .into_any_element()
 }
 
-/// One row of a context menu.
+/// One row of a context menu ([`context_menu_entry`]).
 fn context_item(
     label: String,
     theme: Theme,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    div()
-        .px(px(10.))
-        .py(px(6.))
-        .text_size(theme.ui_px(12.))
+    context_menu_entry(div(), &theme)
         .text_color(theme.text)
         .cursor_pointer()
         .hover(|style| style.bg(theme.bg_hover))
@@ -4378,7 +4337,7 @@ fn context_item(
 }
 
 fn context_separator(theme: Theme) -> AnyElement {
-    div().h(px(1.)).w_full().bg(theme.border).into_any_element()
+    context_menu_separator(&theme).into_any_element()
 }
 
 // ── shared pieces ─────────────────────────────────────────────────────────
@@ -4405,9 +4364,9 @@ fn section(
         right,
         div()
             .w_full()
-            .px(px(SECTION_PAD))
-            .pt(px(SECTION_PAD))
-            .pb(px(SECTION_PAD))
+            .px(DynamicSpacing::Base12.px(&theme))
+            .pt(DynamicSpacing::Base12.px(&theme))
+            .pb(DynamicSpacing::Base12.px(&theme))
             .child(content)
             .into_any_element(),
         theme,
@@ -4430,16 +4389,16 @@ fn band(
         .w_full()
         .flex()
         .flex_col()
-        .gap(theme.space(20.))
+        .gap(DynamicSpacing::Base20.px(&theme))
         .child(
             div()
                 .w_full()
                 .flex()
                 .flex_col()
-                .gap(px(4.))
+                .gap(DynamicSpacing::Base04.px(&theme))
                 .child(
                     div()
-                        .text_size(theme.ui_px(11.))
+                        .text_size(TextSize::Small.px(&theme))
                         .line_height(theme.ui_px(14.))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text_3)
@@ -4447,7 +4406,7 @@ fn band(
                 )
                 .child(
                     div()
-                        .text_size(theme.ui_px(12.))
+                        .text_size(TextSize::Small.px(&theme))
                         .line_height(theme.ui_px(16.))
                         .text_color(theme.text_3)
                         .child(description.to_string()),
@@ -4465,9 +4424,9 @@ fn subpanel(label: &str, meta: Option<String>, content: AnyElement, theme: Theme
         .w_full()
         .flex()
         .flex_col()
-        .gap(px(10.))
-        .p(px(14.))
-        .rounded(px(10.))
+        .gap(DynamicSpacing::Base08.px(&theme))
+        .p(DynamicSpacing::Base12.px(&theme))
+        .rounded(Radius::Large.px(&theme))
         .border_1()
         .border_color(theme.border)
         .bg(theme.bg_main)
@@ -4475,17 +4434,17 @@ fn subpanel(label: &str, meta: Option<String>, content: AnyElement, theme: Theme
             div()
                 .flex()
                 .items_center()
-                .gap(px(8.))
+                .gap(DynamicSpacing::Base08.px(&theme))
                 .child(
                     div()
-                        .text_size(theme.ui_px(11.))
+                        .text_size(TextSize::Small.px(&theme))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.text_3)
                         .child(label.to_uppercase()),
                 )
                 .children(meta.map(|meta| {
                     div()
-                        .text_size(theme.ui_px(11.))
+                        .text_size(TextSize::Small.px(&theme))
                         .text_color(theme.text_3)
                         .child(meta)
                 })),
@@ -4508,7 +4467,7 @@ fn card(
         .id(SharedString::from(id))
         .flex_none()
         .w_full()
-        .rounded(px(12.))
+        .rounded(Radius::XLarge.px(&theme))
         .border_1()
         .border_color(theme.border)
         .bg(theme.bg_raised)
@@ -4518,11 +4477,11 @@ fn card(
         .child(
             div()
                 .flex_none()
-                .px(px(14.))
-                .py(px(12.))
+                .px(DynamicSpacing::Base12.px(&theme))
+                .py(DynamicSpacing::Base12.px(&theme))
                 .flex()
                 .flex_col()
-                .gap(px(4.))
+                .gap(DynamicSpacing::Base04.px(&theme))
                 .border_b_1()
                 .border_color(theme.border)
                 .child(
@@ -4530,10 +4489,10 @@ fn card(
                         .w_full()
                         .flex()
                         .items_center()
-                        .gap(px(10.))
+                        .gap(DynamicSpacing::Base08.px(&theme))
                         .child(
                             div()
-                                .text_size(theme.ui_px(15.))
+                                .text_size(TextSize::Large.px(&theme))
                                 .line_height(theme.ui_px(20.))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.text)
@@ -4541,7 +4500,7 @@ fn card(
                         )
                         .children(meta.map(|meta| {
                             div()
-                                .text_size(theme.ui_px(11.))
+                                .text_size(TextSize::Small.px(&theme))
                                 .text_color(theme.text_3)
                                 .child(meta)
                         }))
@@ -4550,7 +4509,7 @@ fn card(
                 )
                 .children(description.map(|description| {
                     div()
-                        .text_size(theme.ui_px(12.))
+                        .text_size(TextSize::Small.px(&theme))
                         .line_height(theme.ui_px(16.))
                         .text_color(theme.text_3)
                         .child(description.to_string())
@@ -4567,14 +4526,28 @@ fn card(
 /// can be cloned into every option.
 type SegmentPick<T> = Rc<dyn Fn(T, &mut Window, &mut App)>;
 
-/// A compact segmented control: one active segment, the rest quiet. Reuses the
-/// metric switcher's register so every tab row on the page reads the same.
+/// A segmented control: one active segment, the rest quiet. The group is
+/// joined the way the settings card's "One at a time / All" control is — no
+/// gap, a shared hairline between neighbours, and only the group's outer
+/// corners round. Height, horizontal padding, label size, and radius all come
+/// from the button tokens ([`button_frame`] at [`ButtonSize::Medium`]), so the
+/// group lines up with the page's chips and buttons.
+///
+/// `inset` picks the resting fill for the surface the group sits on, exactly as
+/// [`filters::chip`] does: `bg_raised` on the canvas, `bg_main` inside a raised
+/// card so the inactive segments read as recessed wells instead of vanishing
+/// into the card. `enabled` keeps a segment that has no data yet visible but
+/// inert — the chart's metric switcher dims a metric it cannot plot rather
+/// than dropping it and reflowing the group.
+#[allow(clippy::too_many_arguments)]
 fn segmented<T>(
     prefix: &'static str,
     options: &[T],
     active: T,
     label: impl Fn(T) -> String,
     key: impl Fn(T) -> &'static str,
+    enabled: impl Fn(T) -> bool,
+    inset: bool,
     theme: Theme,
     on_pick: impl Fn(T, &mut Window, &mut App) + 'static,
 ) -> AnyElement
@@ -4582,39 +4555,48 @@ where
     T: Copy + PartialEq + 'static,
 {
     let on_pick: SegmentPick<T> = Rc::new(on_pick);
-    let mut row = div()
-        .flex()
-        .items_center()
-        .gap(px(2.))
-        .p(px(2.))
-        .rounded(px(8.))
-        .border_1()
-        .border_color(theme.border)
-        .bg(theme.bg_main);
-    for option in options.iter().copied() {
+    let resting = if inset { theme.bg_main } else { theme.bg_raised };
+    let radius = button::RADIUS.px(&theme);
+    let many = options.len() > 1;
+    let last = options.len().saturating_sub(1);
+    let mut row = div().flex().items_center();
+    for (ix, option) in options.iter().copied().enumerate() {
         let is_active = option == active;
+        let is_enabled = enabled(option);
         let handler = on_pick.clone();
         row = row.child(
-            div()
+            button_frame(div(), &theme, ButtonSize::Medium)
                 .id(SharedString::from(format!("{prefix}-{}", key(option))))
-                .h(px(24.))
-                .px(px(9.))
-                .rounded(px(6.))
-                .flex()
-                .items_center()
-                .text_size(theme.ui_px(11.5))
+                .rounded_none()
+                .border_1()
+                .border_color(theme.border)
+                // One control: only the outer corners round, and the segments
+                // share the hairline between them.
+                .when(!many, |tab| tab.rounded(radius))
+                .when(many && ix == 0, |tab| tab.rounded_l(radius))
+                .when(many && ix == last, |tab| tab.rounded_r(radius).border_l_0())
+                .when(many && ix > 0 && ix < last, |tab| tab.border_l_0())
                 .when(is_active, |tab| {
                     tab.bg(theme.active)
                         .text_color(theme.active_fg)
                         .font_weight(FontWeight::MEDIUM)
-                })
-                .when(!is_active, |tab| {
-                    tab.text_color(theme.text_3)
                         .cursor_pointer()
-                        .hover(|style| style.bg(theme.bg_hover).text_color(theme.text_2))
+                })
+                .when(!is_active && is_enabled, |tab| {
+                    tab.bg(resting)
+                        .text_color(theme.text_2)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.bg_hover))
                         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                             handler(option, window, cx)
                         })
+                })
+                // A metric with no source data stays visible but disabled, so
+                // the group keeps its shape as availability changes.
+                .when(!is_active && !is_enabled, |tab| {
+                    tab.bg(resting)
+                        .text_color(theme.text_3.opacity(0.55))
+                        .cursor_default()
                 })
                 .child(label(option)),
         );
@@ -4625,26 +4607,11 @@ where
 /// A search field, shared by the Sessions table and the Breakdown table so both
 /// read the same.
 fn search_box(input: &Entity<ComposerInput>, theme: Theme) -> AnyElement {
-    div()
+    picker_search_frame(div(), &theme)
         .flex_1()
         .min_w(px(180.))
-        .h(px(32.))
-        .px(px(12.))
-        .rounded(px(8.))
-        .bg(theme.bg_main)
-        .border_1()
-        .border_color(theme.border)
-        .flex()
-        .items_center()
-        .gap(px(8.))
-        .child(icon("icons/search.svg", 13., theme.text_3))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_size(theme.ui_px(13.))
-                .child(input.clone()),
-        )
+        .child(icon("icons/search.svg", IconSize::Small.px(&theme), theme.text_3))
+        .child(div().flex_1().min_w_0().child(input.clone()))
         .into_any_element()
 }
 
@@ -4655,7 +4622,7 @@ fn table_toolbar(search: AnyElement, columns: AnyElement, theme: Theme) -> AnyEl
         .w_full()
         .flex()
         .items_center()
-        .gap(theme.space(8.))
+        .gap(DynamicSpacing::Base08.px(&theme))
         .child(search)
         .child(columns)
         .into_any_element()
@@ -4674,30 +4641,30 @@ fn table_pager(
 ) -> AnyElement {
     div()
         .w_full()
-        .pt(theme.space(12.))
+        .pt(DynamicSpacing::Base12.px(&theme))
         .flex()
         .items_center()
-        .gap(px(8.))
+        .gap(DynamicSpacing::Base08.px(&theme))
         .child(
             div()
                 .flex_1()
                 .min_w_0()
-                .text_size(theme.ui_px(13.))
+                .text_size(TextSize::Default.px(&theme))
                 .text_color(theme.text_3)
                 .child(summary),
         )
         .child(
             div()
-                .text_size(theme.ui_px(12.))
+                .text_size(TextSize::Small.px(&theme))
                 .text_color(theme.text_3)
                 .child(tr!("view.rows")),
         )
         .child(size_control)
         .child(
             div()
-                .px(px(2.))
+                .px(DynamicSpacing::Base02.px(&theme))
                 .font(num_font())
-                .text_size(theme.ui_px(12.))
+                .text_size(TextSize::Small.px(&theme))
                 .text_color(theme.text_3)
                 .child(format!("{current}/{pages}")),
         )
@@ -4716,14 +4683,14 @@ fn chart_label(label: &str, sub: Option<&str>, theme: Theme) -> AnyElement {
         .child(
             div()
                 .truncate()
-                .text_size(theme.ui_px(12.))
+                .text_size(TextSize::Small.px(&theme))
                 .text_color(theme.text)
                 .child(label.to_string()),
         )
         .children(sub.map(|sub| {
             div()
                 .truncate()
-                .text_size(theme.ui_px(10.5))
+                .text_size(TextSize::XSmall.px(&theme))
                 .text_color(theme.text_3)
                 .child(sub.to_string())
         }))
@@ -4736,14 +4703,14 @@ fn bar_track(fraction: f64, theme: Theme) -> AnyElement {
         .flex_1()
         .min_w(px(48.))
         .h(px(8.))
-        .rounded(px(4.))
+        .rounded(Radius::Small.px(&theme))
         .bg(theme.trough)
         .overflow_hidden()
         .child(
             div()
                 .h_full()
                 .w(relative(fraction.clamp(0.0, 1.0) as f32))
-                .rounded(px(4.))
+                .rounded(Radius::Small.px(&theme))
                 .bg(theme.accent),
         )
         .into_any_element()
@@ -4755,7 +4722,7 @@ fn chart_value(value: &str, theme: Theme) -> AnyElement {
         .w(px(72.))
         .flex_none()
         .font(num_font())
-        .text_size(theme.ui_px(11.5))
+        .text_size(TextSize::Small.px(&theme))
         .text_color(theme.text)
         .text_align(gpui::TextAlign::Right)
         .child(value.to_string())
@@ -4769,7 +4736,7 @@ fn chart_share(share: &str, theme: Theme) -> AnyElement {
         .flex_none()
         .whitespace_nowrap()
         .font(num_font())
-        .text_size(theme.ui_px(11.5))
+        .text_size(TextSize::Small.px(&theme))
         .text_color(theme.text_3)
         .text_align(gpui::TextAlign::Right)
         .child(share.to_string())
@@ -4780,11 +4747,11 @@ fn chart_share(share: &str, theme: Theme) -> AnyElement {
 fn totals_row(filtered: &str, page: &str, theme: Theme) -> AnyElement {
     div()
         .w_full()
-        .pt(theme.space(8.))
+        .pt(DynamicSpacing::Base08.px(&theme))
         .flex()
         .items_center()
-        .gap(px(12.))
-        .text_size(theme.ui_px(12.))
+        .gap(DynamicSpacing::Base12.px(&theme))
+        .text_size(TextSize::Small.px(&theme))
         .child(div().text_color(theme.text_3).child(filtered.to_string()))
         .child(div().flex_1())
         .child(div().text_color(theme.text_3).child(page.to_string()))
@@ -4793,9 +4760,9 @@ fn totals_row(filtered: &str, page: &str, theme: Theme) -> AnyElement {
 
 fn empty_line(text: &str, theme: Theme) -> AnyElement {
     div()
-        .px(px(8.))
-        .py(px(6.))
-        .text_size(theme.ui_px(11.5))
+        .px(DynamicSpacing::Base08.px(&theme))
+        .py(DynamicSpacing::Base06.px(&theme))
+        .text_size(TextSize::Small.px(&theme))
         .text_color(theme.text_3)
         .child(text.to_string())
         .into_any_element()
@@ -4803,7 +4770,7 @@ fn empty_line(text: &str, theme: Theme) -> AnyElement {
 
 fn retry_note(theme: Theme) -> AnyElement {
     div()
-        .text_size(theme.ui_px(12.))
+        .text_size(TextSize::Small.px(&theme))
         .text_color(theme.text_3)
         .child(tr!("view.retries_are_unavailable_pi_records_automatic_ret"))
         .into_any_element()
@@ -4811,12 +4778,12 @@ fn retry_note(theme: Theme) -> AnyElement {
 
 fn stat_row(label: &str, value: &str, theme: Theme) -> AnyElement {
     div()
-        .px(px(8.))
-        .py(px(3.))
+        .px(DynamicSpacing::Base08.px(&theme))
+        .py(DynamicSpacing::Base03.px(&theme))
         .flex()
         .items_center()
-        .gap(px(12.))
-        .text_size(theme.ui_px(11.5))
+        .gap(DynamicSpacing::Base12.px(&theme))
+        .text_size(TextSize::Small.px(&theme))
         .child(
             div()
                 .flex_1()
@@ -4842,7 +4809,7 @@ fn hit_rate_bars(series: &TimeSeries, theme: Theme) -> AnyElement {
         .h(px(40.))
         .flex()
         .items_end()
-        .gap(px(2.))
+        .gap(DynamicSpacing::Base02.px(&theme))
         .children(series.points.iter().enumerate().map(|(ix, point)| {
             let rate = Totals {
                 tokens: TokenCounts {
@@ -4881,7 +4848,7 @@ fn hit_rate_bars(series: &TimeSeries, theme: Theme) -> AnyElement {
                 .child(
                     div()
                         .w_full()
-                        .rounded_t(px(2.))
+                        .rounded_t(Radius::XSmall.px(&theme))
                         .bg(color)
                         .h(relative(height))
                         .group_hover("usage-cache-bar", |style| style.bg(theme.accent)),
@@ -4906,13 +4873,13 @@ pub(crate) fn num_font() -> Font {
 /// line (provider, parent folder) trailing in the quiet register.
 fn breakdown_name_cell(column: &Column, row: &GroupRow, theme: Theme) -> AnyElement {
     cell_shell(column)
-        .gap(px(8.))
+        .gap(DynamicSpacing::Base08.px(&theme))
         .child(
             div()
                 .flex_none()
                 .max_w(px(column.width - 24.))
                 .truncate()
-                .text_size(theme.ui_px(12.))
+                .text_size(TextSize::Small.px(&theme))
                 .text_color(theme.text)
                 .child(row.label.clone()),
         )
@@ -4921,7 +4888,7 @@ fn breakdown_name_cell(column: &Column, row: &GroupRow, theme: Theme) -> AnyElem
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_size(theme.ui_px(10.5))
+                .text_size(TextSize::XSmall.px(&theme))
                 .text_color(theme.text_3)
                 .child(sub)
         }))
@@ -5004,8 +4971,8 @@ fn summary_stat(label: String, value: String, theme: Theme) -> AnyElement {
     div()
         .flex()
         .items_center()
-        .gap(px(6.))
-        .text_size(theme.ui_px(11.5))
+        .gap(DynamicSpacing::Base06.px(&theme))
+        .text_size(TextSize::Small.px(&theme))
         .child(div().text_color(theme.text_3).child(label))
         .child(div().font(num_font()).text_color(theme.text_2).child(value))
         .into_any_element()

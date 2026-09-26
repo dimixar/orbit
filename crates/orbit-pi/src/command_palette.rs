@@ -13,8 +13,8 @@
 //! STORY: the operator hits ⌘P, types two or three characters, and lands on a
 //! session, a panel toggle, or a settings section; Enter executes and the
 //! composer regains focus.
-//! FIRST VIEWPORT: a 640px card floating near the top over a black scrim; a
-//! tall search row with a search glyph; sectioned rows (Sessions / Commands /
+//! FIRST VIEWPORT: a Zed picker-width card floating near the top over a black
+//! scrim; a search row with a search glyph; sectioned rows (Sessions / Commands /
 //! Settings) with icon, label, inline detail, and a shortcut chip; a quiet
 //! footer naming the keys.
 //! FORM: a command-palette anatomy (sections, fuzzy scoring, wrap-around
@@ -35,25 +35,61 @@ use gpui::{
     ScrollHandle, SharedString, Styled, Window,
 };
 
-use crate::app::{icon, PopoverSurface, SettingsSection};
+use crate::app::{
+    icon, menu_header, picker_entry, picker_search_frame, picker_surface, SettingsSection,
+};
 use crate::composer::ComposerInput;
 use crate::sessions::SessionInfo;
+use crate::theme::tokens::{
+    context_menu, list, list_item, picker, BufferLineHeight, ButtonSize, DynamicSpacing, IconSize,
+    Radius, TextSize,
+};
 use crate::theme::{self, Theme};
 
-/// Card width — room for a session title plus inline detail.
-const CARD_W: f32 = 640.;
-/// Uniform row height (icon + label + inline detail + shortcut chip).
-const ROW_H: f32 = 44.;
-/// Section header height ("Sessions" / "Commands" / "Settings").
-const HEADER_H: f32 = 30.;
-/// Search field row.
-const SEARCH_H: f32 = 56.;
-/// Footer hint bar.
-const FOOTER_H: f32 = 30.;
-/// Largest results height before the list scrolls (≈ 9 rows + headers).
-const LIST_MAX_H: f32 = 430.;
-/// Tallest the whole card may grow; the list scrolls past this.
-const CARD_MAX_H: f32 = SEARCH_H + LIST_MAX_H + FOOTER_H;
+/// The palette's layout metrics, resolved from the theme so the card's
+/// height caps and the keyboard reveal math measure exactly what renders.
+/// The card itself is Zed's picker width (`picker::default_width`).
+#[derive(Debug, Clone, Copy)]
+struct PaletteMetrics {
+    /// Search field row (Zed's picker head).
+    search_h: f32,
+    /// Uniform row height (icon + label + inline detail + shortcut chip):
+    /// a one-line picker entry.
+    row_h: f32,
+    /// Section header ("Sessions" / "Commands" / "Settings"): a list
+    /// sub-header plus the Base12 above it that separates sections.
+    header_h: f32,
+    /// The list's padding above the first and below the last row.
+    list_pad_y: f32,
+    /// Largest results height before the list scrolls (≈ 9 rows + headers).
+    list_max_h: f32,
+    /// Footer hint bar: one line of Small text, Base06 above and below.
+    footer_h: f32,
+}
+
+impl PaletteMetrics {
+    fn new(theme: &Theme) -> Self {
+        Self {
+            search_h: picker::search_height(theme).into(),
+            row_h: picker::entry_height(theme).into(),
+            header_h: (DynamicSpacing::Base12.px(theme)
+                + list::sub_header_height(theme)
+                + list::sub_header_padding_bottom(theme))
+            .into(),
+            list_pad_y: picker::list_padding_y(theme).into(),
+            list_max_h: picker::default_max_height(theme).into(),
+            footer_h: (BufferLineHeight::Comfortable.resolve(TextSize::Small.px(theme))
+                + DynamicSpacing::Base06.px(theme) * 2.)
+                .into(),
+        }
+    }
+
+    /// Tallest the whole card may grow; the list scrolls past this.
+    fn card_max_h(&self) -> f32 {
+        self.search_h + self.list_max_h + self.footer_h
+    }
+}
+
 /// Sessions listed when the query is empty (recent activity, newest first).
 const EMPTY_SESSION_ROWS: usize = 6;
 /// Sessions listed for a non-empty query.
@@ -215,6 +251,10 @@ pub struct CommandPalette {
     scroll: ScrollHandle,
     highlighted: usize,
     last_filter: String,
+    /// The list's actual on-screen height from the last render (the card is
+    /// capped by the window). `ensure_visible` scrolls against this, not the
+    /// uncapped `list_max_h`, or a short window scrolls too little.
+    list_viewport: f32,
     on_open: OpenSession,
     on_command: RunCommand,
     /// `bool` = dismissed by an outside mouse-down (vs. escape).
@@ -240,6 +280,7 @@ impl CommandPalette {
             scroll: ScrollHandle::new(),
             highlighted: 0,
             last_filter: String::new(),
+            list_viewport: 0.,
             on_open,
             on_command,
             on_dismiss,
@@ -597,29 +638,32 @@ impl CommandPalette {
         let pos = self.highlighted.min(rows.len() - 1) as isize;
         let next = (pos + dir).rem_euclid(rows.len() as isize) as usize;
         self.highlighted = next;
-        self.ensure_visible(&rows);
+        let metrics = PaletteMetrics::new(theme::get(cx));
+        self.ensure_visible(&rows, &metrics);
         cx.notify();
     }
 
-    /// Pixel offset of a row's top edge, accounting for section headers.
-    fn row_top(rows: &[PaletteItem], ix: usize) -> f32 {
-        let mut y = 0.;
+    /// Pixel offset of a row's top edge, accounting for the list's top
+    /// padding and the section headers.
+    fn row_top(rows: &[PaletteItem], ix: usize, metrics: &PaletteMetrics) -> f32 {
+        let mut y = metrics.list_pad_y;
         let mut prev = None;
         for (i, item) in rows.iter().enumerate() {
             if prev != Some(item.section) {
-                y += HEADER_H;
+                y += metrics.header_h;
                 prev = Some(item.section);
             }
             if i == ix {
                 break;
             }
-            y += ROW_H;
+            y += metrics.row_h;
         }
         y
     }
 
-    /// Total content height of the results list (rows + headers).
-    fn content_height(rows: &[PaletteItem]) -> f32 {
+    /// Total content height of the results list (rows + headers + the
+    /// list's vertical padding).
+    fn content_height(rows: &[PaletteItem], metrics: &PaletteMetrics) -> f32 {
         let headers = {
             let mut count = 0;
             let mut prev = None;
@@ -631,23 +675,33 @@ impl CommandPalette {
             }
             count
         };
-        rows.len() as f32 * ROW_H + headers as f32 * HEADER_H
+        rows.len() as f32 * metrics.row_h
+            + headers as f32 * metrics.header_h
+            + 2. * metrics.list_pad_y
     }
 
-    fn ensure_visible(&mut self, rows: &[PaletteItem]) {
-        let content_h = Self::content_height(rows);
-        let viewport_h = content_h.min(LIST_MAX_H);
-        let row_top = Self::row_top(rows, self.highlighted);
-        let current: f32 = self.scroll.offset().y.into();
+    fn ensure_visible(&mut self, rows: &[PaletteItem], metrics: &PaletteMetrics) {
+        let content_h = Self::content_height(rows, metrics);
+        let viewport_h = content_h.min(if self.list_viewport > 0. {
+            self.list_viewport
+        } else {
+            metrics.list_max_h
+        });
+        let row_top = Self::row_top(rows, self.highlighted, metrics);
+        // `ScrollHandle` keeps the offset as the first child's top relative to
+        // the container, which is **negative** once scrolled down; recover the
+        // positive distance-from-top before comparing, and negate on the way
+        // back out.
+        let current = -f32::from(self.scroll.offset().y);
         let mut offset = current;
         if row_top < current {
             offset = row_top;
-        } else if row_top + ROW_H > current + viewport_h {
-            offset = row_top + ROW_H - viewport_h;
+        } else if row_top + metrics.row_h > current + viewport_h {
+            offset = row_top + metrics.row_h - viewport_h;
         }
         let max_offset = (content_h - viewport_h).max(0.);
         self.scroll
-            .set_offset(point(px(0.), px(offset.clamp(0., max_offset))));
+            .set_offset(point(px(0.), px(-offset.clamp(0., max_offset))));
     }
 
     fn activate(
@@ -692,18 +746,22 @@ impl Render for CommandPalette {
 
         let this = cx.entity();
         let theme = *theme::get(cx);
+        let metrics = PaletteMetrics::new(&theme);
 
         // Hug the content, capped so the card never owns the window.
         let viewport_h = f32::from(window.viewport_size().height);
         let top = (viewport_h * 0.09).clamp(48., 72.);
-        let card_cap = (viewport_h - top - 36.).max(SEARCH_H + ROW_H + FOOTER_H);
+        let card_cap =
+            (viewport_h - top - 36.).max(metrics.search_h + metrics.row_h + metrics.footer_h);
         let content_h = if rows.is_empty() {
-            140.
+            // The no-match state: one two-line entry inside the list padding.
+            f32::from(picker::two_line_entry_height(&theme)) + 2. * metrics.list_pad_y
         } else {
-            Self::content_height(&rows)
+            Self::content_height(&rows, &metrics)
         };
-        let list_cap = CARD_MAX_H.min(card_cap) - SEARCH_H - FOOTER_H;
+        let list_cap = metrics.card_max_h().min(card_cap) - metrics.search_h - metrics.footer_h;
         let list_h = content_h.min(list_cap);
+        self.list_viewport = list_h;
 
         // ── results list ──
         let mut list = div()
@@ -713,52 +771,46 @@ impl Render for CommandPalette {
             .flex_none()
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
-            .px(px(8.))
-            .pb(px(8.))
+            .py(picker::list_padding_y(&theme))
             .flex()
             .flex_col();
         if rows.is_empty() {
+            // Zed's no-match state: one muted picker entry.
             list = list.child(
-                div()
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap(px(6.))
-                    .child(icon("icons/search.svg", 18., theme.text_3))
+                picker_entry(div(), &theme)
+                    .h(picker::two_line_entry_height(&theme))
+                    .flex_none()
+                    .text_color(theme.text_3)
+                    .child(icon("icons/search.svg", context_menu::ICON.px(&theme), theme.text_3))
                     .child(
                         div()
-                            .text_size(theme.ui_px(13.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text_2)
-                            .child(tr!("command_palette.no_results")),
-                    )
-                    .child(
-                        div()
-                            .text_size(theme.ui_px(12.))
-                            .text_color(theme.text_3)
-                            .child(tr!(
-                                "command_palette.try_a_session_title_a_command_or_a_setting"
-                            )),
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(tr!("command_palette.no_results")),
+                            )
+                            .child(
+                                div()
+                                    .text_size(picker::SECONDARY_TEXT.px(&theme))
+                                    .child(tr!(
+                                        "command_palette.try_a_session_title_a_command_or_a_setting"
+                                    )),
+                            ),
                     ),
             );
         } else {
             let mut prev_section = None;
             for ix in 0..rows.len() {
                 if prev_section != Some(rows[ix].section) {
+                    // Base12 above each section; `PaletteMetrics::header_h`
+                    // counts it.
                     list = list.child(
-                        div()
-                            .h(px(HEADER_H))
-                            .px(px(10.))
-                            .pt(px(10.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .text_size(theme.ui_px(11.5))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.text_3)
-                            .child(rows[ix].section.label()),
+                        menu_header(rows[ix].section.label(), &theme)
+                            .pt(DynamicSpacing::Base12.px(&theme)),
                     );
                     prev_section = Some(rows[ix].section);
                 }
@@ -780,17 +832,14 @@ impl Render for CommandPalette {
         }
 
         // ── card ──
-        let card = div()
+        let card = picker_surface(div(), &theme)
             .w_full()
-            .max_w(px(CARD_W))
+            .max_w(picker::default_width(&theme))
             .flex_none()
-            .rounded(px(14.))
-            .popover_surface(theme)
             .flex()
             .flex_col()
             .overflow_hidden()
             .occlude()
-            .font_family(theme::ui_font_family())
             // Clicks inside the card must not reach the scrim's dismiss.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_action(cx.listener(Self::on_cancel))
@@ -799,33 +848,24 @@ impl Render for CommandPalette {
             .on_action(cx.listener(Self::on_prev))
             // search row
             .child(
-                div()
-                    .h(px(SEARCH_H))
-                    .px(px(18.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .border_b_1()
-                    .border_color(theme.border)
-                    .text_size(theme.ui_px(15.))
+                picker_search_frame(div(), &theme)
                     .text_color(theme.text)
-                    .child(icon("icons/search.svg", 16., theme.text_3))
+                    .child(icon("icons/search.svg", IconSize::Small.px(&theme), theme.text_3))
                     .child(div().flex_1().min_w_0().child(self.filter.clone())),
             )
             .child(list)
             // footer — the palette is new chrome; name the keys once, quietly.
             .child(
                 div()
-                    .h(px(FOOTER_H))
-                    .px(px(14.))
+                    .h(px(metrics.footer_h))
+                    .px(picker::search_padding_x(&theme))
                     .flex_none()
                     .flex()
                     .items_center()
-                    .gap(px(14.))
+                    .gap(DynamicSpacing::Base16.px(&theme))
                     .border_t_1()
                     .border_color(theme.border)
-                    .text_size(theme.ui_px(11.))
+                    .text_size(TextSize::Small.px(&theme))
                     .text_color(theme.text_3)
                     .child(tr!("command_palette.navigate"))
                     .child(tr!("command_palette.select"))
@@ -840,7 +880,7 @@ impl Render for CommandPalette {
             .inset_0()
             .occlude()
             .bg(scrim)
-            .px(px(24.))
+            .px(DynamicSpacing::Base24.px(&theme))
             .pt(px(top))
             .flex()
             .items_start()
@@ -860,14 +900,11 @@ fn render_row(
 ) -> impl IntoElement + use<> {
     let item = rows[ix].clone();
     let this = this.clone();
-    div()
-        .id(ElementId::NamedInteger(
-            "command-palette-row".into(),
-            ix as u64,
-        ))
-        .h(px(ROW_H))
-        .px(px(10.))
-        .rounded(px(8.))
+    let row = picker_entry(
+        div().id(ElementId::NamedInteger("command-palette-row".into(), ix as u64)),
+        &theme,
+    );
+    row.h(picker::entry_height(&theme))
         .border_1()
         .border_color(if highlighted {
             theme.border_strong
@@ -875,22 +912,19 @@ fn render_row(
             gpui::transparent_black()
         })
         .flex_none()
-        .flex()
-        .items_center()
-        .gap(px(10.))
         .cursor_pointer()
-        // Hover moves the keyboard highlight; click activates the row.
-        .on_hover({
+        // Moving the pointer over a row moves the keyboard highlight; click
+        // activates it. `on_mouse_move` (not `on_hover`) so a scroll that
+        // slides rows under a stationary pointer can't hijack ↑/↓ navigation.
+        .on_mouse_move({
             let this = this.clone();
-            move |hovering, _, cx| {
-                if *hovering {
-                    this.update(cx, |palette, cx| {
-                        if palette.highlighted != ix {
-                            palette.highlighted = ix;
-                            cx.notify();
-                        }
-                    });
-                }
+            move |_, _, cx| {
+                this.update(cx, |palette, cx| {
+                    if palette.highlighted != ix {
+                        palette.highlighted = ix;
+                        cx.notify();
+                    }
+                });
             }
         })
         .on_click({
@@ -903,35 +937,26 @@ fn render_row(
             }
         })
         .when(highlighted, |row| row.bg(theme.overlay_strong))
-        .child(
-            div()
-                .size(px(20.))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(icon(
-                    item.icon,
-                    15.,
-                    if is_current_session {
-                        theme.accent
-                    } else {
-                        theme.text_2
-                    },
-                )),
-        )
+        .child(icon(
+            item.icon,
+            context_menu::ICON.px(&theme),
+            if is_current_session {
+                theme.accent
+            } else {
+                theme.text_2
+            },
+        ))
         .child(
             div()
                 .flex_1()
                 .min_w_0()
                 .flex()
                 .items_baseline()
-                .gap(px(8.))
+                .gap(DynamicSpacing::Base08.px(&theme))
                 .child(
                     div()
                         .min_w_0()
                         .truncate()
-                        .text_size(theme.ui_px(13.5))
                         .font_weight(if highlighted {
                             FontWeight::MEDIUM
                         } else {
@@ -948,7 +973,7 @@ fn render_row(
                     row.child(
                         div()
                             .flex_none()
-                            .text_size(theme.ui_px(12.))
+                            .text_size(picker::SECONDARY_TEXT.px(&theme))
                             .text_color(theme.text_3)
                             .child(detail),
                     )
@@ -957,16 +982,17 @@ fn render_row(
         .when_some(item.shortcut, |row, shortcut| {
             row.child(
                 div()
-                    .h(px(22.))
+                    .ml(context_menu::keybinding_gap(&theme) - list_item::content_gap(&theme))
+                    .h(ButtonSize::Default.height(&theme))
                     .min_w(px(28.))
-                    .px(px(7.))
-                    .rounded(px(7.))
+                    .px(DynamicSpacing::Base08.px(&theme))
+                    .rounded(Radius::Large.px(&theme))
                     .flex_none()
                     .flex()
                     .items_center()
                     .justify_center()
                     .bg(theme.overlay_strong)
-                    .text_size(theme.ui_px(11.5))
+                    .text_size(TextSize::Small.px(&theme))
                     .text_color(theme.text_3)
                     .child(SharedString::from(shortcut)),
             )
@@ -982,6 +1008,7 @@ pub fn layer(palette: Entity<CommandPalette>) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::size;
 
     #[test]
     fn fuzzy_subsequence_and_boundaries() {
@@ -1023,15 +1050,135 @@ mod tests {
             item(Section::Sessions, 1),
             item(Section::Commands, 2),
         ];
-        assert_eq!(CommandPalette::row_top(&rows, 0), HEADER_H);
-        assert_eq!(CommandPalette::row_top(&rows, 1), HEADER_H + ROW_H);
+        let m = PaletteMetrics::new(&Theme::dark());
+        assert_eq!(CommandPalette::row_top(&rows, 0, &m), m.list_pad_y + m.header_h);
         assert_eq!(
-            CommandPalette::row_top(&rows, 2),
-            HEADER_H * 2. + ROW_H * 2.
+            CommandPalette::row_top(&rows, 1, &m),
+            m.list_pad_y + m.header_h + m.row_h
         );
         assert_eq!(
-            CommandPalette::content_height(&rows),
-            HEADER_H * 2. + ROW_H * 3.
+            CommandPalette::row_top(&rows, 2, &m),
+            m.list_pad_y + m.header_h * 2. + m.row_h * 2.
         );
+        assert_eq!(
+            CommandPalette::content_height(&rows, &m),
+            2. * m.list_pad_y + m.header_h * 2. + m.row_h * 3.
+        );
+    }
+
+    /// With the palette filter focused, the `Picker` arrows must win over the
+    /// `Composer` arrows (both ride on the same input), so ↓/↑ move the
+    /// highlight instead of the caret.
+    #[gpui::test]
+    fn arrow_keys_move_the_highlight(cx: &mut gpui::TestAppContext) {
+        bind_picker_arrows(cx);
+        let cx = cx.add_empty_window();
+        let palette = open_test_palette(cx);
+        let _ = cx.draw(point(px(0.), px(0.)), size(px(900.), px(700.)), |_, _| {
+            palette.clone()
+        });
+
+        assert_eq!(cx.update(|_, cx| palette.read(cx).highlighted), 0);
+        cx.simulate_keystrokes("down");
+        assert_eq!(
+            cx.update(|_, cx| palette.read(cx).highlighted),
+            1,
+            "↓ moves the highlight"
+        );
+        cx.simulate_keystrokes("down");
+        assert_eq!(cx.update(|_, cx| palette.read(cx).highlighted), 2);
+        cx.simulate_keystrokes("up");
+        assert_eq!(
+            cx.update(|_, cx| palette.read(cx).highlighted),
+            1,
+            "↑ moves the highlight"
+        );
+    }
+
+    /// The highlight must stay inside the *actual* (window-capped) list
+    /// viewport, not just the uncapped `list_max_h`, or ↓ walks it off-screen
+    /// in a short window.
+    #[gpui::test]
+    fn arrows_keep_the_highlight_in_view(cx: &mut gpui::TestAppContext) {
+        bind_picker_arrows(cx);
+        let cx = cx.add_empty_window();
+        let palette = open_test_palette(cx);
+        let _ = cx.draw(point(px(0.), px(0.)), size(px(900.), px(700.)), |_, _| {
+            palette.clone()
+        });
+
+        let metrics = PaletteMetrics::new(&Theme::dark());
+        let rows = cx.update(|_, cx| palette.read(cx).results(""));
+        assert!(rows.len() > 12, "need enough rows to scroll: {}", rows.len());
+
+        // The test window's viewport isn't capped by the draw size, so force a
+        // short viewport (four rows) the way a short window would.
+        let viewport = metrics.row_h * 4.;
+        for highlighted in [12usize, 6, 0] {
+            cx.update(|_, cx| {
+                palette.update(cx, |p, _| {
+                    p.list_viewport = viewport;
+                    p.highlighted = highlighted;
+                    p.ensure_visible(&rows, &metrics);
+                });
+            });
+            let offset = cx.update(|_, cx| -f32::from(palette.read(cx).scroll.offset().y));
+            let top = CommandPalette::row_top(&rows, highlighted, &metrics);
+            assert!(
+                top >= offset - 0.5,
+                "row scrolled above the viewport: {top} < {offset}"
+            );
+            assert!(
+                top + metrics.row_h <= offset + viewport + 0.5,
+                "row below the viewport: {top} + {} > {offset} + {viewport}",
+                metrics.row_h
+            );
+        }
+    }
+
+    /// Bind the picker arrows exactly as `main::bind_keys` does: the `Composer`
+    /// arrows first, the `Picker` arrows after (later registration wins ties).
+    fn bind_picker_arrows(cx: &mut gpui::TestAppContext) {
+        use crate::{Down, PickerSelectNext, PickerSelectPrev, Up};
+        use gpui::KeyBinding;
+
+        cx.update(|cx| {
+            cx.set_global(theme::Theme::for_id(theme::ThemeId::Orbit));
+            cx.bind_keys([
+                KeyBinding::new("up", Up, Some("Composer")),
+                KeyBinding::new("down", Down, Some("Composer")),
+                KeyBinding::new("up", PickerSelectPrev, Some("Picker")),
+                KeyBinding::new("down", PickerSelectNext, Some("Picker")),
+            ]);
+        });
+    }
+
+    /// A palette with no sessions, its filter focused, ready to draw.
+    fn open_test_palette(cx: &mut gpui::VisualTestContext) -> Entity<CommandPalette> {
+        let snapshot = PaletteSnapshot {
+            sessions: Vec::new(),
+            active_path: None,
+            busy: false,
+            session_id: None,
+            sidebar_visible: true,
+            side_panel_visible: false,
+            terminal_visible: false,
+            project_panel_visible: false,
+            can_choose_model: false,
+            can_choose_thinking: false,
+        };
+        cx.update(|window, cx| {
+            let palette = cx.new(|cx| {
+                CommandPalette::new(
+                    snapshot,
+                    Box::new(|_, _, _| {}),
+                    Box::new(|_, _, _| {}),
+                    Box::new(|_, _, _| {}),
+                    cx,
+                )
+            });
+            window.focus(&palette.read(cx).focus_handle(cx));
+            palette
+        })
     }
 }
