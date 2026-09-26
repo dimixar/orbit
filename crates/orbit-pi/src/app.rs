@@ -572,6 +572,19 @@ pub struct OrbitApp {
     /// A mode chosen on the New Task page, before a session id exists to key
     /// it to.
     workflow_pending: Option<WorkflowMode>,
+    /// The model new sessions start on, from
+    /// `~/.orbit-pi/session-defaults.json`, loaded at launch.
+    session_default: crate::session_defaults::SessionDefault,
+    /// Whether the active session should still be moved onto the default
+    /// model. Armed by a `new_session` birth; disarmed once the default has
+    /// been pushed (or there is none), by a manual model/thinking choice, or
+    /// when pi rejects the push — so a later catalog refresh never clobbers a
+    /// manual composer choice.
+    default_model_armed: bool,
+    /// What `apply_default_model` has already sent for the active session,
+    /// so the catalog refreshes that follow a session birth don't resend the
+    /// same `set_model`.
+    default_model_pushed: DefaultModelPushed,
     /// Whether the composer's workflow-mode picker popover is open.
     workflow_menu_open: bool,
     /// Highlighted row in the workflow-mode picker.
@@ -770,6 +783,40 @@ pub(crate) struct ModelEntry {
     pub(crate) provider: String,
     /// Provider-reported context window in tokens, when the catalog exposes it.
     pub(crate) context_window: Option<u64>,
+    /// The thinking levels the model supports, in pi's own order — derived
+    /// from the catalog's `reasoning` flag and `thinkingLevelMap` exactly like
+    /// pi's `getSupportedThinkingLevels`. A non-reasoning model is `["off"]`.
+    pub(crate) thinking_levels: Vec<String>,
+}
+
+/// pi's thinking-level ladder, in the order pi itself uses.
+const THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// The thinking levels a `get_available_models` entry supports — the
+/// client-side mirror of pi-ai's `getSupportedThinkingLevels`. `xhigh` and
+/// `max` are opt-in through `thinkingLevelMap`; the other levels are dropped
+/// only when the map marks them `null`; a model without `reasoning` supports
+/// only `off`.
+pub(crate) fn catalog_thinking_levels(model: &Value) -> Vec<String> {
+    if !model
+        .get("reasoning")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return vec!["off".to_string()];
+    }
+    let map = model.get("thinkingLevelMap").and_then(Value::as_object);
+    THINKING_LEVELS
+        .iter()
+        .filter(|level| match map.and_then(|map| map.get(**level)) {
+            // Explicitly unsupported by the provider.
+            Some(Value::Null) => false,
+            // The extended levels are exposed only when the map defines them.
+            None => !matches!(**level, "xhigh" | "max"),
+            Some(_) => true,
+        })
+        .map(|level| level.to_string())
+        .collect()
 }
 
 impl OrbitApp {
@@ -873,7 +920,7 @@ impl OrbitApp {
         // the file on the very first tool call of the session.
         let access_mode = AccessMode::load();
         access_mode.persist();
-        let (client, connect_error) = match extensions.spawn(&workspace) {
+        let (client, connect_error) = match extensions.spawn(&workspace, true) {
             Ok(client) => (Some(client), String::new()),
             Err(err) => (None, tr!("runtime.pi_spawn_failed", error = err)),
         };
@@ -943,16 +990,14 @@ impl OrbitApp {
                 Rc::new({
                     let app_weak = app_weak.clone();
                     move |path, display, cx: &mut App| {
-                        let _ = app_weak.update(cx, |app, cx| {
-                            app.open_file_in_viewer(path, display, cx)
-                        });
+                        let _ = app_weak
+                            .update(cx, |app, cx| app.open_file_in_viewer(path, display, cx));
                     }
                 }),
                 Rc::new({
                     let app_weak = app_weak.clone();
                     move |request, cx: &mut App| {
-                        let _ = app_weak
-                            .update(cx, |app, cx| app.on_file_op(request, cx));
+                        let _ = app_weak.update(cx, |app, cx| app.on_file_op(request, cx));
                     }
                 }),
                 Rc::new(move |cx: &mut App| {
@@ -1137,6 +1182,9 @@ impl OrbitApp {
             access_menu_focus: cx.focus_handle(),
             workflow_mode: WorkflowMode::default(),
             workflow_pending: None,
+            session_default: crate::session_defaults::SessionDefault::load(),
+            default_model_armed: false,
+            default_model_pushed: DefaultModelPushed::default(),
             workflow_menu_open: false,
             workflow_menu_highlight: 0,
             workflow_menu_focus: cx.focus_handle(),
@@ -1884,6 +1932,16 @@ enum RuntimeState {
     Failed,
 }
 
+/// The `set_model` / `set_thinking_level` already sent to put the active
+/// session on the default model, so a follow-up catalog refresh doesn't
+/// resend them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct DefaultModelPushed {
+    session: Option<String>,
+    model: Option<(String, String)>,
+    thinking: Option<String>,
+}
+
 /// Which dropdown is open on the settings surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsSelect {
@@ -1900,6 +1958,10 @@ enum SettingsSelect {
     BackdropFade,
     /// The model the auto-title extension asks (Settings → Agent).
     TitleModel,
+    /// The model new sessions start on (Settings → Agent).
+    DefaultModel,
+    /// The default model's thinking level (Settings → Agent).
+    DefaultThinking,
 }
 
 // ── feature modules ───────────────────────────────────────────────────────
@@ -1934,6 +1996,8 @@ mod error_label_tests;
 #[cfg(test)]
 mod popup_layout_tests;
 #[cfg(test)]
+mod session_default_apply_tests;
+#[cfg(test)]
 mod sidebar_active_reveal_tests;
 #[cfg(test)]
 mod sidebar_placeholder_tests;
@@ -1949,3 +2013,55 @@ pub(crate) use helpers::{
     spinner, EmptyFill, BUTTON_GROUP, PRESS_DIM,
 };
 use sidebar::sessions_with_placeholder;
+
+#[cfg(test)]
+mod catalog_thinking_tests {
+    use super::catalog_thinking_levels;
+    use serde_json::json;
+
+    #[test]
+    fn non_reasoning_model_supports_only_off() {
+        assert_eq!(catalog_thinking_levels(&json!({})), vec!["off"]);
+        assert_eq!(
+            catalog_thinking_levels(&json!({"reasoning": false})),
+            vec!["off"]
+        );
+    }
+
+    #[test]
+    fn reasoning_model_without_a_map_gets_the_base_ladder() {
+        assert_eq!(
+            catalog_thinking_levels(&json!({"reasoning": true})),
+            vec!["off", "minimal", "low", "medium", "high"]
+        );
+    }
+
+    #[test]
+    fn map_drops_explicit_nulls_and_gates_extended_levels() {
+        // The DeepSeek shape: only low/high/max are mapped; the nulls are
+        // unsupported and `xhigh` is not offered at all.
+        assert_eq!(
+            catalog_thinking_levels(&json!({
+                "reasoning": true,
+                "thinkingLevelMap": {"off": null, "minimal": null, "low": "low", "medium": null, "high": "high", "max": "max"}
+            })),
+            vec!["low", "high", "max"]
+        );
+        // A level the map does not mention stays available (`off` here).
+        assert_eq!(
+            catalog_thinking_levels(&json!({
+                "reasoning": true,
+                "thinkingLevelMap": {"minimal": null, "medium": null}
+            })),
+            vec!["off", "low", "high"]
+        );
+        // `xhigh`/`max` need a mapping even when nothing else is null.
+        assert_eq!(
+            catalog_thinking_levels(&json!({
+                "reasoning": true,
+                "thinkingLevelMap": {"xhigh": "xhigh"}
+            })),
+            vec!["off", "minimal", "low", "medium", "high", "xhigh"]
+        );
+    }
+}

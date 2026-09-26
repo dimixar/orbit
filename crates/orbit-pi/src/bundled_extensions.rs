@@ -27,14 +27,15 @@ use std::path::{Path, PathBuf};
 
 use orbit_rpc::PiClient;
 
+use crate::session_defaults::SessionDefault;
+
 const QUOTA_INDEX_JS: &str = include_str!("../../../contrib/orbit-quota-extension/index.js");
 const QUOTA_ADAPTERS_JS: &str = include_str!("../../../contrib/orbit-quota-extension/adapters.js");
 const GUARD_INDEX_JS: &str = include_str!("../../../contrib/orbit-guard-extension/index.js");
 const GUARD_POLICY_JS: &str = include_str!("../../../contrib/orbit-guard-extension/policy.js");
 const TITLE_INDEX_JS: &str = include_str!("../../../contrib/orbit-title-extension/index.js");
 const TITLE_HELPERS_JS: &str = include_str!("../../../contrib/orbit-title-extension/title.js");
-const WORKFLOW_INDEX_JS: &str =
-    include_str!("../../../contrib/orbit-workflow-extension/index.js");
+const WORKFLOW_INDEX_JS: &str = include_str!("../../../contrib/orbit-workflow-extension/index.js");
 const WORKFLOW_POLICY_JS: &str =
     include_str!("../../../contrib/orbit-workflow-extension/policy.js");
 
@@ -84,17 +85,31 @@ impl BundledExtensions {
 
     /// Spawn a pi session process with every available bundled extension
     /// loaded. Every session spawn in the app goes through here.
-    pub(crate) fn spawn(&self, workspace: &Path) -> anyhow::Result<PiClient> {
+    ///
+    /// `apply_default` seeds the child's startup model from the user's
+    /// default model (`~/.orbit-pi/session-defaults.json`). Pass `false` for
+    /// a process that is about to *resume* a session — a resumed session
+    /// keeps the model recorded in its file, never Orbit's default.
+    pub(crate) fn spawn(
+        &self,
+        workspace: &Path,
+        apply_default: bool,
+    ) -> anyhow::Result<PiClient> {
         // A `pi update` can restore the pristine RPC bundle while Orbit is
         // running; re-check before every spawn so a session switch or Runtime
         // restart still gets custom UI, quota, and auth. The unchanged fast
         // path is a stat, so this costs nothing in the common case.
         crate::rpc_patches::apply_on_launch();
+        let args = if apply_default {
+            SessionDefault::load().cli_args()
+        } else {
+            Vec::new()
+        };
         let extensions = self.extension_paths();
         if extensions.is_empty() {
-            return PiClient::spawn(workspace, None);
+            return PiClient::spawn_with_args(workspace, None, &args);
         }
-        PiClient::spawn_with_extensions(workspace, None, &extensions)
+        PiClient::spawn_with_extensions_and_args(workspace, None, &extensions, &args)
     }
 
     /// Spawn the **AI reviewer** process. It loads the same bundled extensions

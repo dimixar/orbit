@@ -179,10 +179,12 @@ impl OrbitApp {
             // badge when no Nerd Font is installed).
             let nerd = nerd_font_family(cx);
             let leading: AnyElement = match &entry {
-                AcEntry::Command { .. } => {
-                    icon("icons/extensions.svg", context_menu::ICON.px(&theme), theme.text_3)
-                        .into_any_element()
-                }
+                AcEntry::Command { .. } => icon(
+                    "icons/extensions.svg",
+                    context_menu::ICON.px(&theme),
+                    theme.text_3,
+                )
+                .into_any_element(),
                 AcEntry::File { path } => file_glyph(
                     path.as_str(),
                     theme.mode == ThemeMode::Dark,
@@ -210,66 +212,69 @@ impl OrbitApp {
                 AcEntry::File { .. } => None,
             };
             list = list.child(
-                picker_entry(div().id(ElementId::NamedInteger("ac-row".into(), ix as u64)), &theme)
-                    .h(row_h)
-                    .cursor_pointer()
-                    .when(selected, |row| row.bg(theme.active))
-                    .hover(|style| style.bg(theme.overlay))
-                    .on_click(move |_, _, cx| {
-                        this.update(cx, |app, cx| app.commit_entry(entry.clone(), cx))
-                            .ok();
-                    })
-                    .child(leading)
-                    .child(
+                picker_entry(
+                    div().id(ElementId::NamedInteger("ac-row".into(), ix as u64)),
+                    &theme,
+                )
+                .h(row_h)
+                .cursor_pointer()
+                .when(selected, |row| row.bg(theme.active))
+                .hover(|style| style.bg(theme.overlay))
+                .on_click(move |_, _, cx| {
+                    this.update(cx, |app, cx| app.commit_entry(entry.clone(), cx))
+                        .ok();
+                })
+                .child(leading)
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .gap(DynamicSpacing::Base08.px(&theme))
+                        // Fuzzy match first: the basename (or command
+                        // name) leads, then — after a breath — the rest
+                        // of the path / description in dimmed text.
+                        .child(
+                            div()
+                                .flex_none()
+                                .max_w(px(CONTENT_MAX_W / 2.))
+                                .truncate()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(if selected {
+                                    theme.active_fg
+                                } else {
+                                    theme.text_2
+                                })
+                                .child(title),
+                        )
+                        .when(!subtitle.is_empty(), |row| {
+                            row.child(
+                                div()
+                                    .min_w_0()
+                                    .flex_1()
+                                    .truncate()
+                                    .text_size(picker::SECONDARY_TEXT.px(&theme))
+                                    .text_color(theme.text_3)
+                                    .child(subtitle),
+                            )
+                        }),
+                )
+                .when_some(scope_badge, |row, badge| {
+                    row.child(
                         div()
-                            .min_w_0()
-                            .flex_1()
+                            .h(px(18.))
+                            .px(DynamicSpacing::Base06.px(&theme))
+                            .rounded(Radius::Medium.px(&theme))
+                            .flex_none()
                             .flex()
                             .items_center()
-                            .gap(DynamicSpacing::Base08.px(&theme))
-                            // Fuzzy match first: the basename (or command
-                            // name) leads, then — after a breath — the rest
-                            // of the path / description in dimmed text.
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .max_w(px(CONTENT_MAX_W / 2.))
-                                    .truncate()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(if selected {
-                                        theme.active_fg
-                                    } else {
-                                        theme.text_2
-                                    })
-                                    .child(title),
-                            )
-                            .when(!subtitle.is_empty(), |row| {
-                                row.child(
-                                    div()
-                                        .min_w_0()
-                                        .flex_1()
-                                        .truncate()
-                                        .text_size(picker::SECONDARY_TEXT.px(&theme))
-                                        .text_color(theme.text_3)
-                                        .child(subtitle),
-                                )
-                            }),
+                            .bg(theme.overlay_strong)
+                            .text_size(TextSize::XSmall.px(&theme))
+                            .text_color(theme.text_3)
+                            .child(badge),
                     )
-                    .when_some(scope_badge, |row, badge| {
-                        row.child(
-                            div()
-                                .h(px(18.))
-                                .px(DynamicSpacing::Base06.px(&theme))
-                                .rounded(Radius::Medium.px(&theme))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .bg(theme.overlay_strong)
-                                .text_size(TextSize::XSmall.px(&theme))
-                                .text_color(theme.text_3)
-                                .child(badge),
-                        )
-                    }),
+                }),
             );
         }
         // Full width of the chat box, so long paths are never cut.
@@ -342,11 +347,12 @@ impl OrbitApp {
                             .child(a.name.clone()),
                     )
                     .child(
-                        div()
-                            .text_size(TextSize::Small.px(&theme))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.text_3)
-                            .child("×".to_string()),
+                        icon(
+                            "icons/x.svg",
+                            ButtonSize::Medium.icon_size().px(&theme),
+                            theme.text_3,
+                        )
+                        .into_any_element(),
                     )
                     .on_mouse_up(
                         MouseButton::Left,
@@ -634,6 +640,9 @@ impl OrbitApp {
     }
 
     pub(super) fn set_model(&mut self, id: String, provider: String, cx: &mut Context<Self>) {
+        // A manual choice supersedes the session-birth default push. The push
+        // itself sends `SetModel` directly so it doesn't disarm itself.
+        self.default_model_armed = false;
         self.send(
             CommandBody::SetModel {
                 model_id: id,
@@ -645,6 +654,8 @@ impl OrbitApp {
     }
 
     pub(super) fn set_thinking_level(&mut self, level: String, cx: &mut Context<Self>) {
+        // A manual level choice likewise supersedes the pending default.
+        self.default_model_armed = false;
         self.send(
             CommandBody::SetThinkingLevel { level },
             "set_thinking_level",
@@ -824,8 +835,7 @@ impl OrbitApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.workflow_menu_highlight =
-            (self.workflow_menu_highlight + 1) % WorkflowMode::ALL.len();
+        self.workflow_menu_highlight = (self.workflow_menu_highlight + 1) % WorkflowMode::ALL.len();
         cx.notify();
     }
 

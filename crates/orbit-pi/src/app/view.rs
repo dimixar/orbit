@@ -121,6 +121,12 @@ impl Render for OrbitApp {
             self.activate_window_pending = false;
             window.activate_window();
         }
+        // Model / thinking choices are fixed for the duration of a turn. A
+        // picker left open when a run begins is dropped so its list cannot
+        // still change the model mid-turn; the chips render disabled.
+        if self.is_running() {
+            self.close_model_selector(window, cx);
+        }
         let theme = *theme::get(cx);
         // `/`-command and `@`-file menu state derives from the composer text
         // every frame, so typing opens/closes/filters it without extra sync.
@@ -218,10 +224,8 @@ impl Render for OrbitApp {
         // The right side pane is hidden while settings/onboarding own the
         // main area (same rule as the sessions sidebar).
         let pane_open = self.sidepane.read(cx).is_open();
-        let pane_visible = pane_open
-            && !self.settings_open
-            && !self.usage_open
-            && self.dependencies_ready();
+        let pane_visible =
+            pane_open && !self.settings_open && !self.usage_open && self.dependencies_ready();
         let pane_width = if pane_visible {
             self.sidepane.read(cx).width()
         } else {
@@ -280,9 +284,8 @@ impl Render for OrbitApp {
         // a change rebuilds the tree off-thread. The Explorer and the Review
         // pane are mutually exclusive right docks: while Review is open the
         // tree stays closed.
-        let explorer_visible = self.project_panel.read(cx).is_open()
-            && !self.settings_open
-            && !pane_open;
+        let explorer_visible =
+            self.project_panel.read(cx).is_open() && !self.settings_open && !pane_open;
         let explorer_width = if explorer_visible {
             self.project_panel.read(cx).width()
         } else {
@@ -333,12 +336,18 @@ impl Render for OrbitApp {
         // The top bar spans the whole main area, so the docks do not squeeze
         // it — compact only when the main area itself is tight.
         let compact_chrome = f32::from(main_width + explorer_width + pane_width) < 720.;
-        // While the Git card is open, its title moves up into the shared top
-        // bar (see `GitPanel::top_bar_leading`); the branch selector stays on
-        // the card's tab row, next to the view it scopes.
-        let git_leading = self
-            .git_open
-            .then(|| self.git_panel.update(cx, |panel, cx| panel.top_bar_leading(theme, cx)));
+        // While a feature card is open, its title moves up into the shared top
+        // bar (see `GitPanel::top_bar_leading` / `UsagePage::top_bar_leading`);
+        // the card's own chrome (branch selector, filters) stays with the view
+        // it scopes.
+        let git_leading = self.git_open.then(|| {
+            self.git_panel
+                .update(cx, |panel, cx| panel.top_bar_leading(theme, cx))
+        });
+        let usage_leading = self.usage_open.then(|| {
+            self.usage
+                .update(cx, |page, cx| page.top_bar_leading(theme, cx))
+        });
         let mut top_controls = div().flex_none().flex().items_center().gap_2();
         // Provider quota — a compact, provider-independent headroom meter.
         // Hidden entirely on a pi without `quota.*` (or when no provider
@@ -392,7 +401,11 @@ impl Render for OrbitApp {
                             "info",
                             &theme,
                             self.session_details_open,
-                            icon("icons/info.svg", IconSize::Medium.px(&theme), theme.text_2),
+                            icon(
+                                "icons/info.svg",
+                                ButtonSize::Medium.icon_size().px(&theme),
+                                theme.text_2,
+                            ),
                         )
                         .on_mouse_up(MouseButton::Left, cx.listener(Self::on_info_click)),
                     ),
@@ -405,7 +418,7 @@ impl Render for OrbitApp {
                     explorer_visible,
                     icon(
                         "icons/folder.svg",
-                        IconSize::Medium.px(&theme),
+                        ButtonSize::Medium.icon_size().px(&theme),
                         if explorer_visible {
                             theme.text
                         } else {
@@ -426,7 +439,7 @@ impl Render for OrbitApp {
                     pane_visible,
                     icon(
                         "icons/panel-right.svg",
-                        IconSize::Medium.px(&theme),
+                        ButtonSize::Medium.icon_size().px(&theme),
                         if pane_visible {
                             theme.text
                         } else {
@@ -444,7 +457,7 @@ impl Render for OrbitApp {
                     terminal_visible,
                     icon(
                         "icons/terminal.svg",
-                        IconSize::Medium.px(&theme),
+                        ButtonSize::Medium.icon_size().px(&theme),
                         if terminal_visible {
                             theme.text
                         } else {
@@ -467,7 +480,7 @@ impl Render for OrbitApp {
                     self.git_open,
                     icon(
                         "icons/github.svg",
-                        IconSize::Medium.px(&theme),
+                        ButtonSize::Medium.icon_size().px(&theme),
                         if self.git_open {
                             theme.text
                         } else {
@@ -708,7 +721,7 @@ impl Render for OrbitApp {
                                         )
                                         .child(icon(
                                             "icons/settings.svg",
-                                            IconSize::Small.px(&theme),
+                                            ButtonSize::Medium.icon_size().px(&theme),
                                             theme.text_3,
                                         ))
                                         .child(
@@ -826,7 +839,7 @@ impl Render for OrbitApp {
                                     .flex()
                                     .items_center(),
                             );
-                            if let Some(leading) = git_leading {
+                            if let Some(leading) = git_leading.or(usage_leading) {
                                 left.child(leading)
                             } else {
                                 left.child(
@@ -886,165 +899,172 @@ impl Render for OrbitApp {
                         .flex()
                         .flex_col()
                         .relative()
-                    // transcript (centered column) or empty state
-                    .child(if empty {
-                        self.render_empty_state(main_width, cx).into_any_element()
-                    } else {
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .w_full()
-                            .relative()
-                            .child(self.transcript.render(
-                                review_workspace.as_deref(),
-                                window.viewport_size().height,
-                                main_width,
-                                Some(self.review_opener(cx)),
-                                Some(self.image_opener(cx)),
-                                self.search_hits(),
-                                self.search_active(),
-                                cx,
-                            ))
-                            // In-transcript find bar (⌘F), floating over the
-                            // top-right of the transcript.
-                            .children(self.transcript_search_bar(cx))
-                            .into_any_element()
-                    })
-                    // floating composer + status bar — one centered column
-                    .child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .px_4()
-                            .pb_4()
-                            // One centered column: composer + status bar share
-                            // the same max width so the folder/meta row always
-                            // aligns to the composer's edges.
-                            .child(
-                                div()
-                                    // A stable element identity keeps the
-                                    // popovers and inline bars below from
-                                    // re-keying when a sibling appears, so
-                                    // their animations never restart mid-way.
-                                    .id("composer-column")
-                                    .max_w(px(CONTENT_MAX_W))
-                                    .w_full()
-                                    .flex()
-                                    .flex_col()
-                                    // `/`-command and `@`-file menu — anchored
-                                    // above the composer box (same deferred
-                                    // + anchored pattern as the chip pickers)
-                                    .children(self.autocomplete_popup(cx))
-                                    // Command/protocol failures, above the
-                                    // queue and composer.
-                                    .children(self.error_banner(theme, cx))
-                                    // In-flight retry / compaction state —
-                                    // persistent while active, never a
-                                    // transient status line.
-                                    .children(self.run_status_strip(cx))
-                                    // Access-guard approval — inline, above
-                                    // the queue and composer (no scrim modal).
-                                    .children(self.ask_panel(cx))
-                                    .children(self.approval_bar(cx))
-                                    // Queued follow-ups wait here (sticky above
-                                    // the composer) until the task finishes.
-                                    .children(self.queue_bar(cx))
-                                    // Extension `setWidget` blocks placed
-                                    // above the editor.
-                                    .children(self.extension_widgets_above(cx))
-                                    // composer box — the picker popups are
-                                    // anchored above their own chips
-                                    .child(
-                                        div()
-                                            .id("composer-box")
-                                            .w_full()
-                                            .relative()
-                                            .bg(theme.bg_composer)
-                                            .border_1()
-                                            .border_color(if self.file_drag_hovered {
-                                                theme.accent
-                                            } else if composer_focused {
-                                                theme.border_strong
-                                            } else {
-                                                theme.border
-                                            })
-                                            .rounded(Radius::XLarge.px(&theme))
-                                            .shadow(theme.composer_shadow())
-                                            .px(DynamicSpacing::Base12.px(&theme))
-                                            .pt(DynamicSpacing::Base08.px(&theme))
-                                            .pb(DynamicSpacing::Base08.px(&theme))
-                                            // Base interface font for the input
-                                            // (scales with the UI font-size
-                                            // setting); the editor inherits it.
-                                            .text_size(TextSize::Default.px(&theme))
-                                            .flex()
-                                            .flex_col()
-                                            .gap(DynamicSpacing::Base08.px(&theme))
-                                            .on_mouse_up(
-                                                MouseButton::Left,
-                                                cx.listener(Self::on_composer_click),
-                                            )
-                                            .on_drag_move(cx.listener(Self::on_file_drag_move))
-                                            .children(self.attachments_row(cx))
-                                            .child(self.input.clone())
-                                            .child(self.composer_row(composer_compact, cx))
-                                            // Drop-target overlay: fades
-                                            // in over the box while files are
-                                            // dragged across it. Absolute, so
-                                            // highlighting never shifts layout.
-                                            .children(self.file_drag_hovered.then(|| {
-                                                let overlay = div()
-                                                    .absolute()
-                                                    .inset_0()
-                                                    .rounded(Radius::XLarge.px(&theme))
-                                                    .bg(theme.bg_composer.opacity(0.92))
-                                                    .border_1()
-                                                    .border_color(theme.accent)
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .gap_2()
-                                                    .child(icon(
-                                                        "icons/plus.svg",
-                                                        IconSize::Small.px(&theme),
-                                                        theme.accent,
-                                                    ))
-                                                    .child(
-                                                        div()
-                                                            .text_size(TextSize::Small.px(&theme))
-                                                            .font_weight(FontWeight::MEDIUM)
-                                                            .text_color(theme.accent)
-                                                            .child(tr!("composer.drop_to_attach")),
-                                                    );
-                                                if theme::reduce_motion(cx) {
-                                                    overlay.into_any_element()
+                        // transcript (centered column) or empty state
+                        .child(if empty {
+                            self.render_empty_state(main_width, cx).into_any_element()
+                        } else {
+                            div()
+                                .flex_1()
+                                .min_h_0()
+                                .w_full()
+                                .relative()
+                                .child(self.transcript.render(
+                                    review_workspace.as_deref(),
+                                    window.viewport_size().height,
+                                    main_width,
+                                    Some(self.review_opener(cx)),
+                                    Some(self.image_opener(cx)),
+                                    self.search_hits(),
+                                    self.search_active(),
+                                    cx,
+                                ))
+                                // In-transcript find bar (⌘F), floating over the
+                                // top-right of the transcript.
+                                .children(self.transcript_search_bar(cx))
+                                .into_any_element()
+                        })
+                        // floating composer + status bar — one centered column
+                        .child(
+                            div()
+                                .w_full()
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .px_4()
+                                .pb_4()
+                                // One centered column: composer + status bar share
+                                // the same max width so the folder/meta row always
+                                // aligns to the composer's edges.
+                                .child(
+                                    div()
+                                        // A stable element identity keeps the
+                                        // popovers and inline bars below from
+                                        // re-keying when a sibling appears, so
+                                        // their animations never restart mid-way.
+                                        .id("composer-column")
+                                        .max_w(px(CONTENT_MAX_W))
+                                        .w_full()
+                                        .flex()
+                                        .flex_col()
+                                        // `/`-command and `@`-file menu — anchored
+                                        // above the composer box (same deferred
+                                        // + anchored pattern as the chip pickers)
+                                        .children(self.autocomplete_popup(cx))
+                                        // Command/protocol failures, above the
+                                        // queue and composer.
+                                        .children(self.error_banner(theme, cx))
+                                        // In-flight retry / compaction state —
+                                        // persistent while active, never a
+                                        // transient status line.
+                                        .children(self.run_status_strip(cx))
+                                        // Access-guard approval — inline, above
+                                        // the queue and composer (no scrim modal).
+                                        .children(self.ask_panel(cx))
+                                        .children(self.approval_bar(cx))
+                                        // Queued follow-ups wait here (sticky above
+                                        // the composer) until the task finishes.
+                                        .children(self.queue_bar(cx))
+                                        // Extension `setWidget` blocks placed
+                                        // above the editor.
+                                        .children(self.extension_widgets_above(cx))
+                                        // composer box — the picker popups are
+                                        // anchored above their own chips
+                                        .child(
+                                            div()
+                                                .id("composer-box")
+                                                .w_full()
+                                                .relative()
+                                                .bg(theme.bg_composer)
+                                                .border_1()
+                                                .border_color(if self.file_drag_hovered {
+                                                    theme.accent
+                                                } else if composer_focused {
+                                                    theme.border_strong
                                                 } else {
-                                                    overlay
-                                                        .with_animation(
-                                                            "drop-overlay",
-                                                            Animation::new(Duration::from_millis(
-                                                                120,
-                                                            )),
-                                                            |overlay, delta| overlay.opacity(delta),
-                                                        )
-                                                        .into_any_element()
-                                                }
-                                            })),
-                                    )
-                                    // Extension `setWidget` blocks placed
-                                    // below the editor.
-                                    .children(self.extension_widgets_below(cx))
-                                    .child(self.status_bar(&workspace_label, cx)),
-                            ),
-                    )
-                    // bottom terminal panel — the last row of the page, under
-                    // the composer, so it hugs the window's bottom edge
-                    .children(
-                        terminal_visible.then(|| self.terminal_panel.clone().into_any_element()),
-                    )
-                    .into_any_element()
+                                                    theme.border
+                                                })
+                                                .rounded(Radius::XLarge.px(&theme))
+                                                .shadow(theme.composer_shadow())
+                                                .px(DynamicSpacing::Base12.px(&theme))
+                                                .pt(DynamicSpacing::Base08.px(&theme))
+                                                .pb(DynamicSpacing::Base08.px(&theme))
+                                                // Base interface font for the input
+                                                // (scales with the UI font-size
+                                                // setting); the editor inherits it.
+                                                .text_size(TextSize::Default.px(&theme))
+                                                .flex()
+                                                .flex_col()
+                                                .gap(DynamicSpacing::Base08.px(&theme))
+                                                .on_mouse_up(
+                                                    MouseButton::Left,
+                                                    cx.listener(Self::on_composer_click),
+                                                )
+                                                .on_drag_move(cx.listener(Self::on_file_drag_move))
+                                                .children(self.attachments_row(cx))
+                                                .child(self.input.clone())
+                                                .child(self.composer_row(composer_compact, cx))
+                                                // Drop-target overlay: fades
+                                                // in over the box while files are
+                                                // dragged across it. Absolute, so
+                                                // highlighting never shifts layout.
+                                                .children(self.file_drag_hovered.then(|| {
+                                                    let overlay = div()
+                                                        .absolute()
+                                                        .inset_0()
+                                                        .rounded(Radius::XLarge.px(&theme))
+                                                        .bg(theme.bg_composer.opacity(0.92))
+                                                        .border_1()
+                                                        .border_color(theme.accent)
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .gap_2()
+                                                        .child(icon(
+                                                            "icons/plus.svg",
+                                                            IconSize::Small.px(&theme),
+                                                            theme.accent,
+                                                        ))
+                                                        .child(
+                                                            div()
+                                                                .text_size(
+                                                                    TextSize::Small.px(&theme),
+                                                                )
+                                                                .font_weight(FontWeight::MEDIUM)
+                                                                .text_color(theme.accent)
+                                                                .child(tr!(
+                                                                    "composer.drop_to_attach"
+                                                                )),
+                                                        );
+                                                    if theme::reduce_motion(cx) {
+                                                        overlay.into_any_element()
+                                                    } else {
+                                                        overlay
+                                                            .with_animation(
+                                                                "drop-overlay",
+                                                                Animation::new(
+                                                                    Duration::from_millis(120),
+                                                                ),
+                                                                |overlay, delta| {
+                                                                    overlay.opacity(delta)
+                                                                },
+                                                            )
+                                                            .into_any_element()
+                                                    }
+                                                })),
+                                        )
+                                        // Extension `setWidget` blocks placed
+                                        // below the editor.
+                                        .children(self.extension_widgets_below(cx))
+                                        .child(self.status_bar(&workspace_label, cx)),
+                                ),
+                        )
+                        // bottom terminal panel — the last row of the page, under
+                        // the composer, so it hugs the window's bottom edge
+                        .children(
+                            terminal_visible
+                                .then(|| self.terminal_panel.clone().into_any_element()),
+                        )
+                        .into_any_element()
                 };
                 // The top bar stays put; a feature page opens as a card below
                 // it, the chat fills the column itself.
@@ -1335,7 +1355,11 @@ impl OrbitApp {
         }
         let theme = *theme::get(cx);
         let font = ext_widgets::widget_font();
-        let mut column = div().w_full().flex().flex_col().gap(DynamicSpacing::Base06.px(&theme));
+        let mut column = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(DynamicSpacing::Base06.px(&theme));
         for widget in items {
             let mut card = div()
                 .id(ElementId::Name(format!("ext-widget-{}", widget.key).into()))
@@ -1414,7 +1438,7 @@ impl OrbitApp {
                     )
                     .child(icon(
                         self.access_mode.icon(),
-                        IconSize::XSmall.px(&theme),
+                        ButtonSize::Default.icon_size().px(&theme),
                         theme.text_3,
                     ))
                     .child(
@@ -1449,7 +1473,7 @@ impl OrbitApp {
         let svg = gpui::svg()
             .path("icons/chevron-down.svg")
             .flex_none()
-            .size(IconSize::Indicator.px(&theme))
+            .size(IconSize::XSmall.px(&theme))
             .text_color(if open { fg } else { theme.text_3 })
             .into_any_element();
         if !open {
@@ -1459,7 +1483,7 @@ impl OrbitApp {
             return gpui::svg()
                 .path("icons/chevron-down.svg")
                 .flex_none()
-                .size(IconSize::Indicator.px(&theme))
+                .size(IconSize::XSmall.px(&theme))
                 .text_color(fg)
                 .with_transformation(Transformation::rotate(radians(std::f32::consts::PI)))
                 .into_any_element();
@@ -1467,7 +1491,7 @@ impl OrbitApp {
         gpui::svg()
             .path("icons/chevron-down.svg")
             .flex_none()
-            .size(IconSize::Indicator.px(&theme))
+            .size(IconSize::XSmall.px(&theme))
             .text_color(fg)
             .with_animation(
                 animation_id,
@@ -1640,7 +1664,7 @@ impl OrbitApp {
                     )
                     .child(icon(
                         self.workflow_mode.icon(),
-                        IconSize::XSmall.px(&theme),
+                        ButtonSize::Default.icon_size().px(&theme),
                         theme.text_3,
                     ))
                     .child(
@@ -1830,7 +1854,11 @@ impl OrbitApp {
                     MouseButton::Left,
                     cx.listener(|this, _, _, cx| this.steer_current(cx)),
                 )
-                .child(icon("icons/arrow-up-right.svg", IconSize::Small.px(&theme), theme.accent))
+                .child(icon(
+                    "icons/arrow-up-right.svg",
+                    ButtonSize::Medium.icon_size().px(&theme),
+                    theme.accent,
+                ))
                 .into_any_element(),
         )
     }
@@ -1854,7 +1882,11 @@ impl OrbitApp {
                     .when(self.add_menu_open, |b| {
                         b.bg(theme.active).text_color(theme.active_fg)
                     })
-                    .child(icon("icons/plus.svg", IconSize::Small.px(&theme), theme.text_3))
+                    .child(icon(
+                        "icons/plus.svg",
+                        ButtonSize::Default.icon_size().px(&theme),
+                        theme.text_3,
+                    ))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_add_trigger_click)),
             )
     }
@@ -1910,10 +1942,8 @@ impl OrbitApp {
                     .when(!hint.is_empty(), |row| {
                         row.child(
                             div()
-                                .ml(
-                                    context_menu::keybinding_gap(&theme)
-                                        - context_menu::icon_gap(&theme),
-                                )
+                                .ml(context_menu::keybinding_gap(&theme)
+                                    - context_menu::icon_gap(&theme))
                                 .text_size(TextSize::Small.px(&theme))
                                 .text_color(theme.text_3)
                                 .child(*hint),
@@ -1979,6 +2009,9 @@ impl OrbitApp {
     /// windows keep Send reachable.
     pub(super) fn model_chip(&self, compact: bool, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = *theme::get(cx);
+        // A run in flight dims the chip and swallows clicks until it settles.
+        let disabled = self.is_running();
+        let open = !disabled && self.picker_is_open(PickerKind::Model);
         div()
             .flex()
             .flex_col()
@@ -1986,34 +2019,31 @@ impl OrbitApp {
             .children(self.chip_popup(PickerKind::Model))
             .child(
                 button_frame(div().id("model-chip"), &theme, ButtonSize::Default)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.overlay))
-                    .when(self.picker_is_open(PickerKind::Model), |chip| {
-                        chip.bg(theme.active)
+                    .when(!disabled, |chip| {
+                        chip.cursor_pointer()
+                            .hover(|s| s.bg(theme.overlay))
+                            .when(open, |chip| chip.bg(theme.active))
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(Self::on_model_trigger_click),
+                            )
                     })
-                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_model_trigger_click))
+                    .when(disabled, |chip| {
+                        chip.cursor_not_allowed().opacity(0.5)
+                    })
                     .child(icon_dyn(
                         provider_icon(&self.model_provider),
-                        IconSize::XSmall.px(&theme),
+                        ButtonSize::Default.icon_size().px(&theme),
                         theme.text_3,
                     ))
                     .child(
                         div()
                             .max_w(px(if compact { 120. } else { 220. }))
                             .truncate()
-                            .text_color(if self.picker_is_open(PickerKind::Model) {
-                                theme.active_fg
-                            } else {
-                                theme.text_2
-                            })
+                            .text_color(if open { theme.active_fg } else { theme.text_2 })
                             .child(self.model_label.clone()),
                     )
-                    .child(Self::chip_caret(
-                        self.picker_is_open(PickerKind::Model),
-                        theme.active_fg,
-                        "model-caret-turn",
-                        cx,
-                    )),
+                    .child(Self::chip_caret(open, theme.active_fg, "model-caret-turn", cx)),
             )
     }
 
@@ -2021,6 +2051,9 @@ impl OrbitApp {
     /// style, same hierarchy as the model chip.
     pub(super) fn thinking_chip(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
         let theme = *theme::get(cx);
+        // A run in flight dims the chip and swallows clicks until it settles.
+        let disabled = self.is_running();
+        let open = !disabled && self.picker_is_open(PickerKind::Thinking);
         div()
             .flex()
             .flex_col()
@@ -2028,30 +2061,33 @@ impl OrbitApp {
             .children(self.chip_popup(PickerKind::Thinking))
             .child(
                 button_frame(div().id("thinking-chip"), &theme, ButtonSize::Default)
-                    .cursor_pointer()
-                    .hover(|s| s.bg(theme.overlay))
-                    .when(self.picker_is_open(PickerKind::Thinking), |chip| {
-                        chip.bg(theme.active)
+                    .when(!disabled, |chip| {
+                        chip.cursor_pointer()
+                            .hover(|s| s.bg(theme.overlay))
+                            .when(open, |chip| chip.bg(theme.active))
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(Self::on_thinking_trigger_click),
+                            )
                     })
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(Self::on_thinking_trigger_click),
-                    )
+                    .when(disabled, |chip| {
+                        chip.cursor_not_allowed().opacity(0.5)
+                    })
                     .child({
                         let (path, _) = thinking_icon(&self.thinking_label, &theme);
-                        icon(path, IconSize::Small.px(&theme), theme.text_3)
+                        icon(
+                            path,
+                            ButtonSize::Default.icon_size().px(&theme),
+                            theme.text_3,
+                        )
                     })
                     .child(
                         div()
-                            .text_color(if self.picker_is_open(PickerKind::Thinking) {
-                                theme.active_fg
-                            } else {
-                                theme.text_2
-                            })
+                            .text_color(if open { theme.active_fg } else { theme.text_2 })
                             .child(thinking_display(&self.thinking_label)),
                     )
                     .child(Self::chip_caret(
-                        self.picker_is_open(PickerKind::Thinking),
+                        open,
                         theme.active_fg,
                         "thinking-caret-turn",
                         cx,
@@ -2292,61 +2328,58 @@ impl OrbitApp {
                                             .text_color(theme.text_3)
                                             .child(tr!("view.mode")),
                                     )
-                                    .child(
-                                        div().flex().gap(px(4.)).children(
-                                            WorkflowMode::ALL.iter().map(|mode| {
-                                                let mode = *mode;
-                                                let selected = self.workflow_mode == mode;
-                                                let button = div().id(ElementId::Name(
-                                                    format!("new-task-mode-{}", mode.as_wire())
-                                                        .into(),
-                                                ));
-                                                button_frame(button, &theme, ButtonSize::Large)
-                                                    .flex_1()
-                                                    .border_1()
-                                                    .border_color(if selected {
-                                                        theme.accent.opacity(0.55)
+                                    .child(div().flex().gap(px(4.)).children(
+                                        WorkflowMode::ALL.iter().map(|mode| {
+                                            let mode = *mode;
+                                            let selected = self.workflow_mode == mode;
+                                            let button = div().id(ElementId::Name(
+                                                format!("new-task-mode-{}", mode.as_wire()).into(),
+                                            ));
+                                            button_frame(button, &theme, ButtonSize::Large)
+                                                .flex_1()
+                                                .border_1()
+                                                .border_color(if selected {
+                                                    theme.accent.opacity(0.55)
+                                                } else {
+                                                    theme.border
+                                                })
+                                                .bg(if selected {
+                                                    theme.accent.opacity(0.12)
+                                                } else {
+                                                    theme.bg_raised
+                                                })
+                                                .cursor_pointer()
+                                                .hover(|s| {
+                                                    s.border_color(theme.border_strong)
+                                                        .bg(theme.overlay)
+                                                })
+                                                .on_mouse_up(
+                                                    MouseButton::Left,
+                                                    cx.listener(move |app, _, _, cx| {
+                                                        app.choose_workflow_mode(mode, cx);
+                                                    }),
+                                                )
+                                                .child(icon(
+                                                    mode.icon(),
+                                                    ButtonSize::Large.icon_size().px(&theme),
+                                                    if selected {
+                                                        theme.accent
                                                     } else {
-                                                        theme.border
-                                                    })
-                                                    .bg(if selected {
-                                                        theme.accent.opacity(0.12)
-                                                    } else {
-                                                        theme.bg_raised
-                                                    })
-                                                    .cursor_pointer()
-                                                    .hover(|s| {
-                                                        s.border_color(theme.border_strong)
-                                                            .bg(theme.overlay)
-                                                    })
-                                                    .on_mouse_up(
-                                                        MouseButton::Left,
-                                                        cx.listener(move |app, _, _, cx| {
-                                                            app.choose_workflow_mode(mode, cx);
-                                                        }),
-                                                    )
-                                                    .child(icon(
-                                                        mode.icon(),
-                                                        IconSize::Small.px(&theme),
-                                                        if selected {
-                                                            theme.accent
+                                                        theme.text_3
+                                                    },
+                                                ))
+                                                .child(
+                                                    div()
+                                                        .font_weight(FontWeight::MEDIUM)
+                                                        .text_color(if selected {
+                                                            theme.text
                                                         } else {
-                                                            theme.text_3
-                                                        },
-                                                    ))
-                                                    .child(
-                                                        div()
-                                                            .font_weight(FontWeight::MEDIUM)
-                                                            .text_color(if selected {
-                                                                theme.text
-                                                            } else {
-                                                                theme.text_2
-                                                            })
-                                                            .child(mode.label()),
-                                                    )
-                                            }),
-                                        ),
-                                    ),
+                                                            theme.text_2
+                                                        })
+                                                        .child(mode.label()),
+                                                )
+                                        }),
+                                    )),
                             )
                             // Workspace — a labeled select field, not a ghost
                             // row. Click opens the workspace picker (recent
@@ -2424,7 +2457,10 @@ impl OrbitApp {
                                                             .gap(px(1.))
                                                             .child(
                                                                 div()
-                                                                    .text_size(TextSize::Default.px(&theme))
+                                                                    .text_size(
+                                                                        TextSize::Default
+                                                                            .px(&theme),
+                                                                    )
                                                                     .font_weight(FontWeight::MEDIUM)
                                                                     .text_color(theme.text)
                                                                     .truncate()
@@ -2432,7 +2468,9 @@ impl OrbitApp {
                                                             )
                                                             .child(
                                                                 div()
-                                                                    .text_size(TextSize::Small.px(&theme))
+                                                                    .text_size(
+                                                                        TextSize::Small.px(&theme),
+                                                                    )
                                                                     .text_color(theme.text_3)
                                                                     .truncate()
                                                                     .child(path_label),
@@ -2501,7 +2539,7 @@ impl OrbitApp {
                         .clone()
                         .or_else(|| std::env::current_dir().ok())
                         .unwrap_or_else(|| PathBuf::from("."));
-                    match app.extensions.spawn(&workspace) {
+                    match app.extensions.spawn(&workspace, true) {
                         Ok(client) => {
                             app.client = Some(client);
                             app.send(CommandBody::GetState, "get_state");
@@ -2650,19 +2688,19 @@ impl OrbitApp {
                                         })
                                         .child(refresh_glyph(
                                             "refresh-spin",
-                                            IconSize::Small.px(&theme),
+                                            ButtonSize::Medium.icon_size().px(&theme),
                                             self.refreshing,
                                             theme.text_2,
                                             theme,
                                         ))
                                         .child(
-                                            div()
-                                                .text_color(theme.text_2)
-                                                .child(if self.refreshing {
+                                            div().text_color(theme.text_2).child(
+                                                if self.refreshing {
                                                     tr!("common.checking")
                                                 } else {
                                                     tr!("common.refresh")
-                                                }),
+                                                },
+                                            ),
                                         ),
                                     )
                                     // Only offered when the page was opened on
@@ -2812,7 +2850,11 @@ impl OrbitApp {
                     .gap(px(4.))
                     .text_size(TextSize::Small.px(&theme))
                     .text_color(theme.ok_green)
-                    .child(icon("icons/check.svg", IconSize::XSmall.px(&theme), theme.ok_green))
+                    .child(icon(
+                        "icons/check.svg",
+                        IconSize::XSmall.px(&theme),
+                        theme.ok_green,
+                    ))
                     .child(
                         dep.version
                             .clone()
@@ -2846,7 +2888,7 @@ impl OrbitApp {
                             })
                             .child(icon(
                                 "icons/copy.svg",
-                                IconSize::Small.px(&theme),
+                                ButtonSize::Default.icon_size().px(&theme),
                                 theme.text_2,
                             )),
                     )
@@ -2876,7 +2918,11 @@ impl OrbitApp {
                     .hover(|s| s.bg(theme.overlay).text_color(theme.text_2))
                     .active(|s| s.bg(theme.active).text_color(theme.active_fg))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_pick_folder_click))
-                    .child(icon("icons/folder.svg", IconSize::XSmall.px(&theme), theme.text_3))
+                    .child(icon(
+                        "icons/folder.svg",
+                        ButtonSize::Default.icon_size().px(&theme),
+                        theme.text_3,
+                    ))
                     .child(workspace_label.to_string()),
             )
             .children(self.branch.as_ref().map(|branch| {
@@ -2910,7 +2956,7 @@ impl OrbitApp {
                                     )
                                     .child(icon(
                                         "icons/branch.svg",
-                                        IconSize::XSmall.px(&theme),
+                                        ButtonSize::Default.icon_size().px(&theme),
                                         theme.text_3,
                                     ))
                                     .child(branch.name.clone())
@@ -2945,7 +2991,7 @@ impl OrbitApp {
                             )
                             .child(icon(
                                 "icons/git-fork.svg",
-                                IconSize::XSmall.px(&theme),
+                                ButtonSize::Default.icon_size().px(&theme),
                                 theme.text_3,
                             ))
                             .child(tr!("view.count_more", count = count))
@@ -3054,7 +3100,11 @@ impl OrbitApp {
                 header_ghost_button(
                     "toggle-sidebar",
                     &theme,
-                    icon("icons/layout-left.svg", IconSize::Medium.px(&theme), theme.text_2),
+                    icon(
+                        "icons/layout-left.svg",
+                        ButtonSize::Medium.icon_size().px(&theme),
+                        theme.text_2,
+                    ),
                 )
                 .block_mouse_except_scroll()
                 .tooltip({
@@ -3087,7 +3137,7 @@ impl OrbitApp {
                     })
                     .child(icon(
                         "icons/arrow-left.svg",
-                        IconSize::Medium.px(&theme),
+                        ButtonSize::Medium.icon_size().px(&theme),
                         if back_enabled {
                             theme.text_2
                         } else {
@@ -3115,7 +3165,7 @@ impl OrbitApp {
                     })
                     .child(icon(
                         "icons/arrow-right.svg",
-                        IconSize::Medium.px(&theme),
+                        ButtonSize::Medium.icon_size().px(&theme),
                         if forward_enabled {
                             theme.text_2
                         } else {
@@ -3148,7 +3198,11 @@ impl OrbitApp {
                     this.on_new_session(&crate::NewSession, w, cx)
                 }),
             )
-            .child(icon("icons/compose.svg", IconSize::Small.px(&theme), theme.accent))
+            .child(icon(
+                "icons/compose.svg",
+                ButtonSize::Large.icon_size().px(&theme),
+                theme.accent,
+            ))
             .child(
                 div()
                     .flex_1()
@@ -3186,7 +3240,11 @@ impl OrbitApp {
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseUpEvent, w, cx| this.toggle_command_palette(w, cx)),
             )
-            .child(icon("icons/search.svg", IconSize::Small.px(&theme), theme.text_3))
+            .child(icon(
+                "icons/search.svg",
+                ButtonSize::Large.icon_size().px(&theme),
+                theme.text_3,
+            ))
             .child(
                 div()
                     .flex_1()
@@ -3238,7 +3296,7 @@ impl OrbitApp {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_usage_nav_click))
             .child(icon(
                 "icons/usage-total.svg",
-                IconSize::Small.px(&theme),
+                ButtonSize::Large.icon_size().px(&theme),
                 if active {
                     theme.active_fg
                 } else {
@@ -3270,7 +3328,11 @@ impl OrbitApp {
                 .cursor_pointer()
                 .text_color(theme.send_fg)
                 .on_mouse_up(MouseButton::Left, cx.listener(Self::on_abort_mouse))
-                .child(icon("icons/stop.svg", IconSize::XSmall.px(&theme), theme.send_fg))
+                .child(icon(
+                    "icons/stop.svg",
+                    ButtonSize::Medium.icon_size().px(&theme),
+                    theme.send_fg,
+                ))
         } else {
             // Nothing to send yet: the button stays clickable (submit
             // no-ops on empty) but reads as quiet until there's a message
@@ -3287,7 +3349,7 @@ impl OrbitApp {
                 .on_mouse_up(MouseButton::Left, cx.listener(Self::on_send_click))
                 .child(icon(
                     "icons/send.svg",
-                    IconSize::Small.px(&theme),
+                    ButtonSize::Medium.icon_size().px(&theme),
                     if empty { theme.text_3 } else { theme.send_fg },
                 ))
         }
@@ -3437,7 +3499,11 @@ impl OrbitApp {
                 .items_center()
                 .justify_center()
                 .bg(theme.accent.opacity(0.16))
-                .child(icon("icons/task.svg", IconSize::Small.px(&theme), theme.accent)),
+                .child(icon(
+                    "icons/task.svg",
+                    IconSize::Small.px(&theme),
+                    theme.accent,
+                )),
         );
         if !question.header.trim().is_empty() {
             header = header.child(
@@ -3469,7 +3535,11 @@ impl OrbitApp {
             icon_button_frame(div().id("ask-close"), &theme, ButtonSize::Compact)
                 .cursor_pointer()
                 .hover(|style| style.bg(theme.overlay_strong))
-                .child(icon("icons/x.svg", IconSize::XSmall.px(&theme), theme.text_3))
+                .child(icon(
+                    "icons/x.svg",
+                    ButtonSize::Compact.icon_size().px(&theme),
+                    theme.text_3,
+                ))
                 .on_click(cx.listener(|this, _, window, cx| this.ask_cancel(window, cx))),
         );
         card = card.child(header);
@@ -3552,7 +3622,11 @@ impl OrbitApp {
                 .child(marker)
                 .child(copy);
             if multi && checked {
-                row = row.child(icon("icons/check.svg", IconSize::XSmall.px(&theme), theme.accent));
+                row = row.child(icon(
+                    "icons/check.svg",
+                    IconSize::XSmall.px(&theme),
+                    theme.accent,
+                ));
             }
             if !submitted {
                 row = row.on_click(cx.listener(move |this, _, _, cx| this.ask_choose(ix, cx)));
@@ -3582,7 +3656,11 @@ impl OrbitApp {
                 .items_center()
                 .gap(px(8.))
                 .hover(|style| style.bg(theme.overlay_strong))
-                .child(icon("icons/compose.svg", IconSize::XSmall.px(&theme), theme.text_3))
+                .child(icon(
+                    "icons/compose.svg",
+                    IconSize::XSmall.px(&theme),
+                    theme.text_3,
+                ))
                 .child(
                     div()
                         .text_size(TextSize::Small.px(&theme))
@@ -3840,7 +3918,11 @@ impl OrbitApp {
                     .items_center()
                     .justify_center()
                     .bg(theme.accent.opacity(0.16))
-                    .child(icon("icons/lock.svg", IconSize::Small.px(&theme), theme.accent)),
+                    .child(icon(
+                        "icons/lock.svg",
+                        IconSize::Small.px(&theme),
+                        theme.accent,
+                    )),
             )
             .child(
                 div()
@@ -3968,7 +4050,11 @@ impl OrbitApp {
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(icon("icons/info.svg", IconSize::Medium.px(&theme), theme.crit))
+                .child(icon(
+                    "icons/info.svg",
+                    IconSize::Medium.px(&theme),
+                    theme.crit,
+                ))
                 .child(
                     div()
                         .flex_1()
@@ -4006,7 +4092,11 @@ impl OrbitApp {
                                 cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
                             }),
                         )
-                        .child(icon("icons/copy.svg", IconSize::XSmall.px(&theme), theme.text_2)),
+                        .child(icon(
+                            "icons/copy.svg",
+                            ButtonSize::Compact.icon_size().px(&theme),
+                            theme.text_2,
+                        )),
                 )
                 .child(
                     icon_button_frame(div().id("dismiss-error"), &theme, ButtonSize::Compact)
@@ -4015,7 +4105,11 @@ impl OrbitApp {
                         .text_color(theme.text_2)
                         .hover(|s| s.bg(theme.overlay).text_color(theme.text))
                         .on_mouse_up(MouseButton::Left, cx.listener(Self::dismiss_error))
-                        .child("×"),
+                        .child(icon(
+                            "icons/x.svg",
+                            ButtonSize::Compact.icon_size().px(&theme),
+                            theme.text_2,
+                        )),
                 )
                 .into_any_element(),
         )
