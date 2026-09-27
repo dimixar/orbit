@@ -37,7 +37,6 @@ macro_rules! tr_cow {
 }
 
 mod access;
-mod ai_review;
 mod app;
 mod app_icon;
 mod ask;
@@ -54,6 +53,7 @@ mod composer_send;
 mod context_meter;
 mod custom_ui;
 mod dialog;
+mod diff_view;
 mod dither;
 mod explorer;
 mod favorites;

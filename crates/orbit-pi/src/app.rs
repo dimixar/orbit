@@ -47,7 +47,6 @@ use orbit_rpc::{
 use serde_json::Value;
 
 use crate::access::AccessMode;
-use crate::ai_review::{Report, ReviewKind, ReviewStatus};
 use crate::ask::{AskPrompt, AskQuestion};
 use crate::auth::{AuthEffect, AuthManager, AuthSupport, LoginPhase, ProviderStatus};
 use crate::branch_picker::BranchPicker;
@@ -212,6 +211,15 @@ pub struct OrbitApp {
     /// would let the repeat skip) while the first frame — generation 0 — draws
     /// the settled state with no launch animation.
     sidebar_slide_gen: u64,
+    /// Whether a feature page (Files / Git / Usage / AI Review) was open on
+    /// the previous frame. A full-page Review pane yields only to a page that
+    /// *opens* under it, never to one that was already there when the reader
+    /// maximized.
+    feature_open_last: bool,
+    /// Whether the Review pane was full-page on the previous frame. The
+    /// rising edge opens the sessions sidebar, so a maximized review never
+    /// strands the reader without a way to switch sessions.
+    pane_full_last: bool,
     /// Keyboard cursor for the sessions sidebar: an index into the current
     /// sidebar rows. `None` until the sidebar takes keyboard focus (⌘⇧B);
     /// the row it names paints the focused surface in `render_side_row`.
@@ -508,18 +516,10 @@ pub struct OrbitApp {
     latest_turn: Option<usize>,
     /// Right side pane — Review (git diff).
     sidepane: Entity<SidePane>,
-    /// The dedicated AI reviewer process, when one is running. Kept out of
-    /// `lives` — it is not a user session and must never appear in the sidebar.
-    ai_review: Option<ai_review::ReviewAgent>,
-    /// What the running/last reviewer was asked to inspect.
-    ai_review_kind: Option<ReviewKind>,
-    /// The reviewer's lifecycle, mirrored into the Review pane each frame.
-    ai_review_status: ReviewStatus,
-    /// The parsed findings (and prose) of the last completed review.
-    ai_report: Option<Report>,
-    /// Monotonic id guarding against a superseded review's async diff
-    /// collection launching a process after the user started or cancelled one.
-    ai_review_generation: u64,
+    /// Keeps the right pane's observer alive: the pane can change its own
+    /// width, full-page state, or collapse from its header, and the app's
+    /// layout (sidebar, main column, terminal) must follow immediately.
+    _sidepane_sub: Subscription,
     /// Right dock — the workspace file tree (cmd-shift-e).
     project_panel: Entity<crate::explorer::ProjectPanel>,
     /// Full-page read-only file viewer (the Files surface).
@@ -981,6 +981,7 @@ impl OrbitApp {
 
         // Right side pane: Review (git diff).
         let sidepane = cx.new(SidePane::new);
+        let sidepane_sub = cx.observe(&sidepane, |_, _, cx| cx.notify());
         // Bottom panel: an integrated shell.
         let terminal_panel = cx.new(TerminalPanel::new);
         // Full-page Git panel (Changes / History / Graph).
@@ -1046,6 +1047,8 @@ impl OrbitApp {
             sidebar_list: ListState::new(0, ListAlignment::Top, px(44.)),
             sidebar_visible: true,
             sidebar_slide_gen: 0,
+            feature_open_last: false,
+            pane_full_last: false,
             sidebar_cursor: None,
             sidebar_focus: cx.focus_handle(),
             input,
@@ -1162,11 +1165,7 @@ impl OrbitApp {
             turn_open: false,
             latest_turn: None,
             sidepane,
-            ai_review: None,
-            ai_review_kind: None,
-            ai_review_status: ReviewStatus::default(),
-            ai_report: None,
-            ai_review_generation: 0,
+            _sidepane_sub: sidepane_sub,
             project_panel,
             file_viewer,
             terminal_panel,
@@ -1438,7 +1437,7 @@ impl OrbitApp {
     pub(super) fn set_current_workspace(&mut self, cwd: PathBuf) {
         persist_last_workspace(&cwd);
         self.workspace_logo = crate::workspace_logo::load(&cwd);
-        self.current_workspace = Some(cwd);
+        self.current_workspace = Some(cwd.clone());
     }
 
     /// Add `cwd` to Orbit's project list if it isn't already there. Called
@@ -1973,12 +1972,11 @@ enum SettingsSelect {
 // `app.rs` keeps the `OrbitApp` model, the shared types, and the controller
 // wiring. Rendering and feature-specific logic live in child modules; they
 // are descendants of `app`, so they reach private fields/methods directly.
-mod ai_review;
 mod ask;
 mod composer_ops;
 mod dialogs;
 mod events;
-mod helpers;
+pub(crate) mod helpers;
 mod open_in;
 mod pi_update_ui;
 mod pickers;
@@ -2008,6 +2006,8 @@ mod session_default_apply_tests;
 mod sidebar_active_reveal_tests;
 #[cfg(test)]
 mod sidebar_placeholder_tests;
+#[cfg(test)]
+mod sidepane_full_width_tests;
 #[cfg(test)]
 mod titlebar_layout_tests;
 

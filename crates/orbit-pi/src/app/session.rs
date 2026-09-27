@@ -494,7 +494,6 @@ impl OrbitApp {
             return;
         }
         self.send(CommandBody::NewSession, "new_session");
-        self.discard_ai_review();
         self.input.read(cx).focus(window);
         cx.notify();
     }
@@ -522,7 +521,6 @@ impl OrbitApp {
             && !self.is_running()
         {
             self.send(CommandBody::NewSession, "new_session");
-            self.discard_ai_review();
             self.input.read(cx).focus(window);
             cx.notify();
             return;
@@ -543,7 +541,6 @@ impl OrbitApp {
         // parked run never waits on a modal tied to the previous session.
         self.cancel_open_dialog(cx);
         self.park_active_session();
-        self.discard_ai_review();
 
         self.busy = false;
         self.transcript.clear();
@@ -664,7 +661,6 @@ impl OrbitApp {
         self.cancel_open_dialog(cx);
         // ── park the outgoing session (running or idle) ──
         self.park_active_session();
-        self.discard_ai_review();
         self.busy = false;
         self.added = 0;
         self.removed = 0;
@@ -1847,8 +1843,6 @@ impl OrbitApp {
                 .update(cx, |panel, cx| panel.set_tab(index, cx));
         }
     }
-
-    // ── Explorer (project panel + Files surface) ───────────────────────
 
     /// Flip the left project-panel dock (⌘⇧E / Ctrl+Shift+E).
     pub(super) fn on_toggle_project_panel(

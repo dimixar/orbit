@@ -22,9 +22,6 @@ impl OrbitApp {
             cx.notify();
         }
         self.tick_background(cx);
-        // The reviewer is its own process with its own event stream; drain it
-        // regardless of the active session's state.
-        self.tick_ai_review(cx);
         // Persist a settled panel layout (a drag writes once it stops).
         crate::layout::flush_if_settled();
         // Bound the warm-session pool: reap idle parked processes past the TTL.
@@ -243,7 +240,7 @@ impl OrbitApp {
                     // read it now instead of waiting for the slow poll.
                     self.quota_entries_next_poll = Instant::now();
                     self.poll_quota_entries();
-                    // Capture the turn's end checkpoint, then refresh Review.
+                    // Capture the turn's end checkpoint.
                     self.finish_turn(cx);
                     // The run ended: announce it if the user is elsewhere.
                     let path = self.current_session_path.clone();

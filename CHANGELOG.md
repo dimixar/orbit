@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The Review pane gained view controls.** The changed files collapse to their
+  headers or expand back in one click (each header is its own toggle), long lines
+  wrap or unwrap (unwrapping pans only the diff body — the file name and change
+  counts stay fixed at the pane's edges), the diff switches between unified and
+  side-by-side rows, and the pane can own the page — the session view yields and
+  the sessions sidebar opens beside it — or minimize to a rail, returning to the
+  docked side pane first. All icon toggles with tooltips.
+
 ### Added
 
 - Settings → Agent → Behavior now lets Enter queue a follow-up (the existing
