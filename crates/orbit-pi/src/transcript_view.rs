@@ -30,7 +30,7 @@ use gpui::{
     Hitbox, HitboxBehavior, Hsla, Image, ImageSource, InspectorElementId, InteractiveText,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, Pixels,
     ScrollHandle, ScrollWheelEvent, SharedString, StrikethroughStyle, StyledText, TextAlign,
-    TextLayout, TextRun, UnderlineStyle, Window,
+    TextLayout, TextRun, TransformationMatrix, UnderlineStyle, Window,
 };
 
 use std::ops::Range;
@@ -42,7 +42,8 @@ use serde_json::Value;
 use orbit_rpc::MessageUsage;
 
 use crate::app::{
-    button_frame, context_menu_entry, context_menu_surface, icon_button_frame, BUTTON_GROUP,
+    button_frame, context_menu_entry, context_menu_surface, file_badge, file_glyph,
+    icon_button_frame, nerd_font_family, BUTTON_GROUP,
 };
 use crate::context_meter::{format_tokens, hit_percent_label};
 use crate::highlight::{self, Token};
@@ -646,6 +647,12 @@ struct SelectableText {
     /// Plain text this block contributes to the clipboard.
     plain: SharedString,
     links: Vec<(Range<usize>, String)>,
+    /// Byte ranges whose font glyph is blanked and replaced by a hugeicon
+    /// painted over the reserved space — the external-link arrow after a
+    /// bare URL in prose.
+    marks: Vec<Range<usize>>,
+    mark_color: Hsla,
+    mark_size: Pixels,
     scope: Option<TextScope>,
 }
 
@@ -662,9 +669,53 @@ impl SelectableText {
             text,
             plain,
             links,
+            marks: Vec::new(),
+            mark_color: Hsla::transparent_black(),
+            mark_size: px(0.),
             scope,
         }
     }
+
+    /// Paint the given byte ranges as hugeicon arrows in `color`; their font
+    /// glyphs must already be invisible (see [`hide_autolink_marks`]).
+    fn with_marks(mut self, marks: Vec<Range<usize>>, color: Hsla, size: Pixels) -> Self {
+        self.marks = marks;
+        self.mark_color = color;
+        self.mark_size = size;
+        self
+    }
+}
+
+/// Draw the hugeicon external-link arrow over the glyph space an autolink
+/// reserves. `range` covers just the arrow character: the runs keep its
+/// advance (so the mark stays part of the clickable link and the copied
+/// selection), while the icon centers on the box where the font glyph sat.
+fn paint_link_mark(
+    layout: &TextLayout,
+    range: &Range<usize>,
+    color: Hsla,
+    size: Pixels,
+    window: &mut Window,
+    cx: &App,
+) {
+    let Some(start) = layout.position_for_index(range.start) else {
+        return;
+    };
+    // A mark that wrapped alone still sits on its own line; the end position
+    // must share it for the box to be the arrow's, not a whole row's.
+    let center_x = match layout.position_for_index(range.end) {
+        Some(end) if end.y == start.y => (start.x + end.x) * 0.5,
+        _ => start.x + size * 0.5,
+    };
+    let top = start.y + (layout.line_height() - size) * 0.5;
+    let bounds = Bounds::new(point(center_x - size * 0.5, top), gpui::size(size, size));
+    let _ = window.paint_svg(
+        bounds,
+        "icons/arrow-up-right.svg".into(),
+        TransformationMatrix::unit(),
+        color,
+        cx,
+    );
 }
 
 impl Element for SelectableText {
@@ -717,6 +768,9 @@ impl Element for SelectableText {
     ) {
         self.text
             .paint(None, inspector_id, bounds, &mut (), &mut (), window, cx);
+        for mark in &self.marks {
+            paint_link_mark(layout, mark, self.mark_color, self.mark_size, window, cx);
+        }
         if let Some(scope) = self.scope.as_ref() {
             // The cursor rides this block's own hitbox: an I-beam over text,
             // a hand on links. A block's request wins only while the pointer
@@ -921,6 +975,10 @@ struct RowPaint {
     ix: usize,
     row_count: usize,
     theme: Theme,
+    /// The Nerd Fonts family for devicons file glyphs, resolved once per
+    /// frame; `None` when no Nerd Font is available (extension badges fall
+    /// back).
+    nerd: Option<SharedString>,
     live: bool,
     live_elapsed: Option<Duration>,
     fold_open: bool,
@@ -1061,6 +1119,9 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
             .collect()
     };
 
+    // Devicons resolve once per frame: every file row in the list shares the
+    // same Nerd Fonts family (or falls back to extension badges).
+    let nerd = nerd_font_family(cx);
     let list_el = list(view.scroller.list_state(), move |ix, _window, cx| {
         let live = streaming.get() == Some(ix);
         let live_elapsed = if live {
@@ -1085,6 +1146,7 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
             let card = render_changed_files(
                 files,
                 theme,
+                nerd.as_ref(),
                 ix,
                 workspace.as_deref(),
                 expanded_files.borrow().contains(&ix),
@@ -1146,6 +1208,7 @@ pub(crate) fn render_transcript(view: TranscriptView, cx: &gpui::App) -> impl In
             ix,
             row_count,
             theme: *theme::get(cx),
+            nerd: nerd.clone(),
             live,
             live_elapsed,
             fold_open,
@@ -1821,6 +1884,7 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
                         open,
                         group_live,
                         theme,
+                        paint.nerd.as_ref(),
                         paint.expanded_activities.clone(),
                         paint.expanded_tools.clone(),
                         paint.copied_sections.clone(),
@@ -1889,6 +1953,7 @@ fn render_assistant(message: &ChatMessage, paint: &RowPaint) -> impl IntoElement
                 open,
                 group_live,
                 theme,
+                paint.nerd.as_ref(),
                 paint.expanded_activities.clone(),
                 paint.expanded_tools.clone(),
                 paint.copied_sections.clone(),
@@ -2111,6 +2176,7 @@ fn render_activity_group(
     open: bool,
     live: bool,
     theme: Theme,
+    nerd: Option<&SharedString>,
     expanded_activities: ExpandedActivities,
     expanded_tools: ExpandedTools,
     copied_sections: CopiedSections,
@@ -2276,6 +2342,7 @@ fn render_activity_group(
                     pulse,
                     !pulse,
                     theme,
+                    nerd,
                     (ix, flat),
                     expanded_tools.borrow().contains(&(ix, flat)),
                     expanded_tools.clone(),
@@ -2842,6 +2909,7 @@ fn render_activity_card(
     pulse: bool,
     complete: bool,
     theme: Theme,
+    nerd: Option<&SharedString>,
     key: (usize, usize),
     tool_open: bool,
     expanded_tools: ExpandedTools,
@@ -2879,6 +2947,19 @@ fn render_activity_card(
     // An edit/write tool carries its own change; the header copy button and
     // the expanded body both read from it.
     let diff = edit_diff(tool);
+    // File-content tools get their file's devicon in the header; the
+    // devicons palette follows the theme.
+    let file_path = file_preview_path(tool);
+    let dark = theme.mode == ThemeMode::Dark;
+    if matches!(tool.name.as_str(), "read" | "edit" | "write") {
+        eprintln!(
+            "[card-dbg] name={} nerd={:?} devicon={:?} path={:?}",
+            tool.name,
+            nerd,
+            file_path.and_then(|p| crate::app::helpers::dev_file_icon(p, dark)),
+            file_path
+        );
+    }
 
     let mut card = div()
         .id(ElementId::NamedInteger(
@@ -2940,14 +3021,60 @@ fn render_activity_card(
                                     ),
                                 ),
                         )
-                    } else {
+                    } else if let Some(url) = tool_url(tool) {
+                        // A fetch tool's preview is the URL itself: a link
+                        // that opens the browser without toggling the card
+                        // (the row's own click expands the detail).
                         row.child(
                             div()
+                                .id(ElementId::NamedInteger(
+                                    "tool-link".into(),
+                                    (key.0 as u64) << 16 | key.1 as u64,
+                                ))
                                 .flex_1()
                                 .min_w_0()
-                                .truncate()
-                                .text_color(theme.tool_meta)
-                                .child(detail),
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .cursor_pointer()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_color(theme.accent)
+                                        .underline()
+                                        .child(display_url(&url).to_string()),
+                                )
+                                .child(glyph(
+                                    "icons/arrow-up-right.svg",
+                                    IconSize::XSmall.px(&theme),
+                                    theme.accent,
+                                ))
+                                .on_click(move |_, _, cx| {
+                                    cx.open_url(&url);
+                                    cx.stop_propagation();
+                                }),
+                        )
+                    } else {
+                        let mut preview =
+                            div().flex_1().min_w_0().flex().items_center().gap(px(6.));
+                        if let Some(path) = file_path {
+                            preview = preview.child(file_glyph(
+                                path,
+                                dark,
+                                nerd,
+                                IconSize::Small.px(&theme),
+                                file_badge(path, theme),
+                            ));
+                        }
+                        row.child(
+                            preview.child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(theme.tool_meta)
+                                    .child(detail),
+                            ),
                         )
                     }
                 })
@@ -4458,9 +4585,65 @@ fn format_working_elapsed(duration: Duration) -> String {
     }
 }
 
+/// The URL a fetch-style tool was invoked with. `None` for other tools.
+fn tool_url(tool: &ToolCall) -> Option<String> {
+    if !matches!(
+        tool.name.as_str(),
+        "web_fetch" | "webfetch" | "fetch" | "open_url" | "browse"
+    ) {
+        return None;
+    }
+    tool.args
+        .as_ref()?
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// The query a web-search tool was invoked with. `None` for other tools.
+fn tool_search_query(tool: &ToolCall) -> Option<String> {
+    if !matches!(
+        tool.name.as_str(),
+        "web_search" | "websearch" | "search_web" | "browse"
+    ) {
+        return None;
+    }
+    tool.args
+        .as_ref()?
+        .get("query")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// A URL as it reads in a card header: scheme and a leading `www.` dropped.
+fn display_url(url: &str) -> &str {
+    let url = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    url.strip_prefix("www.").unwrap_or(url)
+}
+
+/// File-content tools whose header preview is one file path — the tools
+/// that get the file's devicon.
+fn file_preview_path(tool: &ToolCall) -> Option<&str> {
+    match tool.name.as_str() {
+        "read" | "view" | "edit" | "write" => tool.path.as_deref(),
+        _ => None,
+    }
+}
+
 fn activity_preview(tool: &ToolCall) -> String {
     if let Some(path) = &tool.path {
         return path.clone();
+    }
+    // A fetch tool's arguments JSON would show `{"url":"…"}` and a search
+    // tool's `{"query":"…"}`; the URL/query itself is the fact to show.
+    if let Some(url) = tool_url(tool) {
+        return display_url(&url).to_string();
+    }
+    if let Some(query) = tool_search_query(tool) {
+        return query;
     }
     // A command tool's pi summary is the raw JSON arguments; show the shell
     // command itself in the header instead of `{"command":"…"}`.
@@ -4515,9 +4698,15 @@ fn render_line_delta(added: u64, removed: u64, theme: Theme, size: f32) -> impl 
 // `border-l-2` blockquotes, mono inline-code chips, rounded pre blocks,
 // and clickable underlined links.
 
-/// Flattened inline runs: the body text, one [`TextRun`] per styled span,
-/// and the link `(byte range, url)` pairs.
-type InlineRuns = (SharedString, Vec<TextRun>, Vec<(Range<usize>, String)>);
+/// Flattened inline runs: `(text, runs, links, autolink marks)`. Each link
+/// is a `(byte range, url)` pair into the body; each mark is the byte range
+/// of an autolink's arrow glyph.
+type InlineRuns = (
+    SharedString,
+    Vec<TextRun>,
+    Vec<(Range<usize>, String)>,
+    Vec<Range<usize>>,
+);
 
 /// One styled inline span produced by [`parse_inline`].
 #[derive(Clone, Default)]
@@ -4528,6 +4717,9 @@ struct InlineSpan {
     strikethrough: bool,
     code: bool,
     link: Option<String>,
+    /// A bare URL the parser recognized, as opposed to a `[label](url)`
+    /// link. Autolinks get an external-link mark in the rendered text.
+    autolink: bool,
 }
 
 fn flush_span(spans: &mut Vec<InlineSpan>, current: &mut InlineSpan) {
@@ -4536,8 +4728,48 @@ fn flush_span(spans: &mut Vec<InlineSpan>, current: &mut InlineSpan) {
     }
 }
 
+/// The end index (exclusive) of a bare `http://` or `https://` URL starting
+/// at `start`, or `None` when the text there is not a URL. The scan stops at
+/// whitespace, `<`, and `>`; trailing sentence punctuation, emphasis markers,
+/// and closing brackets with no opener inside the URL are left for the prose.
+fn autolink_end(chars: &[char], start: usize) -> Option<usize> {
+    let tail = &chars[start..];
+    if !tail.starts_with(&['h', 't', 't', 'p', 's', ':', '/', '/'])
+        && !tail.starts_with(&['h', 't', 't', 'p', ':', '/', '/'])
+    {
+        return None;
+    }
+    let mut end = start;
+    while end < chars.len() && !chars[end].is_whitespace() && chars[end] != '<' && chars[end] != '>'
+    {
+        end += 1;
+    }
+    while end > start {
+        let last = chars[end - 1];
+        let trim = matches!(
+            last,
+            '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"' | '*' | '_' | '~'
+        ) || (matches!(last, ')' | ']' | '}') && {
+            let opener = match last {
+                ')' => '(',
+                ']' => '[',
+                _ => '{',
+            };
+            let opens = chars[start..end].iter().filter(|&&c| c == opener).count();
+            let closes = chars[start..end].iter().filter(|&&c| c == last).count();
+            closes > opens
+        });
+        if !trim {
+            break;
+        }
+        end -= 1;
+    }
+    (end > start).then_some(end)
+}
+
 /// Parse GFM inline syntax: `` `code` ``, `**bold**`, `*italic*`, `_italic_`,
-/// `~~strike~~`, `[links](url)`. `\*`-style escapes render literally.
+/// `~~strike~~`, `[links](url)`, and bare `http(s)://` URLs. `\*`-style
+/// escapes render literally.
 fn parse_inline(text: &str) -> Vec<InlineSpan> {
     let mut spans: Vec<InlineSpan> = Vec::new();
     let mut current = InlineSpan::default();
@@ -4640,6 +4872,23 @@ fn parse_inline(text: &str) -> Vec<InlineSpan> {
                     i += 1;
                 }
             }
+            'h' => {
+                // A bare URL is a link even without `[label](url)` syntax.
+                if let Some(end) = autolink_end(&chars, i) {
+                    // Capture the surrounding style before the flush resets
+                    // it, so a URL inside `**bold**` stays bold.
+                    let mut span = current.clone();
+                    flush_span(&mut spans, &mut current);
+                    span.text = chars[i..end].iter().collect();
+                    span.link = Some(span.text.clone());
+                    span.autolink = true;
+                    spans.push(span);
+                    i = end;
+                } else {
+                    current.text.push(ch);
+                    i += 1;
+                }
+            }
             other => {
                 current.text.push(other);
                 i += 1;
@@ -4661,12 +4910,21 @@ fn inline_runs(
     let mut body = String::new();
     let mut runs: Vec<TextRun> = Vec::new();
     let mut links: Vec<(Range<usize>, String)> = Vec::new();
+    let mut marks: Vec<Range<usize>> = Vec::new();
     for span in spans {
         if span.text.is_empty() {
             continue;
         }
         let start = body.len();
         body.push_str(&span.text);
+        // A bare URL wears an external-link mark so it reads as a link at a
+        // glance: a gap, then the arrow the mark run carries. The whole mark
+        // rides the link run, so clicking it opens the URL too. The arrow
+        // gets its own run so the transcript can blank the font glyph and
+        // paint the hugeicon arrow over it.
+        if span.autolink {
+            body.push(' ');
+        }
         let len = body.len() - start;
         let mut font = ui_font();
         if span.code {
@@ -4692,7 +4950,7 @@ fn inline_runs(
         } else {
             base_color
         };
-        runs.push(TextRun {
+        let run = TextRun {
             len,
             font,
             color,
@@ -4706,13 +4964,55 @@ fn inline_runs(
                 thickness: px(1.),
                 color: None,
             }),
-        });
+        };
+        if span.autolink {
+            let mark_start = body.len();
+            body.push_str(AUTOLINK_ARROW);
+            marks.push(mark_start..body.len());
+            runs.push(run.clone());
+            runs.push(TextRun {
+                len: body.len() - mark_start,
+                ..run
+            });
+        } else {
+            runs.push(run);
+        }
         if let Some(url) = &span.link {
             links.push((start..body.len(), url.clone()));
         }
     }
-    (body.into(), runs, links)
+    (body.into(), runs, links, marks)
 }
+
+/// Blank the font glyphs the autolink mark runs carry; [`paint_link_mark`]
+/// draws the hugeicon arrow over that space instead. The run stays in the
+/// text, so the click target and copied selection still cover the mark.
+fn hide_autolink_marks(runs: Vec<TextRun>, marks: &[Range<usize>]) -> Vec<TextRun> {
+    if marks.is_empty() {
+        return runs;
+    }
+    let mut offset = 0usize;
+    runs.into_iter()
+        .map(|mut run| {
+            let start = offset;
+            offset += run.len;
+            if marks
+                .iter()
+                .any(|mark| mark.start < offset && mark.end > start)
+            {
+                run.color = Hsla::transparent_black();
+                run.underline = None;
+            }
+            run
+        })
+        .collect()
+}
+
+/// The north-east arrow a bare URL reserves after its gap. Kept as plain
+/// Unicode in the text — the copied selection stays readable, unlike a
+/// private-use glyph — while the transcript blanks the font's glyph and
+/// paints the hugeicon arrow over it.
+const AUTOLINK_ARROW: &str = "\u{2197}";
 
 /// The window's default UI face (Zed's IBM Plex Sans), explicit for
 /// [`TextRun`] construction.
@@ -4742,7 +5042,7 @@ fn paragraph_text(
     theme: Theme,
 ) -> impl IntoElement {
     let spans = parse_inline(text);
-    let (body, runs, links) = inline_runs(&spans, weight, color, theme);
+    let (body, runs, links, marks) = inline_runs(&spans, weight, color, theme);
     let wrapper = div()
         .w_full()
         .min_w_0()
@@ -4751,17 +5051,23 @@ fn paragraph_text(
         .line_height(theme.ui_px(line_height))
         .text_color(color);
     if let Some(scope) = text_scope() {
+        // The font's arrow would pick a fallback/emoji face; the hugeicon
+        // paints crisper and on-theme (see `paint_link_mark`).
+        let runs = hide_autolink_marks(runs, &marks);
         let range = scope.state.borrow().range_for(&key, body.as_ref());
         let runs = highlight_runs(runs, range, selection_color(theme));
         let plain = body.clone();
         wrapper
-            .child(SelectableText::new(
-                key,
-                StyledText::new(body).with_runs(runs),
-                plain,
-                links,
-                Some(scope),
-            ))
+            .child(
+                SelectableText::new(
+                    key,
+                    StyledText::new(body).with_runs(runs),
+                    plain,
+                    links,
+                    Some(scope),
+                )
+                .with_marks(marks, theme.accent, IconSize::Small.px(&theme)),
+            )
             .into_any_element()
     } else {
         let ranges: Vec<Range<usize>> = links.iter().map(|(range, _)| range.clone()).collect();
@@ -6227,6 +6533,7 @@ fn workspace_relative_path(path: &str, workspace: Option<&Path>) -> String {
 pub(crate) fn render_changed_files(
     files: &[(String, u64, u64)],
     theme: Theme,
+    nerd: Option<&SharedString>,
     message_ix: usize,
     workspace: Option<&Path>,
     expanded: bool,
@@ -6261,6 +6568,13 @@ pub(crate) fn render_changed_files(
                 .flex()
                 .items_center()
                 .gap(px(8.))
+                .child(file_glyph(
+                    path,
+                    theme.mode == ThemeMode::Dark,
+                    nerd,
+                    IconSize::Small.px(&theme),
+                    file_badge(path, theme),
+                ))
                 .child(
                     div()
                         .min_w_0()
@@ -7055,6 +7369,78 @@ mod tests {
     }
 
     #[test]
+    fn fetch_tools_preview_the_url_not_json() {
+        let fetch = ToolCall {
+            name: "web_fetch".into(),
+            summary: r#"{"url":"https://example.com/docs/start"}"#.into(),
+            path: None,
+            added: 0,
+            removed: 0,
+            id: None,
+            args: Some(serde_json::json!({ "url": "https://example.com/docs/start" })),
+            output: None,
+            failed: false,
+            facts: Default::default(),
+        };
+        assert_eq!(
+            tool_url(&fetch).as_deref(),
+            Some("https://example.com/docs/start")
+        );
+        // The header drops the scheme so the host leads the line.
+        assert_eq!(activity_preview(&fetch), "example.com/docs/start");
+        assert_eq!(display_url("http://www.example.com/x"), "example.com/x");
+        assert_eq!(display_url("https://example.com"), "example.com");
+        assert_eq!(display_url("example.com"), "example.com");
+
+        let search = ToolCall {
+            name: "web_search".into(),
+            summary: r#"{"query":"rust async book"}"#.into(),
+            path: None,
+            added: 0,
+            removed: 0,
+            id: None,
+            args: Some(serde_json::json!({ "query": "rust async book" })),
+            output: None,
+            failed: false,
+            facts: Default::default(),
+        };
+        assert_eq!(
+            tool_search_query(&search).as_deref(),
+            Some("rust async book")
+        );
+        assert_eq!(activity_preview(&search), "rust async book");
+        // Other tools never fabricate a link or a query.
+        assert_eq!(tool_url(&search), None);
+        assert_eq!(tool_search_query(&fetch), None);
+    }
+
+    #[test]
+    fn only_file_tools_get_the_file_glyph() {
+        let read = ToolCall {
+            name: "read".into(),
+            summary: String::new(),
+            path: Some("src/main.rs".into()),
+            added: 0,
+            removed: 0,
+            id: None,
+            args: None,
+            output: None,
+            failed: false,
+            facts: Default::default(),
+        };
+        assert_eq!(file_preview_path(&read), Some("src/main.rs"));
+        // The preview still shows the path (unchanged behavior).
+        assert_eq!(activity_preview(&read), "src/main.rs");
+        // A search tool's `path` is a scope, not the thing it read; it keeps
+        // its generic icon instead of a file glyph.
+        let grep = ToolCall {
+            name: "grep".into(),
+            ..read.clone()
+        };
+        assert_eq!(file_preview_path(&grep), None);
+    }
+
+    #[test]
     fn multiline_command_preview_is_single_line_without_changing_the_command() {
         let command = "python3 - <<'PY'\n  print('hello')\nPY";
         let tool = ToolCall {
@@ -7480,13 +7866,120 @@ mod tests {
     fn inline_runs_pairs_link_ranges_with_urls() {
         let theme = Theme::dark();
         let spans = parse_inline("see [docs](https://pi.dev) now");
-        let (body, runs, links) = inline_runs(&spans, FontWeight::NORMAL, theme.text, theme);
+        let (body, runs, links, marks) = inline_runs(&spans, FontWeight::NORMAL, theme.text, theme);
         assert_eq!(body.as_ref(), "see docs now");
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].1, "https://pi.dev");
         assert_eq!(&body[links[0].0.clone()], "docs");
+        assert!(marks.is_empty());
         // Underline style rides on the link run.
         assert!(runs.iter().any(|run| run.underline.is_some()));
+    }
+
+    #[test]
+    fn bare_urls_autolink_and_trim_trailing_punctuation() {
+        let spans = parse_inline("see https://pi.dev/docs. and http://a.b/(x) now");
+        let links: Vec<&str> = spans.iter().filter_map(|s| s.link.as_deref()).collect();
+        assert_eq!(links, vec!["https://pi.dev/docs", "http://a.b/(x)"]);
+        let autolinks: Vec<&str> = spans
+            .iter()
+            .filter(|s| s.autolink)
+            .map(|s| s.text.as_str())
+            .collect();
+        assert_eq!(autolinks, vec!["https://pi.dev/docs", "http://a.b/(x)"]);
+        // A closing bracket with no opener inside the URL is prose.
+        let spans = parse_inline("(see https://x.dev/a)");
+        assert_eq!(
+            spans
+                .iter()
+                .filter_map(|s| s.link.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["https://x.dev/a"]
+        );
+        // Angle brackets stay prose; the URL itself is the link.
+        let spans = parse_inline("<https://x.dev>");
+        assert_eq!(
+            spans
+                .iter()
+                .filter_map(|s| s.link.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["https://x.dev"]
+        );
+        // Markdown links are not autolinks, and code spans stay literal.
+        let spans = parse_inline("[docs](https://pi.dev)");
+        assert!(spans.iter().all(|s| !s.autolink));
+        let spans = parse_inline("`https://pi.dev`");
+        assert!(spans.iter().all(|s| s.link.is_none()));
+    }
+
+    #[test]
+    fn autolink_range_covers_the_rendered_url() {
+        let theme = Theme::dark();
+        let spans = parse_inline("go https://pi.dev/x now");
+        let (body, runs, links, marks) = inline_runs(&spans, FontWeight::NORMAL, theme.text, theme);
+        assert_eq!(body.as_ref(), "go https://pi.dev/x \u{2197} now");
+        assert_eq!(links.len(), 1);
+        // The range covers the URL and its external-link mark.
+        assert_eq!(&body[links[0].0.clone()], "https://pi.dev/x \u{2197}");
+        // The mark is its own run, so the transcript can blank the font
+        // glyph and paint the hugeicon arrow over the space.
+        assert_eq!(marks.len(), 1);
+        assert_eq!(&body[marks[0].clone()], "\u{2197}");
+        let hidden = hide_autolink_marks(runs, &marks);
+        assert!(hidden.iter().any(|run| run.color.a == 0.0));
+    }
+
+    struct AutolinkParagraphView {
+        selection: TextSelectionState,
+    }
+
+    impl gpui::Render for AutolinkParagraphView {
+        fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            self.selection.borrow_mut().begin_frame();
+            let _scope = TextScopeGuard::enter(TextScope {
+                state: self.selection.clone(),
+                message_ix: 0,
+            });
+            let theme = theme::Theme::for_id(theme::ThemeId::Orbit);
+            div().w_full().child(paragraph_text(
+                "PR created: https://github.com/imrj05/orbit/pull/36",
+                14.,
+                26.,
+                FontWeight::NORMAL,
+                theme.assistant_text,
+                ElementId::Name("autolink-paragraph".into()),
+                theme,
+            ))
+        }
+    }
+
+    #[gpui::test]
+    fn autolink_mark_paints_the_hugeicon_over_its_glyph(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let selection = Rc::new(RefCell::new(TextSelection::new()));
+        let view = cx.update(|_, cx| {
+            cx.new(|_| AutolinkParagraphView {
+                selection: selection.clone(),
+            })
+        });
+        cx.draw(
+            point(px(0.), px(0.)),
+            gpui::size(px(600.), px(200.)),
+            |_, _| view.clone(),
+        );
+        let state = selection.borrow();
+        assert_eq!(state.blocks.len(), 1);
+        let block = &state.blocks[0];
+        // The mark stays in the copied text and inside the link target...
+        let arrow = block.text.find('\u{2197}').expect("mark in the copy text");
+        assert!(block.links[0].0.contains(&arrow));
+        // ...and keeps a box on the line, which is where the hugeicon draws.
+        let start = block.layout.position_for_index(arrow).expect("mark box");
+        let end = block
+            .layout
+            .position_for_index(arrow + '\u{2197}'.len_utf8())
+            .expect("mark box end");
+        assert!(end.x > start.x, "the mark reserves room for the icon");
     }
 
     #[test]

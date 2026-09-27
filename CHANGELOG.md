@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Settings → Shortcuts reflects the selected default. Hints remain visible with
   an empty draft; the newline shortcut stays in Settings rather than adding
   clutter below the composer.
+- Transcript tool cards show the file's language icon on `read` / `edit` /
+  `write` rows and on the changed-files summary. `web_fetch` rows show the URL
+  as a clickable link with the scheme hidden, and `web_search` rows show the
+  query instead of the raw arguments JSON.
+- Bare `http(s)://` URLs in user and assistant prose are links now: accent
+  colored, underlined, marked with the HugeIcons external-link arrow, and
+  opened in the default browser on click. Markdown `[label](url)` links keep
+  their own label.
 
 ### Changed
 
@@ -34,6 +42,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remains an explicit steer. Idle sends still start a normal prompt, and
   Shift+Enter still inserts a new line. Steering and alternate-send shortcuts
   are scoped to the chat input so they cannot submit drafts from other fields.
+
+### Fixed
+
+- File icons render everywhere they are used (the Explorer tree, `@file`
+  mention rows, attachment chips, and Git changed-file rows). The bundled Nerd
+  Fonts symbols face was embedded in the app but never registered with the text
+  system, so every devicon silently fell back to a text extension badge.
 
 ### Fixed
 
