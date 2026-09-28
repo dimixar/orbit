@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-29
+
 ### Changed
 
 - Dropdown menus across the app now match the branch selector's popover
@@ -24,8 +26,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   second time. The popup dismissed on mouse-down and the trigger's mouse-up
   re-opened it on the same click; the trigger now honors the same gesture
   guard every other dropdown uses.
-
-### Fixed
 
 - **New Task** now starts a fresh session when pi has exited instead of doing
   nothing. With no turn in flight the button sent `new_session` to the live
@@ -643,7 +643,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In-transcript find (⌘F) and a full-window image lightbox.
 - Native macOS app bundle, Developer-ID signed and notarizable.
 
-[Unreleased]: https://github.com/imrj05/orbit/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/imrj05/orbit/compare/v0.2.1...HEAD
 [0.0.1]: https://github.com/imrj05/orbit/releases/tag/v0.0.1
 [0.0.2]: https://github.com/imrj05/orbit/releases/tag/v0.0.2
 [0.0.3]: https://github.com/imrj05/orbit/releases/tag/v0.0.3
@@ -664,3 +664,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.0.18]: https://github.com/imrj05/orbit/releases/tag/v0.0.18
 [0.0.19]: https://github.com/imrj05/orbit/releases/tag/v0.0.19
 [0.2.0]: https://github.com/imrj05/orbit/releases/tag/v0.2.0
+[0.2.1]: https://github.com/imrj05/orbit/releases/tag/v0.2.1
