@@ -1212,6 +1212,7 @@ fn expected_archive_root(layout: &InstallLayout, version: &str) -> std::ffi::OsS
     }
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = layout;
         std::ffi::OsString::from(format!("orbit-pi-{version}-{}", target_triple()))
     }
 }
