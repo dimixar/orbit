@@ -5244,17 +5244,57 @@ fn image_line(trimmed: &str) -> Option<(String, String)> {
             .and_then(|rest| rest.split('>').next())
             .unwrap_or_else(|| raw.split_whitespace().next().unwrap_or(""));
         if !url.is_empty() {
-            return Some((alt, url.to_string()));
+            return Some((alt, normalize_image_url(url)));
         }
         return None;
     }
     if t.starts_with("<img") {
         let src = html_attr(t, "src")?;
         if !src.is_empty() {
-            return Some((html_attr(t, "alt").unwrap_or_default(), src));
+            return Some((
+                html_attr(t, "alt").unwrap_or_default(),
+                normalize_image_url(&src),
+            ));
         }
     }
     None
+}
+
+/// Rewrite GitHub's signed `private-user-images` CDN URL to the durable
+/// `user-attachments` URL for the same asset.
+///
+/// A screenshot pasted into a comment is stored as
+/// `private-user-images.githubusercontent.com/<user>/<asset>-<uuid>.<ext>?jwt=…`.
+/// That JWT expires within minutes, and GitHub re-signs the URL only when it
+/// renders the page itself — so the stored URL 404s for Orbit and the reply
+/// shows the alt-text fallback. The durable URL is the same asset and never
+/// expires: it is the form the issue/PR body itself uses.
+fn normalize_image_url(url: &str) -> String {
+    const SIGNED_HOST: &str = "https://private-user-images.githubusercontent.com/";
+    let Some(rest) = url.strip_prefix(SIGNED_HOST) else {
+        return url.to_string();
+    };
+    let path = rest.split(['?', '#']).next().unwrap_or(rest);
+    let file = path.rsplit('/').next().unwrap_or(path);
+    // `<asset id>-<uuid>.<ext>`: the UUID half names the durable asset.
+    let Some((_, stem)) = file.split_once('-') else {
+        return url.to_string();
+    };
+    let uuid = stem.rsplit_once('.').map_or(stem, |(stem, _)| stem);
+    if !is_uuid(uuid) {
+        return url.to_string();
+    }
+    format!("https://github.com/user-attachments/assets/{uuid}")
+}
+
+/// `8-4-4-4-12` hex, the shape of GitHub's asset IDs.
+fn is_uuid(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(ix, byte)| match ix {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        })
 }
 
 /// Read `name="value"` (single or double quoted) from a tag's source text.
@@ -5779,14 +5819,8 @@ fn render_block(
             .flex_col()
             .gap(px(4.))
             .children(lines.iter().enumerate().map(move |(sub, line)| {
-                paragraph_text(
-                    line,
-                    14.,
-                    26.,
-                    FontWeight::NORMAL,
-                    theme.text_2,
-                    md_id(ix, salt, block_ix, sub),
-                    theme,
+                render_container_line(
+                    line, ix, salt, block_ix, sub, 14., 26., FontWeight::NORMAL, theme.text_2, theme,
                 )
             }))
             .into_any_element(),
@@ -5809,7 +5843,7 @@ fn render_block(
             aligns,
         } => render_table(header, rows, aligns, ix, salt, block_ix, theme).into_any_element(),
         Block::Image { alt, url } => {
-            render_markdown_image(alt, url, ix, salt, block_ix, theme).into_any_element()
+            render_markdown_image(alt, url, ix, salt, block_ix, 0, theme).into_any_element()
         }
     }
 }
@@ -5824,6 +5858,7 @@ fn render_markdown_image(
     ix: usize,
     salt: u64,
     block_ix: usize,
+    sub: usize,
     theme: Theme,
 ) -> impl IntoElement {
     let url = url.to_string();
@@ -5831,17 +5866,17 @@ fn render_markdown_image(
     let fallback_alt = alt.to_string();
     div().w_full().min_w_0().flex().child(
         img(url)
-            .id(md_id(ix, salt, block_ix, 0))
+            .id(md_id(ix, salt, block_ix, sub))
             // `min_w_0` is load-bearing: a replaced element's automatic minimum
             // width is its intrinsic width, so without it `max_w_full` loses
             // and a large screenshot overflows the column and the rail.
             .min_w_0()
             .max_w_full()
-            // Height 0 lets taffy derive the box from the image's aspect ratio
-            // once it decodes, so the image scales to the column instead of
-            // keeping its intrinsic height and leaving a tall empty band (gpui
-            // seeds `size.height` with the intrinsic value otherwise).
-            .h(px(0.))
+            // Leave the height auto so gpui derives it from the decoded image
+            // and taffy re-derives it from the aspect ratio once
+            // `max_w_full` clamps the width. A definite height (including 0)
+            // makes gpui compute the width *from* it instead — 0 × ratio —
+            // and the loaded image collapses to nothing.
             .rounded(Radius::Large.px(&theme))
             .border_1()
             .border_color(theme.border)
@@ -5911,16 +5946,50 @@ fn render_alert(
                 ),
         )
         .children(lines.iter().enumerate().map(move |(sub, line)| {
-            paragraph_text(
+            render_container_line(
                 line,
+                ix,
+                salt,
+                block_ix,
+                sub,
                 14.,
                 26.,
                 FontWeight::NORMAL,
                 theme.assistant_text,
-                md_id(ix, salt, block_ix, sub),
                 theme,
             )
         }))
+}
+
+/// Render one line inside a quote or alert. A standalone image line (GitHub
+/// quotes a bug report whose screenshot was pasted as a raw `<img>` tag) paints
+/// as an image instead of showing the tag as text.
+#[allow(clippy::too_many_arguments)]
+fn render_container_line(
+    line: &str,
+    ix: usize,
+    salt: u64,
+    block_ix: usize,
+    sub: usize,
+    size: f32,
+    line_height: f32,
+    weight: FontWeight,
+    color: Hsla,
+    theme: Theme,
+) -> AnyElement {
+    if let Some((alt, url)) = image_line(line) {
+        return render_markdown_image(&alt, &url, ix, salt, block_ix, sub, theme).into_any_element();
+    }
+    paragraph_text(
+        line,
+        size,
+        line_height,
+        weight,
+        color,
+        md_id(ix, salt, block_ix, sub),
+        theme,
+    )
+    .into_any_element()
 }
 
 /// `ml-5` bullet / numbered item with a hanging indent on wrap. GFM task
@@ -5974,13 +6043,16 @@ fn render_list_item(
                 .justify_start()
                 .child(marker),
         )
-        .child(div().min_w_0().flex_1().child(paragraph_text(
+        .child(div().min_w_0().flex_1().child(render_container_line(
             &item.text,
+            ix,
+            salt,
+            block_ix,
+            sub,
             14.,
             26.,
             FontWeight::NORMAL,
             text_color,
-            md_id(ix, salt, block_ix, sub),
             theme,
         )))
         .into_any_element()
@@ -7801,12 +7873,74 @@ mod tests {
     }
 
     #[test]
+    fn parse_blocks_handles_github_pasted_image_tags() {
+        // GitHub stores a pasted screenshot as a raw `<img>` whose attributes
+        // are ordered `alt width height src`, without a self-closing slash.
+        let tag = "<img alt=\"Image\" width=\"1450\" height=\"932\" src=\"https://private-user-images.githubusercontent.com/1/2-a.png?jwt=eyJ0eXAi.eyJpc3Mi.OiJnaXRodWI\">";
+        let blocks = parse_blocks(&format!("### What happened?\n\n{tag}\n\n### Steps\n\n1. Open\n"));
+        assert!(
+            matches!(&blocks[1], Block::Image { alt, url }
+                if alt == "Image"
+                    && url.starts_with("https://private-user-images.githubusercontent.com/1/2-a.png?jwt=")),
+            "expected an image block at index 1"
+        );
+    }
+
+    #[test]
     fn image_markdown_inside_prose_is_not_split() {
         // A line that only *contains* an image stays prose; only a standalone
         // image line becomes a block, so sentences are never cut in half.
         let blocks = parse_blocks("see ![inline](https://example.com/x.png) here");
         assert!(matches!(&blocks[0], Block::Paragraph(lines)
                 if lines.join(" ") == "see ![inline](https://example.com/x.png) here"));
+    }
+
+    #[test]
+    fn quoted_image_lines_are_recognized() {
+        // A quoted bug report keeps its `<img>` on a `> ` line; the block stays
+        // a Quote, but the line inside it must still parse as an image.
+        let blocks = parse_blocks(
+            "> ### What happened?\n> <img alt=\"Image\" width=\"1450\" height=\"932\" src=\"https://private-user-images.githubusercontent.com/1/2-a.png?jwt=eyJ0eXAi.eyJpc3Mi.OiJnaXRodWI\">\n> \n> ### Steps\n> 1. Open\n",
+        );
+        let Block::Quote(lines) = &blocks[0] else {
+            panic!("expected the blockquote to stay a Quote");
+        };
+        assert!(image_line(&lines[1]).is_some());
+        assert_eq!(
+            image_line(&lines[1]).unwrap().1,
+            "https://private-user-images.githubusercontent.com/1/2-a.png?jwt=eyJ0eXAi.eyJpc3Mi.OiJnaXRodWI"
+        );
+    }
+
+    #[test]
+    fn signed_cdn_urls_rewrite_to_the_durable_asset_url() {
+        // A screenshot pasted into a reply is stored as a signed
+        // `private-user-images` URL whose JWT expires within minutes; the same
+        // asset is served forever from `github.com/user-attachments/assets/…`.
+        let signed = "https://private-user-images.githubusercontent.com/74659438/656345150-69f721c8-e025-44cd-8242-4e87eef54f7e.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.expired";
+        assert_eq!(
+            normalize_image_url(signed),
+            "https://github.com/user-attachments/assets/69f721c8-e025-44cd-8242-4e87eef54f7e"
+        );
+        // The durable form and other hosts are left exactly as written.
+        assert_eq!(
+            normalize_image_url(
+                "https://github.com/user-attachments/assets/69f721c8-e025-44cd-8242-4e87eef54f7e"
+            ),
+            "https://github.com/user-attachments/assets/69f721c8-e025-44cd-8242-4e87eef54f7e"
+        );
+        assert_eq!(
+            normalize_image_url("https://user-images.githubusercontent.com/1/2-a.png"),
+            "https://user-images.githubusercontent.com/1/2-a.png"
+        );
+        // A signed path without the asset-id–UUID shape stays untouched rather
+        // than guessing at a URL that may not exist.
+        assert_eq!(
+            normalize_image_url(
+                "https://private-user-images.githubusercontent.com/1/2-a.png?jwt=x"
+            ),
+            "https://private-user-images.githubusercontent.com/1/2-a.png?jwt=x"
+        );
     }
 
     #[test]
@@ -8994,6 +9128,181 @@ mod tests {
         assert!(
             selected.contains("zulu") && selected.contains("Second"),
             "unexpected selection text: {selected:?}"
+        );
+    }
+
+    /// Serves a fixed 200×100 PNG for any image request so the markdown
+    /// image pipeline (parse → fetch → decode → layout) can run headless,
+    /// recording every URI the renderer asked for.
+    #[derive(Default)]
+    struct PngHttpClient {
+        requested: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    /// A 200×100 gray PNG, encoded per request so no fixture file is needed.
+    fn fixture_png() -> Vec<u8> {
+        let pixels = image::RgbaImage::from_pixel(200, 100, image::Rgba([120, 120, 120, 255]));
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(pixels)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .expect("encode the fixture png");
+        bytes.into_inner()
+    }
+
+    impl gpui::http_client::HttpClient for PngHttpClient {
+        fn type_name(&self) -> &'static str {
+            "PngHttpClient"
+        }
+
+        fn user_agent(&self) -> Option<&gpui::http_client::http::HeaderValue> {
+            None
+        }
+
+        fn proxy(&self) -> Option<&gpui::http_client::Url> {
+            None
+        }
+
+        fn send(
+            &self,
+            request: gpui::http_client::Request<gpui::http_client::AsyncBody>,
+        ) -> futures::future::BoxFuture<
+            'static,
+            anyhow::Result<gpui::http_client::Response<gpui::http_client::AsyncBody>>,
+        > {
+            self.requested
+                .lock()
+                .expect("request log is not poisoned")
+                .push(request.uri().to_string());
+            let png = fixture_png();
+            Box::pin(async move {
+                Ok(gpui::http_client::Response::builder()
+                    .status(200)
+                    .header("content-type", "image/png")
+                    .body(gpui::http_client::AsyncBody::from(png))
+                    .expect("build the fixture response"))
+            })
+        }
+    }
+
+    /// A standalone markdown image (the `<img>` tag GitHub stores for a
+    /// pasted issue screenshot) must lay out at the reading column's width
+    /// with its aspect ratio kept. The element used to force a definite
+    /// `height: 0`, from which gpui derives a 0px width — the image decoded
+    /// and then painted 0×0, so issue bodies appeared to have no screenshot
+    /// at all.
+    #[gpui::test]
+    fn markdown_image_lays_out_in_the_reading_column(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let requested = Arc::new(std::sync::Mutex::new(Vec::new()));
+        cx.update(|_, cx| {
+            cx.set_global(theme::Theme::for_id(theme::ThemeId::Orbit));
+            cx.set_http_client(Arc::new(PngHttpClient {
+                requested: requested.clone(),
+            }));
+        });
+
+        struct ImageDocView;
+        impl gpui::Render for ImageDocView {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                div()
+                    .id("image-doc")
+                    .w(px(100.))
+                    .debug_selector(|| "image-doc".to_string())
+                    .child(render_markdown_document(
+                        "<img width=\"1450\" height=\"932\" alt=\"Image\" src=\"https://example.com/shot.png\" />",
+                        theme::Theme::for_id(theme::ThemeId::Orbit),
+                    ))
+            }
+        }
+
+        let view = cx.update(|_, cx| cx.new(|_| ImageDocView));
+        let paint = |cx: &mut gpui::VisualTestContext| {
+            let view = view.clone();
+            cx.draw(
+                point(px(0.), px(0.)),
+                gpui::size(px(300.), px(300.)),
+                move |_, _| view.clone(),
+            );
+        };
+        paint(cx);
+        cx.run_until_parked();
+        paint(cx);
+        cx.run_until_parked();
+        paint(cx);
+
+        assert!(
+            requested
+                .lock()
+                .expect("request log is not poisoned")
+                .iter()
+                .any(|uri| uri == "https://example.com/shot.png"),
+            "the document's image must be fetched"
+        );
+        let host = cx
+            .debug_bounds("image-doc")
+            .expect("the document is visible");
+        // The 200×100 fixture scales to the 100px column as 100×50; a
+        // definite zero height instead collapses the box to 0×0.
+        assert_eq!(
+            host.size.height,
+            px(50.),
+            "the image must keep its ratio at column width"
+        );
+    }
+
+    /// A reply that quotes a pasted screenshot stores a signed
+    /// `private-user-images` URL whose JWT expires within minutes, so fetching
+    /// it 404s and the reply shows only the alt-text fallback. The renderer
+    /// must fetch the durable `user-attachments` URL for the same asset.
+    #[gpui::test]
+    fn quoted_reply_image_uses_the_durable_asset_url(cx: &mut gpui::TestAppContext) {
+        let cx = cx.add_empty_window();
+        let requested = Arc::new(std::sync::Mutex::new(Vec::new()));
+        cx.update(|_, cx| {
+            cx.set_global(theme::Theme::for_id(theme::ThemeId::Orbit));
+            cx.set_http_client(Arc::new(PngHttpClient {
+                requested: requested.clone(),
+            }));
+        });
+
+        struct ReplyDocView;
+        impl gpui::Render for ReplyDocView {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                div().id("reply-doc").w(px(240.)).child(render_markdown_document(
+                    "> ### What happened?\n> <img alt=\"Image\" width=\"1450\" height=\"932\" src=\"https://private-user-images.githubusercontent.com/74659438/656345150-69f721c8-e025-44cd-8242-4e87eef54f7e.png?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.expired\">\n> ### Steps to reproduce\n> 1. Open OrbitPI on windows\n",
+                    theme::Theme::for_id(theme::ThemeId::Orbit),
+                ))
+            }
+        }
+
+        let view = cx.update(|_, cx| cx.new(|_| ReplyDocView));
+        let paint = |cx: &mut gpui::VisualTestContext| {
+            let view = view.clone();
+            cx.draw(
+                point(px(0.), px(0.)),
+                gpui::size(px(300.), px(300.)),
+                move |_, _| view.clone(),
+            );
+        };
+        paint(cx);
+        cx.run_until_parked();
+        paint(cx);
+        cx.run_until_parked();
+        paint(cx);
+
+        let requested = requested.lock().expect("request log is not poisoned");
+        assert!(
+            requested.iter().any(|uri| {
+                uri
+                == "https://github.com/user-attachments/assets/69f721c8-e025-44cd-8242-4e87eef54f7e"
+            }),
+            "the reply must fetch the durable asset URL, got {requested:?}"
+        );
+        assert!(
+            !requested
+                .iter()
+                .any(|uri| uri.starts_with("https://private-user-images")),
+            "the expired signed URL must never be fetched: {requested:?}"
         );
     }
 }

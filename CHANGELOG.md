@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The Git page's **Issues** and **Pull requests** forms now discover the repository's own
+  templates (`.github/ISSUE_TEMPLATE/` Markdown and YAML issue forms, plus
+  `.github/PULL_REQUEST_TEMPLATE.md` and its variants). A lone template applies
+  automatically; with several, a **Template** picker (including **Blank**) chooses one.
+  The choice prefills the title prefix and body skeleton — a YAML issue form is flattened
+  into Markdown — and its `labels:` ride along on **Create**.
+
+- The Git page's **Issues** and **Pull requests** forms can now draft their title and
+  Markdown body with a **Generate** button. Add optional notes (or leave them blank) and
+  Orbit makes the same one-shot, tool-free `pi -p` call the commit-message generator uses,
+  reading the branch, its commits, and its changed files; when pi is missing or has no
+  credentials it falls back to a local heuristic built from those same facts. Nothing is
+  created until you review the draft and press **Create**.
+
 - Every icon-only button across the app now carries the same native tooltip the
   send / stop button has — a localized label, usually with its keyboard shortcut
   (e.g. `Toggle Terminal (⌘J)`). Covers the top bar, sidebar, transcript copy /
@@ -28,6 +42,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   persists in `~/.orbit-pi/workspaces.json` beside the project list.
 
 ### Fixed
+
+- Images in issue/PR bodies, comments, and transcripts now render. The markdown image
+  element forced a definite `height: 0`, and gpui derives a missing width from a definite
+  height before the image decodes (0 × ratio), so a loaded screenshot collapsed to a 0×0
+  box with only its border visible. The height is left auto now: the image scales to the
+  reading column and taffy keeps its aspect ratio.
+
+- Screenshots in replies load again when GitHub stored them as signed
+  `private-user-images.githubusercontent.com/…?jwt=…` URLs. That JWT expires within
+  minutes, so the app got a 404 and showed the alt-text fallback; the renderer rewrites
+  the URL to the durable `github.com/user-attachments/assets/<uuid>` form encoded in the
+  filename, which serves the same image.
+
+- GitHub issue/PR bodies and comments now render screenshots that GitHub stored as raw
+  HTML `<img src="…">` tags when the line is inside a blockquote or list item — a quoted
+  bug report is a common case. Previously only a standalone top-level `<img>` line became
+  an image, so these showed the tag as text; the whole tag/its URL rendered as a link.
+
+- The **New pull request** form's **Base branch** picker, and the **Template** pickers on
+  both new-issue/new-PR forms, no longer float over the wrong part of the form or paint
+  behind its fields. They are anchored to the chip that opens them (opening upward at the
+  bottom of the PR form), draw above the form, and use the top branch selector's dropdown
+  chip (glyph, value, chevron) and picker surface — list inset, rows, and search row for
+  the branch list.
+
+- The **Issues** tab's **Label** picker — the list filter chip and the detail view's
+  **Edit labels** button — no longer opens at the page's top-right over the issue list.
+  It anchors to the button that opened it, opens directly beneath it, and uses the same
+  picker surface and rows as the branch selector.
 
 - The conversation rail's active tick now follows every navigation path, not
   just wheel and scrollbar gestures. Clicking a tick and pressing ⌘↑/⌘↓ scroll

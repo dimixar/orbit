@@ -31,8 +31,10 @@ use crate::app::{
 };
 use crate::commit_message;
 use crate::gh;
+use crate::gh_templates::{self, RepoTemplate};
 use crate::git::{self, CommitEntry, StatusRow};
 use crate::git_ops::{self, InProgress};
+use crate::issue_message::{self, DraftKind};
 use crate::theme::tokens::{
     button, context_menu, input, picker, popover, ButtonSize, DynamicSpacing, IconSize, Radius,
     StyledExt, TextSize,
@@ -129,6 +131,13 @@ enum BranchPrompt {
     New,
     /// Rename the current branch (carries its name).
     Rename(String),
+}
+
+/// Which New form's repository-template picker is open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DraftForm {
+    Issue,
+    PullRequest,
 }
 
 /// What to do once the user answers the "stage unstaged changes?" prompt.
@@ -253,6 +262,10 @@ pub struct GitPanel {
     issue_new_open: bool,
     issue_new_title: Entity<crate::composer::ComposerInput>,
     issue_new_body: Entity<crate::composer::ComposerInput>,
+    /// Optional free-form notes that steer the generated issue draft.
+    issue_new_hint: Entity<crate::composer::ComposerInput>,
+    /// True while a one-shot pi draft request runs for the issue form.
+    issue_generating: bool,
 
     // ── pull requests (gh) ──
     pulls: Vec<gh::GhPull>,
@@ -272,8 +285,25 @@ pub struct GitPanel {
     pr_new_open: bool,
     pr_new_title: Entity<crate::composer::ComposerInput>,
     pr_new_body: Entity<crate::composer::ComposerInput>,
+    /// Optional free-form notes that steer the generated PR draft.
+    pr_new_hint: Entity<crate::composer::ComposerInput>,
+    /// True while a one-shot pi draft request runs for the PR form.
+    pr_generating: bool,
     pr_new_base: Option<String>,
     pr_new_draft: bool,
+
+    // ── repository templates (issue / pull request) ──
+    /// Issue templates discovered under `.github/ISSUE_TEMPLATE` (or the
+    /// legacy single-file locations).
+    issue_templates: Vec<RepoTemplate>,
+    /// Pull-request templates discovered in the repository.
+    pr_templates: Vec<RepoTemplate>,
+    /// The selected issue template (`None` = a blank body).
+    issue_template: Option<usize>,
+    /// The selected pull-request template (`None` = a blank body).
+    pr_template: Option<usize>,
+    /// Which New form's template menu is open, if any.
+    template_menu: Option<DraftForm>,
 
     // ── header ──
     branch: Option<String>,
@@ -362,6 +392,12 @@ impl GitPanel {
                 .with_key_context("Composer Picker")
                 .with_max_lines(8)
         });
+        let issue_new_hint = cx.new(|cx| {
+            crate::composer::ComposerInput::new(cx)
+                .with_placeholder_key("git_panel.draft_notes_placeholder")
+                .with_key_context("Composer Picker")
+                .with_max_lines(3)
+        });
         let pr_search = cx.new(|cx| {
             crate::composer::ComposerInput::new(cx)
                 .with_placeholder_key("git_panel.pr_search_placeholder")
@@ -387,6 +423,12 @@ impl GitPanel {
                 .with_placeholder_key("git_panel.pr_body_placeholder")
                 .with_key_context("Composer Picker")
                 .with_max_lines(10)
+        });
+        let pr_new_hint = cx.new(|cx| {
+            crate::composer::ComposerInput::new(cx)
+                .with_placeholder_key("git_panel.draft_notes_placeholder")
+                .with_key_context("Composer Picker")
+                .with_max_lines(3)
         });
         let branch_filter = cx.new(|cx| {
             crate::composer::ComposerInput::new(cx)
@@ -458,6 +500,8 @@ impl GitPanel {
             issue_new_open: false,
             issue_new_title,
             issue_new_body,
+            issue_new_hint,
+            issue_generating: false,
             pulls: Vec::new(),
             pulls_loading: false,
             pulls_error: None,
@@ -472,8 +516,15 @@ impl GitPanel {
             pr_new_open: false,
             pr_new_title,
             pr_new_body,
+            pr_new_hint,
+            pr_generating: false,
             pr_new_base: None,
             pr_new_draft: false,
+            issue_templates: Vec::new(),
+            pr_templates: Vec::new(),
+            issue_template: None,
+            pr_template: None,
+            template_menu: None,
             branch: None,
             ahead_behind: None,
             has_commits: false,
@@ -567,11 +618,18 @@ impl GitPanel {
             self.issues.clear();
             self.issue_detail = None;
             self.issue_new_open = false;
+            self.issue_generating = false;
             self.issue_filter = gh::IssueFilter::default();
             self.pulls.clear();
             self.pr_detail = None;
             self.pr_new_open = false;
+            self.pr_generating = false;
             self.pr_filter = gh::PrFilter::default();
+            self.issue_templates.clear();
+            self.pr_templates.clear();
+            self.issue_template = None;
+            self.pr_template = None;
+            self.template_menu = None;
             self.gh_probed = false;
             if self.open {
                 self.refresh_all(cx);
@@ -620,6 +678,7 @@ impl GitPanel {
         self.refresh_status(cx);
         self.refresh_branch(cx);
         self.refresh_gh(cx);
+        self.refresh_templates(cx);
         match self.tab {
             GitTab::History => self.refresh_history(cx),
             GitTab::Graph => self.refresh_graph(cx),
@@ -927,12 +986,17 @@ impl GitPanel {
             return;
         }
         let body = self.issue_new_body.read(cx).text();
+        let labels = self
+            .issue_template
+            .and_then(|index| self.issue_templates.get(index))
+            .map(|template| template.labels.clone())
+            .unwrap_or_default();
         let Some(cwd) = self.cwd() else { return };
         self.issue_busy = true;
         cx.notify();
         self.spawn_data(
             cx,
-            move || gh::create_issue(&cwd, &title, &body, &[], &[]),
+            move || gh::create_issue(&cwd, &title, &body, &labels, &[]),
             |panel, result, cx| {
                 panel.issue_busy = false;
                 match result {
@@ -944,6 +1008,7 @@ impl GitPanel {
                             .issue_new_title
                             .update(cx, |input, cx| input.clear(cx));
                         panel.issue_new_body.update(cx, |input, cx| input.clear(cx));
+                        panel.issue_new_hint.update(cx, |input, cx| input.clear(cx));
                         if let Some(number) = url.rsplit('/').next().and_then(|n| n.parse().ok()) {
                             panel.open_issue(number, cx);
                         }
@@ -954,6 +1019,563 @@ impl GitPanel {
                 cx.notify();
             },
         );
+    }
+
+    /// Load the repository's issue and pull-request templates off-thread.
+    fn refresh_templates(&mut self, cx: &mut Context<Self>) {
+        let Some(cwd) = self.cwd() else { return };
+        self.spawn_data(
+            cx,
+            move || {
+                Ok::<_, String>((
+                    gh_templates::issue_templates(&cwd),
+                    gh_templates::pull_templates(&cwd),
+                ))
+            },
+            |panel, result, cx| {
+                if let Ok((issues, pulls)) = result {
+                    let issues_were_empty = panel.issue_templates.is_empty();
+                    let pulls_were_empty = panel.pr_templates.is_empty();
+                    panel.issue_templates = issues;
+                    panel.pr_templates = pulls;
+                    panel.issue_template = panel
+                        .issue_template
+                        .filter(|index| *index < panel.issue_templates.len());
+                    panel.pr_template = panel
+                        .pr_template
+                        .filter(|index| *index < panel.pr_templates.len());
+
+                    // The templates can land after the form opened (they load
+                    // off-thread). Apply the lone template the first time it
+                    // becomes known, and only onto an untouched body.
+                    let apply_issue = issues_were_empty
+                        && panel.issue_new_open
+                        && panel.issue_template.is_none()
+                        && panel.issue_templates.len() == 1
+                        && panel.issue_new_body.read(cx).text().trim().is_empty();
+                    if apply_issue {
+                        panel.apply_issue_template(Some(0), cx);
+                    }
+                    let apply_pull = pulls_were_empty
+                        && panel.pr_new_open
+                        && panel.pr_template.is_none()
+                        && panel.pr_templates.len() == 1
+                        && panel.pr_new_body.read(cx).text().trim().is_empty();
+                    if apply_pull {
+                        panel.apply_pull_template(Some(0), cx);
+                    }
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// The label for the issue form's template chip.
+    fn issue_template_label(&self) -> String {
+        match self.issue_template.and_then(|index| self.issue_templates.get(index)) {
+            Some(template) => template.label(),
+            None => tr!("git_panel.template_blank"),
+        }
+    }
+
+    /// The label for the pull-request form's template chip.
+    fn pr_template_label(&self) -> String {
+        match self.pr_template.and_then(|index| self.pr_templates.get(index)) {
+            Some(template) => template.label(),
+            None => tr!("git_panel.template_blank"),
+        }
+    }
+
+    /// Open the New issue form, applying the lone issue template when the repo
+    /// has exactly one (a chooser would just add a click).
+    fn open_issue_new(&mut self, cx: &mut Context<Self>) {
+        self.issue_new_open = true;
+        self.issue_generating = false;
+        self.issue_detail = None;
+        self.template_menu = None;
+        if self.issue_templates.is_empty() {
+            self.refresh_templates(cx);
+        }
+        let default = (self.issue_templates.len() == 1).then_some(0);
+        self.apply_issue_template(default, cx);
+    }
+
+    /// Open the New pull request form, applying the lone PR template when the
+    /// repo has exactly one.
+    fn open_pull_new(&mut self, cx: &mut Context<Self>) {
+        self.pr_new_base = Some(self.default_base());
+        self.pr_new_open = true;
+        self.pr_generating = false;
+        self.pr_detail = None;
+        self.template_menu = None;
+        self.ref_menu = None;
+        if self.pr_templates.is_empty() {
+            self.refresh_templates(cx);
+        }
+        let default = (self.pr_templates.len() == 1).then_some(0);
+        self.apply_pull_template(default, cx);
+    }
+
+    /// Pick an issue template (`None` = blank), prefilling the title prefix and
+    /// the body. A blank pick only clears a body that still holds a template
+    /// skeleton, so typed prose is never lost.
+    fn apply_issue_template(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
+        self.issue_template = index.filter(|index| *index < self.issue_templates.len());
+        self.template_menu = None;
+        match self
+            .issue_template
+            .and_then(|index| self.issue_templates.get(index))
+            .cloned()
+        {
+            Some(template) => {
+                self.prefill_title(&self.issue_new_title.clone(), template.title_prefix.as_deref(), cx);
+                set_composer_text(&self.issue_new_body, &template.body, cx);
+            }
+            None => self.clear_template_body(&self.issue_new_body.clone(), cx),
+        }
+        cx.notify();
+    }
+
+    /// Pick a pull-request template (`None` = blank).
+    fn apply_pull_template(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
+        self.pr_template = index.filter(|index| *index < self.pr_templates.len());
+        self.template_menu = None;
+        match self
+            .pr_template
+            .and_then(|index| self.pr_templates.get(index))
+            .cloned()
+        {
+            Some(template) => {
+                self.prefill_title(&self.pr_new_title.clone(), template.title_prefix.as_deref(), cx);
+                set_composer_text(&self.pr_new_body, &template.body, cx);
+            }
+            None => self.clear_template_body(&self.pr_new_body.clone(), cx),
+        }
+        cx.notify();
+    }
+
+    /// Set the title to the template's prefix when the field is still empty.
+    fn prefill_title(
+        &self,
+        input: &Entity<crate::composer::ComposerInput>,
+        prefix: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(prefix) = prefix.filter(|value| !value.is_empty()) else {
+            return;
+        };
+        if input.read(cx).text().trim().is_empty() {
+            set_composer_text(input, prefix, cx);
+        }
+    }
+
+    /// Clear a body field only when it still matches a known template skeleton,
+    /// so switching back to Blank does not wipe the user's own words.
+    fn clear_template_body(
+        &self,
+        input: &Entity<crate::composer::ComposerInput>,
+        cx: &mut Context<Self>,
+    ) {
+        let current = input.read(cx).text();
+        let is_skeleton = self
+            .issue_templates
+            .iter()
+            .chain(self.pr_templates.iter())
+            .any(|template| template.body == current);
+        if is_skeleton {
+            set_composer_text(input, "", cx);
+        }
+    }
+
+    fn set_template(&mut self, target: DraftForm, index: Option<usize>, cx: &mut Context<Self>) {
+        match target {
+            DraftForm::Issue => self.apply_issue_template(index, cx),
+            DraftForm::PullRequest => self.apply_pull_template(index, cx),
+        }
+    }
+
+    /// The repository-template picker for either New form. Rendered inside the
+    /// form card (which is `relative`), so it tracks the chip without a global
+    /// anchor.
+    /// A template chip that owns its popover, so the menu anchors to the chip
+    /// itself rather than the form card.
+    fn template_selector(
+        &self,
+        theme: Theme,
+        target: DraftForm,
+        chip_id: &'static str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let label = match target {
+            DraftForm::Issue => self.issue_template_label(),
+            DraftForm::PullRequest => self.pr_template_label(),
+        };
+        let open = self.template_menu == Some(target);
+        let popup = if open {
+            self.template_picker_popup(theme, target, cx)
+        } else {
+            None
+        };
+        div()
+            .relative()
+            .flex()
+            .child(dropdown_chip(
+                chip_id,
+                &label,
+                "icons/file.svg",
+                open,
+                theme,
+                cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.template_menu = if this.template_menu == Some(target) {
+                        None
+                    } else {
+                        Some(target)
+                    };
+                    cx.notify();
+                }),
+            ))
+            .children(popup)
+            .into_any_element()
+    }
+
+    /// The repository-template picker, styled like the top branch selector
+    /// (picker surface, list inset, one picker row per entry) and anchored to
+    /// the chip that opened it.
+    fn template_picker_popup(
+        &self,
+        theme: Theme,
+        target: DraftForm,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.template_menu != Some(target) {
+            return None;
+        }
+        let (templates, current) = match target {
+            DraftForm::Issue => (&self.issue_templates, self.issue_template),
+            DraftForm::PullRequest => (&self.pr_templates, self.pr_template),
+        };
+        let id = match target {
+            DraftForm::Issue => "git-issue-template-menu",
+            DraftForm::PullRequest => "git-pr-template-menu",
+        };
+        let scroll_id = match target {
+            DraftForm::Issue => "git-issue-template-scroll",
+            DraftForm::PullRequest => "git-pr-template-scroll",
+        };
+
+        let mut list = div()
+            .id(scroll_id)
+            .w_full()
+            .max_h(px(300.))
+            .overflow_y_scroll()
+            .py(picker::list_padding_y(&theme))
+            .flex()
+            .flex_col();
+        list = list.child(
+            picker_entry(div().id("git-template-blank"), &theme)
+                .cursor_pointer()
+                .text_color(theme.text)
+                .hover(|s| s.bg(theme.bg_hover))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.set_template(target, None, cx)
+                }))
+                .child(icon(
+                    "icons/file.svg",
+                    context_menu::ICON.px(&theme),
+                    theme.text_3,
+                ))
+                .child(div().flex_1().min_w_0().child(tr!("git_panel.template_blank")))
+                .when(current.is_none(), |row| {
+                    row.child(icon(
+                        "icons/check.svg",
+                        context_menu::ICON.px(&theme),
+                        theme.accent,
+                    ))
+                }),
+        );
+        if templates.is_empty() {
+            list = list.child(
+                picker_entry(div(), &theme)
+                    .text_color(theme.text_3)
+                    .child(tr!("git_panel.template_none")),
+            );
+        }
+        for (index, template) in templates.iter().enumerate() {
+            let selected = current == Some(index);
+            list = list.child(
+                picker_entry(
+                    div().id(gpui::ElementId::Name(format!("git-template-{index}").into())),
+                    &theme,
+                )
+                .cursor_pointer()
+                .text_color(theme.text)
+                .hover(|s| s.bg(theme.bg_hover))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.set_template(target, Some(index), cx)
+                }))
+                .child(icon(
+                    "icons/file.svg",
+                    context_menu::ICON.px(&theme),
+                    theme.text_3,
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(template.label())
+                        .child(
+                            div()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_size(TextSize::XSmall.px(&theme))
+                                .text_color(theme.text_3)
+                                .child(template.path.clone()),
+                        ),
+                )
+                .when(selected, |row| {
+                    row.child(icon(
+                        "icons/check.svg",
+                        context_menu::ICON.px(&theme),
+                        theme.accent,
+                    ))
+                }),
+            );
+        }
+
+        let menu = picker_surface(div().id(id), &theme)
+            .absolute()
+            .left(px(0.))
+            .w(px(320.))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .occlude()
+            .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                this.template_menu = None;
+                cx.notify();
+            }))
+            .child(menu_header(tr!("git_panel.template"), &theme))
+            .child(list);
+        // Anchor to the chip: the issue form's chip sits near the top, so the
+        // menu opens downward; the PR form's chip sits at the bottom, so it
+        // opens upward instead of being clipped by the scroll container.
+        let menu = match target {
+            DraftForm::Issue => menu.top(px(30.)),
+            DraftForm::PullRequest => menu.bottom(px(30.)),
+        };
+        // `deferred` keeps the menu's layout in this subtree (so it anchors to
+        // the chip) but paints it after the form's other fields, which would
+        // otherwise draw over it.
+        Some(deferred(menu).into_any_element())
+    }
+
+    /// A base-branch chip that owns its popover, mirroring [`Self::template_selector`]
+    /// so the picker anchors to the chip.
+    fn base_branch_selector(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let label = self
+            .pr_new_base
+            .clone()
+            .unwrap_or_else(|| tr!("git_panel.choose_base"));
+        let popup = if self.ref_menu == Some(RefTarget::PrBase) {
+            self.pr_base_popup(theme, cx)
+        } else {
+            None
+        };
+        div()
+            .relative()
+            .flex()
+            .child(dropdown_chip(
+                "git-pr-new-base",
+                &label,
+                "icons/branch.svg",
+                self.ref_menu == Some(RefTarget::PrBase),
+                theme,
+                cx.listener(|this, _: &ClickEvent, window, cx| {
+                    // mouse-down-out closes the picker; the chip's mouse-up would
+                    // otherwise toggle it straight back open on the same gesture
+                    // (see AGENT.md popovers).
+                    const GESTURE: Duration = Duration::from_millis(200);
+                    if let Some(dismissed) = this.menu_dismissed_at.take() {
+                        if dismissed.elapsed() < GESTURE {
+                            return;
+                        }
+                    }
+                    let opening = this.ref_menu != Some(RefTarget::PrBase);
+                    this.ref_menu = if opening {
+                        Some(RefTarget::PrBase)
+                    } else {
+                        None
+                    };
+                    if opening {
+                        this.clear_branch_filter(cx);
+                        window.focus(&this.branch_filter.read(cx).focus_handle(cx));
+                    }
+                    cx.notify();
+                }),
+            ))
+            .children(popup)
+            .into_any_element()
+    }
+
+    /// The New-PR base picker, styled and anchored like the top branch
+    /// selector: a search row over the repository's local branches.
+    fn pr_base_popup(&self, theme: Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.ref_menu != Some(RefTarget::PrBase) {
+            return None;
+        }
+        let needle = self.branch_filter.read(cx).text().trim().to_lowercase();
+        let matches = |name: &str| needle.is_empty() || name.to_lowercase().contains(&needle);
+        let current = self.pr_new_base.clone();
+        let mut locals: Vec<String> = self
+            .refs
+            .iter()
+            .filter(|entry| entry.kind == git::RefKind::Branch && matches(entry.name.as_str()))
+            .map(|entry| entry.name.clone())
+            .collect();
+        locals.sort_by_key(|name| name.to_lowercase());
+
+        let mut list = div()
+            .id("git-pr-base-scroll")
+            .w_full()
+            .max_h(px(320.))
+            .overflow_y_scroll()
+            .py(picker::list_padding_y(&theme))
+            .flex()
+            .flex_col();
+        if locals.is_empty() {
+            list = list.child(
+                picker_entry(div(), &theme)
+                    .text_color(theme.text_3)
+                    .child(tr!("git_panel.no_matching_branches")),
+            );
+        } else {
+            list = list.child(branch_section_label(
+                &tr!("git_panel.local_branches"),
+                theme,
+            ));
+            for name in locals {
+                let selected = current.as_deref() == Some(name.as_str());
+                let branch = name.clone();
+                let id = gpui::ElementId::Name(format!("git-pr-base-{name}").into());
+                list = list.child(
+                    picker_entry(div().id(id), &theme)
+                        .cursor_pointer()
+                        .when(selected, |row| row.bg(theme.active).text_color(theme.active_fg))
+                        .when(!selected, |row| {
+                            row.text_color(theme.text).hover(|s| s.bg(theme.bg_hover))
+                        })
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.pr_new_base = Some(branch.clone());
+                            this.close_ref_picker(cx);
+                        }))
+                        .child(icon(
+                            "icons/branch.svg",
+                            context_menu::ICON.px(&theme),
+                            if selected {
+                                theme.active_fg
+                            } else {
+                                theme.text_3
+                            },
+                        ))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .child(name.clone()),
+                        )
+                        .when(selected, |row| {
+                            row.child(icon(
+                                "icons/check.svg",
+                                context_menu::ICON.px(&theme),
+                                theme.active_fg,
+                            ))
+                        }),
+                );
+            }
+        }
+
+        let menu = picker_surface(div().id("git-pr-base-menu"), &theme)
+            .absolute()
+            .bottom(px(30.))
+            .left(px(0.))
+            .w(px(320.))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .occlude()
+            .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                this.close_ref_picker(cx);
+            }))
+            .child(
+                picker_search_frame(div(), &theme)
+                    .child(icon(
+                        "icons/search.svg",
+                        input::ICON.px(&theme),
+                        theme.text_3,
+                    ))
+                    .child(div().flex_1().min_w_0().child(self.branch_filter.clone())),
+            )
+            .child(list);
+        Some(deferred(menu).into_any_element())
+    }
+
+    /// Ask pi for an issue draft (title + body) from the optional notes field
+    /// plus the repository context, falling back to a local heuristic.
+    fn generate_issue_draft(&mut self, cx: &mut Context<Self>) {
+        if self.issue_generating || self.issue_busy {
+            return;
+        }
+        let Some(cwd) = self.cwd() else { return };
+        let hint = self.issue_new_hint.read(cx).text();
+        let template = self
+            .issue_template
+            .and_then(|index| self.issue_templates.get(index))
+            .cloned();
+        let title_prefix = template.as_ref().and_then(|entry| entry.title_prefix.clone());
+        let provider = self.provider.clone();
+        let model = self.model.clone();
+        self.issue_generating = true;
+        self.set_status(tr!("git_panel.generating_draft"));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let provider = (!provider.is_empty()).then_some(provider.as_str());
+                    let model = (!model.is_empty()).then_some(model.as_str());
+                    match issue_message::generate(
+                        &cwd,
+                        provider,
+                        model,
+                        DraftKind::Issue,
+                        &hint,
+                        None,
+                        template.as_ref(),
+                    ) {
+                        Ok(draft) => draft,
+                        Err(_) => issue_message::heuristic(
+                            &cwd,
+                            DraftKind::Issue,
+                            &hint,
+                            None,
+                            template.as_ref(),
+                        ),
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |panel, cx| {
+                panel.issue_generating = false;
+                set_composer_text(&panel.issue_new_title, &with_title_prefix(&title_prefix, &result.title), cx);
+                set_composer_text(&panel.issue_new_body, &result.body, cx);
+                panel.set_status(tr!("git_panel.draft_ready"));
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn set_issue_state(&mut self, state: gh::IssueState, cx: &mut Context<Self>) {
@@ -1142,12 +1764,17 @@ impl GitPanel {
         let body = self.pr_new_body.read(cx).text();
         let base = self.pr_new_base.clone().unwrap_or_default();
         let draft = self.pr_new_draft;
+        let labels = self
+            .pr_template
+            .and_then(|index| self.pr_templates.get(index))
+            .map(|template| template.labels.clone())
+            .unwrap_or_default();
         let Some(cwd) = self.cwd() else { return };
         self.pr_busy = true;
         cx.notify();
         self.spawn_data(
             cx,
-            move || gh::create_pull(&cwd, &title, &body, &base, draft),
+            move || gh::create_pull(&cwd, &title, &body, &base, draft, &labels),
             |panel, result, cx| {
                 panel.pr_busy = false;
                 match result {
@@ -1157,6 +1784,7 @@ impl GitPanel {
                         panel.pr_new_open = false;
                         panel.pr_new_title.update(cx, |input, cx| input.clear(cx));
                         panel.pr_new_body.update(cx, |input, cx| input.clear(cx));
+                        panel.pr_new_hint.update(cx, |input, cx| input.clear(cx));
                         if let Some(number) = url.rsplit('/').next().and_then(|n| n.parse().ok()) {
                             panel.open_pull(number, cx);
                         }
@@ -1167,6 +1795,62 @@ impl GitPanel {
                 cx.notify();
             },
         );
+    }
+
+    /// Ask pi for a pull-request draft from the optional notes field plus the
+    /// branch's commits and diff against the chosen base.
+    fn generate_pull_draft(&mut self, cx: &mut Context<Self>) {
+        if self.pr_generating || self.pr_busy {
+            return;
+        }
+        let Some(cwd) = self.cwd() else { return };
+        let hint = self.pr_new_hint.read(cx).text();
+        let base = self.pr_new_base.clone();
+        let template = self
+            .pr_template
+            .and_then(|index| self.pr_templates.get(index))
+            .cloned();
+        let title_prefix = template.as_ref().and_then(|entry| entry.title_prefix.clone());
+        let provider = self.provider.clone();
+        let model = self.model.clone();
+        self.pr_generating = true;
+        self.set_status(tr!("git_panel.generating_draft"));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let provider = (!provider.is_empty()).then_some(provider.as_str());
+                    let model = (!model.is_empty()).then_some(model.as_str());
+                    match issue_message::generate(
+                        &cwd,
+                        provider,
+                        model,
+                        DraftKind::PullRequest,
+                        &hint,
+                        base.as_deref(),
+                        template.as_ref(),
+                    ) {
+                        Ok(draft) => draft,
+                        Err(_) => issue_message::heuristic(
+                            &cwd,
+                            DraftKind::PullRequest,
+                            &hint,
+                            base.as_deref(),
+                            template.as_ref(),
+                        ),
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |panel, cx| {
+                panel.pr_generating = false;
+                set_composer_text(&panel.pr_new_title, &with_title_prefix(&title_prefix, &result.title), cx);
+                set_composer_text(&panel.pr_new_body, &result.body, cx);
+                panel.set_status(tr!("git_panel.draft_ready"));
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn set_pr_state(&mut self, state: gh::PrState, cx: &mut Context<Self>) {
@@ -1566,10 +2250,14 @@ impl GitPanel {
             self.issue_detail = None;
             self.issue_detail_loading = false;
             self.issue_new_open = false;
+            self.issue_generating = false;
             self.pr_detail = None;
             self.pr_detail_loading = false;
             self.pr_new_open = false;
+            self.pr_generating = false;
             self.label_menu_open = false;
+            self.template_menu = None;
+            self.ref_menu = None;
             cx.notify();
         }
         had
@@ -4215,16 +4903,19 @@ impl GitPanel {
                 theme,
                 cx.listener(|this, _: &ClickEvent, _, cx| this.apply_issue_search(cx)),
             ))
-            .child(filter_chip(
-                "git-issue-label-filter",
-                &label_label,
-                "icons/chevron-down.svg",
-                theme,
-                cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.label_menu_open = !this.label_menu_open;
-                    cx.notify();
-                }),
-            ))
+            .child({
+                let trigger = filter_chip(
+                    "git-issue-label-filter",
+                    &label_label,
+                    "icons/chevron-down.svg",
+                    theme,
+                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.label_menu_open = !this.label_menu_open;
+                        cx.notify();
+                    }),
+                );
+                self.label_selector(theme, trigger, true, cx)
+            })
             .children(filter.is_active().then(|| {
                 filter_chip(
                     "git-issue-clear",
@@ -4248,11 +4939,7 @@ impl GitPanel {
                 true,
                 self.issue_busy,
                 theme,
-                cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.issue_new_open = true;
-                    this.issue_detail = None;
-                    cx.notify();
-                }),
+                cx.listener(|this, _: &ClickEvent, _, cx| this.open_issue_new(cx)),
             ))
             .into_any_element()
     }
@@ -4565,25 +5252,28 @@ impl GitPanel {
             .flex()
             .flex_col()
             .gap(DynamicSpacing::Base08.px(&theme))
-            .child(action_button(
-                "git-issue-labels",
-                &tr!("git_panel.edit_labels"),
-                Some(
-                    icon(
-                        "icons/tag-01.svg",
-                        ButtonSize::Medium.icon_size().px(&theme),
-                        theme.text_2,
-                    )
-                    .into_any_element(),
-                ),
-                false,
-                self.issue_busy,
-                theme,
-                cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.label_menu_open = !this.label_menu_open;
-                    cx.notify();
-                }),
-            ));
+            .child({
+                let trigger = action_button(
+                    "git-issue-labels",
+                    &tr!("git_panel.edit_labels"),
+                    Some(
+                        icon(
+                            "icons/tag-01.svg",
+                            ButtonSize::Medium.icon_size().px(&theme),
+                            theme.text_2,
+                        )
+                        .into_any_element(),
+                    ),
+                    false,
+                    self.issue_busy,
+                    theme,
+                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.label_menu_open = !this.label_menu_open;
+                        cx.notify();
+                    }),
+                );
+                self.label_selector(theme, trigger, false, cx)
+            });
         let timeline = div()
             .flex()
             .flex_col()
@@ -4650,22 +5340,78 @@ impl GitPanel {
     }
 
     fn issue_new_view(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+        let generate_leading = if self.issue_generating {
+            spinner(
+                "git-issue-generate-spinner",
+                ButtonSize::Medium.icon_size().px(&theme),
+                theme.accent,
+                theme,
+            )
+        } else {
+            icon(
+                "icons/spark.svg",
+                ButtonSize::Medium.icon_size().px(&theme),
+                theme.accent,
+            )
+            .into_any_element()
+        };
+        let generate_label = if self.issue_generating {
+            tr!("git_panel.generating_draft")
+        } else {
+            tr!("git_panel.generate_draft")
+        };
         let card = div()
             .flex()
             .flex_col()
             .gap(DynamicSpacing::Base12.px(&theme))
             .px(DynamicSpacing::Base20.px(&theme))
             .py(DynamicSpacing::Base16.px(&theme))
-            .max_w(px(780.))
+            .max_w(px(820.))
+            .relative()
             .child(
                 div()
-                    .text_size(TextSize::Large.px(&theme))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child(tr!("git_panel.new_issue_title")),
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(DynamicSpacing::Base12.px(&theme))
+                    .child(
+                        div()
+                            .text_size(TextSize::Large.px(&theme))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(tr!("git_panel.new_issue_title")),
+                    )
+                    .child(action_button(
+                        "git-issue-new-generate",
+                        &generate_label,
+                        Some(generate_leading),
+                        false,
+                        self.issue_busy || self.issue_generating,
+                        theme,
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.generate_issue_draft(cx)),
+                    )),
             )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(DynamicSpacing::Base08.px(&theme))
+                    .child(
+                        div()
+                            .text_size(TextSize::Small.px(&theme))
+                            .text_color(theme.text_3)
+                            .child(tr!("git_panel.template")),
+                    )
+                    .child(self.template_selector(
+                        theme,
+                        DraftForm::Issue,
+                        "git-issue-template",
+                        cx,
+                    )),
+            )
+            .child(composer_field(theme, self.issue_new_hint.clone(), px(0.)))
             .child(composer_field(theme, self.issue_new_title.clone(), px(0.)))
-            .child(composer_field(theme, self.issue_new_body.clone(), px(160.)))
+            .child(composer_field(theme, self.issue_new_body.clone(), px(220.)))
             .child(
                 div()
                     .flex()
@@ -4705,29 +5451,52 @@ impl GitPanel {
 
     /// The repo-label popover. On an open issue it toggles labels on that
     /// issue; otherwise it sets the list's label filter.
-    fn label_picker_popup(&self, theme: Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// Wrap a label trigger so its picker anchors to it and paints above the
+    /// page via `deferred`. `align_right` right-aligns the menu with the
+    /// trigger — the filter bar's chip sits near the right edge.
+    fn label_selector(
+        &self,
+        theme: Theme,
+        trigger: AnyElement,
+        align_right: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let popup = if self.label_menu_open {
+            self.label_popup(theme, align_right, cx)
+        } else {
+            None
+        };
+        div()
+            .relative()
+            .flex()
+            .child(trigger)
+            .children(popup)
+            .into_any_element()
+    }
+
+    /// The repository-label picker. On an open issue it toggles labels on that
+    /// issue; otherwise it sets the list's label filter.
+    fn label_popup(
+        &self,
+        theme: Theme,
+        align_right: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if !self.label_menu_open {
             return None;
         }
         let detail = self.issue_detail.clone();
-        let mut menu = context_menu_surface(div().id("git-label-menu"), &theme)
-            .absolute()
-            .top(px(42.))
-            .right(px(12.))
-            .w(px(240.))
+        let mut list = div()
+            .id("git-label-scroll")
+            .w_full()
             .max_h(px(320.))
             .overflow_y_scroll()
+            .py(picker::list_padding_y(&theme))
             .flex()
-            .flex_col()
-            .occlude()
-            .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                this.label_menu_open = false;
-                cx.notify();
-            }))
-            .child(menu_header(tr!("git_panel.labels"), &theme));
+            .flex_col();
         if self.issue_labels.is_empty() {
-            menu = menu.child(
-                context_menu_entry(div(), &theme)
+            list = list.child(
+                picker_entry(div(), &theme)
                     .text_color(theme.text_3)
                     .child(tr!("git_panel.no_labels")),
             );
@@ -4738,10 +5507,11 @@ impl GitPanel {
                 .as_ref()
                 .is_some_and(|issue| issue.labels.iter().any(|entry| entry.name == name));
             let id = gpui::ElementId::Name(format!("git-label-{name}").into());
-            menu = menu.child(
-                context_menu_entry(div().id(id), &theme)
+            list = list.child(
+                picker_entry(div().id(id), &theme)
                     .cursor_pointer()
-                    .hover(|s| s.bg(theme.overlay))
+                    .text_color(theme.text)
+                    .hover(|s| s.bg(theme.bg_hover))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         if this.issue_detail.is_some() {
                             this.toggle_issue_label(name.clone(), cx);
@@ -4760,7 +5530,24 @@ impl GitPanel {
                     }),
             );
         }
-        Some(menu.into_any_element())
+        let menu = picker_surface(div().id("git-label-menu"), &theme)
+            .w(px(260.))
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .occlude()
+            .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                this.label_menu_open = false;
+                cx.notify();
+            }))
+            .child(menu_header(tr!("git_panel.labels"), &theme))
+            .child(list);
+        let wrapper = if align_right {
+            div().absolute().right(px(0.)).top(px(30.))
+        } else {
+            div().absolute().left(px(0.)).top(px(30.))
+        };
+        Some(wrapper.child(deferred(menu)).into_any_element())
     }
 
     // ── pull request rendering ─────────────────────────────────────────
@@ -4857,12 +5644,7 @@ impl GitPanel {
                 true,
                 self.pr_busy,
                 theme,
-                cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.pr_new_base = Some(this.default_base());
-                    this.pr_new_open = true;
-                    this.pr_detail = None;
-                    cx.notify();
-                }),
+                cx.listener(|this, _: &ClickEvent, _, cx| this.open_pull_new(cx)),
             ))
             .into_any_element()
     }
@@ -4949,12 +5731,11 @@ impl GitPanel {
             "icons/circle-x.svg"
         };
         let mut content = div()
+            .flex_1()
+            .min_w(px(520.))
             .flex()
             .flex_col()
-            .gap(DynamicSpacing::Base12.px(&theme))
-            .px(DynamicSpacing::Base20.px(&theme))
-            .py(DynamicSpacing::Base16.px(&theme))
-            .max_w(px(780.));
+            .gap(DynamicSpacing::Base12.px(&theme));
         content = content.child(
             div()
                 .flex()
@@ -5476,40 +6257,166 @@ impl GitPanel {
                     }),
                 )),
         );
+        // ── metadata rail ──
+        let review_body: AnyElement = review_chip(pull, theme).unwrap_or_else(|| {
+            div()
+                .text_size(TextSize::Small.px(&theme))
+                .text_color(theme.text_3)
+                .child(tr!("git_panel.review_none"))
+                .into_any_element()
+        });
+        let checks_body: AnyElement = match check_bucket_chip(pull.checks_summary(), theme) {
+            Some(chip) => chip,
+            None => div()
+                .text_size(TextSize::Small.px(&theme))
+                .text_color(theme.text_3)
+                .child(tr!("git_panel.no_checks"))
+                .into_any_element(),
+        };
+        let changes = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(DynamicSpacing::Base08.px(&theme))
+            .child(delta_stats(pull.additions, pull.deletions, theme))
+            .child(
+                div()
+                    .text_size(TextSize::Small.px(&theme))
+                    .text_color(theme.text_3)
+                    .child(tr!("git_panel.files_count", count = pull.changed_files)),
+            )
+            .into_any_element();
+        let branches = div()
+            .flex()
+            .flex_col()
+            .gap(DynamicSpacing::Base06.px(&theme))
+            .child(meta_time_row(
+                &tr!("git_panel.base_branch"),
+                &pull.base_ref,
+                theme,
+            ))
+            .child(meta_time_row(
+                &tr!("git_panel.head_branch"),
+                &pull.head_ref,
+                theme,
+            ))
+            .into_any_element();
+        let timeline = div()
+            .flex()
+            .flex_col()
+            .gap(DynamicSpacing::Base06.px(&theme))
+            .child(meta_time_row(
+                &tr!("git_panel.opened"),
+                &gh::relative_time(&pull.created_at),
+                theme,
+            ))
+            .child(meta_time_row(
+                &tr!("git_panel.updated"),
+                &gh::relative_time(&pull.updated_at),
+                theme,
+            ))
+            .into_any_element();
+        let rail = div()
+            .flex_none()
+            .w(px(240.))
+            .flex()
+            .flex_col()
+            .gap(DynamicSpacing::Base16.px(&theme))
+            .child(meta_section(&tr!("git_panel.review"), review_body, theme))
+            .child(meta_section(&tr!("git_panel.checks"), checks_body, theme))
+            .child(meta_section(&tr!("git_panel.tab_changes"), changes, theme))
+            .child(meta_section(&tr!("git_panel.branches"), branches, theme))
+            .child(meta_section(&tr!("git_panel.timeline"), timeline, theme));
+
         div()
             .id("git-pr-detail-scroll")
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
-            .child(content)
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .px(DynamicSpacing::Base20.px(&theme))
+                    .py(DynamicSpacing::Base16.px(&theme))
+                    .child(
+                        // The rail wraps under the reading column when the pane
+                        // is too narrow to hold both (min column + rail + gap).
+                        div()
+                            .w_full()
+                            .max_w(px(1040.))
+                            .flex()
+                            .flex_wrap()
+                            .items_start()
+                            .gap(DynamicSpacing::Base20.px(&theme))
+                            .child(content)
+                            .child(rail),
+                    ),
+            )
             .into_any_element()
     }
 
     fn pr_new_view(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
-        let base_label = self
-            .pr_new_base
-            .clone()
-            .unwrap_or_else(|| tr!("git_panel.choose_base"));
+        let generate_leading = if self.pr_generating {
+            spinner(
+                "git-pr-generate-spinner",
+                ButtonSize::Medium.icon_size().px(&theme),
+                theme.accent,
+                theme,
+            )
+        } else {
+            icon(
+                "icons/spark.svg",
+                ButtonSize::Medium.icon_size().px(&theme),
+                theme.accent,
+            )
+            .into_any_element()
+        };
+        let generate_label = if self.pr_generating {
+            tr!("git_panel.generating_draft")
+        } else {
+            tr!("git_panel.generate_draft")
+        };
         let card = div()
             .flex()
             .flex_col()
             .gap(DynamicSpacing::Base12.px(&theme))
             .px(DynamicSpacing::Base20.px(&theme))
             .py(DynamicSpacing::Base16.px(&theme))
-            .max_w(px(780.))
-            .child(
-                div()
-                    .text_size(TextSize::Large.px(&theme))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child(tr!("git_panel.new_pull_title")),
-            )
-            .child(composer_field(theme, self.pr_new_title.clone(), px(0.)))
-            .child(composer_field(theme, self.pr_new_body.clone(), px(160.)))
+            .max_w(px(820.))
+            .relative()
             .child(
                 div()
                     .flex()
                     .items_center()
+                    .justify_between()
+                    .gap(DynamicSpacing::Base12.px(&theme))
+                    .child(
+                        div()
+                            .text_size(TextSize::Large.px(&theme))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(tr!("git_panel.new_pull_title")),
+                    )
+                    .child(action_button(
+                        "git-pr-new-generate",
+                        &generate_label,
+                        Some(generate_leading),
+                        false,
+                        self.pr_busy || self.pr_generating,
+                        theme,
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.generate_pull_draft(cx)),
+                    )),
+            )
+            .child(composer_field(theme, self.pr_new_hint.clone(), px(0.)))
+            .child(composer_field(theme, self.pr_new_title.clone(), px(0.)))
+            .child(composer_field(theme, self.pr_new_body.clone(), px(220.)))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_wrap()
                     .gap(DynamicSpacing::Base08.px(&theme))
                     .child(
                         div()
@@ -5517,17 +6424,7 @@ impl GitPanel {
                             .text_color(theme.text_3)
                             .child(tr!("git_panel.base_branch")),
                     )
-                    .child(filter_toggle_chip(
-                        "git-pr-new-base",
-                        &base_label,
-                        Some("icons/branch.svg"),
-                        false,
-                        theme,
-                        cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.ref_menu = Some(RefTarget::PrBase);
-                            cx.notify();
-                        }),
-                    ))
+                    .child(self.base_branch_selector(theme, cx))
                     .child(filter_toggle_chip(
                         "git-pr-new-draft",
                         &tr!("git_panel.pr_draft"),
@@ -5538,6 +6435,12 @@ impl GitPanel {
                             this.pr_new_draft = !this.pr_new_draft;
                             cx.notify();
                         }),
+                    ))
+                    .child(self.template_selector(
+                        theme,
+                        DraftForm::PullRequest,
+                        "git-pr-template",
+                        cx,
                     )),
             )
             .child(
@@ -5850,6 +6753,12 @@ impl GitPanel {
     /// The ref picker opened by "Merge branch…" / "Rebase onto…".
     fn ref_picker_popup(&self, theme: Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
         let target = self.ref_menu?;
+        // The New-PR base picker is rendered inside the form, anchored to its
+        // chip (see [`Self::base_branch_selector`]); this page-level popup only
+        // serves the Merge / Rebase targets launched from the branch bar.
+        if target == RefTarget::PrBase {
+            return None;
+        }
         let title = match target {
             RefTarget::Merge => tr!("git_panel.merge_branch"),
             RefTarget::Rebase => tr!("git_panel.rebase_onto"),
@@ -6313,7 +7222,6 @@ impl Render for GitPanel {
             .children(self.ref_picker_popup(theme, cx))
             .children(self.branch_menu(theme, cx))
             .children(self.file_actions_menu(theme, cx))
-            .children(self.label_picker_popup(theme, cx))
             .children(self.stage_prompt_popup(theme, cx))
             .children(self.confirm_popup(theme, cx))
             .children(self.branch_prompt_popup(theme, window, cx))
@@ -6558,6 +7466,46 @@ fn filter_toggle_chip(
         .into_any_element()
 }
 
+/// A chip that opens a picker, styled like the top branch selector: the glyph,
+/// the current value, and a chevron, filling with the active color while its
+/// menu is open.
+fn dropdown_chip(
+    id: &'static str,
+    label: &str,
+    glyph: &'static str,
+    open: bool,
+    theme: Theme,
+    listener: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> AnyElement {
+    button_frame(div().id(id), &theme, ButtonSize::Medium)
+        .border_1()
+        .border_color(theme.border)
+        .bg(if open { theme.active } else { theme.bg_raised })
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.bg_hover))
+        .on_click(listener)
+        .child(icon(
+            glyph,
+            ButtonSize::Medium.icon_size().px(&theme),
+            if open { theme.active_fg } else { theme.text_2 },
+        ))
+        .child(
+            div()
+                .max_w(px(180.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(if open { theme.active_fg } else { theme.text })
+                .child(label.to_string()),
+        )
+        .child(icon(
+            "icons/chevron-down.svg",
+            IconSize::XSmall.px(&theme),
+            if open { theme.active_fg } else { theme.text_3 },
+        ))
+        .into_any_element()
+}
+
 /// A small placeholder shown inside an expanding commit row while its detail
 /// loads (or when it could not be loaded).
 fn detail_note(theme: Theme, label: &str) -> AnyElement {
@@ -6578,21 +7526,60 @@ fn detail_note(theme: Theme, label: &str) -> AnyElement {
 
 // ── Issues ─────────────────────────────────────────────────────────
 
+/// The label chips for a list row: up to `take` real chips plus a `+N`
+/// indicator when more are hidden, so a heavily labeled item never pushes the
+/// author and time out of the row.
+fn label_summary(labels: &[gh::GhLabel], take: usize, theme: Theme) -> Vec<AnyElement> {
+    let mut chips: Vec<AnyElement> = labels
+        .iter()
+        .take(take)
+        .map(|label| issue_label_chip(label, theme))
+        .collect();
+    if labels.len() > take {
+        chips.push(
+            div()
+                .h(px(18.))
+                .px(DynamicSpacing::Base06.px(&theme))
+                .rounded(Radius::Small.px(&theme))
+                .border_1()
+                .border_color(theme.border)
+                .flex()
+                .items_center()
+                .text_size(TextSize::XSmall.px(&theme))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text_3)
+                .child(format!("+{}", labels.len() - take))
+                .into_any_element(),
+        );
+    }
+    chips
+}
+
+/// A right-aligned, fixed-width relative time so list rows line their times up
+/// in a column the eye can scan.
+fn row_time(value: &str, theme: Theme) -> AnyElement {
+    div()
+        .flex_none()
+        .w(px(64.))
+        .text_right()
+        .whitespace_nowrap()
+        .text_size(TextSize::Small.px(&theme))
+        .text_color(theme.text_3)
+        .child(value.to_string())
+        .into_any_element()
+}
+
 /// One issue row in the list: state glyph, number/title, labels, author,
 /// comment count, and relative time.
 fn issue_row(issue: &gh::GhIssue, theme: Theme, cx: &Context<GitPanel>) -> AnyElement {
     let number = issue.number;
-    let state_color = if issue.is_open() {
+    let open = issue.is_open();
+    let state_color = if open {
         theme.add_green
     } else {
         theme.del_red
     };
-    let state_label = if issue.is_open() {
-        tr!("git_panel.issue_open")
-    } else {
-        tr!("git_panel.issue_closed")
-    };
-    let state_glyph = if issue.is_open() {
+    let state_glyph = if open {
         "icons/circle-dot.svg"
     } else {
         "icons/circle-check.svg"
@@ -6602,7 +7589,7 @@ fn issue_row(issue: &gh::GhIssue, theme: Theme, cx: &Context<GitPanel>) -> AnyEl
         .group("git-row")
         .mx(DynamicSpacing::Base12.px(&theme))
         .px(DynamicSpacing::Base08.px(&theme))
-        .py(DynamicSpacing::Base08.px(&theme))
+        .py(DynamicSpacing::Base06.px(&theme))
         .rounded(Radius::Large.px(&theme))
         .flex()
         .items_center()
@@ -6637,7 +7624,8 @@ fn issue_row(issue: &gh::GhIssue, theme: Theme, cx: &Context<GitPanel>) -> AnyEl
                                 .overflow_hidden()
                                 .whitespace_nowrap()
                                 .text_size(TextSize::Small.px(&theme))
-                                .text_color(theme.text)
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(if open { theme.text } else { theme.text_2 })
                                 .child(issue.title.clone()),
                         ),
                 )
@@ -6647,13 +7635,7 @@ fn issue_row(issue: &gh::GhIssue, theme: Theme, cx: &Context<GitPanel>) -> AnyEl
                         .items_center()
                         .gap(DynamicSpacing::Base06.px(&theme))
                         .min_w_0()
-                        .children(
-                            issue
-                                .labels
-                                .iter()
-                                .take(4)
-                                .map(|label| issue_label_chip(label, theme)),
-                        )
+                        .children(label_summary(&issue.labels, 3, theme))
                         .child(author_avatar(&issue.author.login, "", theme))
                         .child(
                             div()
@@ -6674,21 +7656,10 @@ fn issue_row(issue: &gh::GhIssue, theme: Theme, cx: &Context<GitPanel>) -> AnyEl
                                     theme.text_3,
                                 ))
                                 .child(issue.comments.len().to_string()),
-                        )
-                        .child(
-                            div()
-                                .text_size(TextSize::Small.px(&theme))
-                                .text_color(theme.text_3)
-                                .child(gh::relative_time(&issue.updated_at)),
                         ),
                 ),
         )
-        .child(state_chip(
-            &state_label,
-            state_color,
-            Some(state_glyph),
-            theme,
-        ));
+        .child(row_time(&gh::relative_time(&issue.updated_at), theme));
     if !issue.url.is_empty() {
         let url = issue.url.clone();
         row = row.child(
@@ -6774,6 +7745,31 @@ fn state_chip(label: &str, color: Hsla, glyph: Option<&'static str>, theme: Them
         .children(glyph.map(|path| icon(path, IconSize::Indicator.px(&theme), color)))
         .child(label.to_string())
         .into_any_element()
+}
+
+/// Replace a `ComposerInput`'s whole contents in one edit, so a generated
+/// draft overwrites whatever the user had typed.
+fn set_composer_text(
+    input: &Entity<crate::composer::ComposerInput>,
+    text: &str,
+    cx: &mut Context<GitPanel>,
+) {
+    let len = input.read(cx).text().len();
+    input.update(cx, |field, cx| field.replace_range(0..len, text, cx));
+}
+
+/// Prepend a template's title prefix (`bug: `) to a generated title, unless the
+/// title already carries it.
+fn with_title_prefix(prefix: &Option<String>, title: &str) -> String {
+    let Some(prefix) = prefix.as_deref().filter(|value| !value.trim().is_empty()) else {
+        return title.to_string();
+    };
+    let bare = prefix.trim_end();
+    if title.starts_with(bare) {
+        title.to_string()
+    } else {
+        format!("{prefix}{title}")
+    }
 }
 
 /// A bordered field wrapper for a `ComposerInput` (issue title/body/comment).
@@ -6888,7 +7884,7 @@ fn pr_row(pull: &gh::GhPull, theme: Theme, cx: &Context<GitPanel>) -> AnyElement
         .group("git-row")
         .mx(DynamicSpacing::Base12.px(&theme))
         .px(DynamicSpacing::Base08.px(&theme))
-        .py(DynamicSpacing::Base08.px(&theme))
+        .py(DynamicSpacing::Base06.px(&theme))
         .rounded(Radius::Large.px(&theme))
         .flex()
         .items_center()
@@ -6923,7 +7919,12 @@ fn pr_row(pull: &gh::GhPull, theme: Theme, cx: &Context<GitPanel>) -> AnyElement
                                 .overflow_hidden()
                                 .whitespace_nowrap()
                                 .text_size(TextSize::Small.px(&theme))
-                                .text_color(theme.text)
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(if pull.is_open() {
+                                    theme.text
+                                } else {
+                                    theme.text_2
+                                })
                                 .child(pull.title.clone()),
                         )
                         .children(pull.is_draft.then(|| {
@@ -6941,12 +7942,7 @@ fn pr_row(pull: &gh::GhPull, theme: Theme, cx: &Context<GitPanel>) -> AnyElement
                         .items_center()
                         .gap(DynamicSpacing::Base06.px(&theme))
                         .min_w_0()
-                        .children(
-                            pull.labels
-                                .iter()
-                                .take(3)
-                                .map(|label| issue_label_chip(label, theme)),
-                        )
+                        .children(label_summary(&pull.labels, 3, theme))
                         .child(author_avatar(&pull.author.login, "", theme))
                         .child(
                             div()
@@ -6962,15 +7958,10 @@ fn pr_row(pull: &gh::GhPull, theme: Theme, cx: &Context<GitPanel>) -> AnyElement
                         )
                         .children(review_chip(pull, theme))
                         .children(check_bucket_chip(pull.checks_summary(), theme))
-                        .child(delta_stats(pull.additions, pull.deletions, theme))
-                        .child(
-                            div()
-                                .text_size(TextSize::Small.px(&theme))
-                                .text_color(theme.text_3)
-                                .child(gh::relative_time(&pull.updated_at)),
-                        ),
+                        .child(delta_stats(pull.additions, pull.deletions, theme)),
                 ),
-        );
+        )
+        .child(row_time(&gh::relative_time(&pull.updated_at), theme));
     if !pull.url.is_empty() {
         let url = pull.url.clone();
         row = row.child(
