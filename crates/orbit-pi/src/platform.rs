@@ -80,7 +80,8 @@ const APP_ICON_PX: usize = 36;
 /// embed, and a single bilinear tap then had to squeeze it into a 14px slot on
 /// the GPU. Redrawing into a bitmap of exactly `px` pixels instead resamples
 /// once with AppKit's high-quality filter, off the renderer's hot path — and
-/// shrinks each embedded icon from ~1 MB to ~2 KB.#[cfg(target_os = "macos")]
+/// shrinks each embedded icon from ~1 MB to ~2 KB.
+#[cfg(target_os = "macos")]
 fn app_icon_png(application_path: &objc2_foundation::NSString, px: usize) -> Option<Vec<u8>> {
     use objc2::AllocAnyThread;
     use objc2_app_kit::{
