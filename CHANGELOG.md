@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Dropdown menus across the app now match the branch selector's popover
+  style: one surface treatment, roomier rows with the same hover, and the
+  current choice marked with the active fill and a check. This covers the Git
+  page's Sync and "…" menus, changed-file and merge/rebase menus, the Review
+  source menu, the Usage filter and row menus, the composer's add/mode
+  popups, and the sidebar session menu; the branch, label, template, and
+  Settings pickers now share the same row treatment. Right-click context
+  menus stay compact.
+
+### Fixed
+
+- The Issue page's **Label** dropdown now closes when its trigger is clicked a
+  second time. The popup dismissed on mouse-down and the trigger's mouse-up
+  re-opened it on the same click; the trigger now honors the same gesture
+  guard every other dropdown uses.
+
 ### Fixed
 
 - **New Task** now starts a fresh session when pi has exited instead of doing
