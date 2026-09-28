@@ -6,9 +6,10 @@ use gpui::{point, Pixels};
 use crate::sessions::cap_chars;
 use crate::shimmer::ShimmerText;
 use crate::theme::tokens::{
-    context_menu, list_item, popover, BufferLineHeight, ButtonSize, DynamicSpacing, IconSize,
+    context_menu, list_item, picker, popover, BufferLineHeight, ButtonSize, DynamicSpacing, IconSize,
     TextSize,
 };
+use crate::workspace_mark::{self, WorkspaceMark};
 
 /// Whether a workspace group is collapsed in the sidebar. The active
 /// workspace is expanded by default; all others are collapsed unless the
@@ -138,6 +139,10 @@ pub(crate) fn sessions_with_placeholder(
 pub(crate) fn build_sidebar_rows(
     sessions: &[SessionInfo],
     workspaces: &[PathBuf],
+    // Sidebar ordering for the workspace groups, plus the per-workspace
+    // added-at stamps used by [`WorkspaceSort::DateAdded`].
+    sort: WorkspaceSort,
+    added_at: &HashMap<PathBuf, SystemTime>,
     working_label: &str,
     collapsed_workspaces: &HashSet<String>,
     expanded_workspace_groups: &HashSet<String>,
@@ -170,6 +175,9 @@ pub(crate) fn build_sidebar_rows(
             ixs.push(ix);
         }
     }
+    // Order the groups for the active sort mode before any rows are laid out;
+    // a group's own session order is independent (pinned-first, then recency).
+    sort_workspace_groups(&mut groups, sessions, sort, added_at);
     // Pinned sessions lead their project group; recency order is preserved
     // within the pinned and unpinned partitions (the sort is stable). Doing
     // this here rather than in `load_sessions` keeps an Orbit-owned
@@ -235,8 +243,57 @@ pub(crate) fn build_sidebar_rows(
     side_rows
 }
 
-/// The active workspace's header pinned over the session list, plus how far
-/// the next group's header has pushed it up.
+/// Reorder `(label, cwd, session indices)` groups for the active sidebar
+/// sort mode. `groups` is already deduped by label, so reordering never
+/// merges two projects.
+///
+/// `LastUpdated` keys on each group's newest session activity — the group is
+/// not necessarily in activity order after the pin sort, so it takes the max
+/// rather than the first row. `DateAdded` keys on the persisted added-at
+/// stamp. Ties break on the label so the order is stable across reloads, and
+/// unknown/empty keys sort last.
+fn sort_workspace_groups(
+    groups: &mut [(String, PathBuf, Vec<usize>)],
+    sessions: &[SessionInfo],
+    sort: WorkspaceSort,
+    added_at: &HashMap<PathBuf, SystemTime>,
+) {
+    if sort == WorkspaceSort::Manual {
+        return;
+    }
+    let label_key = |label: &str| label.to_lowercase();
+    let by_label = |a: &(String, PathBuf, Vec<usize>), b: &(String, PathBuf, Vec<usize>)| {
+        label_key(&a.0).cmp(&label_key(&b.0))
+    };
+    match sort {
+        WorkspaceSort::Manual => {}
+        WorkspaceSort::AlphabeticalAsc => groups.sort_by(|a, b| by_label(a, b)),
+        WorkspaceSort::AlphabeticalDesc => groups.sort_by(|a, b| by_label(b, a)),
+        WorkspaceSort::LastUpdated => groups.sort_by(|a, b| {
+            group_updated(&b.2, sessions)
+                .cmp(&group_updated(&a.2, sessions))
+                .then_with(|| by_label(a, b))
+        }),
+        WorkspaceSort::DateAdded => groups.sort_by(|a, b| {
+            added_at
+                .get(&b.1)
+                .cmp(&added_at.get(&a.1))
+                .then_with(|| by_label(a, b))
+        }),
+        WorkspaceSort::SessionCount => groups.sort_by(|a, b| {
+            b.2.len().cmp(&a.2.len()).then_with(|| by_label(a, b))
+        }),
+    }
+}
+
+/// Newest session activity in a group, or `None` for an empty project. Empty
+/// groups sort last under [`WorkspaceSort::LastUpdated`].
+fn group_updated(ixs: &[usize], sessions: &[SessionInfo]) -> Option<SystemTime> {
+    ixs.iter().map(|&ix| sessions[ix].modified).max()
+}
+
+/// The scrolled-to workspace's header pinned over the session list, plus how
+/// far the next group's header has pushed it up.
 pub(crate) struct StickyHeader {
     /// Row index of the pinned [`SideRow::Workspace`] header.
     pub ix: usize,
@@ -244,29 +301,32 @@ pub(crate) struct StickyHeader {
     pub top_offset: Pixels,
 }
 
-/// Resolve the sticky header for the session list. Only the active
-/// workspace's group pins — and only while it is expanded — so the open
-/// session's project stays named while its own sessions scroll. The header
-/// scrolls away with its section once the next group's header takes over
-/// (same behaviour as the side pane's sticky file header).
-pub(crate) fn sticky_sidebar_header(
-    list: &ListState,
-    rows: &[SideRow],
-    active_label: &str,
-) -> Option<StickyHeader> {
-    let header_ix = rows.iter().position(|row| {
-        matches!(
-            row,
-            SideRow::Workspace {
-                label,
-                collapsed: false,
-                ..
-            } if label == active_label
-        )
-    })?;
+/// Resolve the sticky header for the session list: the header of the project
+/// group that owns the row at the top of the viewport. Every expanded group
+/// pins — not just the active one — so whichever long project the reader has
+/// scrolled into keeps its name visible. The header scrolls away with its
+/// section once the next group's header takes over (same behaviour as the
+/// side pane's sticky file header).
+pub(crate) fn sticky_sidebar_header(list: &ListState, rows: &[SideRow]) -> Option<StickyHeader> {
     let scroll_top = list.logical_scroll_top();
-    if scroll_top.item_ix < header_ix {
-        // The real header has not reached the top of the viewport yet.
+    // The last header at or above the top row is the pinned section. Clamp a
+    // past-the-end offset (the list reads that way while following) to the
+    // final row so a short list still resolves its group.
+    let scan_end = scroll_top.item_ix.min(rows.len().checked_sub(1)?);
+    let header_ix = rows[..=scan_end]
+        .iter()
+        .rposition(|row| matches!(row, SideRow::Workspace { .. }))?;
+    // A collapsed group shows only its always-visible rows (the open, running
+    // or pinned sessions), so there is no long history to label — and pinning
+    // its header would mask the previous group's rows.
+    if matches!(
+        rows.get(header_ix),
+        Some(SideRow::Workspace { collapsed: true, .. })
+    ) {
+        return None;
+    }
+    if scroll_top.item_ix == header_ix && scroll_top.offset_in_item <= px(0.) {
+        // The real header is exactly at the top — nothing to pin over it.
         return None;
     }
     // The section ends at the next workspace header (or the list end).
@@ -274,14 +334,6 @@ pub(crate) fn sticky_sidebar_header(
         .iter()
         .position(|row| matches!(row, SideRow::Workspace { .. }))
         .map(|offset| header_ix + 1 + offset);
-    if next_header_ix.is_some_and(|next| scroll_top.item_ix >= next) {
-        // The section scrolled fully past; its header belongs above the view.
-        return None;
-    }
-    if scroll_top.item_ix == header_ix && scroll_top.offset_in_item <= px(0.) {
-        // The real header is exactly at the top — nothing to pin over it.
-        return None;
-    }
     // Push the pinned header up as the next group's header arrives. Item
     // bounds are in window coordinates, so compare against the list's
     // viewport; unmeasured items are too far away to need a push.
@@ -314,6 +366,8 @@ pub(crate) fn render_side_row(
     // Every session with a live (running or warm-idle) pi process. Guards
     // delete, which would otherwise let an alive process recreate the file.
     live_paths: &Rc<HashSet<PathBuf>>,
+    // Per-workspace sidebar marks (icon + tint), keyed by path.
+    marks: &Rc<HashMap<PathBuf, WorkspaceMark>>,
     session_menu: Option<&SessionMenu>,
     workspace_menu: Option<&WorkspaceMenu>,
     // Whether this row is the keyboard cursor (see `OrbitApp::sidebar_cursor`).
@@ -335,6 +389,7 @@ pub(crate) fn render_side_row(
             let this_new = this.clone();
             let this_menu = this.clone();
             let menu = workspace_menu.filter(|m| m.label == label);
+            let mark = marks.get(cwd).cloned().unwrap_or_default();
             // Outer shell: inter-group spacing only — horizontal inset comes
             // from the list's `px_2`, so the hover pill lines up with the
             // session rows' (inside the same container) and the chevron lands
@@ -387,6 +442,7 @@ pub(crate) fn render_side_row(
                                     label: label.clone(),
                                     cwd: cwd.clone(),
                                     at: Some(event.position),
+                                    picker: false,
                                 };
                                 this.update(cx, |app, cx| {
                                     app.open_workspace_menu_at(menu, window, cx);
@@ -402,10 +458,10 @@ pub(crate) fn render_side_row(
                             IconSize::Indicator.px(&theme),
                             theme.text_3,
                         ))
-                        .child(icon(
-                            "icons/folder.svg",
+                        .child(icon_dyn(
+                            workspace_mark::icon_path(mark.icon.as_deref()),
                             IconSize::Small.px(&theme),
-                            theme.text_3,
+                            workspace_mark::tint_color(&theme, mark.tint.as_deref()),
                         ))
                         .child(
                             div()
@@ -423,6 +479,7 @@ pub(crate) fn render_side_row(
                             label.clone(),
                             cwd.clone(),
                             menu,
+                            mark.clone(),
                             this_menu.clone(),
                             theme,
                         ))
@@ -1088,6 +1145,7 @@ pub(crate) fn workspace_menu_button(
     label: String,
     cwd: PathBuf,
     menu: Option<&WorkspaceMenu>,
+    mark: WorkspaceMark,
     this: Entity<OrbitApp>,
     theme: Theme,
 ) -> impl IntoElement + use<> {
@@ -1112,6 +1170,7 @@ pub(crate) fn workspace_menu_button(
             label: label_for_click.clone(),
             cwd: cwd_for_click.clone(),
             at: None,
+            picker: false,
         };
         this.update(cx, |app, cx| app.toggle_workspace_menu(menu, window, cx));
     })
@@ -1126,19 +1185,106 @@ pub(crate) fn workspace_menu_button(
             .top_0()
             .left_0()
             .size(px(0.))
-            .child(workspace_menu_popup(menu, this_for_popup.clone(), theme))
+            .child(workspace_menu_popup(
+                menu,
+                mark.clone(),
+                this_for_popup.clone(),
+                theme,
+            ))
     }))
 }
 
-/// The actions popup anchored to a workspace header: Copy path / Remove
-/// from sidebar. Painted with the same deferred + anchored convention as
-/// the session row menu, dismissed by any outside mouse-down.
+/// One row of the workspace header menu, on the branch selector's picker
+/// metrics ([`picker_entry`]): a leading glyph beside the label, with the
+/// picker row's inset, padding, height, and radius. The click closes the menu
+/// through the app action it runs.
+fn workspace_menu_item<C, L>(
+    id: &'static str,
+    icon_path: &'static str,
+    label: L,
+    theme: Theme,
+    this: Entity<OrbitApp>,
+    on_click: C,
+) -> impl IntoElement + use<C, L>
+where
+    C: Fn(&mut OrbitApp, &mut Context<OrbitApp>) + 'static,
+    L: Into<SharedString>,
+{
+    let label: SharedString = label.into();
+    picker_entry(div().id(id), &theme)
+        .h(picker::entry_height(&theme))
+        .flex_none()
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.overlay))
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            cx.stop_propagation();
+            this.update(cx, |app, cx| (on_click)(app, cx));
+        })
+        .child(icon(icon_path, context_menu::ICON.px(&theme), theme.text_3))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_color(theme.text_2)
+                .child(label),
+        )
+}
+
+/// The actions popup anchored to a workspace header: Copy path / Icon & color /
+/// Remove from sidebar, or — once `Icon & color` is chosen — the picker itself.
+/// Uses the branch selector's picker surface and row metrics; deferred and
+/// anchored like the session row menu, dismissed by any outside mouse-down.
 pub(crate) fn workspace_menu_popup(
     menu: &WorkspaceMenu,
+    mark: WorkspaceMark,
     this: Entity<OrbitApp>,
     theme: Theme,
 ) -> AnyElement {
-    let popup = context_menu_surface(div(), &theme)
+    let body: AnyElement = if menu.picker {
+        workspace_appearance_picker(menu, mark, this.clone(), theme)
+    } else {
+        // The action rows wear the branch selector's picker metrics — the
+        // same Base04 inset, Base06 inner padding, 31px row, and Base01 row
+        // gap — so the workspace menu and the branch/sort popovers read as
+        // one family.
+        div()
+            .py(picker::list_padding_y(&theme))
+            .flex()
+            .flex_col()
+            .gap(DynamicSpacing::Base01.px(&theme))
+            .child(workspace_menu_item(
+                "wm-copy-path",
+                "icons/copy.svg",
+                tr!("sidebar.copy_path"),
+                theme,
+                this.clone(),
+                |app, cx| app.on_workspace_copy_path(cx),
+            ))
+            .child(workspace_menu_item(
+                "wm-icon-color",
+                "icons/contrast.svg",
+                tr!("sidebar.icon_and_color"),
+                theme,
+                this.clone(),
+                |app, cx| app.on_workspace_open_picker(cx),
+            ))
+            .child(workspace_menu_item(
+                "wm-remove",
+                "icons/minus.svg",
+                tr!("sidebar.remove_from_sidebar"),
+                theme,
+                this.clone(),
+                |app, cx| app.on_workspace_remove(cx),
+            ))
+            .into_any_element()
+    };
+
+    // Same picker surface as the branch selector (and the sidebar's sort
+    // menu). One fixed width across both modes means opening the icon picker
+    // never resizes the popover.
+    let popup = picker_surface(div(), &theme)
+        .w(workspace_picker_width(&theme))
         .flex()
         .flex_col()
         .overflow_hidden()
@@ -1155,25 +1301,7 @@ pub(crate) fn workspace_menu_popup(
                 })
             }
         })
-        .child(menu_item(
-            "wm-copy-path",
-            "icons/copy.svg",
-            tr!("sidebar.copy_path"),
-            theme,
-            this.clone(),
-            false,
-            |app, cx| app.on_workspace_copy_path(cx),
-        ))
-        .child(context_menu_separator(&theme))
-        .child(menu_item(
-            "wm-remove",
-            "icons/minus.svg",
-            tr!("sidebar.remove_from_sidebar"),
-            theme,
-            this.clone(),
-            false,
-            |app, cx| app.on_workspace_remove(cx),
-        ));
+        .child(body);
 
     let anchor = if let Some(at) = menu.at {
         anchored().anchor(Corner::TopLeft).position(at)
@@ -1190,6 +1318,317 @@ pub(crate) fn workspace_menu_popup(
         .snap_to_window_with_margin(popover::WINDOW_MARGIN)
         .child(deferred(popup))
         .into_any_element()
+}
+
+/// A grid cell's side: a square hit target that holds an [`IconSize::Medium`]
+/// glyph with even padding all round.
+fn workspace_picker_cell(theme: &Theme) -> Pixels {
+    DynamicSpacing::Base24.px(theme)
+}
+
+/// Spacing between grid cells and tint swatches.
+fn workspace_picker_gap(theme: &Theme) -> Pixels {
+    DynamicSpacing::Base06.px(theme)
+}
+
+/// The inset from the surface edge to the picker's content. Used for the
+/// header, swatches, and grid alike so their left and right edges line up.
+fn workspace_picker_padding_x(theme: &Theme) -> Pixels {
+    DynamicSpacing::Base16.px(theme)
+}
+
+/// The width the picker surface needs — the icon grid plus its horizontal
+/// padding, so the content fills the popup exactly with no trailing gap.
+fn workspace_picker_width(theme: &Theme) -> Pixels {
+    let columns = workspace_mark::ICON_COLUMNS as f32;
+    workspace_picker_cell(theme) * columns
+        + workspace_picker_gap(theme) * (columns - 1.)
+        + workspace_picker_padding_x(theme) * 2.
+}
+
+/// The icon-and-color picker shown in place of the workspace menu: a row of
+/// semantic tint dots over a grid of curated HugeIcons. Picking either writes
+/// the mark and persists it; `Reset` clears both back to the folder default.
+fn workspace_appearance_picker(
+    menu: &WorkspaceMenu,
+    mark: WorkspaceMark,
+    this: Entity<OrbitApp>,
+    theme: Theme,
+) -> AnyElement {
+    let cell = workspace_picker_cell(&theme);
+    let gap = workspace_picker_gap(&theme);
+
+    let mut dots = div().flex().w_full().justify_between();
+    for (key, color_of) in workspace_mark::TINTS {
+        let selected = mark
+            .tint
+            .as_deref()
+            .map_or(*key == "default", |tint| tint == *key);
+        let cwd = menu.cwd.clone();
+        let mark = mark.clone();
+        let this = this.clone();
+        dots = dots.child(
+            div()
+                .id(ElementId::Name(format!("wm-tint-{key}").into()))
+                .size(IconSize::Medium.px(&theme))
+                .flex_none()
+                .rounded_full()
+                .bg(color_of(&theme))
+                .border_2()
+                .border_color(if selected {
+                    theme.text
+                } else {
+                    theme.border_strong
+                })
+                .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    cx.stop_propagation();
+                    let next = WorkspaceMark {
+                        icon: mark.icon.clone(),
+                        tint: Some((*key).to_string()),
+                    };
+                    this.update(cx, |app, cx| {
+                        app.set_workspace_mark(cwd.clone(), next);
+                        cx.notify();
+                    });
+                }),
+        );
+    }
+
+    let ink = workspace_mark::tint_color(&theme, mark.tint.as_deref());
+    let mut grid = div().flex().flex_col().gap(gap);
+    for row in workspace_mark::PROJECT_ICONS.chunks(workspace_mark::ICON_COLUMNS) {
+        let mut cells = div().flex().gap(gap);
+        for stem in row {
+            let selected = mark
+                .icon
+                .as_deref()
+                .map_or(*stem == "folder", |icon| icon == *stem);
+            let cwd = menu.cwd.clone();
+            let mark = mark.clone();
+            let this = this.clone();
+            cells = cells.child(
+                div()
+                    .id(ElementId::Name(format!("wm-icon-{stem}").into()))
+                    .size(cell)
+                    .flex_none()
+                    .rounded(list_item::RADIUS.px(&theme))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .when(selected, |s| s.bg(theme.active))
+                    .hover(|s| s.bg(theme.bg_hover))
+                    .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        cx.stop_propagation();
+                        let next = WorkspaceMark {
+                            icon: Some((*stem).to_string()),
+                            tint: mark.tint.clone(),
+                        };
+                        this.update(cx, |app, cx| {
+                            app.set_workspace_mark(cwd.clone(), next);
+                            cx.notify();
+                        });
+                    })
+                    .child(icon_dyn(
+                        workspace_mark::icon_path(Some(stem)),
+                        IconSize::Medium.px(&theme),
+                        ink,
+                    )),
+            );
+        }
+        grid = grid.child(cells);
+    }
+
+    let reset_cwd = menu.cwd.clone();
+    let this_reset = this.clone();
+    let header = div()
+        .w_full()
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .text_size(TextSize::Small.px(&theme))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child(tr!("sidebar.icon_and_color")),
+        )
+        .child(
+            div()
+                .id("wm-mark-reset")
+                .flex_none()
+                .cursor_pointer()
+                .px(DynamicSpacing::Base04.px(&theme))
+                .py(DynamicSpacing::Base01.px(&theme))
+                .rounded(list_item::RADIUS.px(&theme))
+                .text_size(TextSize::Small.px(&theme))
+                .text_color(theme.text_3)
+                .hover(|s| s.bg(theme.bg_hover))
+                .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                    cx.stop_propagation();
+                    this_reset.update(cx, |app, cx| {
+                        app.set_workspace_mark(reset_cwd.clone(), WorkspaceMark::default());
+                        cx.notify();
+                    });
+                })
+                .child(tr!("sidebar.reset")),
+        );
+
+    div()
+        .w_full()
+        .flex()
+        .flex_col()
+        .gap(DynamicSpacing::Base08.px(&theme))
+        .px(workspace_picker_padding_x(&theme))
+        .py(DynamicSpacing::Base08.px(&theme))
+        .child(header)
+        .child(dots)
+        .child(grid)
+        .into_any_element()
+}
+
+/// The hover-revealed sort control on the sidebar's Projects header. Opens
+/// the workspace-sort menu anchored below; the active mode is checked.
+pub(crate) fn sidebar_sort_button(
+    sort: WorkspaceSort,
+    open: bool,
+    this: Entity<OrbitApp>,
+    theme: Theme,
+) -> impl IntoElement + use<> {
+    let this_for_popup = this.clone();
+    icon_button_frame(div().id("sidebar-sort"), &theme, ButtonSize::Compact)
+        .relative()
+        .cursor_pointer()
+        // Revealed on the Projects row's hover, or while the menu is open.
+        .opacity(if open { 1.0 } else { 0.0 })
+        .group_hover("sidebar-projects", |s| s.opacity(1.))
+        .hover(|s| s.bg(theme.overlay))
+        .active(|s| s.opacity(PRESS_DIM))
+        .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            this.update(cx, |app, cx| app.toggle_sidebar_sort_menu(window, cx));
+        })
+        .child(icon(
+            "icons/sort.svg",
+            ButtonSize::Compact.icon_size().px(&theme),
+            theme.text_3,
+        ))
+        .children(open.then(|| {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size(px(0.))
+                .child(sidebar_sort_popup(sort, this_for_popup, theme))
+        }))
+}
+
+/// Width of the workspace-sort popover. Matches the branch picker's compact
+/// picker width so the two dropdowns read as the same control.
+const SORT_POPOVER_W: f32 = 280.;
+
+/// The workspace-sort menu, anchored below the Projects sort button. Uses the
+/// picker surface (search-less) and `picker_entry` rows so it matches the
+/// branch selector; an outside mouse-down dismisses it.
+pub(crate) fn sidebar_sort_popup(
+    sort: WorkspaceSort,
+    this: Entity<OrbitApp>,
+    theme: Theme,
+) -> AnyElement {
+    let popup = picker_surface(div(), &theme)
+        .w(px(SORT_POPOVER_W))
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .occlude()
+        .on_mouse_down_out({
+            let this = this.clone();
+            move |_, _, cx| {
+                this.update(cx, |app, cx| {
+                    // Arm the gesture guard so this same click's mouse-up
+                    // cannot immediately re-open the menu.
+                    app.menu_dismissed_at = Some(Instant::now());
+                    app.sidebar_sort_menu = false;
+                    cx.notify();
+                })
+            }
+        })
+        .child(menu_header(tr!("sidebar.sort"), &theme).pt(picker::list_padding_y(&theme)))
+        .child(
+            div()
+                .py(picker::list_padding_y(&theme))
+                .flex()
+                .flex_col()
+                .gap(DynamicSpacing::Base01.px(&theme))
+                .children(
+                    WorkspaceSort::ALL
+                        .into_iter()
+                        .map(|option| sidebar_sort_item(option, sort, this.clone(), theme)),
+                ),
+        );
+
+    anchored()
+        .position_mode(AnchoredPositionMode::Local)
+        .anchor(Corner::TopLeft)
+        .offset(point(
+            px(0.),
+            ButtonSize::Compact.height(&theme) + popover::MENU_OFFSET,
+        ))
+        .snap_to_window_with_margin(popover::WINDOW_MARGIN)
+        .child(deferred(popup))
+        .into_any_element()
+}
+
+/// One workspace-sort menu entry, on the picker row metrics the branch
+/// selector uses: a leading mode glyph, the label, and a trailing check when
+/// the mode is active. Selecting any entry switches the mode and closes the
+/// menu.
+fn sidebar_sort_item(
+    option: WorkspaceSort,
+    active: WorkspaceSort,
+    this: Entity<OrbitApp>,
+    theme: Theme,
+) -> impl IntoElement {
+    let is_active = option == active;
+    picker_entry(div().id(option.as_str()), &theme)
+        .h(picker::entry_height(&theme))
+        .flex_none()
+        .cursor_pointer()
+        .when(is_active, |row| row.bg(theme.active))
+        .when(!is_active, |row| row.hover(|s| s.bg(theme.overlay)))
+        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+            cx.stop_propagation();
+            this.update(cx, |app, cx| app.set_workspace_sort(option, cx));
+        })
+        .child(icon(
+            option.icon_path(),
+            context_menu::ICON.px(&theme),
+            if is_active {
+                theme.active_fg
+            } else {
+                theme.text_3
+            },
+        ))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_color(if is_active {
+                    theme.active_fg
+                } else {
+                    theme.text_2
+                })
+                .child(tr!(option.label_key())),
+        )
+        .when(is_active, |row| {
+            row.child(icon(
+                "icons/check.svg",
+                context_menu::ICON.px(&theme),
+                theme.accent,
+            ))
+        })
 }
 
 /// One entry of the sidebar's session / workspace menus, on Zed's context
@@ -1348,6 +1787,7 @@ impl OrbitApp {
         if self.model_selector.is_some() {
             self.close_model_selector(window, cx);
         }
+        self.sidebar_sort_menu = false;
     }
 
     pub(super) fn on_menu_copy_path(&mut self, cx: &mut Context<Self>) {
@@ -1429,6 +1869,43 @@ impl OrbitApp {
         cx.notify();
     }
 
+    /// Open (or toggle closed) the sidebar's workspace-sort menu. Follows the
+    /// same gesture guard as the row menus, so the dismissing click cannot
+    /// immediately re-open it.
+    pub(super) fn toggle_sidebar_sort_menu(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        const GESTURE: Duration = Duration::from_millis(200);
+        if let Some(dismissed) = self.menu_dismissed_at.take() {
+            if dismissed.elapsed() < GESTURE {
+                return;
+            }
+        }
+        if self.sidebar_sort_menu {
+            self.sidebar_sort_menu = false;
+            cx.notify();
+            return;
+        }
+        self.dismiss_transient_popups(window, cx);
+        self.session_menu = None;
+        self.workspace_menu = None;
+        self.sidebar_sort_menu = true;
+        cx.notify();
+    }
+
+    /// Switch the workspace ordering and persist the choice with the project
+    /// list. Re-sorting is pure UI: pi's session files are never touched.
+    pub(super) fn set_workspace_sort(&mut self, sort: WorkspaceSort, cx: &mut Context<Self>) {
+        self.sidebar_sort_menu = false;
+        if self.workspace_sort != sort {
+            self.workspace_sort = sort;
+            self.persist_workspace_prefs();
+        }
+        cx.notify();
+    }
+
     /// Open (or toggle closed) the row-actions popup for a workspace header.
     pub(super) fn toggle_workspace_menu(
         &mut self,
@@ -1479,6 +1956,14 @@ impl OrbitApp {
         cx.notify();
     }
 
+    /// Swap the open workspace menu for its icon/tint picker, in place.
+    pub(super) fn on_workspace_open_picker(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = self.workspace_menu.as_mut() {
+            menu.picker = true;
+        }
+        cx.notify();
+    }
+
     /// Remove the workspace the open header menu belongs to from Orbit's own
     /// project list. pi's session files are never touched — the folder can be
     /// added again by picking it to work in.
@@ -1523,6 +2008,8 @@ impl OrbitApp {
         build_sidebar_rows(
             &sessions,
             &self.workspaces,
+            self.workspace_sort,
+            &self.workspace_added_at,
             &working,
             &self.collapsed_workspaces,
             &self.expanded_workspace_groups,
@@ -1675,7 +2162,11 @@ impl OrbitApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.session_menu.take().is_some() || self.workspace_menu.take().is_some() {
+        if self.session_menu.take().is_some()
+            || self.workspace_menu.take().is_some()
+            || self.sidebar_sort_menu
+        {
+            self.sidebar_sort_menu = false;
             cx.notify();
             return;
         }

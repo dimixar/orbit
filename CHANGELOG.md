@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The sidebar's Projects list now defaults to most recent activity, with a
+  sort control on the header to order workspace groups by recently added, name
+  (A–Z or Z–A), or session count, or fall back to the manual added order. The
+  choice persists in `~/.orbit-pi/workspaces.json` and each project now records
+  when it was added.
+
+- Each project in the sidebar can now wear its own mark: pick from a curated
+  set of the bundled HugeIcons and tint it with one of eight semantic colors
+  (which follow the active palette). Reach it from the workspace header's `⋯`
+  menu → **Icon & color**, with a Reset back to the folder default. The choice
+  persists in `~/.orbit-pi/workspaces.json` beside the project list.
+
+### Fixed
+
+- The sidebar's project headers now stay pinned as you scroll through *any*
+  expanded group, not just the active workspace. Previously only the open
+  workspace's header was sticky, so a long list under the first project pinned
+  while every other expanded project scrolled its header away.
+
+- The "open in" menu's app icons are crisp and no longer tiny. macOS returns an
+  icon whose largest representation is 1024×1024, and the menu embedded that PNG
+  unchanged, so the renderer's single bilinear pass had to squeeze it into a
+  14px slot — the blur. Icons are now rasterized to exactly the pixel size the
+  menu draws (36×36 for the now-18px slot, matching a Retina blit 1:1), which
+  also drops each embedded icon from roughly 1 MB to 2 KB.
+
 ## [0.0.19] - 2026-09-28
 
 ### Changed

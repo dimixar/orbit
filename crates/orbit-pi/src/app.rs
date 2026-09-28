@@ -26,7 +26,7 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use base64::Engine as _;
@@ -80,6 +80,7 @@ use crate::usage::page::UsagePage;
 use crate::watch;
 use crate::widgets::{ExtensionWidget, WidgetPlacement};
 use crate::workflow::WorkflowMode;
+use crate::workspace_mark::WorkspaceMark;
 use crate::workspace_picker::{WorkspaceEntry, WorkspacePicker};
 
 const SIDEBAR_DEFAULT_W: f32 = 248.;
@@ -412,6 +413,20 @@ pub struct OrbitApp {
     /// added when the user picks it to work in; removing one drops only this
     /// entry and never touches pi.
     workspaces: Vec<PathBuf>,
+    /// When each listed workspace was added to Orbit, keyed by path — the
+    /// stable sort key for [`WorkspaceSort::DateAdded`]. Persisted back into
+    /// `workspaces.json`; a workspace with no record falls back to the
+    /// folder's creation time.
+    workspace_added_at: HashMap<PathBuf, SystemTime>,
+    /// Per-workspace sidebar mark (icon stem + tint key), keyed by path and
+    /// persisted beside the project list. A workspace with no entry wears the
+    /// default folder mark in the muted ink.
+    workspace_marks: HashMap<PathBuf, WorkspaceMark>,
+    /// How workspace groups are ordered in the sidebar. Persisted alongside
+    /// the project list; changing it re-sorts the UI and never touches pi.
+    workspace_sort: WorkspaceSort,
+    /// The sidebar's Projects-header sort menu is open.
+    sidebar_sort_menu: bool,
     /// Open row-actions menu on a workspace group header (which workspace's
     /// label + cwd). Mutually exclusive with `session_menu`.
     workspace_menu: Option<WorkspaceMenu>,
@@ -506,6 +521,14 @@ pub struct OrbitApp {
     /// When the in-flight manual refresh started, so its spin is kept visible
     /// for a minimum duration even if the reply is immediate.
     quota_refresh_started: Option<Instant>,
+    /// Whether the top-bar quota popover's "Hidden" group is expanded. The
+    /// group lists providers the user hid from the list, so a mistoggle is
+    /// one click to undo.
+    quota_hidden_open: bool,
+    /// Providers the user hid from the top-bar usage popover, from
+    /// `~/.orbit-pi/hidden-quota-providers.json`, loaded at launch. The
+    /// popover filters its cards against this; Settings still shows them.
+    hidden_quota_providers: crate::quota_hidden::HiddenProviders,
     /// The `sessionId` pi reports for the active session (its task id).
     session_id: Option<String>,
     /// Current agent turn number for this session (0 = none yet).
@@ -1031,6 +1054,7 @@ impl OrbitApp {
             )
         });
 
+        let workspace_store = load_workspace_store();
         let mut app = Self {
             client,
             runtime,
@@ -1121,7 +1145,11 @@ impl OrbitApp {
             collapsed_workspaces: HashSet::new(),
             expanded_workspace_groups: HashSet::new(),
             expanded_session_groups: HashMap::new(),
-            workspaces: load_workspaces(),
+            workspaces: workspace_store.workspaces,
+            workspace_added_at: workspace_store.added_at,
+            workspace_marks: workspace_store.marks,
+            workspace_sort: workspace_store.sort,
+            sidebar_sort_menu: false,
             workspace_menu: None,
             current_session_path: None,
             menu_dismissed_at: None,
@@ -1160,6 +1188,8 @@ impl OrbitApp {
             quota_popup_open: false,
             quota_refreshing: false,
             quota_refresh_started: None,
+            quota_hidden_open: false,
+            hidden_quota_providers: crate::quota_hidden::HiddenProviders::load(),
             session_id: None,
             turn_count: 0,
             turn_open: false,
@@ -1448,8 +1478,32 @@ impl OrbitApp {
         if self.workspaces.iter().any(|w| w == &cwd) {
             return;
         }
+        self.workspace_added_at.insert(cwd.clone(), SystemTime::now());
         self.workspaces.push(cwd);
-        persist_workspaces(&self.workspaces);
+        self.persist_workspace_prefs();
+    }
+
+    /// Write the sidebar's project list, each project's added-at stamp, the
+    /// per-workspace marks, and the active sort mode back to
+    /// `workspaces.json`.
+    fn persist_workspace_prefs(&self) {
+        persist_workspace_store(&WorkspaceStore {
+            workspaces: self.workspaces.clone(),
+            added_at: self.workspace_added_at.clone(),
+            marks: self.workspace_marks.clone(),
+            sort: self.workspace_sort,
+        });
+    }
+
+    /// Set (or clear, with [`WorkspaceMark::default`]) a workspace's sidebar
+    /// icon and tint, then persist. Orbit-owned: never touches pi.
+    pub(super) fn set_workspace_mark(&mut self, cwd: PathBuf, mark: WorkspaceMark) {
+        if mark.is_default() {
+            self.workspace_marks.remove(&cwd);
+        } else {
+            self.workspace_marks.insert(cwd, mark);
+        }
+        self.persist_workspace_prefs();
     }
 
     /// Drop a project from Orbit's sidebar. pi's session files stay exactly
@@ -1458,7 +1512,9 @@ impl OrbitApp {
         let before = self.workspaces.len();
         self.workspaces.retain(|w| w.as_path() != cwd);
         if self.workspaces.len() != before {
-            persist_workspaces(&self.workspaces);
+            self.workspace_added_at.remove(cwd);
+            self.workspace_marks.remove(cwd);
+            self.persist_workspace_prefs();
         }
     }
 
@@ -1546,45 +1602,212 @@ enum SideRow {
     ShowLess { label: String },
 }
 
-/// `~/.orbit-pi/workspaces.json` — the folders Orbit lists in its sidebar.
-/// Orbit-owned: pi owns the session files, this only records which projects
-/// the user added. Removing a workspace here never touches pi.
+/// How the sidebar orders workspace groups. Persisted alongside the project
+/// list in `~/.orbit-pi/workspaces.json`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum WorkspaceSort {
+    /// Insertion order — the order the user added projects to Orbit.
+    Manual,
+    /// Group label, A→Z (case-insensitive).
+    AlphabeticalAsc,
+    /// Group label, Z→A (case-insensitive).
+    AlphabeticalDesc,
+    /// Most recent session activity first.
+    #[default]
+    LastUpdated,
+    /// Most recently added project first.
+    DateAdded,
+    /// Most sessions first.
+    SessionCount,
+}
+
+impl WorkspaceSort {
+    /// Every mode, in the order the sort menu lists them.
+    pub(crate) const ALL: [WorkspaceSort; 6] = [
+        Self::LastUpdated,
+        Self::DateAdded,
+        Self::AlphabeticalAsc,
+        Self::AlphabeticalDesc,
+        Self::SessionCount,
+        Self::Manual,
+    ];
+
+    /// Stable key written to disk. Renaming one needs a migration in
+    /// [`Self::from_key`], or the user's choice silently resets.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::AlphabeticalAsc => "alphabetical",
+            Self::AlphabeticalDesc => "alphabetical_desc",
+            Self::LastUpdated => "last_updated",
+            Self::DateAdded => "date_added",
+            Self::SessionCount => "session_count",
+        }
+    }
+
+    /// Parse a persisted key. A missing key (a store written before the sort
+    /// control existed) and unknown values both fall back to the default,
+    /// [`Self::LastUpdated`], matching the sidebar's out-of-the-box order.
+    pub(crate) fn from_key(key: &str) -> Self {
+        match key {
+            "manual" => Self::Manual,
+            "alphabetical" => Self::AlphabeticalAsc,
+            "alphabetical_desc" => Self::AlphabeticalDesc,
+            "last_updated" => Self::LastUpdated,
+            "date_added" => Self::DateAdded,
+            "session_count" => Self::SessionCount,
+            _ => Self::default(),
+        }
+    }
+
+    /// i18n key for the menu entry.
+    pub(crate) fn label_key(self) -> &'static str {
+        match self {
+            Self::Manual => "sidebar.sort_manual",
+            Self::LastUpdated => "sidebar.sort_updated",
+            Self::DateAdded => "sidebar.sort_added",
+            Self::AlphabeticalAsc => "sidebar.sort_alphabetical",
+            Self::AlphabeticalDesc => "sidebar.sort_alphabetical_desc",
+            Self::SessionCount => "sidebar.sort_count",
+        }
+    }
+
+    /// Icon shown on the menu entry.
+    pub(crate) fn icon_path(self) -> &'static str {
+        match self {
+            Self::Manual => "icons/task.svg",
+            Self::LastUpdated => "icons/clock.svg",
+            Self::DateAdded => "icons/plus.svg",
+            Self::AlphabeticalAsc => "icons/chevron-up.svg",
+            Self::AlphabeticalDesc => "icons/chevron-down.svg",
+            Self::SessionCount => "icons/task.svg",
+        }
+    }
+}
+
+/// `~/.orbit-pi/workspaces.json` — the folders Orbit lists in its sidebar,
+/// when each was added, and how the sidebar orders them. Orbit-owned: pi owns
+/// the session files, this only records which projects the user added.
 fn workspaces_path() -> PathBuf {
     crate::platform::home_dir()
         .join(".orbit-pi")
         .join("workspaces.json")
 }
 
-fn load_workspaces() -> Vec<PathBuf> {
-    let Ok(raw) = fs::read_to_string(workspaces_path()) else {
-        return Vec::new();
-    };
-    let Ok(value) = serde_json::from_str::<Value>(&raw) else {
-        return Vec::new();
-    };
-    value
-        .get("workspaces")
-        .and_then(Value::as_array)
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(Value::as_str)
-                .map(normalize_workspace_path)
-                .collect()
-        })
-        .unwrap_or_default()
+/// The parsed workspaces store. Keeping `added_at` beside the path list gives
+/// [`WorkspaceSort::DateAdded`] a stable key across relaunches.
+#[derive(Debug, Default)]
+struct WorkspaceStore {
+    workspaces: Vec<PathBuf>,
+    added_at: HashMap<PathBuf, SystemTime>,
+    marks: HashMap<PathBuf, WorkspaceMark>,
+    sort: WorkspaceSort,
 }
 
-fn persist_workspaces(workspaces: &[PathBuf]) {
+/// Read the project list, tolerating the pre-timestamp format where
+/// `workspaces` was a bare array of path strings.
+fn load_workspace_store() -> WorkspaceStore {
+    let Ok(raw) = fs::read_to_string(workspaces_path()) else {
+        return WorkspaceStore::default();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+        return WorkspaceStore::default();
+    };
+    parse_workspace_store(&value)
+}
+
+/// Parse a workspaces store from JSON — the testable half of
+/// [`load_workspace_store`], with the file read factored out.
+fn parse_workspace_store(value: &Value) -> WorkspaceStore {
+    let mut store = WorkspaceStore {
+        sort: value
+            .get("sort")
+            .and_then(Value::as_str)
+            .map(WorkspaceSort::from_key)
+            .unwrap_or_default(),
+        ..WorkspaceStore::default()
+    };
+    let Some(entries) = value.get("workspaces").and_then(Value::as_array) else {
+        return store;
+    };
+    for entry in entries {
+        let (path, added_at, mark) = match entry {
+            // Legacy format: a bare path string.
+            Value::String(raw) => (normalize_workspace_path(raw), None, WorkspaceMark::default()),
+            // Current format: `{ "path": …, "added_at": <unix secs>,
+            // "icon": <stem>, "tint": <key> }`.
+            Value::Object(map) => {
+                let Some(raw) = map.get("path").and_then(Value::as_str) else {
+                    continue;
+                };
+                let added = map
+                    .get("added_at")
+                    .and_then(Value::as_u64)
+                    .map(|secs| UNIX_EPOCH + Duration::from_secs(secs));
+                let mark = WorkspaceMark {
+                    icon: map.get("icon").and_then(Value::as_str).map(str::to_string),
+                    tint: map.get("tint").and_then(Value::as_str).map(str::to_string),
+                };
+                (normalize_workspace_path(raw), added, mark)
+            }
+            _ => continue,
+        };
+        if store.workspaces.contains(&path) {
+            continue;
+        }
+        let added_at = added_at.unwrap_or_else(|| workspace_created_at(&path));
+        store.added_at.insert(path.clone(), added_at);
+        if !mark.is_default() {
+            store.marks.insert(path.clone(), mark);
+        }
+        store.workspaces.push(path);
+    }
+    store
+}
+
+/// Best-effort creation time for a workspace with no recorded added-at (a
+/// store written before timestamps were tracked). The epoch fallback sorts
+/// unknown folders last rather than jumping them to the top.
+fn workspace_created_at(path: &Path) -> SystemTime {
+    fs::metadata(path)
+        .and_then(|meta| meta.created())
+        .unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
+fn persist_workspace_store(store: &WorkspaceStore) {
     let path = workspaces_path();
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let paths: Vec<String> = workspaces
+    let workspaces: Vec<Value> = store
+        .workspaces
         .iter()
-        .map(|p| p.to_string_lossy().into_owned())
+        .map(|p| {
+            let added_at = store
+                .added_at
+                .get(p)
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let mark = store.marks.get(p).cloned().unwrap_or_default();
+            // Omit unset mark fields so projects without a custom look keep
+            // the store's original two-key shape.
+            let mut entry = serde_json::Map::new();
+            entry.insert("path".into(), serde_json::json!(p.to_string_lossy()));
+            entry.insert("added_at".into(), serde_json::json!(added_at));
+            if let Some(icon) = mark.icon {
+                entry.insert("icon".into(), serde_json::json!(icon));
+            }
+            if let Some(tint) = mark.tint {
+                entry.insert("tint".into(), serde_json::json!(tint));
+            }
+            Value::Object(entry)
+        })
         .collect();
-    let payload = serde_json::json!({ "workspaces": paths });
+    let payload = serde_json::json!({
+        "workspaces": workspaces,
+        "sort": store.sort.as_str(),
+    });
     let _ = fs::write(path, payload.to_string());
 }
 
@@ -1656,6 +1879,8 @@ struct WorkspaceMenu {
     cwd: PathBuf,
     /// Right-click origin in window coordinates (see [`SessionMenu::at`]).
     at: Option<Point<Pixels>>,
+    /// The menu is showing the icon/tint picker instead of the action list.
+    picker: bool,
 }
 
 /// Sections of the settings surface.
@@ -2006,6 +2231,8 @@ mod session_default_apply_tests;
 mod sidebar_active_reveal_tests;
 #[cfg(test)]
 mod sidebar_placeholder_tests;
+#[cfg(test)]
+mod sidebar_sort_tests;
 #[cfg(test)]
 mod sidepane_full_width_tests;
 #[cfg(test)]
