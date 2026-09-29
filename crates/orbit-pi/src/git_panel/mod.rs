@@ -29,6 +29,7 @@ use crate::app::{
     nerd_font_family, picker_entry, picker_search_frame, picker_surface, press, refresh_glyph,
     spinner, TipExt, BUTTON_GROUP,
 };
+use crate::commands::{self, CommandId};
 use crate::commit_message;
 use crate::gh;
 use crate::gh_templates::{self, RepoTemplate};
@@ -2958,6 +2959,13 @@ impl GitPanel {
             .children(tabs.into_iter().map(|(tab, tab_icon, key)| {
                 let label = tr!(key);
                 let selected = self.tab == tab;
+                let command = match tab {
+                    GitTab::Changes => CommandId::GitTabChanges,
+                    GitTab::History => CommandId::GitTabHistory,
+                    GitTab::Graph => CommandId::GitTabGraph,
+                    GitTab::Issues => CommandId::GitTabIssues,
+                    GitTab::Pulls => CommandId::GitTabPulls,
+                };
                 press(button_frame(
                     div().id(gpui::ElementId::Name(
                         format!("git-tab-{}", key.rsplit('.').next().unwrap_or(key)).into(),
@@ -2987,6 +2995,7 @@ impl GitPanel {
                     this.refresh_all(cx);
                     cx.notify();
                 }))
+                .tip(commands::tooltip(command, false))
                 .child(icon(
                     tab_icon,
                     ButtonSize::Medium.icon_size().px(&theme),
@@ -3344,7 +3353,7 @@ impl GitPanel {
                 .bg(theme.crit.opacity(0.1))
                 .border_1()
                 .border_color(theme.crit.opacity(0.45))
-                .rounded(Radius::Large.px(&theme))
+                .rounded(Radius::XLarge.px(&theme))
                 .px(DynamicSpacing::Base12.px(&theme))
                 .py(DynamicSpacing::Base08.px(&theme))
                 .flex()
@@ -3524,7 +3533,7 @@ impl GitPanel {
                 .bg(theme.warn.opacity(0.1))
                 .border_1()
                 .border_color(theme.warn.opacity(0.45))
-                .rounded(Radius::Large.px(&theme))
+                .rounded(Radius::XLarge.px(&theme))
                 .px(DynamicSpacing::Base12.px(&theme))
                 .py(DynamicSpacing::Base08.px(&theme))
                 .flex()
@@ -4292,7 +4301,7 @@ impl GitPanel {
             .mx(DynamicSpacing::Base12.px(&theme))
             .h(px(32.))
             .px(DynamicSpacing::Base08.px(&theme))
-            .rounded(Radius::Large.px(&theme))
+            .rounded(Radius::Medium.px(&theme))
             .flex()
             .items_center()
             .gap(DynamicSpacing::Base08.px(&theme))
@@ -4520,7 +4529,7 @@ impl GitPanel {
             .mb(DynamicSpacing::Base06.px(&theme))
             .px(DynamicSpacing::Base12.px(&theme))
             .py(DynamicSpacing::Base08.px(&theme))
-            .rounded(Radius::Large.px(&theme))
+            .rounded(Radius::XLarge.px(&theme))
             .border_1()
             .border_color(theme.border)
             .bg(theme.bg_raised)
@@ -5168,7 +5177,7 @@ impl GitPanel {
             main = main.child(
                 div()
                     .p(DynamicSpacing::Base12.px(&theme))
-                    .rounded(Radius::Large.px(&theme))
+                    .rounded(Radius::XLarge.px(&theme))
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.bg_raised)
@@ -5863,7 +5872,7 @@ impl GitPanel {
             content = content.child(
                 div()
                     .p(DynamicSpacing::Base12.px(&theme))
-                    .rounded(Radius::Large.px(&theme))
+                    .rounded(Radius::XLarge.px(&theme))
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.bg_raised)
@@ -5876,7 +5885,7 @@ impl GitPanel {
         // Checks.
         if !pull.checks.is_empty() {
             let mut checks = div()
-                .rounded(Radius::Large.px(&theme))
+                .rounded(Radius::XLarge.px(&theme))
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.bg_raised)
@@ -5935,7 +5944,7 @@ impl GitPanel {
         // Commits.
         if !pull.commits.is_empty() {
             let mut commits = div()
-                .rounded(Radius::Large.px(&theme))
+                .rounded(Radius::XLarge.px(&theme))
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.bg_raised)
@@ -5975,7 +5984,7 @@ impl GitPanel {
         // Changed files.
         if !pull.files.is_empty() {
             let mut files = div()
-                .rounded(Radius::Large.px(&theme))
+                .rounded(Radius::XLarge.px(&theme))
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.bg_raised)
@@ -6065,7 +6074,7 @@ impl GitPanel {
         // page sits in a card above the comment field, GitHub-style.
         if pull.is_open() {
             let merge_row = div()
-                .rounded(Radius::Large.px(&theme))
+                .rounded(Radius::XLarge.px(&theme))
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.bg_raised)
@@ -7393,7 +7402,7 @@ fn stash_row(stash: &git_ops::StashEntry, theme: Theme, cx: &Context<GitPanel>) 
         .mx(DynamicSpacing::Base12.px(&theme))
         .h(px(32.))
         .px(DynamicSpacing::Base08.px(&theme))
-        .rounded(Radius::Large.px(&theme))
+        .rounded(Radius::Medium.px(&theme))
         .flex()
         .items_center()
         .gap(DynamicSpacing::Base08.px(&theme))
@@ -7556,7 +7565,7 @@ fn detail_note(theme: Theme, label: &str) -> AnyElement {
         .mb(DynamicSpacing::Base06.px(&theme))
         .px(DynamicSpacing::Base12.px(&theme))
         .py(DynamicSpacing::Base08.px(&theme))
-        .rounded(Radius::Large.px(&theme))
+        .rounded(Radius::XLarge.px(&theme))
         .border_1()
         .border_color(theme.border)
         .bg(theme.bg_raised)
@@ -7632,7 +7641,7 @@ fn issue_row(issue: &gh::GhIssue, theme: Theme, cx: &Context<GitPanel>) -> AnyEl
         .mx(DynamicSpacing::Base12.px(&theme))
         .px(DynamicSpacing::Base08.px(&theme))
         .py(DynamicSpacing::Base06.px(&theme))
-        .rounded(Radius::Large.px(&theme))
+        .rounded(Radius::Medium.px(&theme))
         .flex()
         .items_center()
         .gap(DynamicSpacing::Base08.px(&theme))
@@ -7774,7 +7783,7 @@ fn state_chip(label: &str, color: Hsla, glyph: Option<&'static str>, theme: Them
     div()
         .h(px(20.))
         .px(DynamicSpacing::Base08.px(&theme))
-        .rounded(px(10.))
+        .rounded(Radius::Small.px(&theme))
         .bg(color.opacity(0.15))
         .border_1()
         .border_color(color.opacity(0.5))
@@ -7866,7 +7875,7 @@ fn issue_comment_card(comment: &gh::GhComment, theme: Theme) -> AnyElement {
         .map(|user| user.login.clone())
         .unwrap_or_default();
     div()
-        .rounded(Radius::Large.px(&theme))
+        .rounded(Radius::XLarge.px(&theme))
         .border_1()
         .border_color(theme.border)
         .bg(theme.bg_raised)
@@ -7927,7 +7936,7 @@ fn pr_row(pull: &gh::GhPull, theme: Theme, cx: &Context<GitPanel>) -> AnyElement
         .mx(DynamicSpacing::Base12.px(&theme))
         .px(DynamicSpacing::Base08.px(&theme))
         .py(DynamicSpacing::Base06.px(&theme))
-        .rounded(Radius::Large.px(&theme))
+        .rounded(Radius::Medium.px(&theme))
         .flex()
         .items_center()
         .gap(DynamicSpacing::Base08.px(&theme))
@@ -8106,7 +8115,7 @@ fn review_card(review: &gh::GhReview, theme: Theme) -> AnyElement {
         ),
     };
     div()
-        .rounded(Radius::Large.px(&theme))
+        .rounded(Radius::XLarge.px(&theme))
         .border_1()
         .border_color(theme.border)
         .bg(theme.bg_raised)
@@ -8213,7 +8222,7 @@ fn graph_row(
         .mx(DynamicSpacing::Base12.px(&theme))
         .px(DynamicSpacing::Base08.px(&theme))
         .py(DynamicSpacing::Base06.px(&theme))
-        .rounded(Radius::Large.px(&theme))
+        .rounded(Radius::Medium.px(&theme))
         .flex()
         .items_center()
         .gap(DynamicSpacing::Base08.px(&theme))
@@ -8428,7 +8437,7 @@ fn commit_row(
         .mx(DynamicSpacing::Base12.px(&theme))
         .px(DynamicSpacing::Base08.px(&theme))
         .py(DynamicSpacing::Base08.px(&theme))
-        .rounded(Radius::Large.px(&theme))
+        .rounded(Radius::Medium.px(&theme))
         .flex()
         .items_center()
         .gap(DynamicSpacing::Base08.px(&theme))
@@ -8781,7 +8790,7 @@ fn letter_tile(letter: char, color: Hsla, theme: Theme) -> AnyElement {
     div()
         .size(px(18.))
         .flex_none()
-        .rounded(px(5.))
+        .rounded(Radius::Small.px(&theme))
         .bg(color.opacity(0.12))
         .flex()
         .items_center()

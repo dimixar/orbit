@@ -383,7 +383,7 @@ impl FileViewer {
             chrome_leading: 12.,
             reserve_controls: false,
             tab_scroll: ScrollHandle::new(),
-            focus: cx.focus_handle(),
+            focus: cx.focus_handle().tab_stop(true),
             focus_pending: false,
             next_id: 0,
             save_epoch: 0,
@@ -1027,7 +1027,7 @@ impl FileViewer {
             .flex_none()
             .h(px(20.))
             .px(px(6.))
-            .rounded(Radius::Medium.px(&theme))
+            .rounded(Radius::Small.px(&theme))
             .bg(theme.bg_raised)
             .border_1()
             .border_color(theme.border)

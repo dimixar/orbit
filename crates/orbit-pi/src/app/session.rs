@@ -347,7 +347,12 @@ impl OrbitApp {
         if !self.input.read(cx).focus_handle(cx).is_focused(window) {
             return;
         }
-        self.commit_autocomplete_if_open(cx);
+        // With the menu open, Tab accepts the highlighted entry; with it
+        // closed, Tab is the workbench's focus-traversal key and must not be
+        // swallowed by this binding.
+        if !self.commit_autocomplete_if_open(cx) {
+            window.focus_next();
+        }
     }
 
     pub(super) fn on_send_click(
@@ -1078,6 +1083,17 @@ impl OrbitApp {
         }
     }
 
+    /// The command palette's Rename Session: open the details popover (the
+    /// header's info control owns the rename field) and put the caret in it.
+    pub(super) fn begin_session_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.quota_popup_open = false;
+        self.session_details_open = true;
+        self.seed_session_name_input(cx);
+        let handle = self.session_name_input.read(cx).focus_handle(cx);
+        window.focus(&handle);
+        cx.notify();
+    }
+
     /// The Update button's success glyph: a green check that scales and fades
     /// in when a rename commits. Reduce motion renders it statically.
     fn rename_check(theme: Theme, cx: &App) -> AnyElement {
@@ -1740,7 +1756,7 @@ impl OrbitApp {
                     .gap(px(6.))
                     .px(px(4.))
                     .py(px(2.))
-                    .rounded(Radius::Small.px(&theme))
+                    .rounded(Radius::Medium.px(&theme))
                     .hover(|style| style.bg(theme.bg_hover))
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_quota_hidden_toggle))
                     .child(icon(chevron, IconSize::XSmall.px(&theme), theme.text_3))
@@ -2476,7 +2492,7 @@ fn quota_provider_card(
     let mut block = div()
         .debug_selector(move || card_selector.clone())
         .w_full()
-        .rounded(Radius::Large.px(&theme))
+        .rounded(Radius::XLarge.px(&theme))
         .border_1()
         .border_color(theme.border)
         .bg(theme.overlay)

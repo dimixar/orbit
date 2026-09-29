@@ -863,7 +863,7 @@ impl OrbitApp {
                 div()
                     .h(DynamicSpacing::Base20.px(&theme))
                     .px(DynamicSpacing::Base06.px(&theme))
-                    .rounded(Radius::Medium.px(&theme))
+                    .rounded(Radius::Small.px(&theme))
                     .bg(theme.overlay_strong)
                     .flex()
                     .items_center()
@@ -882,7 +882,7 @@ impl OrbitApp {
                 div()
                     .h(DynamicSpacing::Base20.px(&theme))
                     .px(DynamicSpacing::Base06.px(&theme))
-                    .rounded(Radius::Medium.px(&theme))
+                    .rounded(Radius::Small.px(&theme))
                     .bg(theme.overlay_strong)
                     .flex()
                     .items_center()
@@ -935,7 +935,7 @@ impl OrbitApp {
             } else {
                 theme.border
             })
-            .rounded(Radius::Large.px(&theme))
+            .rounded(Radius::XLarge.px(&theme))
             .p(DynamicSpacing::Base12.px(&theme))
             .flex()
             .flex_col()
@@ -1494,7 +1494,7 @@ impl OrbitApp {
             .bg(theme.bg_composer)
             .border_1()
             .border_color(theme.border)
-            .rounded(Radius::Large.px(&theme))
+            .rounded(Radius::XLarge.px(&theme))
             .px(DynamicSpacing::Base12.px(&theme))
             .py(DynamicSpacing::Base40.px(&theme))
             .flex()
@@ -1679,7 +1679,7 @@ impl OrbitApp {
                     .bg(theme.accent.opacity(0.1))
                     .border_1()
                     .border_color(theme.accent.opacity(0.35))
-                    .rounded(Radius::Large.px(&theme))
+                    .rounded(Radius::XLarge.px(&theme))
                     .px(DynamicSpacing::Base12.px(&theme))
                     .py(DynamicSpacing::Base08.px(&theme))
                     .flex()
@@ -1746,7 +1746,7 @@ impl OrbitApp {
                     .bg(theme.bg_composer)
                     .border_1()
                     .border_color(theme.border)
-                    .rounded(Radius::Large.px(&theme))
+                    .rounded(Radius::XLarge.px(&theme))
                     .px(DynamicSpacing::Base12.px(&theme))
                     .py(DynamicSpacing::Base40.px(&theme))
                     .flex()
@@ -1799,7 +1799,7 @@ impl OrbitApp {
             .bg(theme.crit.opacity(0.08))
             .border_1()
             .border_color(theme.crit.opacity(0.35))
-            .rounded(Radius::Large.px(&theme))
+            .rounded(Radius::XLarge.px(&theme))
             .px(DynamicSpacing::Base12.px(&theme))
             .py(DynamicSpacing::Base12.px(&theme))
             .flex()
@@ -2076,7 +2076,7 @@ impl OrbitApp {
                     .w_full()
                     .px(DynamicSpacing::Base12.px(&theme))
                     .py(DynamicSpacing::Base08.px(&theme))
-                    .rounded(Radius::Medium.px(&theme))
+                    .rounded(Radius::Large.px(&theme))
                     .border_1()
                     .border_color(theme.border)
                     .bg(theme.bg_main)
@@ -2251,7 +2251,7 @@ impl OrbitApp {
             .gap(DynamicSpacing::Base08.px(&theme))
             .px(DynamicSpacing::Base12.px(&theme))
             .py(DynamicSpacing::Base08.px(&theme))
-            .rounded(Radius::Medium.px(&theme))
+            .rounded(Radius::XLarge.px(&theme))
             .border_1()
             .border_color(theme.border)
             .bg(theme.bg_main)
@@ -2424,7 +2424,7 @@ impl OrbitApp {
         let tile = div()
             .size(px(52.))
             .flex_none()
-            .rounded(px(14.))
+            .rounded(Radius::XLarge.px(&theme))
             .bg(theme.bg_raised)
             .border_1()
             .border_color(theme.border)
@@ -2837,7 +2837,7 @@ impl OrbitApp {
             .bg(theme.bg_composer)
             .border_1()
             .border_color(theme.border)
-            .rounded(Radius::Large.px(&theme))
+            .rounded(Radius::XLarge.px(&theme))
             .p(DynamicSpacing::Base12.px(&theme))
             .flex()
             .flex_col()
@@ -2862,7 +2862,7 @@ impl OrbitApp {
         div()
             .h(DynamicSpacing::Base20.px(&theme))
             .px(DynamicSpacing::Base06.px(&theme))
-            .rounded(Radius::Medium.px(&theme))
+            .rounded(Radius::Small.px(&theme))
             .flex_none()
             .flex()
             .items_center()
@@ -3238,7 +3238,7 @@ impl OrbitApp {
                 div()
                     .px(DynamicSpacing::Base08.px(&theme))
                     .py(DynamicSpacing::Base08.px(&theme))
-                    .rounded(Radius::Medium.px(&theme))
+                    .rounded(Radius::Large.px(&theme))
                     .bg(theme.crit.opacity(0.1))
                     .text_size(TextSize::Small.px(&theme))
                     .text_color(theme.crit)
@@ -3597,7 +3597,7 @@ impl OrbitApp {
                     .mb(DynamicSpacing::Base04.px(&theme))
                     .px(DynamicSpacing::Base06.px(&theme))
                     .py(DynamicSpacing::Base04.px(&theme))
-                    .rounded(Radius::Medium.px(&theme))
+                    .rounded(Radius::Large.px(&theme))
                     .bg(theme.crit.opacity(0.1))
                     .text_size(TextSize::Small.px(&theme))
                     .text_color(theme.crit)
@@ -3727,7 +3727,7 @@ impl OrbitApp {
             .bg(theme.bg_composer)
             .border_1()
             .border_color(theme.border)
-            .rounded(Radius::Large.px(&theme))
+            .rounded(Radius::XLarge.px(&theme))
             .flex()
             .flex_col();
         for (i, row) in rows.into_iter().enumerate() {
@@ -3853,88 +3853,90 @@ impl OrbitApp {
     // ── Settings → Shortcuts ─────────────────────────────────────
 
     /// The Shortcuts reference: every workbench-level chord, grouped by the
-    /// surface it acts on. Read-only, so each row pairs its label with the
-    /// same keycap chip the command palette paints — one right-aligned axis
-    /// down each board, like every other settings page.
+    /// surface it acts on. The app-command rows are generated from the
+    /// command registry (`crate::commands`), so the page is complete and can
+    /// never advertise a chord the keymap does not bind. Only the composer's
+    /// text-entry conventions (send/newline/accept — not commands) are
+    /// listed literally, because their labels depend on live preferences.
     pub(super) fn shortcut_rows(&self, theme: Theme) -> Vec<AnyElement> {
+        use crate::commands::{self, Category};
+
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for category in Category::ORDER {
+            let section: Vec<AnyElement> = commands::COMMANDS
+                .iter()
+                .filter(|spec| spec.help && spec.category == category)
+                .map(|spec| {
+                    let title = tr!(spec.title_key);
+                    match spec.shortcut() {
+                        Some(chip) => self.shortcut_row(theme, &title, &[chip.as_str()]),
+                        None => self.setting_row(theme, &title, None, None, None),
+                    }
+                })
+                .collect();
+            if !section.is_empty() {
+                rows.push(self.settings_section(theme, &tr!(category.group_key()), section));
+            }
+            if category == Category::Agent {
+                rows.push(self.composer_shortcut_section(theme));
+            }
+        }
+        rows
+    }
+
+    /// The composer's text-entry conventions — not commands, so kept out of
+    /// the registry — with the live send-mode labels the preference drives.
+    fn composer_shortcut_section(&self, theme: Theme) -> AnyElement {
         use crate::platform::shortcuts as keys;
-        vec![
-            self.settings_section(
-                theme,
-                &tr!("shortcut.group_workbench"),
-                vec![
-                    self.shortcut_row(theme, &tr!("menu.new_task"), &[keys::NEW_SESSION]),
-                    self.shortcut_row(theme, &tr!("menu.refresh_sessions"), &[keys::REFRESH]),
-                    self.shortcut_row(theme, &tr!("menu.command_palette"), &[keys::PALETTE]),
-                    self.shortcut_row(theme, &tr!("menu.toggle_sidebar"), &[keys::SIDEBAR]),
-                    self.shortcut_row(
-                        theme,
-                        &tr!("command_palette.focus_sessions"),
-                        &[keys::FOCUS_SESSIONS],
+        self.settings_section(
+            theme,
+            &tr!("shortcut.group_composer"),
+            vec![
+                self.shortcut_row(
+                    theme,
+                    &tr!("shortcut.send_idle"),
+                    &[keys::label(keys::SEND).as_str()],
+                ),
+                self.shortcut_row(
+                    theme,
+                    &tr!(
+                        "shortcut.send_while_running",
+                        mode = SendMode::FollowUp.label()
                     ),
-                    self.shortcut_row(theme, &tr!("menu.toggle_terminal"), &[keys::TERMINAL]),
-                    self.shortcut_row(theme, &tr!("explorer.toggle"), &[keys::PROJECT_PANEL]),
-                    self.shortcut_row(theme, &tr!("menu.usage"), &[keys::USAGE]),
-                ],
-            ),
-            self.settings_section(
-                theme,
-                &tr!("shortcut.group_composer"),
-                vec![
-                    self.shortcut_row(theme, &tr!("shortcut.send_idle"), &[keys::SEND]),
-                    self.shortcut_row(
-                        theme,
-                        &tr!(
-                            "shortcut.send_while_running",
-                            mode = SendMode::FollowUp.label()
-                        ),
-                        &[SendMode::FollowUp.shortcut(theme.ui.composer_send_mode)],
+                    &[SendMode::FollowUp
+                        .shortcut_label(theme.ui.composer_send_mode)
+                        .as_str()],
+                ),
+                self.shortcut_row(
+                    theme,
+                    &tr!(
+                        "shortcut.send_while_running",
+                        mode = SendMode::Steer.label()
                     ),
-                    self.shortcut_row(
-                        theme,
-                        &tr!("shortcut.send_while_running", mode = SendMode::Steer.label()),
-                        &[
-                            SendMode::Steer.shortcut(theme.ui.composer_send_mode),
-                            keys::STEER,
-                        ],
-                    ),
-                    self.shortcut_row(theme, &tr!("shortcut.newline"), &[keys::NEWLINE]),
-                    self.shortcut_row(theme, &tr!("shortcut.accept"), &[keys::ACCEPT]),
-                    self.shortcut_row(theme, &tr!("shortcut.stop"), &[keys::STOP]),
-                ],
-            ),
-            self.settings_section(
-                theme,
-                &tr!("shortcut.group_transcript"),
-                vec![
-                    self.shortcut_row(theme, &tr!("menu.find_in_transcript"), &[keys::FIND]),
-                    self.shortcut_row(theme, &tr!("shortcut.prev_turn"), &[keys::PREV_TURN]),
-                    self.shortcut_row(theme, &tr!("shortcut.next_turn"), &[keys::NEXT_TURN]),
-                    self.shortcut_row(
-                        theme,
-                        &tr!("shortcut.copy_last"),
-                        &[keys::COPY_LAST_RESPONSE],
-                    ),
-                ],
-            ),
-            self.settings_section(
-                theme,
-                &tr!("shortcut.group_application"),
-                vec![
-                    self.shortcut_row(theme, &tr!("menu.settings"), &[keys::SETTINGS]),
-                    self.shortcut_row(
-                        theme,
-                        &tr!("menu.check_for_updates"),
-                        &[keys::CHECK_UPDATES],
-                    ),
-                    self.shortcut_row(
-                        theme,
-                        &tr!("menu.quit", app = tr!("app.name")),
-                        &[keys::QUIT],
-                    ),
-                ],
-            ),
-        ]
+                    &[
+                        SendMode::Steer
+                            .shortcut_label(theme.ui.composer_send_mode)
+                            .as_str(),
+                        keys::label(keys::STEER).as_str(),
+                    ],
+                ),
+                self.shortcut_row(
+                    theme,
+                    &tr!("shortcut.newline"),
+                    &[keys::label(keys::NEWLINE).as_str()],
+                ),
+                self.shortcut_row(
+                    theme,
+                    &tr!("shortcut.accept"),
+                    &[keys::label(keys::ACCEPT).as_str()],
+                ),
+                self.shortcut_row(
+                    theme,
+                    &tr!("shortcut.stop"),
+                    &[keys::label(keys::STOP).as_str()],
+                ),
+            ],
+        )
     }
 
     /// One shortcut reference row: the command label on the left, its chord as
@@ -4358,7 +4360,7 @@ impl OrbitApp {
             }
             div()
                 .bg(theme.code_bg)
-                .rounded(Radius::Medium.px(&theme))
+                .rounded(Radius::XLarge.px(&theme))
                 .px(DynamicSpacing::Base12.px(&theme))
                 .py(DynamicSpacing::Base08.px(&theme))
                 .child(block)
@@ -4402,7 +4404,7 @@ impl OrbitApp {
                 &tr!("settings.enter_while_running"),
                 Some(&tr!(
                     "settings.enter_while_running_hint",
-                    keys = platform::shortcuts::SEND_ALTERNATE
+                    keys = platform::shortcuts::label(platform::shortcuts::SEND_ALTERNATE)
                 )),
                 None,
                 Some(self.composer_send_mode_toggle(theme, this.clone())),
@@ -5115,7 +5117,9 @@ impl OrbitApp {
                         &tr!("settings.show_sidebar"),
                         Some(&tr!(
                             "settings.show_the_sessions_sidebar_also_toggleable_from_t",
-                            shortcut = crate::platform::shortcuts::SIDEBAR
+                            shortcut = crate::platform::shortcuts::label(
+                                crate::platform::shortcuts::SIDEBAR
+                            )
                         )),
                         None,
                         Some(self.sidebar_toggle(theme, this.clone())),
@@ -5213,7 +5217,7 @@ impl OrbitApp {
             .focusable()
             .border_1()
             .border_color(gpui::transparent_black())
-            .rounded(px(7.))
+            .rounded(Radius::Large.px(&theme))
             .p(DynamicSpacing::Base04.px(&theme))
             .focus(|style| style.border_color(theme.accent))
             // gpui 0.2 has no `:focus-visible`: an automatic focus transfer
@@ -5356,7 +5360,7 @@ impl OrbitApp {
             .flex_1()
             .px(DynamicSpacing::Base12.px(&theme))
             .py(DynamicSpacing::Base12.px(&theme))
-            .rounded(Radius::Medium.px(&theme))
+            .rounded(Radius::XLarge.px(&theme))
             .bg(theme.bg_main)
             .flex()
             .flex_col()
@@ -5393,7 +5397,7 @@ impl OrbitApp {
                     div()
                         .w(theme.term_px(7.))
                         .h(theme.term_px(14.))
-                        .rounded(px(1.))
+                        .rounded_full()
                         .bg(theme.text_2),
                 );
             }
@@ -5402,7 +5406,7 @@ impl OrbitApp {
         let terminal = div()
             .w_full()
             .flex_1()
-            .rounded(Radius::Large.px(&theme))
+            .rounded(Radius::XLarge.px(&theme))
             .border_1()
             .border_color(theme.border)
             .bg(theme.code_bg)
@@ -5522,7 +5526,7 @@ impl OrbitApp {
                     .relative()
                     .w_full()
                     .h(px(84.))
-                    .rounded(Radius::Large.px(&theme))
+                    .rounded(Radius::XLarge.px(&theme))
                     .border_1()
                     .border_color(theme.border)
                     .overflow_hidden()
@@ -7040,7 +7044,7 @@ fn keycap(label: &str, theme: Theme) -> AnyElement {
         .h(ButtonSize::Default.height(&theme))
         .min_w(px(28.))
         .px(DynamicSpacing::Base06.px(&theme))
-        .rounded(Radius::Medium.px(&theme))
+        .rounded(Radius::Large.px(&theme))
         .flex_none()
         .flex()
         .items_center()
