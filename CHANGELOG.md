@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-09-30
+
 ### Added
 
 - Hover hints now carry the shortcut: the model and thinking chips, New Task,
@@ -692,7 +694,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In-transcript find (⌘F) and a full-window image lightbox.
 - Native macOS app bundle, Developer-ID signed and notarizable.
 
-[Unreleased]: https://github.com/imrj05/orbit/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/imrj05/orbit/compare/v0.2.2...HEAD
 [0.0.1]: https://github.com/imrj05/orbit/releases/tag/v0.0.1
 [0.0.2]: https://github.com/imrj05/orbit/releases/tag/v0.0.2
 [0.0.3]: https://github.com/imrj05/orbit/releases/tag/v0.0.3
@@ -714,3 +716,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.0.19]: https://github.com/imrj05/orbit/releases/tag/v0.0.19
 [0.2.0]: https://github.com/imrj05/orbit/releases/tag/v0.2.0
 [0.2.1]: https://github.com/imrj05/orbit/releases/tag/v0.2.1
+[0.2.2]: https://github.com/imrj05/orbit/releases/tag/v0.2.2
