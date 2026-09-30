@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-10-01
+
+### Added
+
+- Add MCP server management, settings UI, and status (#45)
+- Check installed packages for updates and surface a notice (#43)
+
+### Changed
+
+- Feat/add star the repo button (#44)
+
 ## [0.2.2] - 2026-09-30
 
 ### Added
@@ -694,7 +705,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In-transcript find (⌘F) and a full-window image lightbox.
 - Native macOS app bundle, Developer-ID signed and notarizable.
 
-[Unreleased]: https://github.com/imrj05/orbit/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/imrj05/orbit/compare/v0.2.3...HEAD
 [0.0.1]: https://github.com/imrj05/orbit/releases/tag/v0.0.1
 [0.0.2]: https://github.com/imrj05/orbit/releases/tag/v0.0.2
 [0.0.3]: https://github.com/imrj05/orbit/releases/tag/v0.0.3
@@ -717,3 +728,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.2.0]: https://github.com/imrj05/orbit/releases/tag/v0.2.0
 [0.2.1]: https://github.com/imrj05/orbit/releases/tag/v0.2.1
 [0.2.2]: https://github.com/imrj05/orbit/releases/tag/v0.2.2
+[0.2.3]: https://github.com/imrj05/orbit/releases/tag/v0.2.3
