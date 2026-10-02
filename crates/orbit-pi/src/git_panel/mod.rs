@@ -12,7 +12,7 @@
 //! All Git I/O runs on the background executor; the page paints cached state
 //! and is owned by [`crate::app::OrbitApp`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -36,6 +36,7 @@ use crate::gh_templates::{self, RepoTemplate};
 use crate::git::{self, CommitEntry, StatusRow};
 use crate::git_ops::{self, InProgress};
 use crate::issue_message::{self, DraftKind};
+use crate::sidepane::{FileActions, SectionActions, SidePane};
 use crate::theme::tokens::{
     button, context_menu, input, picker, popover, ButtonSize, DynamicSpacing, IconSize, Radius,
     StyledExt, TextSize,
@@ -78,6 +79,7 @@ enum GitTab {
     Changes,
     History,
     Graph,
+    Stashes,
     Issues,
     Pulls,
 }
@@ -110,8 +112,10 @@ enum PendingConfirm {
         method: gh::MergeMethod,
         delete_branch: bool,
     },
-    /// Discard every staged and unstaged change in the working tree.
-    RevertAll,
+    /// Discard every unstaged change in the working tree.
+    DiscardAll,
+    /// Discard one changed file's unstaged edits.
+    DiscardPath(String),
 }
 
 /// Which ref picker is open.
@@ -186,6 +190,10 @@ pub struct GitPanel {
     git_operation: Option<InProgress>,
     /// Files with unresolved conflicts while `git_operation` is active.
     conflicts: Vec<String>,
+    /// The Changes tab's review browser — the same view as the Review pane,
+    /// embedded so the Git page shows the identical diff UI (source filter,
+    /// wrap/split toggles, changed-files tree, inline diffs).
+    review: Entity<SidePane>,
 
     // ── history ──
     history: Vec<CommitEntry>,
@@ -221,8 +229,6 @@ pub struct GitPanel {
     branch_prompt: Option<BranchPrompt>,
     /// The stash stack, newest first.
     stashes: Vec<git_ops::StashEntry>,
-    /// Whether the Stashes section on the Changes tab is expanded.
-    stash_open: bool,
 
     // ── github (gh CLI) ──
     /// Whether the `gh` binary is installed and runnable.
@@ -357,7 +363,10 @@ impl GitPanel {
         let message = cx.new(|cx| {
             crate::composer::ComposerInput::new(cx)
                 .with_placeholder_key("git_panel.commit_message_leave_blank_to_generate")
-                .with_key_context("Composer Picker")
+                // Not `Composer Picker`: the commit box owns Enter (newline)
+                // and Cmd/Ctrl+Enter (commit) through the `GitCommitMessage`
+                // bindings, so no picker chords are needed here.
+                .with_key_context("Composer GitCommitMessage")
                 .with_max_lines(6)
         });
         let branch_input = cx.new(|cx| {
@@ -439,6 +448,13 @@ impl GitPanel {
                 .with_wrap(false)
         });
         let branch_filter_sub = cx.observe(&branch_filter, |_, _, cx| cx.notify());
+        // The embedded review browser shares the Review pane's rendering, so
+        // the Git page's Changes tab is exactly the Review UI.
+        let review = cx.new(|cx| {
+            let mut pane = SidePane::new(cx);
+            pane.set_embedded(true, cx);
+            pane
+        });
         Self {
             open: false,
             tab: GitTab::Changes,
@@ -461,6 +477,7 @@ impl GitPanel {
             pending_discard: None,
             git_operation: None,
             conflicts: Vec::new(),
+            review,
             history: Vec::new(),
             history_loading: false,
             history_error: None,
@@ -479,7 +496,6 @@ impl GitPanel {
             branch_input,
             branch_prompt: None,
             stashes: Vec::new(),
-            stash_open: false,
             gh_installed: false,
             gh_authenticated: false,
             gh_detail: String::new(),
@@ -550,25 +566,32 @@ impl GitPanel {
 
     pub fn show(&mut self, cx: &mut Context<Self>) {
         self.open = true;
+        // Wake the embedded review browser; it loads the diff on demand.
+        self.review.update(cx, |pane, cx| pane.show_review(cx));
         self.refresh_all(cx);
         cx.notify();
     }
 
     pub fn hide(&mut self, cx: &mut Context<Self>) {
         self.open = false;
+        // Park the embedded review browser so it stops reloading while the
+        // Git page is off screen.
+        self.review.update(cx, |pane, cx| pane.close(cx));
         self.branch_menu_open = false;
         self.branch_more_open = false;
         cx.notify();
     }
 
-    /// Switch to a tab by index (0=Changes, 1=History, 2=Graph, 3=Issues,
-    /// 4=Pull requests), reloading it. Driven by the ⌘1–⌘5 shortcuts.
+    /// Switch to a tab by index (0=Changes, 1=History, 2=Graph, 3=Stashes,
+    /// 4=Issues, 5=Pull requests), reloading it. Driven by the ⌘1–⌘6
+    /// shortcuts.
     pub fn set_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         let tab = match index {
             1 => GitTab::History,
             2 => GitTab::Graph,
-            3 => GitTab::Issues,
-            4 => GitTab::Pulls,
+            3 => GitTab::Stashes,
+            4 => GitTab::Issues,
+            5 => GitTab::Pulls,
             _ => GitTab::Changes,
         };
         if self.tab != tab {
@@ -606,8 +629,17 @@ impl GitPanel {
     ) {
         if workspace != self.workspace {
             self.workspace = workspace;
+            // The embedded review browser follows the workspace too, so its
+            // diff reloads for the new repository.
+            let review_workspace = self.workspace.clone();
+            self.review
+                .update(cx, |pane, cx| pane.set_workspace(review_workspace, cx));
             self.staged.clear();
             self.unstaged.clear();
+            // The old tree's per-section actions must not linger on the new
+            // one.
+            self.review
+                .update(cx, |pane, cx| pane.set_section_actions(None, cx));
             self.history.clear();
             self.graph.clear();
             self.remote_web = None;
@@ -650,6 +682,194 @@ impl GitPanel {
         self.on_open_path = Some(open);
     }
 
+    /// Keep the embedded review browser's session context in sync so its
+    /// `Last Turn` source can resolve.
+    pub fn set_review_turn_context(
+        &mut self,
+        session: Option<String>,
+        latest_turn: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        self.review.update(cx, |pane, cx| {
+            pane.set_turn_context(session, latest_turn, cx)
+        });
+    }
+
+    /// Feed the embedded review browser the width of the surface hosting it,
+    /// so its responsive toolbar and changed-files tree match the page.
+    pub fn set_review_width(&mut self, width: Pixels, cx: &mut Context<Self>) {
+        self.review
+            .update(cx, |pane, cx| pane.set_available_width(width, cx));
+    }
+
+    /// Mark the embedded review browser stale so its diff reloads on the next
+    /// paint. Skipped while the Git page is closed, so a settled run does not
+    /// read a diff nobody is looking at.
+    pub fn mark_review_stale(&mut self, cx: &mut Context<Self>) {
+        if self.open {
+            self.review
+                .update(cx, |pane, cx| pane.mark_review_stale(cx));
+        }
+    }
+
+    /// Rebuild the per-file action rows the embedded review shows beside each
+    /// changed file (stage / unstage / discard), reflecting the latest status.
+    /// Called whenever `git status` lands so the rows never go stale.
+    fn install_review_actions(&mut self, cx: &mut Context<Self>) {
+        let weak = cx.entity().downgrade();
+        let staged: HashSet<String> = self.staged.iter().map(|row| row.path.clone()).collect();
+        let unstaged: HashSet<String> = self.unstaged.iter().map(|row| row.path.clone()).collect();
+        let actions: FileActions = std::rc::Rc::new(move |file, theme| {
+            let path = file.path.clone();
+            let is_staged = staged.contains(path.as_str());
+            let is_unstaged = unstaged.contains(path.as_str());
+            if !is_staged && !is_unstaged {
+                return None;
+            }
+            let mut row = div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(DynamicSpacing::Base02.px(&theme))
+                .opacity(0.)
+                .group_hover("review-file-header", |s| s.opacity(1.));
+            if is_unstaged {
+                let stage_path = path.clone();
+                let weak_stage = weak.clone();
+                row = row.child(review_action_icon(
+                    format!("review-stage-{path}"),
+                    "icons/plus.svg",
+                    "git_panel.tip_stage",
+                    theme,
+                    move |_, _, cx| {
+                        let _ =
+                            weak_stage.update(cx, |panel, cx| panel.stage(stage_path.clone(), cx));
+                    },
+                ));
+            }
+            if is_staged {
+                let unstage_path = path.clone();
+                let weak_unstage = weak.clone();
+                row = row.child(review_action_icon(
+                    format!("review-unstage-{path}"),
+                    "icons/minus.svg",
+                    "git_panel.tip_unstage",
+                    theme,
+                    move |_, _, cx| {
+                        let _ = weak_unstage
+                            .update(cx, |panel, cx| panel.unstage(unstage_path.clone(), cx));
+                    },
+                ));
+            }
+            if is_unstaged {
+                let discard_path = path.clone();
+                let weak_discard = weak.clone();
+                row = row.child(review_action_icon(
+                    format!("review-discard-{path}"),
+                    "icons/trash.svg",
+                    "git_panel.tip_discard",
+                    theme,
+                    move |_, _, cx| {
+                        let _ = weak_discard.update(cx, |panel, cx| {
+                            panel.pending_confirm =
+                                Some(PendingConfirm::DiscardPath(discard_path.clone()));
+                            cx.notify();
+                        });
+                    },
+                ));
+            }
+            Some(row.into_any_element())
+        });
+        self.review
+            .update(cx, |pane, cx| pane.set_file_actions(actions, cx));
+    }
+
+    /// Install the per-section bulk actions the embedded review attaches to
+    /// its grouped strips: Stage all plus the whole-tree discard on the
+    /// Changes section, and Unstage all on the Staged section. Rebuilt
+    /// alongside the per-file rows so each strip's buttons always match the
+    /// latest status, and cleared on a clean tree.
+    fn install_review_section_actions(&mut self, cx: &mut Context<Self>) {
+        if self.staged.is_empty() && self.unstaged.is_empty() {
+            self.review
+                .update(cx, |pane, cx| pane.set_section_actions(None, cx));
+            return;
+        }
+        let weak = cx.entity().downgrade();
+        let has_staged = !self.staged.is_empty();
+        let has_unstaged = !self.unstaged.is_empty();
+        // The strips carry the localized label the parser was fed, so the host
+        // matches on the same strings to route each section its own action.
+        let staged_label = tr!("git_panel.section_staged");
+        let changes_label = tr!("git_panel.section_changes");
+        let actions: SectionActions = std::rc::Rc::new(move |label, sticky, theme| {
+            let id = |slug: &str| {
+                gpui::ElementId::Name(
+                    format!(
+                        "review-section-{slug}-{}",
+                        if sticky { "sticky" } else { "row" }
+                    )
+                    .into(),
+                )
+            };
+            if label == changes_label.as_str() {
+                let mut row = div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(DynamicSpacing::Base04.px(&theme));
+                if has_unstaged {
+                    let weak = weak.clone();
+                    row = row.child(review_toolbar_button(
+                        id("stage-all"),
+                        "icons/plus.svg",
+                        tr!("git_panel.stage_all"),
+                        theme.text_2,
+                        theme,
+                        move |_, _, cx| {
+                            let _ = weak.update(cx, |panel, cx| panel.stage_all(cx));
+                        },
+                    ));
+                }
+                // Discard every unstaged change behind a confirmation; the
+                // Staged section is a deliberate state and stays untouched.
+                if has_unstaged {
+                    let weak = weak.clone();
+                    row = row.child(review_toolbar_button(
+                        id("discard-all"),
+                        "icons/trash.svg",
+                        tr!("git_panel.discard_all"),
+                        theme.crit,
+                        theme,
+                        move |_, _, cx| {
+                            let _ = weak.update(cx, |panel, cx| {
+                                panel.pending_confirm = Some(PendingConfirm::DiscardAll);
+                                cx.notify();
+                            });
+                        },
+                    ));
+                }
+                return (has_unstaged || !has_staged).then(|| row.into_any_element());
+            }
+            if has_staged && label == staged_label.as_str() {
+                let weak = weak.clone();
+                return Some(review_toolbar_button(
+                    id("unstage-all"),
+                    "icons/minus.svg",
+                    tr!("git_panel.unstage_all"),
+                    theme.text_2,
+                    theme,
+                    move |_, _, cx| {
+                        let _ = weak.update(cx, |panel, cx| panel.unstage_all(cx));
+                    },
+                ));
+            }
+            None
+        });
+        self.review
+            .update(cx, |pane, cx| pane.set_section_actions(Some(actions), cx));
+    }
+
     /// Set by `OrbitApp` on every render: how far the header's leading edge sits
     /// from the page's left edge. It widens when the sessions sidebar is
     /// collapsed, because the page then spans the window and its own Back
@@ -685,7 +905,8 @@ impl GitPanel {
             GitTab::Graph => self.refresh_graph(cx),
             GitTab::Issues => self.refresh_issues(cx),
             GitTab::Pulls => self.refresh_pulls(cx),
-            GitTab::Changes => {}
+            // Stashes ride along with the branch refresh above.
+            GitTab::Changes | GitTab::Stashes => {}
         }
     }
 
@@ -721,6 +942,7 @@ impl GitPanel {
             GitTab::Graph => self.graph_loading,
             GitTab::Issues => self.issues_loading,
             GitTab::Pulls => self.pulls_loading,
+            GitTab::Stashes => false,
         }
     }
 
@@ -730,6 +952,13 @@ impl GitPanel {
         };
         self.changes_loading = true;
         self.changes_error = None;
+        // The embedded review browser owns the diff read; marking it stale
+        // here reloads it in step with `git status`. Only the Changes tab
+        // mounts it, so the reload waits for a tab that shows it.
+        if self.tab == GitTab::Changes {
+            self.review
+                .update(cx, |pane, cx| pane.mark_review_stale(cx));
+        }
         self.spawn_data(
             cx,
             move || {
@@ -750,6 +979,8 @@ impl GitPanel {
                             rows.iter().filter(|row| row.unstaged()).cloned().collect();
                         panel.git_operation = operation;
                         panel.conflicts = conflicts;
+                        panel.install_review_actions(cx);
+                        panel.install_review_section_actions(cx);
                     }
                     Err(err) => {
                         panel.changes_error = Some(err);
@@ -1073,7 +1304,10 @@ impl GitPanel {
 
     /// The label for the issue form's template chip.
     fn issue_template_label(&self) -> String {
-        match self.issue_template.and_then(|index| self.issue_templates.get(index)) {
+        match self
+            .issue_template
+            .and_then(|index| self.issue_templates.get(index))
+        {
             Some(template) => template.label(),
             None => tr!("git_panel.template_blank"),
         }
@@ -1081,7 +1315,10 @@ impl GitPanel {
 
     /// The label for the pull-request form's template chip.
     fn pr_template_label(&self) -> String {
-        match self.pr_template.and_then(|index| self.pr_templates.get(index)) {
+        match self
+            .pr_template
+            .and_then(|index| self.pr_templates.get(index))
+        {
             Some(template) => template.label(),
             None => tr!("git_panel.template_blank"),
         }
@@ -1129,7 +1366,11 @@ impl GitPanel {
             .cloned()
         {
             Some(template) => {
-                self.prefill_title(&self.issue_new_title.clone(), template.title_prefix.as_deref(), cx);
+                self.prefill_title(
+                    &self.issue_new_title.clone(),
+                    template.title_prefix.as_deref(),
+                    cx,
+                );
                 set_composer_text(&self.issue_new_body, &template.body, cx);
             }
             None => self.clear_template_body(&self.issue_new_body.clone(), cx),
@@ -1147,7 +1388,11 @@ impl GitPanel {
             .cloned()
         {
             Some(template) => {
-                self.prefill_title(&self.pr_new_title.clone(), template.title_prefix.as_deref(), cx);
+                self.prefill_title(
+                    &self.pr_new_title.clone(),
+                    template.title_prefix.as_deref(),
+                    cx,
+                );
                 set_composer_text(&self.pr_new_body, &template.body, cx);
             }
             None => self.clear_template_body(&self.pr_new_body.clone(), cx),
@@ -1285,7 +1530,12 @@ impl GitPanel {
                     context_menu::ICON.px(&theme),
                     theme.text_3,
                 ))
-                .child(div().flex_1().min_w_0().child(tr!("git_panel.template_blank")))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(tr!("git_panel.template_blank")),
+                )
                 .when(current.is_none(), |row| {
                     row.child(icon(
                         "icons/check.svg",
@@ -1305,7 +1555,9 @@ impl GitPanel {
             let selected = current == Some(index);
             list = list.child(
                 picker_entry(
-                    div().id(gpui::ElementId::Name(format!("git-template-{index}").into())),
+                    div().id(gpui::ElementId::Name(
+                        format!("git-template-{index}").into(),
+                    )),
                     &theme,
                 )
                 .cursor_pointer()
@@ -1463,7 +1715,9 @@ impl GitPanel {
                 list = list.child(
                     picker_entry(div().id(id), &theme)
                         .cursor_pointer()
-                        .when(selected, |row| row.bg(theme.active).text_color(theme.active_fg))
+                        .when(selected, |row| {
+                            row.bg(theme.active).text_color(theme.active_fg)
+                        })
                         .when(!selected, |row| {
                             row.text_color(theme.text_2).hover(|s| s.bg(theme.overlay))
                         })
@@ -1536,7 +1790,9 @@ impl GitPanel {
             .issue_template
             .and_then(|index| self.issue_templates.get(index))
             .cloned();
-        let title_prefix = template.as_ref().and_then(|entry| entry.title_prefix.clone());
+        let title_prefix = template
+            .as_ref()
+            .and_then(|entry| entry.title_prefix.clone());
         let provider = self.provider.clone();
         let model = self.model.clone();
         self.issue_generating = true;
@@ -1570,7 +1826,11 @@ impl GitPanel {
                 .await;
             let _ = this.update(cx, |panel, cx| {
                 panel.issue_generating = false;
-                set_composer_text(&panel.issue_new_title, &with_title_prefix(&title_prefix, &result.title), cx);
+                set_composer_text(
+                    &panel.issue_new_title,
+                    &with_title_prefix(&title_prefix, &result.title),
+                    cx,
+                );
                 set_composer_text(&panel.issue_new_body, &result.body, cx);
                 panel.set_status(tr!("git_panel.draft_ready"));
                 cx.notify();
@@ -1811,7 +2071,9 @@ impl GitPanel {
             .pr_template
             .and_then(|index| self.pr_templates.get(index))
             .cloned();
-        let title_prefix = template.as_ref().and_then(|entry| entry.title_prefix.clone());
+        let title_prefix = template
+            .as_ref()
+            .and_then(|entry| entry.title_prefix.clone());
         let provider = self.provider.clone();
         let model = self.model.clone();
         self.pr_generating = true;
@@ -1845,7 +2107,11 @@ impl GitPanel {
                 .await;
             let _ = this.update(cx, |panel, cx| {
                 panel.pr_generating = false;
-                set_composer_text(&panel.pr_new_title, &with_title_prefix(&title_prefix, &result.title), cx);
+                set_composer_text(
+                    &panel.pr_new_title,
+                    &with_title_prefix(&title_prefix, &result.title),
+                    cx,
+                );
                 set_composer_text(&panel.pr_new_body, &result.body, cx);
                 panel.set_status(tr!("git_panel.draft_ready"));
                 cx.notify();
@@ -2092,8 +2358,8 @@ impl GitPanel {
         );
     }
 
-    /// Discard every staged and unstaged change in the working tree.
-    fn revert_all(&mut self, cx: &mut Context<Self>) {
+    /// Discard every unstaged change in the working tree; staged changes stay.
+    fn discard_all_changes(&mut self, cx: &mut Context<Self>) {
         if self.pending.is_some() || self.operation_busy {
             return;
         }
@@ -2101,8 +2367,8 @@ impl GitPanel {
         self.pending_discard = None;
         self.spawn_data(
             cx,
-            move || git::discard_all(&cwd),
-            |panel, result, cx| panel.after_git(result, &tr!("git_panel.reverted_all"), cx),
+            move || git::discard_unstaged(&cwd),
+            |panel, result, cx| panel.after_git(result, &tr!("git_panel.discarded_changes"), cx),
         );
     }
 
@@ -2146,7 +2412,15 @@ impl GitPanel {
     // ── commit flow ────────────────────────────────────────────────────
 
     fn on_commit(&mut self, action: GitAction, cx: &mut Context<Self>) {
-        if self.pending.is_some() || self.generating {
+        // The same gate the commit buttons get from `can_commit`: no work in
+        // flight and something to commit. Cmd/Ctrl+Enter reaches this without
+        // a disabled button in the way.
+        if self.pending.is_some() || self.generating || self.operation_busy {
+            return;
+        }
+        let can_commit =
+            !self.staged.is_empty() || (self.include_unstaged && !self.unstaged.is_empty());
+        if !can_commit {
             return;
         }
         let message = self.message.read(cx).text();
@@ -2524,7 +2798,8 @@ impl GitPanel {
                     cx,
                 );
             }
-            PendingConfirm::RevertAll => self.revert_all(cx),
+            PendingConfirm::DiscardAll => self.discard_all_changes(cx),
+            PendingConfirm::DiscardPath(path) => self.discard(path, cx),
         }
     }
 
@@ -2932,6 +3207,11 @@ impl GitPanel {
             ),
             (GitTab::History, "icons/clock.svg", "git_panel.tab_history"),
             (GitTab::Graph, "icons/git-fork.svg", "git_panel.tab_graph"),
+            (
+                GitTab::Stashes,
+                "icons/archive.svg",
+                "git_panel.tab_stashes",
+            ),
         ];
         // Host tabs only appear when `gh` exists, so a repo without it keeps
         // the page exactly as it was. Sign-in state is handled inside the tab.
@@ -2963,6 +3243,7 @@ impl GitPanel {
                     GitTab::Changes => CommandId::GitTabChanges,
                     GitTab::History => CommandId::GitTabHistory,
                     GitTab::Graph => CommandId::GitTabGraph,
+                    GitTab::Stashes => CommandId::GitTabStashes,
                     GitTab::Issues => CommandId::GitTabIssues,
                     GitTab::Pulls => CommandId::GitTabPulls,
                 };
@@ -3596,24 +3877,14 @@ impl GitPanel {
     }
 
     fn changes_tab(&self, theme: Theme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        // The diff browser is the same view the Review pane shows; stashes
+        // live on their own tab.
         div()
             .flex_1()
             .min_h_0()
             .flex()
             .flex_col()
-            // The list comes first and the composer sits at the bottom, next
-            // to the changes it commits (the reference's arrangement).
-            .child(
-                div()
-                    .id("git-changes-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .pb(DynamicSpacing::Base08.px(&theme))
-                    .children(self.changes_body(theme, cx)),
-            )
+            .child(self.review.clone())
             .child(self.commit_bar(theme, window, cx))
             .into_any_element()
     }
@@ -3650,382 +3921,315 @@ impl GitPanel {
             .border_color(theme.border)
             .flex()
             .flex_col()
-            .gap(DynamicSpacing::Base12.px(&theme))
             .child(
-                // The message field: wraps and grows to a few rows, then
-                // scrolls internally. A fixed min height keeps the bar stable,
-                // and the actions sit on their own row below so a long
-                // generated body can never overlap them.
-                items_stretch(input_field_frame(div(), &theme))
-                    .flex_1()
+                // The commit box mirrors the chat composer: the multi-line
+                // message editor and its action row share one rounded, lifted
+                // surface. The editor grows to six rows before scrolling, so
+                // a conventional-commit body has room; Enter inserts a newline
+                // and Cmd/Ctrl+Enter commits.
+                div()
+                    .id("git-commit-box")
+                    .w_full()
                     .min_w_0()
-                    .min_h(px(56.))
+                    .flex()
+                    .flex_col()
+                    .gap(DynamicSpacing::Base12.px(&theme))
+                    .px(DynamicSpacing::Base16.px(&theme))
+                    .pt(DynamicSpacing::Base12.px(&theme))
+                    .pb(DynamicSpacing::Base12.px(&theme))
+                    .rounded(Radius::XXLarge.px(&theme))
+                    .border_1()
                     .border_color(if message_focused {
                         theme.border_strong
                     } else {
                         theme.border
                     })
                     .bg(theme.bg_composer)
-                    .child(div().flex_1().min_w_0().child(self.message.clone())),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(DynamicSpacing::Base12.px(&theme))
-                    .children((!self.unstaged.is_empty()).then(|| {
+                    .shadow(theme.composer_shadow())
+                    .text_size(TextSize::Default.px(&theme))
+                    // Clicking the box's padding focuses the editor, the way
+                    // the chat composer does.
+                    .on_mouse_up(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, window, cx| {
+                            this.message.read(cx).focus_handle(cx).focus(window);
+                        }),
+                    )
+                    .on_action(cx.listener(|this, _: &crate::GitCommitSubmit, _, cx| {
+                        this.on_commit(GitAction::Commit, cx)
+                    }))
+                    .child(
+                        // A fixed min height keeps the bar stable while the
+                        // field is empty, and the editor stretches to fill it
+                        // so the whole text area is clickable, not just the
+                        // first line.
                         div()
-                            .id("git-include-unstaged-row")
-                            .h(ButtonSize::Medium.height(&theme))
-                            .px(DynamicSpacing::Base06.px(&theme))
-                            .ml(px(-6.))
-                            .rounded(Radius::Large.px(&theme))
+                            .w_full()
+                            .min_w_0()
+                            .min_h(px(56.))
                             .flex()
+                            .flex_col()
+                            .child(self.message.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
                             .items_center()
-                            .gap(DynamicSpacing::Base08.px(&theme))
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme.bg_hover))
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.include_unstaged = !this.include_unstaged;
-                                cx.notify();
-                            }))
-                            .child(check_box(self.include_unstaged, theme))
-                            .child(
+                            .gap(DynamicSpacing::Base12.px(&theme))
+                            .children((!self.unstaged.is_empty()).then(|| {
                                 div()
-                                    .text_size(TextSize::Small.px(&theme))
-                                    .text_color(theme.text_2)
-                                    .child(tr!("git_panel.include_unstaged_changes")),
-                            )
-                            .children(self.include_unstaged.then(|| {
-                                let (additions, deletions) = self.unstaged_stats();
-                                div()
+                                    .id("git-include-unstaged-row")
+                                    .h(ButtonSize::Medium.height(&theme))
+                                    .px(DynamicSpacing::Base06.px(&theme))
+                                    .ml(px(-6.))
+                                    .rounded(Radius::Large.px(&theme))
                                     .flex()
                                     .items_center()
                                     .gap(DynamicSpacing::Base08.px(&theme))
-                                    .text_size(TextSize::Small.px(&theme))
-                                    .child(
-                                        div()
-                                            .text_color(theme.add_green)
-                                            .child(format!("+{additions}")),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_color(theme.del_red)
-                                            .child(format!("-{deletions}")),
-                                    )
-                            }))
-                    }))
-                    .child(div().flex_1())
-                    .children(has_changes.then(|| {
-                        // Generate sits left of the commit actions on the
-                        // footer row, where it no longer competes with the
-                        // message field for horizontal space.
-                        button_frame(div().id("git-generate"), &theme, ButtonSize::Medium)
-                            .border_1()
-                            .border_color(theme.border)
-                            .bg(if self.generating {
-                                theme.overlay
-                            } else {
-                                theme.bg_raised
-                            })
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(if self.generating {
-                                theme.text_3
-                            } else {
-                                theme.text
-                            })
-                            .when(!self.generating, |button| {
-                                button
                                     .cursor_pointer()
-                                    .hover(|s| {
-                                        s.bg(theme.bg_hover).border_color(theme.border_strong)
+                                    .hover(|s| s.bg(theme.bg_hover))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        this.include_unstaged = !this.include_unstaged;
+                                        cx.notify();
+                                    }))
+                                    .child(check_box(self.include_unstaged, theme))
+                                    .child(
+                                        div()
+                                            .text_size(TextSize::Small.px(&theme))
+                                            .text_color(theme.text_2)
+                                            .child(tr!("git_panel.include_unstaged_changes")),
+                                    )
+                                    .children(self.include_unstaged.then(|| {
+                                        let (additions, deletions) = self.unstaged_stats();
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(DynamicSpacing::Base08.px(&theme))
+                                            .text_size(TextSize::Small.px(&theme))
+                                            .child(
+                                                div()
+                                                    .text_color(theme.add_green)
+                                                    .child(format!("+{additions}")),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_color(theme.del_red)
+                                                    .child(format!("-{deletions}")),
+                                            )
+                                    }))
+                            }))
+                            .child(div().flex_1())
+                            .children(has_changes.then(|| {
+                                // Generate sits left of the commit actions on the
+                                // footer row, where it no longer competes with the
+                                // message field for horizontal space.
+                                button_frame(div().id("git-generate"), &theme, ButtonSize::Medium)
+                                    .border_1()
+                                    .border_color(theme.border)
+                                    .bg(if self.generating {
+                                        theme.overlay
+                                    } else {
+                                        theme.bg_raised
                                     })
-                                    .on_click(
-                                        cx.listener(|this, _: &ClickEvent, _, cx| {
-                                            this.generate(cx)
-                                        }),
-                                    )
-                            })
-                            .child(if self.generating {
-                                spinner(
-                                    "git-generate-spinner",
-                                    ButtonSize::Medium.icon_size().px(&theme),
-                                    theme.accent,
-                                    theme,
-                                )
-                            } else {
-                                icon(
-                                    "icons/magic-wand.svg",
-                                    ButtonSize::Medium.icon_size().px(&theme),
-                                    theme.text_2,
-                                )
-                                .into_any_element()
-                            })
-                            .child(if self.generating {
-                                tr!("git_panel.generating_short")
-                            } else {
-                                tr!("git_panel.generate")
-                            })
-                    }))
-                    .child(match actions {
-                        BarActions::Commit => div()
-                            .flex()
-                            .items_center()
-                            .gap(DynamicSpacing::Base08.px(&theme))
-                            .child(action_button(
-                                "git-commit-push",
-                                &commit_and_push_label,
-                                Some(
-                                    icon(
-                                        "icons/cloud-upload.svg",
-                                        ButtonSize::Medium.icon_size().px(&theme),
-                                        theme.text_2,
-                                    )
-                                    .into_any_element(),
-                                ),
-                                false,
-                                !can_commit,
-                                theme,
-                                cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.on_commit(GitAction::CommitAndPush, cx)
-                                }),
-                            ))
-                            .child(action_button(
-                                "git-commit",
-                                &commit_label,
-                                Some(if self.generating {
-                                    spinner(
-                                        "git-commit-spinner",
-                                        ButtonSize::Medium.icon_size().px(&theme),
-                                        theme.accent,
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(if self.generating {
+                                        theme.text_3
+                                    } else {
+                                        theme.text
+                                    })
+                                    .when(!self.generating, |button| {
+                                        button
+                                            .cursor_pointer()
+                                            .hover(|s| {
+                                                s.bg(theme.bg_hover)
+                                                    .border_color(theme.border_strong)
+                                            })
+                                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                                this.generate(cx)
+                                            }))
+                                    })
+                                    .child(if self.generating {
+                                        spinner(
+                                            "git-generate-spinner",
+                                            ButtonSize::Medium.icon_size().px(&theme),
+                                            theme.accent,
+                                            theme,
+                                        )
+                                    } else {
+                                        icon(
+                                            "icons/magic-wand.svg",
+                                            ButtonSize::Medium.icon_size().px(&theme),
+                                            theme.text_2,
+                                        )
+                                        .into_any_element()
+                                    })
+                                    .child(if self.generating {
+                                        tr!("git_panel.generating_short")
+                                    } else {
+                                        tr!("git_panel.generate")
+                                    })
+                            }))
+                            .child(match actions {
+                                BarActions::Commit => div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(DynamicSpacing::Base08.px(&theme))
+                                    .child(action_button(
+                                        "git-commit-push",
+                                        &commit_and_push_label,
+                                        Some(
+                                            icon(
+                                                "icons/cloud-upload.svg",
+                                                ButtonSize::Medium.icon_size().px(&theme),
+                                                theme.text_2,
+                                            )
+                                            .into_any_element(),
+                                        ),
+                                        false,
+                                        !can_commit,
                                         theme,
-                                    )
-                                } else {
-                                    icon(
-                                        "icons/git-commit.svg",
-                                        ButtonSize::Medium.icon_size().px(&theme),
-                                        if can_commit {
-                                            theme.send_fg
+                                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                                            this.on_commit(GitAction::CommitAndPush, cx)
+                                        }),
+                                    ))
+                                    .child(action_button(
+                                        "git-commit",
+                                        &commit_label,
+                                        Some(if self.generating {
+                                            spinner(
+                                                "git-commit-spinner",
+                                                ButtonSize::Medium.icon_size().px(&theme),
+                                                theme.accent,
+                                                theme,
+                                            )
                                         } else {
-                                            theme.text_3
-                                        },
+                                            icon(
+                                                "icons/git-commit.svg",
+                                                ButtonSize::Medium.icon_size().px(&theme),
+                                                if can_commit {
+                                                    theme.send_fg
+                                                } else {
+                                                    theme.text_3
+                                                },
+                                            )
+                                            .into_any_element()
+                                        }),
+                                        true,
+                                        !can_commit,
+                                        theme,
+                                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                                            this.on_commit(GitAction::Commit, cx)
+                                        }),
+                                    ))
+                                    .into_any_element(),
+                                BarActions::Push { publish: _ } => action_button(
+                                    "git-push",
+                                    &push_label,
+                                    Some(
+                                        icon(
+                                            "icons/upload.svg",
+                                            ButtonSize::Medium.icon_size().px(&theme),
+                                            if busy { theme.text_3 } else { theme.send_fg },
+                                        )
+                                        .into_any_element(),
+                                    ),
+                                    true,
+                                    busy,
+                                    theme,
+                                    cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        this.run_git_action(GitAction::Push, None, cx)
+                                    }),
+                                ),
+                                BarActions::Pull { behind } => div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(DynamicSpacing::Base08.px(&theme))
+                                    .child(
+                                        div()
+                                            .text_size(TextSize::Small.px(&theme))
+                                            .text_color(theme.text_3)
+                                            .child(tr!("git_panel.behind", count = behind)),
                                     )
-                                    .into_any_element()
-                                }),
-                                true,
-                                !can_commit,
-                                theme,
-                                cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.on_commit(GitAction::Commit, cx)
-                                }),
-                            ))
-                            .into_any_element(),
-                        BarActions::Push { publish: _ } => action_button(
-                            "git-push",
-                            &push_label,
-                            Some(
-                                icon(
-                                    "icons/upload.svg",
-                                    ButtonSize::Medium.icon_size().px(&theme),
-                                    if busy { theme.text_3 } else { theme.send_fg },
-                                )
-                                .into_any_element(),
-                            ),
-                            true,
-                            busy,
-                            theme,
-                            cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.run_git_action(GitAction::Push, None, cx)
+                                    .child(action_button(
+                                        "git-pull",
+                                        &tr!("git_panel.pull"),
+                                        Some(
+                                            icon(
+                                                "icons/arrow-down.svg",
+                                                ButtonSize::Medium.icon_size().px(&theme),
+                                                theme.text_2,
+                                            )
+                                            .into_any_element(),
+                                        ),
+                                        false,
+                                        busy,
+                                        theme,
+                                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                                            this.run_git_action(GitAction::Pull, None, cx)
+                                        }),
+                                    ))
+                                    .into_any_element(),
+                                BarActions::Merge { behind } => div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(DynamicSpacing::Base08.px(&theme))
+                                    .child(
+                                        div()
+                                            .text_size(TextSize::Small.px(&theme))
+                                            .text_color(theme.text_3)
+                                            .child(tr!(
+                                                "git_panel.diverged_behind",
+                                                count = behind
+                                            )),
+                                    )
+                                    .child(action_button(
+                                        "git-merge",
+                                        &tr!("git_panel.merge"),
+                                        Some(
+                                            icon(
+                                                "icons/git-merge.svg",
+                                                ButtonSize::Medium.icon_size().px(&theme),
+                                                theme.text_2,
+                                            )
+                                            .into_any_element(),
+                                        ),
+                                        false,
+                                        busy,
+                                        theme,
+                                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                                            this.run_git_action(GitAction::Merge, None, cx)
+                                        }),
+                                    ))
+                                    .into_any_element(),
+                                BarActions::UpToDate => div()
+                                    .text_size(TextSize::Small.px(&theme))
+                                    .text_color(theme.text_3)
+                                    .child(tr!("git_panel.up_to_date"))
+                                    .into_any_element(),
                             }),
-                        ),
-                        BarActions::Pull { behind } => div()
-                            .flex()
-                            .items_center()
-                            .gap(DynamicSpacing::Base08.px(&theme))
-                            .child(
-                                div()
-                                    .text_size(TextSize::Small.px(&theme))
-                                    .text_color(theme.text_3)
-                                    .child(tr!("git_panel.behind", count = behind)),
-                            )
-                            .child(action_button(
-                                "git-pull",
-                                &tr!("git_panel.pull"),
-                                Some(
-                                    icon(
-                                        "icons/arrow-down.svg",
-                                        ButtonSize::Medium.icon_size().px(&theme),
-                                        theme.text_2,
-                                    )
-                                    .into_any_element(),
-                                ),
-                                false,
-                                busy,
-                                theme,
-                                cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.run_git_action(GitAction::Pull, None, cx)
-                                }),
-                            ))
-                            .into_any_element(),
-                        BarActions::Merge { behind } => div()
-                            .flex()
-                            .items_center()
-                            .gap(DynamicSpacing::Base08.px(&theme))
-                            .child(
-                                div()
-                                    .text_size(TextSize::Small.px(&theme))
-                                    .text_color(theme.text_3)
-                                    .child(tr!("git_panel.diverged_behind", count = behind)),
-                            )
-                            .child(action_button(
-                                "git-merge",
-                                &tr!("git_panel.merge"),
-                                Some(
-                                    icon(
-                                        "icons/git-merge.svg",
-                                        ButtonSize::Medium.icon_size().px(&theme),
-                                        theme.text_2,
-                                    )
-                                    .into_any_element(),
-                                ),
-                                false,
-                                busy,
-                                theme,
-                                cx.listener(|this, _: &ClickEvent, _, cx| {
-                                    this.run_git_action(GitAction::Merge, None, cx)
-                                }),
-                            ))
-                            .into_any_element(),
-                        BarActions::UpToDate => div()
-                            .text_size(TextSize::Small.px(&theme))
-                            .text_color(theme.text_3)
-                            .child(tr!("git_panel.up_to_date"))
-                            .into_any_element(),
-                    }),
+                    ),
             )
             .into_any_element()
     }
 
+    /// The unstaged section's aggregate `+N -M`, shown beside the commit
+    /// bar's "Include unstaged changes" toggle.
     fn unstaged_stats(&self) -> (u64, u64) {
         let additions = self.unstaged.iter().map(|row| row.unstaged_additions).sum();
         let deletions = self.unstaged.iter().map(|row| row.unstaged_deletions).sum();
         (additions, deletions)
     }
 
-    fn changes_body(&self, theme: Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        if let Some(error) = &self.changes_error {
-            return vec![empty_note(
-                theme,
-                "icons/stop.svg",
-                &tr!("git_panel.git_unavailable"),
-                Some(error),
-            )];
-        }
-        if self.changes_loading && self.staged.is_empty() && self.unstaged.is_empty() {
-            return vec![empty_note(
-                theme,
-                "icons/git-compare.svg",
-                &tr!("git_panel.reading_working_tree"),
-                None,
-            )];
-        }
-        let has_changes = !self.staged.is_empty() || !self.unstaged.is_empty();
-        if !has_changes && self.stashes.is_empty() {
-            return vec![empty_note(
-                theme,
-                "icons/check.svg",
-                &tr!("git_panel.working_tree_clean"),
-                Some(&tr!("git_panel.nothing_to_commit")),
-            )];
-        }
-        let mut out = Vec::new();
-        // Stashes (and the changes that could become one) always render first,
-        // so a stash-only working tree still has something to show.
-        if has_changes || !self.stashes.is_empty() {
-            out.push(self.stash_section(theme, cx));
-        }
-        if !self.staged.is_empty() {
-            out.push(
-                self.section_header(
-                    theme,
-                    cx,
-                    &tr!("git_panel.section_staged"),
-                    "staged",
-                    self.staged.len(),
-                    self.staged
-                        .iter()
-                        .map(|row| row.staged_additions)
-                        .sum::<u64>(),
-                    self.staged
-                        .iter()
-                        .map(|row| row.staged_deletions)
-                        .sum::<u64>(),
-                    true,
-                    Some(cx.listener(|this, _: &ClickEvent, _, cx| this.unstage_all(cx))),
-                ),
-            );
-            out.push(self.change_rows(self.staged.clone(), true, theme, cx));
-        }
-        if !self.unstaged.is_empty() {
-            out.push(
-                self.section_header(
-                    theme,
-                    cx,
-                    &tr!("git_panel.section_changes"),
-                    "changes",
-                    self.unstaged.len(),
-                    self.unstaged
-                        .iter()
-                        .map(|row| row.unstaged_additions)
-                        .sum::<u64>(),
-                    self.unstaged
-                        .iter()
-                        .map(|row| row.unstaged_deletions)
-                        .sum::<u64>(),
-                    false,
-                    Some(cx.listener(|this, _: &ClickEvent, _, cx| this.stage_all(cx))),
-                ),
-            );
-            out.push(self.change_rows(self.unstaged.clone(), false, theme, cx));
-        }
-        if has_changes {
-            out.push(
-                div()
-                    .px(DynamicSpacing::Base20.px(&theme))
-                    .pt(DynamicSpacing::Base06.px(&theme))
-                    .pb(DynamicSpacing::Base02.px(&theme))
-                    .flex()
-                    .justify_end()
-                    .child(
-                        button_frame(div().id("git-revert-all"), &theme, ButtonSize::Medium)
-                            .cursor_pointer()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.crit)
-                            .hover(|s| s.bg(theme.crit.opacity(0.1)))
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.pending_confirm = Some(PendingConfirm::RevertAll);
-                                cx.notify();
-                            }))
-                            .child(icon(
-                                "icons/rotate-ccw.svg",
-                                ButtonSize::Medium.icon_size().px(&theme),
-                                theme.crit,
-                            ))
-                            .child(tr!("git_panel.revert_all")),
-                    )
-                    .into_any_element(),
-            );
-        }
-        out
-    }
-
-    /// The collapsible Stashes section at the top of the Changes tab.
-    fn stash_section(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
+    /// The Stashes tab: the stack with pop / apply / drop, plus the parking
+    /// action. It lives on its own tab so the Changes tab stays the review
+    /// browser plus commit bar.
+    fn stashes_tab(&self, theme: Theme, cx: &mut Context<Self>) -> AnyElement {
         let count = self.stashes.len();
         let has_changes = !self.staged.is_empty() || !self.unstaged.is_empty();
         let mut header = div()
-            .id("git-stash-header")
+            .id("git-stashes-header")
+            .flex_none()
             .px(DynamicSpacing::Base20.px(&theme))
             .pt(DynamicSpacing::Base12.px(&theme))
             .pb(DynamicSpacing::Base08.px(&theme))
@@ -4034,21 +4238,6 @@ impl GitPanel {
             .flex()
             .items_center()
             .gap(DynamicSpacing::Base08.px(&theme))
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.bg_hover))
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.stash_open = !this.stash_open;
-                cx.notify();
-            }))
-            .child(icon(
-                if self.stash_open {
-                    "icons/arrow-down.svg"
-                } else {
-                    "icons/arrow-right.svg"
-                },
-                IconSize::XSmall.px(&theme),
-                theme.text_3,
-            ))
             .child(section_title(&tr!("git_panel.stashes"), count, theme))
             .child(div().flex_1());
         if has_changes {
@@ -4066,7 +4255,6 @@ impl GitPanel {
                             .text_color(theme.text)
                     })
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        cx.stop_propagation();
                         this.stash_push(cx);
                     }))
                     .child(icon(
@@ -4077,259 +4265,36 @@ impl GitPanel {
                     .child(tr!("git_panel.stash_changes")),
             );
         }
-        let mut section = div().flex().flex_col().child(header);
-        if self.stash_open {
-            if self.stashes.is_empty() {
-                section = section.child(
-                    div()
-                        .px(DynamicSpacing::Base20.px(&theme))
-                        .py(DynamicSpacing::Base08.px(&theme))
-                        .text_size(TextSize::Small.px(&theme))
-                        .text_color(theme.text_3)
-                        .child(tr!("git_panel.no_stashes")),
-                );
-            }
+        let body = if self.stashes.is_empty() {
+            empty_note(
+                theme,
+                "icons/archive.svg",
+                &tr!("git_panel.no_stashes"),
+                None,
+            )
+        } else {
+            let mut list = div()
+                .flex()
+                .flex_col()
+                .py(DynamicSpacing::Base06.px(&theme));
             for stash in &self.stashes {
-                section = section.child(stash_row(stash, theme, cx));
+                list = list.child(stash_row(stash, theme, cx));
             }
-        }
-        section.into_any_element()
-    }
-
-    fn change_rows(
-        &self,
-        files: Vec<StatusRow>,
-        staged: bool,
-        theme: Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let mut rows = div()
+            div()
+                .id("git-stashes-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(list)
+                .into_any_element()
+        };
+        div()
+            .flex_1()
+            .min_h_0()
             .flex()
             .flex_col()
-            .pt(DynamicSpacing::Base04.px(&theme))
-            .pb(DynamicSpacing::Base04.px(&theme));
-        for (ix, row) in files.into_iter().enumerate() {
-            if ix > 0 {
-                rows = rows.child(changes_separator(theme));
-            }
-            rows = rows.child(self.change_row(row, staged, theme, cx));
-        }
-        rows.into_any_element()
-    }
-
-    fn section_header(
-        &self,
-        theme: Theme,
-        _cx: &Context<Self>,
-        label: &str,
-        slug: &str,
-        count: usize,
-        additions: u64,
-        deletions: u64,
-        staged_section: bool,
-        action: Option<impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static>,
-    ) -> AnyElement {
-        let mut row = div()
-            .px(DynamicSpacing::Base20.px(&theme))
-            .pt(DynamicSpacing::Base12.px(&theme))
-            .pb(DynamicSpacing::Base06.px(&theme))
-            .border_b_1()
-            .border_color(theme.border)
-            .flex()
-            .items_center()
-            .gap(DynamicSpacing::Base08.px(&theme))
-            .child(section_title(label, count, theme))
-            .when(additions + deletions > 0, |row| {
-                row.child(delta_stats(additions, deletions, theme))
-            })
-            .child(div().flex_1());
-        if let Some(action) = action {
-            row = row.child(
-                button_frame(
-                    div().id(gpui::ElementId::Name(
-                        format!("git-section-action-{slug}").into(),
-                    )),
-                    &theme,
-                    ButtonSize::Default,
-                )
-                .border_1()
-                .border_color(theme.border)
-                .bg(theme.bg_raised)
-                .cursor_pointer()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(theme.text_2)
-                .hover(|s| {
-                    s.bg(theme.bg_hover)
-                        .border_color(theme.border_strong)
-                        .text_color(theme.text)
-                })
-                .on_click(action)
-                .child(icon(
-                    if staged_section {
-                        "icons/minus.svg"
-                    } else {
-                        "icons/plus.svg"
-                    },
-                    ButtonSize::Default.icon_size().px(&theme),
-                    theme.text_3,
-                ))
-                .child(if staged_section {
-                    tr!("git_panel.unstage_all")
-                } else {
-                    tr!("git_panel.stage_all")
-                }),
-            );
-        }
-        row.into_any_element()
-    }
-
-    fn change_row(
-        &self,
-        row: StatusRow,
-        staged: bool,
-        theme: Theme,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let (badge, color) = if staged {
-            (row.staged_badge(), status_color(row.staged_badge(), theme))
-        } else {
-            (row.change_badge(), status_color(row.change_badge(), theme))
-        };
-        let (additions, deletions) = if staged {
-            (row.staged_additions, row.staged_deletions)
-        } else {
-            (row.unstaged_additions, row.unstaged_deletions)
-        };
-        let path = row.path.clone();
-        let name = path.rsplit('/').next().unwrap_or(&path).to_string();
-        let dir = path
-            .rsplit_once('/')
-            .map(|(dir, _)| format!("{dir}/"))
-            .unwrap_or_default();
-        let nerd = nerd_font_family(cx);
-        let dark = theme.mode == ThemeMode::Dark;
-        let glyph_size = IconSize::XSmall.px(&theme);
-        let fallback = icon("icons/file.svg", glyph_size, theme.text_3).into_any_element();
-        let glyph = crate::app::file_glyph(&path, dark, nerd.as_ref(), glyph_size, fallback);
-        let confirm = self.pending_discard.as_deref() == Some(path.as_str());
-        let row_path = path.clone();
-
-        let mut actions = div()
-            .flex()
-            .items_center()
-            .gap(DynamicSpacing::Base04.px(&theme))
-            .flex_none()
-            .opacity(if confirm { 1. } else { 0. })
-            .group_hover("git-row", |s| s.opacity(1.));
-        if staged {
-            actions = actions.child(row_button(
-                format!("git-unstage-{path}"),
-                "icons/minus.svg",
-                "git_panel.tip_unstage",
-                theme,
-                cx.listener(move |this, _: &ClickEvent, _, cx| this.unstage(row_path.clone(), cx)),
-            ));
-        } else {
-            actions = actions.child(row_button(
-                format!("git-stage-{path}"),
-                "icons/plus.svg",
-                "git_panel.tip_stage",
-                theme,
-                cx.listener(move |this, _: &ClickEvent, _, cx| this.stage(row_path.clone(), cx)),
-            ));
-            if confirm {
-                actions = actions
-                    .child(
-                        button_frame(
-                            div().id(gpui::ElementId::Name(
-                                format!("git-discard-yes-{path}").into(),
-                            )),
-                            &theme,
-                            ButtonSize::Default,
-                        )
-                        .bg(theme.crit)
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(theme.send_fg)
-                        .cursor_pointer()
-                        .on_click(cx.listener({
-                            let p = path.clone();
-                            move |this, _: &ClickEvent, _, cx| {
-                                cx.stop_propagation();
-                                this.discard(p.clone(), cx)
-                            }
-                        }))
-                        .child(tr!("git_panel.discard")),
-                    )
-                    .child(
-                        button_frame(
-                            div().id(gpui::ElementId::Name(
-                                format!("git-discard-no-{path}").into(),
-                            )),
-                            &theme,
-                            ButtonSize::Default,
-                        )
-                        .text_color(theme.text_3)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(theme.overlay))
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.pending_discard = None;
-                            cx.notify();
-                        }))
-                        .child(tr!("git_panel.cancel")),
-                    );
-            } else {
-                actions = actions.child(row_button(
-                    format!("git-discard-{path}"),
-                    "icons/trash.svg",
-                    "git_panel.tip_discard",
-                    theme,
-                    cx.listener({
-                        let p = path.clone();
-                        move |this, _: &ClickEvent, _, cx| {
-                            this.pending_discard = Some(p.clone());
-                            cx.notify();
-                        }
-                    }),
-                ));
-            }
-        }
-
-        div()
-            .id(gpui::ElementId::Name(format!("git-row-{path}").into()))
-            .group("git-row")
-            .mx(DynamicSpacing::Base12.px(&theme))
-            .h(px(32.))
-            .px(DynamicSpacing::Base08.px(&theme))
-            .rounded(Radius::Medium.px(&theme))
-            .flex()
-            .items_center()
-            .gap(DynamicSpacing::Base08.px(&theme))
-            .cursor_pointer()
-            .hover(|s| s.bg(theme.bg_hover))
-            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                if let Some(on_open) = this.on_open_file.clone() {
-                    // Leave the Git page — the Review pane takes over.
-                    this.open = false;
-                    on_open(path.clone(), window, cx);
-                }
-            }))
-            .child(letter_tile(badge, color, theme))
-            .child(glyph)
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_size(TextSize::Small.px(&theme))
-                    .child(div().text_color(theme.text_3).child(dir))
-                    .child(div().text_color(theme.text).child(name)),
-            )
-            .child(delta_stats(additions, deletions, theme))
-            .child(actions)
+            .child(header)
+            .child(body)
             .into_any_element()
     }
 
@@ -7138,10 +7103,15 @@ impl GitPanel {
                     tr!("git_panel.merge_pull"),
                 )
             }
-            PendingConfirm::RevertAll => (
-                tr!("git_panel.confirm_revert_title"),
-                tr!("git_panel.confirm_revert_body"),
-                tr!("git_panel.revert_all"),
+            PendingConfirm::DiscardAll => (
+                tr!("git_panel.confirm_discard_all_title"),
+                tr!("git_panel.confirm_discard_all_body"),
+                tr!("git_panel.discard_all"),
+            ),
+            PendingConfirm::DiscardPath(path) => (
+                tr!("git_panel.confirm_discard_title", name = path),
+                tr!("git_panel.confirm_discard_body"),
+                tr!("git_panel.discard"),
             ),
         };
         let card = div()
@@ -7235,6 +7205,7 @@ impl Render for GitPanel {
             GitTab::Changes => self.changes_tab(theme, window, cx),
             GitTab::History => self.history_tab(theme, cx),
             GitTab::Graph => self.graph_tab(theme, cx),
+            GitTab::Stashes => self.stashes_tab(theme, cx),
             GitTab::Issues => self.issues_tab(theme, cx),
             GitTab::Pulls => self.pulls_tab(theme, cx),
         };
@@ -7363,13 +7334,7 @@ fn menu_row(
     )
     .on_click(listener)
     .child(icon(icon_path, context_menu::ICON.px(&theme), theme.text_3))
-    .child(
-        div()
-            .flex_1()
-            .min_w_0()
-            .truncate()
-            .child(label.to_string()),
-    )
+    .child(div().flex_1().min_w_0().truncate().child(label.to_string()))
     .into_any_element()
 }
 
@@ -7625,11 +7590,7 @@ fn row_time(value: &str, theme: Theme) -> AnyElement {
 fn issue_row(issue: &gh::GhIssue, theme: Theme, cx: &Context<GitPanel>) -> AnyElement {
     let number = issue.number;
     let open = issue.is_open();
-    let state_color = if open {
-        theme.add_green
-    } else {
-        theme.del_red
-    };
+    let state_color = if open { theme.add_green } else { theme.del_red };
     let state_glyph = if open {
         "icons/circle-dot.svg"
     } else {
@@ -8717,6 +8678,62 @@ fn avatar_hue(email: &str, name: &str) -> f32 {
     HUES[(hash % HUES.len() as u64) as usize] / 360.
 }
 
+/// An icon-only action for the embedded review's file header. Stops
+/// propagation so the header's collapse toggle never also fires.
+fn review_action_icon(
+    id: String,
+    icon_path: &'static str,
+    tip_key: &'static str,
+    theme: Theme,
+    listener: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> AnyElement {
+    let label = tr!(tip_key);
+    icon_button_frame(
+        div().id(gpui::ElementId::Name(id.into())),
+        &theme,
+        ButtonSize::Default,
+    )
+    .group(BUTTON_GROUP)
+    .cursor_pointer()
+    .hover(|s| s.bg(theme.overlay))
+    .tooltip(move |_, cx| cx.new(|_| Tooltip::new(label.clone())).into())
+    .on_click(move |event, window, cx| {
+        cx.stop_propagation();
+        listener(event, window, cx);
+    })
+    .child(icon(
+        icon_path,
+        ButtonSize::Default.icon_size().px(&theme),
+        theme.text_3,
+    ))
+    .into_any_element()
+}
+
+/// An icon-only bulk action on the embedded review's grouped strips — Stage
+/// all / Unstage all / Revert all — wearing the same bare icon frame as the
+/// strip's view toggles, with its label moved to the tooltip.
+fn review_toolbar_button(
+    id: impl Into<gpui::ElementId>,
+    icon_path: &'static str,
+    label: String,
+    color: Hsla,
+    theme: Theme,
+    listener: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> AnyElement {
+    icon_button_frame(div().id(id), &theme, ButtonSize::Medium)
+        .group(BUTTON_GROUP)
+        .cursor_pointer()
+        .hover(|s| s.bg(theme.bg_hover))
+        .tooltip(move |_, cx| cx.new(|_| Tooltip::new(label.clone())).into())
+        .on_click(listener)
+        .child(icon(
+            icon_path,
+            ButtonSize::Medium.icon_size().px(&theme),
+            color,
+        ))
+        .into_any_element()
+}
+
 /// The Changes-tab section heading: a sentence-case label with the count set
 /// inline as quiet metadata (no count pill), the quieter head the reference
 /// uses.
@@ -8837,16 +8854,6 @@ fn delta_stats(additions: u64, deletions: u64, theme: Theme) -> AnyElement {
                 })
                 .child(format!("-{deletions}")),
         )
-        .into_any_element()
-}
-
-/// A hairline between changed-file rows, inset to the 20px page gutter so it
-/// lines up with the section label and the path — not a full-bleed rule.
-fn changes_separator(theme: Theme) -> AnyElement {
-    div()
-        .mx(DynamicSpacing::Base20.px(&theme))
-        .h(px(1.))
-        .bg(theme.border)
         .into_any_element()
 }
 

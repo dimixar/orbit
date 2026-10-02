@@ -106,6 +106,47 @@ fn feature_card(theme: Theme, body: AnyElement) -> AnyElement {
         .into_any_element()
 }
 
+/// One row in the top bar's overflow menu: a picker entry with a leading
+/// icon, a label, the command's platform chord, and a trailing check when its
+/// surface is open. Reuses the picker's row metrics so it lines up with the
+/// app's other dropdowns.
+fn header_menu_row(
+    id: &'static str,
+    icon_path: &'static str,
+    label: String,
+    shortcut: Option<String>,
+    active: bool,
+    theme: Theme,
+    listener: impl Fn(&MouseUpEvent, &mut Window, &mut gpui::App) + 'static,
+) -> AnyElement {
+    press(
+        picker_entry(div().id(id).group(BUTTON_GROUP), &theme)
+            .h(picker::entry_height(&theme))
+            .flex_none()
+            .cursor_pointer()
+            .text_color(theme.text_2)
+            .hover(|s| s.bg(theme.overlay).text_color(theme.text)),
+    )
+    .on_mouse_up(MouseButton::Left, listener)
+    .child(icon(icon_path, context_menu::ICON.px(&theme), theme.text_3))
+    .child(div().flex_1().min_w_0().truncate().child(label))
+    .children(shortcut.map(|chord| {
+        div()
+            .flex_none()
+            .text_size(TextSize::XSmall.px(&theme))
+            .text_color(theme.text_3)
+            .child(chord)
+    }))
+    .when(active, |row| {
+        row.child(icon(
+            "icons/check.svg",
+            context_menu::ICON.px(&theme),
+            theme.accent,
+        ))
+    })
+    .into_any_element()
+}
+
 /// Duration of the sidebar collapse/expand slide.
 const SIDEBAR_SLIDE_MS: u64 = 180;
 
@@ -289,12 +330,24 @@ impl Render for OrbitApp {
         let git_workspace = self.current_workspace.clone();
         let git_provider = self.model_provider.clone();
         let git_model = self.model_id.clone();
+        let git_session = self.session_id.clone();
+        let git_turn = self.latest_turn;
+        // The embedded Review browser on the Git page's Changes tab lays out
+        // against the page width, so its stats and tree follow the column.
+        let git_review_width = viewport.width
+            - if sidebar_shown {
+                self.sidebar_width
+            } else {
+                px(0.)
+            };
         // Leading inset the full-window pages (Git/Usage/Files) give their
         // headers while the sidebar is collapsed. They now sit in a card below
         // the top bar, so they only need the normal page padding.
         let page_leading = 12.;
         self.git_panel.update(cx, |panel, cx| {
             panel.set_context(git_workspace, git_provider, git_model, cx);
+            panel.set_review_turn_context(git_session, git_turn, cx);
+            panel.set_review_width(git_review_width, cx);
             panel.set_chrome_leading(page_leading, cx);
         });
         // ── file viewer (Files surface) ── spans the main column, so it gives
@@ -400,153 +453,15 @@ impl Render for OrbitApp {
         // reports anything), so the bar never shows a fabricated value.
         top_controls = top_controls.children(self.render_quota_pill(compact_chrome, cx));
         top_controls = top_controls.children(self.render_open_in_control(cx));
-        if (self.added > 0 || self.removed > 0) && !pane_visible && !self.git_open {
-            top_controls = top_controls.child(
-                header_chip(
-                    div()
-                        .id("top-diff-stats")
-                        // The titlebar's fixed chip height and radius, with a
-                        // Medium button's padding.
-                        .h(px(HEADER_CTRL_H))
-                        .px(ButtonSize::Medium.padding_x(&theme))
-                        .rounded(px(HEADER_CTRL_R))
-                        .flex()
-                        .items_center()
-                        .gap(DynamicSpacing::Base06.px(&theme))
-                        .cursor_pointer(),
-                    &theme,
-                )
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(Self::on_open_uncommitted_review),
-                )
-                .child(
-                    div()
-                        .text_size(TextSize::Small.px(&theme))
-                        .text_color(theme.add_green)
-                        .child(format!("+{}", self.added)),
-                )
-                .child(
-                    div()
-                        .text_size(TextSize::Small.px(&theme))
-                        .text_color(theme.del_red)
-                        .child(format!("-{}", self.removed)),
-                ),
-            );
-        }
         top_controls = top_controls
-            .child(
-                // Popup is a sibling of the info chip, not a child: clicks
-                // inside the rename field must not bubble to the chip's
-                // toggle (which would close the popover before Update runs).
-                div()
-                    .relative()
-                    .children(self.render_session_details_popup(cx))
-                    .child(
-                        header_icon_button(
-                            "info",
-                            &theme,
-                            self.session_details_open,
-                            icon(
-                                "icons/info.svg",
-                                ButtonSize::Medium.icon_size().px(&theme),
-                                theme.text_2,
-                            ),
-                        )
-                        .tip(tr!("session.session_details"))
-                        .on_mouse_up(MouseButton::Left, cx.listener(Self::on_info_click)),
-                    ),
-            )
-            // Explorer (project panel) toggle — the right file tree.
-            .child(
-                header_icon_button(
-                    "toggle-project-panel",
-                    &theme,
-                    explorer_visible,
-                    icon(
-                        "icons/folder.svg",
-                        ButtonSize::Medium.icon_size().px(&theme),
-                        if explorer_visible {
-                            theme.text
-                        } else {
-                            theme.text_2
-                        },
-                    ),
-                )
-                .tip(commands::tooltip(
-                    CommandId::ToggleProjectPanel,
-                    explorer_visible,
-                ))
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(Self::on_toggle_project_panel_click),
-                ),
-            )
-            // side-pane toggle sits right after the about (info) button
-            .child(
-                header_icon_button(
-                    "toggle-side-pane",
-                    &theme,
-                    pane_visible,
-                    icon(
-                        "icons/panel-right.svg",
-                        ButtonSize::Medium.icon_size().px(&theme),
-                        if pane_visible {
-                            theme.text
-                        } else {
-                            theme.text_2
-                        },
-                    ),
-                )
-                .tip(commands::tooltip(CommandId::ToggleSidePanel, pane_visible))
-                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_toggle_side_pane)),
-            )
-            // Terminal toggle — the bottom panel (cmd-j).
-            .child(
-                header_icon_button(
-                    "toggle-terminal",
-                    &theme,
-                    terminal_visible,
-                    icon(
-                        "icons/terminal.svg",
-                        ButtonSize::Medium.icon_size().px(&theme),
-                        if terminal_visible {
-                            theme.text
-                        } else {
-                            theme.text_2
-                        },
-                    ),
-                )
-                .tip(commands::tooltip(
-                    CommandId::ToggleTerminal,
-                    terminal_visible,
-                ))
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(|this, _, window, cx| {
-                        this.on_toggle_terminal(&crate::ToggleTerminal, window, cx)
-                    }),
-                ),
-            )
-            // GitHub affordance: opens the full-page Git surface.
-            .child(
-                header_icon_button(
-                    "open-git-github",
-                    &theme,
-                    self.git_open,
-                    icon(
-                        "icons/github.svg",
-                        ButtonSize::Medium.icon_size().px(&theme),
-                        if self.git_open {
-                            theme.text
-                        } else {
-                            theme.text_2
-                        },
-                    ),
-                )
-                .tip(commands::tooltip(CommandId::OpenGit, false))
-                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_open_git_click)),
-            );
+            // Review dock — the side-panel toggle and the working tree's
+            // change counts folded into one chip
+            // (see `render_review_panel_control`).
+            .child(self.render_review_panel_control(theme, pane_visible, cx))
+            // The remaining surfaces (Session details, Explorer, Terminal, Git)
+            // sit behind one "…" menu so the bar keeps only what shows live
+            // state: the quota, open-in, and Review. See `render_header_more`.
+            .child(self.render_header_more(theme, explorer_visible, terminal_visible, cx));
 
         // A blocking extension dialog owns the keyboard while it is open. Focus
         // it (or its text field) once, on the first frame it appears — `tick`
@@ -652,12 +567,16 @@ impl Render for OrbitApp {
                                     .hover(|style| style.bg(theme.accent.opacity(0.4)))
                                     .on_drag(SidebarResize, |_, _, _, cx| cx.new(|_| DragGhost)),
                             )
-                            // brand — the Orbit wordmark, set over the nav column
+                            // brand — the Orbit wordmark, set over the nav
+                            // column. The titlebar strip above already reserves
+                            // the space under the window controls, so `pb_3`
+                            // (plus the nav's `pt_1` below) gives the mark the
+                            // same optical gap above and below it.
                             .child(
                                 div()
                                     .px_3()
                                     .pt(px(2.))
-                                    .pb(px(6.))
+                                    .pb_3()
                                     .flex()
                                     .items_center()
                                     .justify_center()
@@ -674,8 +593,8 @@ impl Render for OrbitApp {
                                         px(90.),
                                     )),
                             )
-                            // nav — one primary action (New Task), one quiet row
-                            // (Search); the switcher palette anchors under Search
+                            // nav — the primary action (New Task); the
+                            // utility icons live in the footer
                             .child(
                                 div()
                                     .px_3()
@@ -684,9 +603,7 @@ impl Render for OrbitApp {
                                     .flex()
                                     .flex_col()
                                     .gap_1()
-                                    .child(self.sidebar_new_task_button(theme, cx))
-                                    .child(self.sidebar_search_row(theme, cx))
-                                    .child(self.sidebar_usage_row(theme, cx)),
+                                    .child(self.sidebar_new_task_button(theme, cx)),
                             )
                             // session list (scrolls), grouped by workspace — or
                             // the empty state when pi's store has no sessions
@@ -785,8 +702,9 @@ impl Render for OrbitApp {
                                 (!self.star_banner_dismissed)
                                     .then(|| self.sidebar_star_banner(theme, cx)),
                             )
-                            // footer — Settings row + connection status, set off
-                            // from the session list by a hairline
+                            // footer — connection status, then the utility
+                            // icons on the last edge, set off from the session
+                            // list by a hairline
                             .child(
                                 div()
                                     .id("sidebar-footer")
@@ -797,36 +715,6 @@ impl Render for OrbitApp {
                                     .border_color(theme.border)
                                     .flex()
                                     .items_center()
-                                    .child(
-                                        button_frame(
-                                            div().id("settings"),
-                                            &theme,
-                                            ButtonSize::Medium,
-                                        )
-                                        .cursor_pointer()
-                                        .hover(|s| s.bg(theme.bg_hover))
-                                        .on_mouse_up(
-                                            MouseButton::Left,
-                                            cx.listener(Self::on_settings_gear_click),
-                                        )
-                                        .child(icon(
-                                            "icons/settings.svg",
-                                            ButtonSize::Medium.icon_size().px(&theme),
-                                            theme.text_3,
-                                        ))
-                                        .child(
-                                            div()
-                                                .text_color(theme.text_2)
-                                                .child(tr!("common.settings")),
-                                        ),
-                                    )
-                                    .child(div().flex_1())
-                                    .when_some(
-                                        self.sidebar_updater_button(theme, cx),
-                                        |footer, button| {
-                                            footer.child(button).child(div().w(px(8.)))
-                                        },
-                                    )
                                     .child(
                                         div()
                                             .flex()
@@ -849,7 +737,15 @@ impl Render for OrbitApp {
                                                         tr!("status.offline")
                                                     }),
                                             ),
-                                    ),
+                                    )
+                                    .child(div().flex_1())
+                                    .when_some(
+                                        self.sidebar_updater_button(theme, cx),
+                                        |footer, button| {
+                                            footer.child(button).child(div().w(px(8.)))
+                                        },
+                                    )
+                                    .child(self.sidebar_footer_actions(theme, cx)),
                             ),
                     );
                 let gen = self.sidebar_slide_gen;
@@ -1076,18 +972,18 @@ impl Render for OrbitApp {
                                                 } else {
                                                     theme.border
                                                 })
-                                                .rounded(Radius::XLarge.px(&theme))
+                                                .rounded(Radius::XXLarge.px(&theme))
                                                 .shadow(theme.composer_shadow())
-                                                .px(DynamicSpacing::Base12.px(&theme))
-                                                .pt(DynamicSpacing::Base08.px(&theme))
-                                                .pb(DynamicSpacing::Base08.px(&theme))
+                                                .px(DynamicSpacing::Base16.px(&theme))
+                                                .pt(DynamicSpacing::Base12.px(&theme))
+                                                .pb(DynamicSpacing::Base12.px(&theme))
                                                 // Base interface font for the input
                                                 // (scales with the UI font-size
                                                 // setting); the editor inherits it.
                                                 .text_size(TextSize::Default.px(&theme))
                                                 .flex()
                                                 .flex_col()
-                                                .gap(DynamicSpacing::Base08.px(&theme))
+                                                .gap(DynamicSpacing::Base16.px(&theme))
                                                 .on_mouse_up(
                                                     MouseButton::Left,
                                                     cx.listener(Self::on_composer_click),
@@ -1104,7 +1000,7 @@ impl Render for OrbitApp {
                                                     let overlay = div()
                                                         .absolute()
                                                         .inset_0()
-                                                        .rounded(Radius::XLarge.px(&theme))
+                                                        .rounded(Radius::XXLarge.px(&theme))
                                                         .bg(theme.bg_composer.opacity(0.92))
                                                         .border_1()
                                                         .border_color(theme.accent)
@@ -1406,6 +1302,7 @@ impl Render for OrbitApp {
             .on_action(cx.listener(Self::on_toggle_model_menu))
             .on_action(cx.listener(Self::on_toggle_thinking_menu))
             .on_action(cx.listener(Self::on_review_changes))
+            .on_action(cx.listener(Self::on_open_git))
             .on_action(cx.listener(Self::on_open_shortcut_help))
             .on_action(cx.listener(Self::on_review_close))
             .on_action(cx.listener(Self::on_focus_next))
@@ -1419,11 +1316,14 @@ impl Render for OrbitApp {
             .on_action(cx.listener(|this, _: &crate::GitTabGraph, window, cx| {
                 this.on_git_tab(2, window, cx)
             }))
-            .on_action(cx.listener(|this, _: &crate::GitTabIssues, window, cx| {
+            .on_action(cx.listener(|this, _: &crate::GitTabStashes, window, cx| {
                 this.on_git_tab(3, window, cx)
             }))
-            .on_action(cx.listener(|this, _: &crate::GitTabPulls, window, cx| {
+            .on_action(cx.listener(|this, _: &crate::GitTabIssues, window, cx| {
                 this.on_git_tab(4, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::GitTabPulls, window, cx| {
+                this.on_git_tab(5, window, cx)
             }))
     }
 }
@@ -3362,6 +3262,206 @@ impl OrbitApp {
             )
     }
 
+    /// The right dock's single top-bar affordance: the side-panel toggle and
+    /// the working tree's `+N −N` change counts, folded into one chip. The
+    /// counts already opened Review on the uncommitted diff, so a separate
+    /// panel toggle beside them was the same job twice. Dirty — and with the
+    /// pane and the Git page closed — the chip wears the counts instead of the
+    /// glyph; clean, it falls back to the `panel-right` icon. Either way it
+    /// flips the pane and stays lifted while the pane is visible.
+    pub(super) fn render_review_panel_control(
+        &self,
+        theme: Theme,
+        pane_visible: bool,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        // The counts stay off while the pane or the Git page already shows the
+        // same diff, matching the standalone chip's old visibility rule.
+        let dirty = (self.added > 0 || self.removed > 0) && !pane_visible && !self.git_open;
+        let chip = press(header_chip(
+            div()
+                .id("toggle-side-pane")
+                .group(BUTTON_GROUP)
+                .h(px(HEADER_CTRL_H))
+                .min_w(px(HEADER_CTRL_H))
+                .px(if dirty {
+                    ButtonSize::Medium.padding_x(&theme)
+                } else {
+                    px(0.)
+                })
+                .rounded(px(HEADER_CTRL_R))
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(DynamicSpacing::Base06.px(&theme))
+                .cursor_pointer(),
+            &theme,
+        ))
+        // One or the other, never both: the counts stand in for the glyph
+        // while the tree is dirty, so the chip cannot grow two things wide.
+        .children((!dirty).then(|| {
+            icon(
+                "icons/panel-right.svg",
+                ButtonSize::Medium.icon_size().px(&theme),
+                if pane_visible {
+                    theme.text
+                } else {
+                    theme.text_2
+                },
+            )
+        }))
+        .children(dirty.then(|| {
+            div()
+                .flex()
+                .items_center()
+                .gap(DynamicSpacing::Base06.px(&theme))
+                .child(
+                    div()
+                        .text_size(TextSize::Small.px(&theme))
+                        .text_color(theme.add_green)
+                        .child(format!("+{}", self.added)),
+                )
+                .child(
+                    div()
+                        .text_size(TextSize::Small.px(&theme))
+                        .text_color(theme.del_red)
+                        .child(format!("-{}", self.removed)),
+                )
+        }));
+        let chip = if pane_visible {
+            header_lift(chip, &theme)
+        } else {
+            chip
+        };
+        chip.tip(commands::tooltip(CommandId::ToggleSidePanel, pane_visible))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_toggle_side_pane))
+    }
+
+    /// The top bar's overflow menu: one "…" control holding the surfaces that
+    /// no longer earn a permanent chip — Session details, Explorer, the
+    /// Terminal, and the Git page. It keeps the bar to the controls that carry
+    /// live state (quota, open-in, Review, this), with the rest one click away
+    /// and still on their shortcuts. Session details' popover is mounted here
+    /// so it keeps its top-right anchor now that its info chip is gone.
+    pub(super) fn render_header_more(
+        &self,
+        theme: Theme,
+        explorer_visible: bool,
+        terminal_visible: bool,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let open = self.header_more_open;
+        let lifted = open || self.session_details_open;
+        div()
+            .relative()
+            .children(self.render_session_details_popup(cx))
+            .children(self.render_header_more_popup(theme, explorer_visible, terminal_visible, cx))
+            .child(
+                header_icon_button(
+                    "header-more",
+                    &theme,
+                    lifted,
+                    icon(
+                        "icons/more.svg",
+                        ButtonSize::Medium.icon_size().px(&theme),
+                        if lifted { theme.text } else { theme.text_2 },
+                    ),
+                )
+                .tip(tr!("sidebar.more_actions"))
+                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_header_more_click)),
+            )
+    }
+
+    /// The overflow menu itself, anchored under the "…" chip. Rows mirror the
+    /// command registry's titles, so the menu, the palette, and the shortcut
+    /// help can never drift apart.
+    pub(super) fn render_header_more_popup(
+        &self,
+        theme: Theme,
+        explorer_visible: bool,
+        terminal_visible: bool,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.header_more_open {
+            return None;
+        }
+        let menu = picker_surface(div().id("header-more-popup"), &theme)
+            .w(px(220.))
+            .py(picker::list_padding_y(&theme))
+            .flex()
+            .flex_col()
+            .gap(DynamicSpacing::Base01.px(&theme))
+            .occlude()
+            .on_mouse_down_out(
+                cx.listener(|this, _: &MouseDownEvent, _, cx| this.dismiss_header_more(cx)),
+            )
+            .child(header_menu_row(
+                "header-more-session",
+                "icons/info.svg",
+                tr!("session.session_details"),
+                None,
+                self.session_details_open,
+                theme,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| this.open_session_details(cx)),
+            ))
+            .child(header_menu_row(
+                "header-more-explorer",
+                "icons/folder.svg",
+                commands::title(CommandId::ToggleProjectPanel, explorer_visible),
+                commands::spec(CommandId::ToggleProjectPanel).shortcut(),
+                explorer_visible,
+                theme,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    this.header_more_open = false;
+                    this.toggle_project_panel(cx);
+                }),
+            ))
+            .child(header_menu_row(
+                "header-more-terminal",
+                "icons/terminal.svg",
+                commands::title(CommandId::ToggleTerminal, terminal_visible),
+                commands::spec(CommandId::ToggleTerminal).shortcut(),
+                terminal_visible,
+                theme,
+                cx.listener(|this, _: &MouseUpEvent, window, cx| {
+                    this.header_more_open = false;
+                    this.on_toggle_terminal(&crate::ToggleTerminal, window, cx);
+                }),
+            ))
+            .child(header_menu_row(
+                "header-more-git",
+                "icons/github.svg",
+                commands::title(CommandId::OpenGit, false),
+                commands::spec(CommandId::OpenGit).shortcut(),
+                self.git_open,
+                theme,
+                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                    this.header_more_open = false;
+                    if this.git_open {
+                        this.close_git(cx);
+                    } else {
+                        this.open_git(cx);
+                    }
+                }),
+            ));
+        Some(
+            div()
+                .absolute()
+                .bottom_0()
+                .right_0()
+                .size(px(0.))
+                .child(
+                    anchored()
+                        .position_mode(AnchoredPositionMode::Local)
+                        .anchor(Corner::TopRight)
+                        .offset(point(px(0.), popover::MENU_OFFSET))
+                        .snap_to_window_with_margin(popover::WINDOW_MARGIN)
+                        .child(deferred(menu)),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// The sidebar's primary action: a raised New Task button in the same
     /// `ButtonSize::Large` frame as the Search and Usage rows, marked by its
     /// accent icon and the ⌘N shortcut hint.
@@ -3387,7 +3487,7 @@ impl OrbitApp {
                 }),
             )
             .child(icon(
-                "icons/compose.svg",
+                "icons/task-add-01.svg",
                 ButtonSize::Large.icon_size().px(&theme),
                 theme.accent,
             ))
@@ -3412,17 +3512,17 @@ impl OrbitApp {
             )
     }
 
-    /// The quiet nav row under the primary button: opens the command
-    /// palette. Ghost style — hover is the only affordance; the ⌘P hint
-    /// mirrors the ⌘N hint on the button above.
-    pub(super) fn sidebar_search_row(
+    /// The sidebar footer's utility icons: Search (command palette), Usage,
+    /// and Settings. Icon-only — each glyph is labelled by its tooltip, which
+    /// also names its chord — so the column keeps labels for the primary
+    /// action and the session list alone.
+    pub(super) fn sidebar_footer_actions(
         &self,
         theme: Theme,
         cx: &Context<Self>,
     ) -> impl IntoElement + use<> {
-        button_frame(div().id("sidebar-search"), &theme, ButtonSize::Large)
-            .group(BUTTON_GROUP)
-            .w_full()
+        // Search — opens the command palette (⌘P).
+        let search = icon_button_frame(div().id("sidebar-search"), &theme, ButtonSize::Medium)
             .tip(commands::tooltip(CommandId::ToggleCommandPalette, false))
             .cursor_pointer()
             .hover(|s| s.bg(theme.bg_hover))
@@ -3433,27 +3533,62 @@ impl OrbitApp {
             )
             .child(icon(
                 "icons/search.svg",
-                ButtonSize::Large.icon_size().px(&theme),
+                ButtonSize::Medium.icon_size().px(&theme),
                 theme.text_3,
-            ))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(theme.text_2)
-                    .child(tr!("view.search")),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .ml(button::keybinding_gap(&theme))
-                    .text_size(TextSize::Small.px(&theme))
-                    .text_color(theme.text_3)
-                    .child(crate::platform::shortcuts::label(
-                        crate::platform::shortcuts::PALETTE,
-                    )),
-            )
+            ));
+        // Usage — opens (or leaves) the Usage page (⌘U).
+        let usage = icon_button_frame(div().id("sidebar-usage"), &theme, ButtonSize::Medium)
+            .tip(commands::tooltip(CommandId::ToggleUsage, false))
+            .when(self.usage_open, |btn| btn.bg(theme.active))
+            .cursor_pointer()
+            .hover(|s| {
+                s.bg(if self.usage_open {
+                    theme.active
+                } else {
+                    theme.bg_hover
+                })
+            })
+            .active(|s| s.opacity(PRESS_DIM))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_usage_nav_click))
+            .child(icon(
+                "icons/chart-analysis.svg",
+                ButtonSize::Medium.icon_size().px(&theme),
+                if self.usage_open {
+                    theme.active_fg
+                } else {
+                    theme.text_3
+                },
+            ));
+        // Settings — toggles the Settings surface (⌘,).
+        let settings = icon_button_frame(div().id("settings"), &theme, ButtonSize::Medium)
+            .tip(commands::tooltip(CommandId::OpenSettings, false))
+            .when(self.settings_open, |btn| btn.bg(theme.active))
+            .cursor_pointer()
+            .hover(|s| {
+                s.bg(if self.settings_open {
+                    theme.active
+                } else {
+                    theme.bg_hover
+                })
+            })
+            .active(|s| s.opacity(PRESS_DIM))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_settings_gear_click))
+            .child(icon(
+                "icons/settings.svg",
+                ButtonSize::Medium.icon_size().px(&theme),
+                if self.settings_open {
+                    theme.active_fg
+                } else {
+                    theme.text_3
+                },
+            ));
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(search)
+            .child(usage)
+            .child(settings)
     }
 
     /// ⌘U: open the Usage page, or leave it if it is already open.
@@ -3498,7 +3633,7 @@ impl OrbitApp {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.sidepane.update(cx, |pane, cx| pane.show_review(cx));
+        self.open_review(cx);
     }
 
     /// ⌘/: open Settings → Shortcuts — the full keyboard reference.
@@ -3567,47 +3702,6 @@ impl OrbitApp {
             || self.workspace_menu.is_some()
             || self.sidebar_sort_menu
             || self.settings_select.is_some()
-    }
-
-    /// Sidebar nav row for the Usage page, in the same `ButtonSize::Large`
-    /// frame as the New Task and Search rows; the open page is marked with an
-    /// `active` fill rather than accent color alone.
-    pub(super) fn sidebar_usage_row(
-        &self,
-        theme: Theme,
-        cx: &Context<Self>,
-    ) -> impl IntoElement + use<> {
-        let active = self.usage_open;
-        button_frame(div().id("sidebar-usage"), &theme, ButtonSize::Large)
-            .group(BUTTON_GROUP)
-            .w_full()
-            .tip(commands::tooltip(CommandId::ToggleUsage, false))
-            .when(active, |row| row.bg(theme.active))
-            .cursor_pointer()
-            .hover(|s| s.bg(if active { theme.active } else { theme.bg_hover }))
-            .active(|s| s.opacity(PRESS_DIM))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_usage_nav_click))
-            .child(icon(
-                "icons/usage-total.svg",
-                ButtonSize::Large.icon_size().px(&theme),
-                if active {
-                    theme.active_fg
-                } else {
-                    theme.text_3
-                },
-            ))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(if active {
-                        theme.active_fg
-                    } else {
-                        theme.text_2
-                    })
-                    .child(tr!("view.usage")),
-            )
     }
 
     /// The sidebar's "star the project" banner. It sits directly above the

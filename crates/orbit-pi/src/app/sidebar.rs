@@ -6,8 +6,8 @@ use gpui::{point, Pixels};
 use crate::sessions::cap_chars;
 use crate::shimmer::ShimmerText;
 use crate::theme::tokens::{
-    context_menu, list_item, picker, popover, BufferLineHeight, ButtonSize, DynamicSpacing, IconSize,
-    TextSize,
+    context_menu, list_item, picker, popover, BufferLineHeight, ButtonSize, DynamicSpacing,
+    IconSize, TextSize,
 };
 use crate::workspace_mark::{self, WorkspaceMark};
 
@@ -280,9 +280,9 @@ fn sort_workspace_groups(
                 .cmp(&added_at.get(&a.1))
                 .then_with(|| by_label(a, b))
         }),
-        WorkspaceSort::SessionCount => groups.sort_by(|a, b| {
-            b.2.len().cmp(&a.2.len()).then_with(|| by_label(a, b))
-        }),
+        WorkspaceSort::SessionCount => {
+            groups.sort_by(|a, b| b.2.len().cmp(&a.2.len()).then_with(|| by_label(a, b)))
+        }
     }
 }
 
@@ -321,7 +321,10 @@ pub(crate) fn sticky_sidebar_header(list: &ListState, rows: &[SideRow]) -> Optio
     // its header would mask the previous group's rows.
     if matches!(
         rows.get(header_ix),
-        Some(SideRow::Workspace { collapsed: true, .. })
+        Some(SideRow::Workspace {
+            collapsed: true,
+            ..
+        })
     ) {
         return None;
     }
@@ -394,11 +397,14 @@ pub(crate) fn render_side_row(
             // from the list's `px_2`, so the hover pill lines up with the
             // session rows' (inside the same container) and the chevron lands
             // under the "Projects" label. Hover lives on the inner card so the
-            // highlight doesn't bleed into the padding. The header is a minimal
-            // label row: chevron + folder + name, the session count pinned to
-            // the very end, and the row actions (a `…` menu, then the
-            // new-session `+`) fading in to the count's left on hover (all
-            // flex_none, so nothing shifts when they appear).
+            // highlight doesn't bleed into the padding. The header is the
+            // parent row above its sessions: chevron + mark + name, the
+            // session count pinned to the very end, and the row actions (a `…`
+            // menu, then the new-session `+`) fading in to the count's left on
+            // hover (all flex_none, so nothing shifts when they appear). The
+            // name takes the session title's size — only bolder — so the group
+            // reads as their parent, not as another section label; the mark
+            // and chevron step up with it.
             div()
                 .w_full()
                 .pt(DynamicSpacing::Base12.px(&theme))
@@ -455,12 +461,12 @@ pub(crate) fn render_side_row(
                             } else {
                                 "icons/chevron-down.svg"
                             },
-                            IconSize::Indicator.px(&theme),
+                            IconSize::XSmall.px(&theme),
                             theme.text_3,
                         ))
                         .child(icon_dyn(
                             workspace_mark::icon_path(mark.icon.as_deref()),
-                            IconSize::Small.px(&theme),
+                            IconSize::Medium.px(&theme),
                             workspace_mark::tint_color(&theme, mark.tint.as_deref()),
                         ))
                         .child(
@@ -468,9 +474,9 @@ pub(crate) fn render_side_row(
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(TextSize::Small.px(&theme))
+                                .text_size(TextSize::Default.px(&theme))
                                 .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.text_3)
+                                .text_color(theme.text_2)
                                 .child(label.clone()),
                         )
                         // Row actions, revealed on hover: a `…` menu
@@ -516,10 +522,12 @@ pub(crate) fn render_side_row(
                             )),
                         )
                         // Session count, pinned to the header's right edge.
+                        // Small, muted metadata — legible beside the parent row
+                        // without competing with the name.
                         .child(
                             div()
                                 .flex_none()
-                                .text_size(TextSize::XSmall.px(&theme))
+                                .text_size(TextSize::Small.px(&theme))
                                 .text_color(theme.text_3)
                                 .child(format!("{count}")),
                         ),
@@ -723,6 +731,7 @@ pub(crate) fn render_side_row(
                 });
             let mut card = div()
                 .group("srow")
+                .relative()
                 .w_full()
                 .pl(px(22.))
                 .pr(DynamicSpacing::Base08.px(&theme))
@@ -828,6 +837,23 @@ pub(crate) fn render_side_row(
                         )
                     }),
             );
+            // The open session's marker: a short ember rail on the leading
+            // edge. The active fill and the hover/cursor washes sit within a
+            // few points of each other, so the rail — not the tint — is what
+            // makes "this is the session you are viewing" unmistakable, and
+            // the row's fill and ink can stay quiet beside it.
+            if active {
+                card = card.child(
+                    div()
+                        .absolute()
+                        .left(DynamicSpacing::Base06.px(&theme))
+                        .top_0()
+                        .bottom_0()
+                        .flex()
+                        .items_center()
+                        .child(div().w(px(2.)).h(px(16.)).rounded_full().bg(theme.accent)),
+                );
+            }
             row = row.child(card);
             row.into_any_element()
         }
@@ -1689,13 +1715,7 @@ where
             this.update(cx, |app, cx| (on_click)(app, cx));
         })
         .child(icon(icon_path, context_menu::ICON.px(&theme), icon_color))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .child(label.to_string()),
-        )
+        .child(div().flex_1().min_w_0().truncate().child(label.to_string()))
 }
 
 /// Reveal a session file in the OS file manager (macOS first, matching the
@@ -1904,11 +1924,7 @@ impl OrbitApp {
     /// Open (or toggle closed) the sidebar's workspace-sort menu. Follows the
     /// same gesture guard as the row menus, so the dismissing click cannot
     /// immediately re-open it.
-    pub(super) fn toggle_sidebar_sort_menu(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn toggle_sidebar_sort_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         const GESTURE: Duration = Duration::from_millis(200);
         if let Some(dismissed) = self.menu_dismissed_at.take() {
             if dismissed.elapsed() < GESTURE {

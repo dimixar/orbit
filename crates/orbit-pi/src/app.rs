@@ -384,6 +384,11 @@ pub struct OrbitApp {
     settings_select_highlight: Option<usize>,
     /// Scroll handle for the settings dropdown's option list.
     settings_select_scroll: UniformListScrollHandle,
+    /// Global settings search. Typing filters the section list down to the
+    /// settings whose label or keywords match, across every section.
+    settings_search: Entity<ComposerInput>,
+    /// Re-render the settings surface as the search is typed.
+    _settings_search_sub: Subscription,
     /// Settings → General: which notification channels are on (persisted to
     /// `~/.orbit-pi/notifications.json`), plus the last macOS permission
     /// read. The read drives the honest "blocked" / "unbundled" rows — a
@@ -513,6 +518,10 @@ pub struct OrbitApp {
     refreshing: bool,
     /// Whether the top-bar session-details popover is open.
     session_details_open: bool,
+    /// Whether the top bar's overflow ("more") menu is open. Holds the
+    /// surfaces that no longer earn a permanent chip: Session details,
+    /// Explorer, the Terminal, and the Git page.
+    header_more_open: bool,
     /// A popover-triggered title generation is in flight; the next
     /// `session_info_changed` seeds the rename field from its result.
     title_generating: bool,
@@ -924,6 +933,17 @@ impl OrbitApp {
                 .with_placeholder_key("app.filter")
                 .with_key_context("Composer Picker")
         });
+        // The settings surface's own search: one field over every section's
+        // rows, not the select popup's filter above.
+        let settings_search = cx.new(|cx| {
+            ComposerInput::new(cx)
+                .with_element_id("settings-search")
+                .with_placeholder_key("app.search_settings")
+                .with_key_context("Composer Picker")
+                .with_max_lines(1)
+                .with_wrap(false)
+        });
+        let settings_search_sub = cx.observe(&settings_search, |_, _, cx| cx.notify());
         let open_in_filter = cx.new(|cx| {
             ComposerInput::new(cx)
                 .with_placeholder_key("app.filter")
@@ -1219,6 +1239,8 @@ impl OrbitApp {
             settings_section: SettingsSection::General,
             settings_select: None,
             settings_filter,
+            settings_search: settings_search.clone(),
+            _settings_search_sub: settings_search_sub,
             settings_select_highlight: None,
             settings_select_scroll: UniformListScrollHandle::new(),
             notification_prefs: notifications::Prefs::load(),
@@ -1270,6 +1292,7 @@ impl OrbitApp {
             host,
             refreshing: false,
             session_details_open: false,
+            header_more_open: false,
             title_generating: false,
             rename_saved_at: None,
             quota_popup_open: false,
@@ -1410,9 +1433,10 @@ impl OrbitApp {
         };
 
         let app_weak = cx.entity().downgrade();
-        // A changed-file row on the Git page opens its diff in Review. The
-        // Review pane replaces the Git page, so the diff gets the column and
-        // the change list is not left behind.
+        // The Git page's per-file actions menu opens a file's diff in Review.
+        // (Changed-file rows now expand their diff inline on the Changes tab.)
+        // The Review pane replaces the Git page, so the diff gets the column
+        // and the change list is not left behind.
         let review_sidepane = app.sidepane.clone();
         let review_app = app_weak.clone();
         app.git_panel.update(cx, |panel, _| {
@@ -1588,7 +1612,8 @@ impl OrbitApp {
         if self.workspaces.iter().any(|w| w == &cwd) {
             return;
         }
-        self.workspace_added_at.insert(cwd.clone(), SystemTime::now());
+        self.workspace_added_at
+            .insert(cwd.clone(), SystemTime::now());
         self.workspaces.push(cwd);
         self.persist_workspace_prefs();
     }
@@ -1843,7 +1868,11 @@ fn parse_workspace_store(value: &Value) -> WorkspaceStore {
     for entry in entries {
         let (path, added_at, mark) = match entry {
             // Legacy format: a bare path string.
-            Value::String(raw) => (normalize_workspace_path(raw), None, WorkspaceMark::default()),
+            Value::String(raw) => (
+                normalize_workspace_path(raw),
+                None,
+                WorkspaceMark::default(),
+            ),
             // Current format: `{ "path": …, "added_at": <unix secs>,
             // "icon": <stem>, "tint": <key> }`.
             Value::Object(map) => {
@@ -1997,15 +2026,15 @@ struct WorkspaceMenu {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsSection {
     General,
+    Appearance,
+    Shortcuts,
     Runtime,
     Agent,
+    Providers,
+    Models,
     Skills,
     Plugins,
     Mcp,
-    Models,
-    Appearance,
-    Providers,
-    Shortcuts,
     About,
 }
 
@@ -2335,6 +2364,8 @@ mod composer_layout_tests;
 mod devicons_tests;
 #[cfg(test)]
 mod error_label_tests;
+#[cfg(test)]
+mod new_task_panels_tests;
 #[cfg(test)]
 mod new_task_reconnect_tests;
 #[cfg(test)]

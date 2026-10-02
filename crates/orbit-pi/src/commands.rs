@@ -67,6 +67,7 @@ pub enum CommandId {
     GitTabChanges,
     GitTabHistory,
     GitTabGraph,
+    GitTabStashes,
     GitTabIssues,
     GitTabPulls,
     // Application
@@ -416,12 +417,15 @@ pub static COMMANDS: &[CommandSpec] = &[
         ),
         shortcuts::REVIEW_CHANGES,
     ),
-    command(
-        CommandId::OpenGit,
-        Navigation,
-        "icons/git-commit.svg",
-        "command_palette.open_git",
-        "git commit push branch history graph changes",
+    with_chord(
+        command(
+            CommandId::OpenGit,
+            Navigation,
+            "icons/git-commit.svg",
+            "command_palette.open_git",
+            "git commit push branch history graph changes",
+        ),
+        shortcuts::OPEN_GIT,
     ),
     // ── Panels ─────────────────────────────────────────────────────────
     with_alt_title(
@@ -607,13 +611,23 @@ pub static COMMANDS: &[CommandSpec] = &[
     ),
     with_chord(
         help_only(command(
+            CommandId::GitTabStashes,
+            Git,
+            "icons/archive.svg",
+            "git_panel.tab_stashes",
+            "git stashes tab stash pop apply drop",
+        )),
+        "secondary-alt-4",
+    ),
+    with_chord(
+        help_only(command(
             CommandId::GitTabIssues,
             Git,
             "icons/github.svg",
             "git_panel.tab_issues",
             "git issues tab github",
         )),
-        "secondary-alt-4",
+        "secondary-alt-5",
     ),
     with_chord(
         help_only(command(
@@ -623,7 +637,7 @@ pub static COMMANDS: &[CommandSpec] = &[
             "git_panel.tab_pulls",
             "git pulls requests tab github",
         )),
-        "secondary-alt-5",
+        "secondary-alt-6",
     ),
     // ── Application ────────────────────────────────────────────────────
     with_chord(
@@ -816,6 +830,11 @@ pub static BINDINGS: &[Binding] = &[
         id: CommandId::ReviewChanges,
     },
     Binding {
+        chord: shortcuts::OPEN_GIT,
+        context: None,
+        id: CommandId::OpenGit,
+    },
+    Binding {
         chord: shortcuts::SHORTCUT_HELP,
         context: None,
         id: CommandId::OpenShortcutHelp,
@@ -889,10 +908,15 @@ pub static BINDINGS: &[Binding] = &[
     Binding {
         chord: "secondary-alt-4",
         context: None,
-        id: CommandId::GitTabIssues,
+        id: CommandId::GitTabStashes,
     },
     Binding {
         chord: "secondary-alt-5",
+        context: None,
+        id: CommandId::GitTabIssues,
+    },
+    Binding {
+        chord: "secondary-alt-6",
         context: None,
         id: CommandId::GitTabPulls,
     },
@@ -989,8 +1013,8 @@ pub fn tooltip(id: CommandId, alternate: bool) -> String {
 fn action_binding(binding: &Binding) -> Option<KeyBinding> {
     use crate::{
         AbortRun, CheckForUpdates, CopyLastResponse, FocusSessions, GitTabChanges, GitTabGraph,
-        GitTabHistory, GitTabIssues, GitTabPulls, NewSession, NextSession, NextTurn,
-        OpenSessionSlot, OpenSettings, OpenShortcutHelp, PrevSession, PrevTurn, Quit,
+        GitTabHistory, GitTabIssues, GitTabPulls, GitTabStashes, NewSession, NextSession, NextTurn,
+        OpenGit, OpenSessionSlot, OpenSettings, OpenShortcutHelp, PrevSession, PrevTurn, Quit,
         RefreshSessions, ReviewChanges, ReviewClose, ReviewCollapseAll, ReviewExpandAll,
         ReviewFileNext, ReviewFilePrev, ReviewHunkNext, ReviewHunkPrev, ReviewTreeNext,
         ReviewTreePrev, ReviewTreeToggle, ToggleCommandPalette, ToggleModelMenu,
@@ -1021,6 +1045,7 @@ fn action_binding(binding: &Binding) -> Option<KeyBinding> {
         CommandId::ChooseModel => KeyBinding::new(chord, ToggleModelMenu, context),
         CommandId::ChooseThinking => KeyBinding::new(chord, ToggleThinkingMenu, context),
         CommandId::ReviewChanges => KeyBinding::new(chord, ReviewChanges, context),
+        CommandId::OpenGit => KeyBinding::new(chord, OpenGit, context),
         CommandId::OpenShortcutHelp => KeyBinding::new(chord, OpenShortcutHelp, context),
         CommandId::ToggleCommandPalette => KeyBinding::new(chord, ToggleCommandPalette, context),
         CommandId::ToggleSearch => KeyBinding::new(chord, ToggleSearch, context),
@@ -1036,6 +1061,7 @@ fn action_binding(binding: &Binding) -> Option<KeyBinding> {
         CommandId::GitTabGraph => KeyBinding::new(chord, GitTabGraph, context),
         CommandId::GitTabIssues => KeyBinding::new(chord, GitTabIssues, context),
         CommandId::GitTabPulls => KeyBinding::new(chord, GitTabPulls, context),
+        CommandId::GitTabStashes => KeyBinding::new(chord, GitTabStashes, context),
         CommandId::ReviewTreeNext => KeyBinding::new(chord, ReviewTreeNext, context),
         CommandId::ReviewTreePrev => KeyBinding::new(chord, ReviewTreePrev, context),
         CommandId::ReviewTreeToggle => KeyBinding::new(chord, ReviewTreeToggle, context),
@@ -1053,7 +1079,6 @@ fn action_binding(binding: &Binding) -> Option<KeyBinding> {
         | CommandId::CopySessionId
         | CommandId::DeleteSession
         | CommandId::FocusComposer
-        | CommandId::OpenGit
         | CommandId::ToggleSidePanel
         | CommandId::OpenMcpSettings
         | CommandId::AddMcpServer
@@ -1142,8 +1167,8 @@ mod tests {
         );
         // A chord-less command shows its bare title.
         assert_eq!(
-            tooltip(CommandId::OpenGit, false),
-            tr!("command_palette.open_git")
+            tooltip(CommandId::ToggleSidePanel, false),
+            tr!("command_palette.show_side_panel")
         );
         // A toggle's alternate face is what the hint names.
         assert_eq!(

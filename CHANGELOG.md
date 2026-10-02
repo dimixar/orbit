@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **⌘⇧G** opens the Git/GitHub page (and closes it again), and the **…**
+  overflow menu now shows each row's shortcut — the Git row reads **⌘⇧G**.
+
+### Changed
+
+- The Git page's commit message box now matches the chat composer: the
+  multi-line editor and its action row share one rounded, lifted surface, so
+  the message reads as a text area instead of a one-line field. **Enter**
+  inserts a newline and **⌘↵** / **Ctrl+Enter** commits.
+- The top bar's right side now carries only what shows live state: the
+  provider quota, **Open in**, the Review chip, and a single **…** menu. The
+  Review chip folds together the side-panel toggle and the working tree's
+  `+N −N` counts (one or the other); the new **…** menu holds **Session
+  details**, **Explorer**, **Terminal**, and **Git**, each still on its
+  shortcut and one click away.
+- Stashes moved off the Git page's **Changes** tab onto their own **Stashes**
+  tab (⌘⌥4), so **Changes** stays the review browser plus commit bar; the
+  **Issues** and **Pull requests** tabs moved to ⌘⌥5 and ⌘⌥6.
+
 ## [0.2.3] - 2026-10-01
 
 ### Added

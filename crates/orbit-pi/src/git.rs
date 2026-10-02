@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use anyhow::{anyhow, bail};
@@ -366,10 +366,18 @@ fn resolve_range(
 /// The tree the index would write — the "staged" snapshot. Does not modify
 /// the index or the working tree.
 fn index_tree(cwd: &Path) -> anyhow::Result<String> {
+    // `git write-tree` rewrites the index (it records the cache-tree
+    // extension) even with `GIT_OPTIONAL_LOCKS=0`. The workspace watcher keeps
+    // `.git/index`, so writing the real one would retrigger the Git page's
+    // refresh forever. Point Git at a throwaway copy instead.
+    let copy = index_copy(cwd)?;
     let output = command(cwd)
+        .env("GIT_INDEX_FILE", &copy)
         .args(["write-tree"])
         .output()
         .map_err(|err| anyhow!("failed to snapshot the Git index: {err}"))?;
+    let _ = std::fs::remove_file(&copy);
+    let _ = std::fs::remove_file(copy.with_extension("lock"));
     if output.status.success() {
         let tree = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         if !tree.is_empty() {
@@ -381,6 +389,28 @@ fn index_tree(cwd: &Path) -> anyhow::Result<String> {
         bail!("{}", command_error(&output));
     }
     Ok(EMPTY_TREE.to_owned())
+}
+
+/// A throwaway copy of the repository's index under its Git directory, where
+/// the workspace watcher ignores every path it does not need. A missing index
+/// needs no copy: Git reads an empty one, matching the unborn-branch case.
+fn index_copy(cwd: &Path) -> anyhow::Result<PathBuf> {
+    let git_dir = run_git_ok(cwd, ["rev-parse", "--absolute-git-dir"])?;
+    let git_dir = PathBuf::from(git_dir.trim());
+    let copy = git_dir.join(format!("orbit-index-read-{}", next_temp_suffix()));
+    let _ = std::fs::copy(git_dir.join("index"), &copy);
+    Ok(copy)
+}
+
+/// A per-process-unique suffix for temporary index copies (no `uuid` dep).
+fn next_temp_suffix() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 /// The merge base of `HEAD` and the repository's default branch (`main` /
@@ -478,6 +508,7 @@ impl StatusRow {
     }
 
     /// Badge for the unstaged list (`U` for untracked).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn change_badge(&self) -> char {
         if self.untracked() {
             'U'
@@ -644,13 +675,14 @@ pub fn discard_paths(cwd: &Path, paths: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// Discard every change in the working tree: staged and unstaged edits to
-/// tracked files are reset to `HEAD`, and untracked files are removed. The UI
+/// Discard every unstaged change: tracked files restore from the index and
+/// untracked files are removed. Staged changes are left untouched. The UI
 /// confirms before calling this.
-pub fn discard_all(cwd: &Path) -> Result<(), String> {
-    // An unborn branch has no `HEAD` to reset to; only its untracked files
-    // need removing, so the failed reset is not an error here.
-    let _ = run_git(cwd, &["reset", "-q", "--hard", "HEAD"]);
+pub fn discard_unstaged(cwd: &Path) -> Result<(), String> {
+    // Restore the working tree from the index (so an unborn branch, whose
+    // tracked files have no committed copy, simply fails harmlessly) and drop
+    // the untracked files the working tree added.
+    let _ = run_git(cwd, &["checkout", "--", "."]);
     run_git(cwd, &["clean", "-fdq"]).map(|_| ())
 }
 
@@ -1355,6 +1387,48 @@ mod tests {
         let rows = status_rows(&root).unwrap();
         assert!(rows.iter().all(StatusRow::staged));
         assert!(!rows.iter().any(StatusRow::unstaged));
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// The Git page's Changes tab reloads its diff on every `git status`
+    /// refresh; the staged/unstaged sources call `index_tree`. If that rewrote
+    /// `.git/index`, the workspace watcher would fire, reload the diff, and
+    /// rewrite the index again — forever. `git write-tree` does rewrite the
+    /// index (its cache-tree extension) even with `GIT_OPTIONAL_LOCKS=0`.
+    #[test]
+    fn index_tree_reads_without_rewriting_the_index() {
+        use std::time::{Duration, SystemTime};
+
+        let root = repository();
+        let index = root.join(".git/index");
+        // Pin the mtime so a rewrite is detectable regardless of clock or
+        // filesystem timestamp granularity.
+        let pinned = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        fs::File::options()
+            .write(true)
+            .open(&index)
+            .unwrap()
+            .set_modified(pinned)
+            .unwrap();
+
+        let tree = index_tree(&root).unwrap();
+        assert!(!tree.is_empty());
+        assert_eq!(
+            fs::metadata(&index).unwrap().modified().unwrap(),
+            pinned,
+            "index_tree must read the index without rewriting it"
+        );
+        // The throwaway copy must not linger next to the real index.
+        let leftovers: Vec<_> = fs::read_dir(root.join(".git"))
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("orbit-index-read-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temporary index left behind: {leftovers:?}"
+        );
         fs::remove_dir_all(root).ok();
     }
 
