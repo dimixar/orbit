@@ -47,7 +47,10 @@ Usage — requests, tokens, cost, and cache, read from your own sessions:
 - Grouped by project, persistent, reopenable, and cross-workspace
 - Orbit-owned project list — remove a workspace from the sidebar without deleting pi's sessions
 - Sort projects by last activity, recently added, name, or session count
-- Clone a session to branch off it
+- Rename, pin, clone, or delete sessions, and copy a session id; pinned sessions sort first
+- Address sessions by position — **⌘1…⌘9** (**Ctrl+1…9**) opens the Nth visible session, **Ctrl+Tab / Ctrl+Shift+Tab** cycle them
+- Sessions written by the CLI or another window refresh the sidebar live
+- Background turn notifications — a desktop banner and alert sound when the window isn't frontmost, an in-app toast otherwise, and a heads-up when a run is waiting on an extension dialog
 
 **Safeguards**
 
@@ -58,23 +61,38 @@ Usage — requests, tokens, cost, and cache, read from your own sessions:
 
 **Review and Git**
 
-- Side pane with a live `git diff HEAD` of the workspace, refreshed when a run settles
-- Git page for Changes / History / Graph, staging, and commit
-- Git page's Issues and Pull requests tabs: browse and file issues and PRs through `gh`, with an AI **Generate** action that drafts a title and body from the branch, its commits, optional notes, and the repository's own issue/PR template
+- Review side pane with selectable sources — **Last Turn** (exactly what one agent turn changed, from per-turn checkpoints), Uncommitted, Unstaged, Staged, Committed, and Branch — refreshed when a run settles
+- Diff view controls: collapse or expand each file, wrap or pan long lines, unified or side-by-side rows, docked / full-page / minimized, and full keyboard operation (Tab focus stops, arrows, `n` / `p` between files, `[` / `]` between hunks)
+- Git page for Changes / History / Graph / Stashes: staging, commit (⌘↵), stash push/pop/apply/drop, sync, push (including force-with-lease), pull, fetch, merge, and rebase, with recovery actions for rejected pushes and conflicts
+- Git page's Issues and Pull requests tabs through `gh`: browse and filter, file issues and PRs, comment, apply labels, close/reopen, review, merge, and check out a PR's branch — with repository templates and an AI **Generate** action that drafts a title and body from the branch, its commits, optional notes, and the repo's own template
+
+**Explorer and Files**
+
+- Project panel (⌘⇧E) — a gitignore-aware workspace tree with expand/collapse, filter, hidden-files toggle, devicons, `M/A/D/R/U` git badges, and keyboard navigation
+- File operations from the tree: new file, new folder, rename, and delete to Trash, plus open / reveal / copy path actions
+- Files page with a tab strip and an editor for the active workspace: syntax-highlighted editable buffers, Markdown Edit/Preview, images, debounced autosave (and ⌘S) with dirty/saving state, and honest read-only guards for binary, oversized, truncated, and non-UTF-8 files
+
+**Terminal**
+
+- Integrated terminal (⌘J) — a real login shell in a resizable bottom panel, built on `alacritty_terminal` for PTY and VT/ANSI emulation and rendered natively by GPUI: scrollback, click-drag selection (⌘C/⌘V), bracketed paste, a blinking cursor, a per-theme ANSI palette, and restart; the shell follows the active workspace
 
 **Workbench**
 
-- Usage, skills, plugins, models, providers, and appearance pages, backed by pi's on-disk data
-- Providers — pi's live catalog plus custom endpoints, with API-key or OAuth sign-in and usage meters
-- Plugins — install pi packages from npm, git, or a local path, global or per project, and update or remove them in place
-- Models and thinking effort read from pi's own runtime
+- Usage, skills, plugins, models, providers, MCP, appearance, and agent/runtime settings, backed by pi's on-disk data
+- **MCP** — manage pi's MCP servers (global and per project) in Settings → MCP: add / edit / validate, a `${NAME}` secret store, live status and tool lists from `pi mcp list --json`, and applying changes by respawning pi with the session preserved
+- Providers — pi's live catalog plus custom endpoints (`models.json`), with API-key or OAuth sign-in and usage meters
+- Plugins — install pi packages from npm, git, or a local path, global or per project; update checks and update/remove in place
+- Models — read from pi's own runtime, with a **default session model** and thinking level (Settings → Agent) applied to every new session; the choice lives in Orbit's own store and leaves pi's global settings alone
+- **Auto session titles** — a bundled pi extension names a session after its first turn, with a model picker and an on/off toggle in Settings → Agent
 - Appearance — **Light / Dark / System**, independent light and dark theme palettes, background image, fonts, sizes, spacing density, and **interface language** (English, 简体中文, 日本語, 한국어, Español, Français, Deutsch, Português do Brasil, Русский, Italiano, or the system language). System follows OS appearance changes live; new installations use System, while existing theme choices are preserved.
 
 **Native**
 
 - A command palette (⌘P / ⌘K) and a registry-driven shortcut layer: the keymap, palette chips, and the Settings → Shortcuts reference all read from one command table, with Tab focus traversal, context-aware keys (review tree, pickers, dialogs), custom macOS window chrome, native dialogs, and reduce-motion
-- Zed's design tokens (spacing and density, type, icon and button sizes, elevation, motion) in `theme/tokens.rs`, scaling with the UI font size and Spacing Density settings; context menus, tooltips, and extension dialogs use them today
-- A signed, notarizable `.app` bundle
+- Zed's design tokens (spacing and density, type, icon and button sizes, elevation, motion) in `theme/tokens.rs`, scaling with the UI font size and Spacing Density settings — settings, usage, the sidebar, transcript chrome, the palette, pickers, modals, the Explorer, the Git panel, and the terminal use them today, with the composer the last major surface
+- **Open in** — open the workspace in a detected editor or terminal right from the header, with each app's real icon
+- A first-run dependency check for `pi`, `node`, and `git` that reports anything missing with its install command
+- Signed releases: macOS `.dmg` (signed + notarized, universal) and `.tar.gz`, Windows `.exe` / `.zip`, Linux `.deb` / `.tar.gz`, with signed in-app updates on every platform
 
 ## Structure
 
@@ -127,27 +145,27 @@ issue before starting.
 | Workflow modes | Composer | Start a session scoped to **Plan Mode**, **Build Mode**, or **Ask Mode** instead of one undifferentiated chat. | Shipped | — |
 | Follow-up on settle | Transcript | Show a queued follow-up inline once a run ends, not only in the compose queue. | Planned | — |
 | Suggested follow-ups | Transcript | Propose 2–3 context-grounded next prompts as composer inserts after a run settles. | Proposed | [#10](https://github.com/imrj05/orbit/issues/10) |
-| GitHub client | Workbench | Browse and manage remote commits, graph, issues, and pull requests in-app. | In progress — issues and PRs tabs ship today, with AI-drafted issue/PR bodies | [#8](https://github.com/imrj05/orbit/issues/8) |
-| Pi extension support | Workbench | First-class list / install / enable / configure / debug of pi extensions, including community ones. | Proposed | [#7](https://github.com/imrj05/orbit/issues/7) |
-| Global default model | Models | Pin pi's global default model and thinking effort from within Orbit. | Proposed | [#9](https://github.com/imrj05/orbit/issues/9) |
+| GitHub client | Workbench | Browse and manage remote commits, graph, issues, and pull requests in-app. | In progress — Issues and Pull requests ship with comments, reviews, merges, and branch checkouts; remote commit browsing remains open | [#8](https://github.com/imrj05/orbit/issues/8) |
+| Pi extension support | Workbench | First-class list / install / enable / configure / debug of pi extensions, including community ones. | In progress — Plugins installs, updates, and removes packages; a dedicated extensions surface with enable/configure/debug is still open | [#7](https://github.com/imrj05/orbit/issues/7) |
+| Global default model | Models | Pin pi's global default model and thinking effort from within Orbit. | Shipped — Settings → Agent sets the model and thinking level every new session starts on (Orbit's own store; pi's global settings are untouched) | [#9](https://github.com/imrj05/orbit/issues/9) |
 | Voice dictation | Composer | Dictate prompts into the composer. | Planned | — |
-| Diff review and terminal | Workbench | Inline diff review and an integrated terminal. | Planned | — |
+| Diff review and terminal | Workbench | Inline diff review and an integrated terminal. | Shipped — Review pane with per-turn checkpoints and view controls, plus a login-shell terminal (⌘J) | — |
 | Parallel sessions | Sessions | Run multiple agents / sessions side by side. | Planned | — |
-| Explorer gaps | Explorer | Quick-open, sticky scroll, and directory folding in the file tree. | Planned | — |
+| Explorer gaps | Explorer | Quick-open, sticky scroll, and directory folding in the file tree. | Planned — expand/collapse, filter, hidden toggle, and git badges ship today | — |
 | Conversation fork/rewind | Sessions | Branch and rewind a conversation (clone ships today). | Planned | — |
 | Scroll-perf measurement | Performance | On-device measurement of transcript scroll performance. | Planned | — |
-| Zed token migration | Design | Move the remaining surfaces (settings, pickers, command palette, modals, transcript chrome, sidebar rows) onto the Zed design tokens. | In progress — context menus, tooltips, and extension dialogs ship today | — |
+| Zed token migration | Design | Move the remaining surfaces (settings, pickers, command palette, modals, transcript chrome, sidebar rows) onto the Zed design tokens. | In progress — settings, usage, sidebar, transcript chrome, palette, pickers, modals, Explorer, Git panel, and terminal are on the tokens; the composer is the last major surface | — |
 
 ### Contributor checklist
 
 - [x] **Workflow modes** — Plan Mode / Build Mode / Ask Mode
 - [ ] **Follow-up on settle** — show a queued follow-up inline when a run ends
 - [ ] **Suggested follow-ups** — context-grounded next prompts ([#10](https://github.com/imrj05/orbit/issues/10))
-- [ ] **GitHub client** — commits, graph, issues, and pull requests ([#8](https://github.com/imrj05/orbit/issues/8))
-- [ ] **Pi extension support** — install and manage extensions, including community ones ([#7](https://github.com/imrj05/orbit/issues/7))
-- [ ] **Global default model** — set pi's default model and thinking effort ([#9](https://github.com/imrj05/orbit/issues/9))
+- [ ] **GitHub client** — remote commits and graph (issues and PRs ship today) ([#8](https://github.com/imrj05/orbit/issues/8))
+- [ ] **Pi extension support** — a dedicated extensions surface; Plugins manages packages today ([#7](https://github.com/imrj05/orbit/issues/7))
+- [x] **Global default model** — set the default model and thinking level for new sessions ([#9](https://github.com/imrj05/orbit/issues/9))
 - [ ] **Voice dictation** — dictate prompts into the composer
-- [ ] **Diff review and terminal** — inline review plus an integrated terminal
+- [x] **Diff review and terminal** — inline review plus an integrated terminal
 - [ ] **Parallel sessions** — multiple agents / sessions at once
 - [ ] **Explorer gaps** — quick-open, sticky scroll, directory folding
 - [ ] **Conversation fork/rewind** — branch and rewind a session
