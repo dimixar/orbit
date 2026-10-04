@@ -148,7 +148,7 @@ impl OrbitApp {
             .clone()
             .or_else(|| std::env::current_dir().ok())
         {
-            self.add_workspace(cwd);
+            self.add_workspace(cwd, cx);
         }
         self.begin_turn(cx);
         // Show the prompt immediately — pi does not echo it back in RPC mode.
@@ -620,13 +620,14 @@ impl OrbitApp {
         self.session_id = None;
         self.workflow_pending = None;
         self.workflow_mode = WorkflowMode::default();
-        self.add_workspace(cwd.clone());
+        self.add_workspace(cwd.clone(), cx);
         self.set_current_workspace(cwd.clone());
+        crate::analytics::track(cx, orbit_analytics::AnalyticsEvent::ProjectOpened);
 
         match self.extensions.spawn(&cwd, true, &self.mcp.secret_env()) {
             Ok(client) => {
                 self.adopt_client(client);
-                self.mcp_stamp = self.mcp.fingerprint();
+                self.mcp_stamp = self.mcp.fingerprint_for(Some(&cwd));
                 self.send(CommandBody::NewSession, "new_session");
                 self.refresh_catalogs();
                 // Capability probes queue after the new-session request.
@@ -735,11 +736,17 @@ impl OrbitApp {
         // ── activate the target ──
         // A parked process spawned before the latest MCP configuration change
         // is stale: drop it and cold-start so it loads the current servers.
-        let mcp_stamp = self.mcp.fingerprint();
+        // The stamp is workspace-specific, so compare against the *target
+        // session's* workspace — the manager is still pointed at the workspace
+        // being left. Using the current fingerprint made every cross-workspace
+        // switch look like a config change and drop (kill) the parked run.
+        // A busy session is never dropped for staleness: the live run wins,
+        // and the new config applies on its next idle reopen.
+        let mcp_stamp = self.mcp.fingerprint_for(Some(&session.cwd));
         if let Some(parked) = self
             .lives
             .remove(&session.path)
-            .filter(|parked| parked.mcp_stamp == mcp_stamp)
+            .filter(|parked| parked.busy || parked.mcp_stamp == mcp_stamp)
         {
             // Resume a background run. The parked transcript is already up
             // to date (its events drain every tick); anything buffered in
@@ -803,8 +810,9 @@ impl OrbitApp {
         self.reset_session_name(cx);
         self.seed_session_name_input(cx);
         // Opening a session keeps its folder in Orbit's own sidebar list.
-        self.add_workspace(session.cwd.clone());
+        self.add_workspace(session.cwd.clone(), cx);
         self.set_current_workspace(session.cwd.clone());
+        crate::analytics::track(cx, orbit_analytics::AnalyticsEvent::ProjectOpened);
         self.current_session_path = Some(session.path.clone());
         if push {
             self.session_history.truncate(self.history_index + 1);
@@ -2269,8 +2277,12 @@ impl OrbitApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let opening = !self.terminal_panel.read(cx).is_open();
         self.terminal_panel
             .update(cx, |panel, cx| panel.toggle(window, cx));
+        if opening {
+            crate::analytics::track(cx, orbit_analytics::AnalyticsEvent::TerminalOpened);
+        }
         cx.notify();
     }
 
