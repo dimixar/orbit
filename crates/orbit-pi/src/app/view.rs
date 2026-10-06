@@ -1905,8 +1905,8 @@ impl OrbitApp {
             icon_button_frame(div().id("steer-btn"), &theme, ButtonSize::Medium)
                 .group(BUTTON_GROUP)
                 .rounded_full()
-                .bg(theme.overlay)
-                .hover(|s| s.bg(theme.overlay_strong))
+                .raised(theme.overlay, &theme)
+                .hover(|s| s.raised(theme.overlay_strong, &theme))
                 .active(|s| s.opacity(PRESS_DIM))
                 .cursor_pointer()
                 .on_mouse_up(
@@ -2419,15 +2419,18 @@ impl OrbitApp {
                                                 } else {
                                                     theme.border
                                                 })
-                                                .bg(if selected {
-                                                    theme.accent.opacity(0.12)
-                                                } else {
-                                                    theme.bg_raised
-                                                })
+                                                .raised(
+                                                    if selected {
+                                                        theme.accent.opacity(0.12)
+                                                    } else {
+                                                        theme.bg_raised
+                                                    },
+                                                    &theme,
+                                                )
                                                 .cursor_pointer()
                                                 .hover(|s| {
                                                     s.border_color(theme.border_strong)
-                                                        .bg(theme.overlay)
+                                                        .raised(theme.overlay, &theme)
                                                 })
                                                 .on_mouse_up(
                                                     MouseButton::Left,
@@ -3474,11 +3477,14 @@ impl OrbitApp {
             .group(BUTTON_GROUP)
             .w_full()
             .tip(commands::tooltip(CommandId::NewSession, false))
-            .bg(theme.bg_raised)
+            .raised(theme.bg_raised, &theme)
             .border_1()
             .border_color(theme.border)
             .cursor_pointer()
-            .hover(|s| s.bg(theme.bg_hover).border_color(theme.border_strong))
+            .hover(|s| {
+                s.raised(theme.bg_hover, &theme)
+                    .border_color(theme.border_strong)
+            })
             .active(|s| s.opacity(PRESS_DIM))
             .on_mouse_up(
                 MouseButton::Left,
@@ -3758,9 +3764,9 @@ impl OrbitApp {
         if self.busy {
             icon_button_frame(div().id("stop-btn"), &theme, ButtonSize::Medium)
                 .rounded_full()
-                .bg(theme.stop_red)
-                .hover(|s| s.bg(theme.stop_red_hover))
-                .active(|s| s.bg(theme.stop_red))
+                .raised(theme.stop_red, &theme)
+                .hover(|s| s.raised(theme.stop_red_hover, &theme))
+                .active(|s| s.raised(theme.stop_red, &theme))
                 .cursor_pointer()
                 .text_color(theme.send_fg)
                 .on_mouse_up(MouseButton::Left, cx.listener(Self::on_abort_mouse))
@@ -3784,10 +3790,11 @@ impl OrbitApp {
             let empty = self.input.read(cx).text().trim().is_empty() && self.attachments.is_empty();
             icon_button_frame(div().id("send-btn"), &theme, ButtonSize::Medium)
                 .rounded_full()
-                .bg(if empty { theme.overlay } else { theme.send_bg })
+                .when(empty, |btn| btn.bg(theme.overlay))
                 .when(!empty, |btn| {
-                    btn.hover(|s| s.bg(theme.send_bg_hover))
-                        .active(|s| s.bg(theme.send_bg))
+                    btn.raised(theme.send_bg, &theme)
+                        .hover(|s| s.raised(theme.send_bg_hover, &theme))
+                        .active(|s| s.raised(theme.send_bg, &theme))
                         .cursor_pointer()
                 })
                 .on_mouse_up(MouseButton::Left, cx.listener(Self::on_send_click))
@@ -4221,7 +4228,7 @@ impl OrbitApp {
             .font_weight(FontWeight::MEDIUM)
             .border_1()
             .border_color(gpui::transparent_black())
-            .bg(theme.overlay)
+            .raised(theme.overlay, &theme)
             .text_color(theme.text_2);
         let back_disabled = submitted || cursor == 0;
         if back_disabled {
@@ -4229,7 +4236,11 @@ impl OrbitApp {
         } else {
             back = back
                 .cursor_pointer()
-                .hover(|style| style.bg(theme.overlay_strong).text_color(theme.text))
+                .hover(|style| {
+                    style
+                        .raised(theme.overlay_strong, &theme)
+                        .text_color(theme.text)
+                })
                 .on_click(cx.listener(|this, _, window, cx| this.ask_prev_question(window, cx)));
         }
         back = back.child(tr!("view.back"));
@@ -4244,14 +4255,14 @@ impl OrbitApp {
             .font_weight(FontWeight::MEDIUM)
             .border_1()
             .border_color(gpui::transparent_black())
-            .bg(theme.accent.opacity(0.16))
+            .raised(theme.accent.opacity(0.16), &theme)
             .text_color(theme.accent);
         if submitted {
             next = next.opacity(0.45);
         } else {
             next = next
                 .cursor_pointer()
-                .hover(|style| style.bg(theme.accent.opacity(0.26)))
+                .hover(|style| style.raised(theme.accent.opacity(0.26), &theme))
                 .on_click(cx.listener(|this, _, window, cx| this.ask_next_question(window, cx)));
         }
         next = next.child(next_label);
@@ -4324,19 +4335,25 @@ impl OrbitApp {
             // ember-washed tile with ember ink, matching the One Accent Rule.
             button = if is_primary {
                 button
-                    .bg(theme.accent.opacity(0.16))
+                    .raised(theme.accent.opacity(0.16), &theme)
                     .text_color(theme.accent)
-                    .hover(|s| s.bg(theme.accent.opacity(0.26)))
+                    .hover(|s| s.raised(theme.accent.opacity(0.26), &theme))
             } else if is_deny {
                 button
-                    .bg(theme.overlay)
+                    .raised(theme.overlay, &theme)
                     .text_color(theme.text_2)
-                    .hover(|s| s.bg(theme.crit.opacity(0.14)).text_color(theme.crit))
+                    .hover(|s| {
+                        s.raised(theme.crit.opacity(0.14), &theme)
+                            .text_color(theme.crit)
+                    })
             } else {
                 button
-                    .bg(theme.overlay)
+                    .raised(theme.overlay, &theme)
                     .text_color(theme.text_2)
-                    .hover(|s| s.bg(theme.overlay_strong).text_color(theme.text))
+                    .hover(|s| {
+                        s.raised(theme.overlay_strong, &theme)
+                            .text_color(theme.text)
+                    })
             };
             // The keyboard cursor reads as a strong border.
             button = button.border_color(if highlighted {
@@ -4427,62 +4444,101 @@ impl OrbitApp {
     /// The pending queue pi is holding, shown as a bar directly above the
     /// composer. While a task is running, messages sent from the composer are
     /// queued as follow-ups here and delivered once the task finishes;
-    /// `queue_update` mirrors the list live.
+    /// `queue_update` mirrors the list live. One raised card in the sibling
+    /// strips' shape, a quiet label header, and flat hairline-separated rows.
     pub(super) fn queue_bar(&self, cx: &Context<Self>) -> Option<AnyElement> {
         if self.queue.is_empty() {
             return None;
         }
         let theme = *theme::get(cx);
-        let mut chips = div().flex().flex_wrap().gap(px(6.));
+        let count = self.queue.len();
+        let only_steering = self.queue.follow_up.is_empty();
+        // The label names the queue's dominant state in the app's 11px label
+        // style; the full delivery sentence stays on the tooltip so the
+        // header can be one quiet line.
+        let label = if only_steering {
+            tr!("view.queue_steering")
+        } else {
+            tr!("view.queue_queued")
+        };
+        let detail = if only_steering {
+            tr!("view.steering_turn", count = count)
+        } else if self.queue.steering.is_empty() {
+            tr!("view.queued_after_task", count = count)
+        } else {
+            tr!("view.steering_plus_followups", count = count)
+        };
+
+        let mut rows: Vec<AnyElement> = Vec::with_capacity(count);
         for text in &self.queue.steering {
-            chips = chips.child(queue_chip("Steer", text, false, theme));
+            rows.push(queue_row(&tr!("view.queue_steer"), text, false, theme));
         }
         for text in &self.queue.follow_up {
-            chips = chips.child(queue_chip("Follow-up", text, true, theme));
+            rows.push(queue_row(&tr!("view.queue_follow_up"), text, true, theme));
         }
+
         Some(
             div()
+                .id("queue-bar")
+                .debug_selector(|| "queue-bar".to_string())
                 .w_full()
                 .mb(px(8.))
-                .px(px(10.))
-                .py(px(8.))
                 .rounded(Radius::XLarge.px(&theme))
                 .border_1()
                 .border_color(theme.border)
                 .bg(theme.bg_raised)
                 .flex()
                 .flex_col()
-                .gap(px(6.))
+                // Clip the rows' hairline separators to the rounded corners.
+                .overflow_hidden()
                 .child(
+                    // A clock, `QUEUED · 2`, and the one action: a compact
+                    // dismiss. No second button, no sentence in the header.
                     div()
+                        .h(px(30.))
+                        .px(px(12.))
                         .flex()
                         .items_center()
-                        .gap_2()
+                        .gap(px(6.))
+                        .child(icon(
+                            "icons/clock.svg",
+                            IconSize::XSmall.px(&theme),
+                            theme.text_3,
+                        ))
                         .child(
                             div()
+                                .id("queue-label")
                                 .flex_1()
                                 .min_w_0()
-                                .text_size(TextSize::Small.px(&theme))
+                                .truncate()
+                                .tip(detail)
+                                .text_size(TextSize::XSmall.px(&theme))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.text_3)
-                                .child(if self.queue.follow_up.is_empty() {
-                                    tr!("view.steering_turn", count = self.queue.len())
-                                } else if self.queue.steering.is_empty() {
-                                    tr!("view.queued_after_task", count = self.queue.len())
-                                } else {
-                                    tr!("view.steering_plus_followups", count = self.queue.len())
-                                }),
+                                .child(format!("{label} · {count}").to_uppercase()),
                         )
                         .child(
-                            button_frame(div().id("clear-queue"), &theme, ButtonSize::Compact)
-                                .text_color(theme.text_2)
-                                .cursor_pointer()
-                                .hover(|s| s.bg(theme.overlay).text_color(theme.text))
-                                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_clear_queue))
-                                .child(tr!("view.clear")),
+                            icon_button_frame(
+                                div()
+                                    .id("clear-queue")
+                                    .debug_selector(|| "clear-queue".to_string()),
+                                &theme,
+                                ButtonSize::Compact,
+                            )
+                            .group(BUTTON_GROUP)
+                            .tip(tr!("view.clear_queue"))
+                            .cursor_pointer()
+                            .text_color(theme.text_3)
+                            .hover(|s| s.bg(theme.overlay).text_color(theme.text))
+                            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_clear_queue))
+                            .child(icon(
+                                "icons/x.svg",
+                                ButtonSize::Compact.icon_size().px(&theme),
+                                theme.text_3,
+                            )),
                         ),
                 )
-                .child(chips)
+                .children(rows)
                 .into_any_element(),
         )
     }
@@ -4527,8 +4583,8 @@ impl OrbitApp {
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(theme.text)
                             .cursor_pointer()
-                            .bg(theme.overlay)
-                            .hover(|s| s.bg(theme.overlay_strong))
+                            .raised(theme.overlay, &theme)
+                            .hover(|s| s.raised(theme.overlay_strong, &theme))
                             .on_mouse_up(
                                 MouseButton::Left,
                                 cx.listener(|this, _, _, cx| {
