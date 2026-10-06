@@ -17,6 +17,8 @@ const links = [
   { label: "Sessions", href: "/#sessions" },
   { label: "Git", href: "/#git" },
   { label: "Usage", href: "/#usage" },
+  { label: "Skills", href: "/#skills" },
+  { label: "MCP", href: "/#mcp" },
   { label: "Changelog", href: "/changelog" },
 ];
 

@@ -12,7 +12,7 @@ Sessions you create in Orbit and in the terminal are the same sessions (`~/.pi/a
 
 A live session — streaming transcript, tool rows, and the composer:
 
-![A live Orbit session: a transcript answering a question about the API with a findings table, a list of changed files, and the composer below.](marketing/public/screens/session.png)
+![A completed Orbit session: the agent's notes on the Windows IME composer fix and a Changed 4 files card with per-file line counts, above the composer.](marketing/public/screens/session.png)
 
 Usage — requests, tokens, cost, and cache, read from your own sessions:
 

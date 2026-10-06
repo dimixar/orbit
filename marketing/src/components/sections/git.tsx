@@ -11,9 +11,9 @@ function GitCard() {
         Git
       </p>
       <p className="text-[12px] text-ink-2">
-        <span className="text-ink">3 files changed</span>
+        <span className="text-ink">4 files changed</span>
         {" · "}
-        <span className="font-mono text-[11px]">+184 −61</span>
+        <span className="font-mono text-[11px]">+355 −34</span>
       </p>
     </div>
   );
@@ -37,7 +37,7 @@ export function Git() {
           <Shot
             src="/screens/review.png"
             srcLight="/screens/review-light.png"
-            alt="The Orbit Review panel open beside a session, showing a selected file's diff on the left and the changed-file tree on the right."
+            alt="The Orbit Review panel open beside a session, showing a selected file's inline diff on the left and the changed-file tree on the right."
             sizes="(max-width: 1024px) 100vw, 560px"
           />
           <GitCard />

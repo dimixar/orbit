@@ -41,6 +41,7 @@ export function Models() {
         "Point Orbit at a local Ollama and everything stays on your machine.",
         "Favorites and context sizes, grouped by provider.",
       ]}
+      flip
       visual={
         <div className="relative">
           <Shot

@@ -145,7 +145,7 @@ export async function Hero() {
               src="/screens/session.png"
               srcLight="/screens/session-light.png"
               priority
-              alt="A live Orbit session: a transcript answering a question about the API with a findings table, a list of changed files, and the composer below."
+              alt="A completed Orbit session: the agent's notes on the Windows IME composer fix and a Changed 4 files card with per-file line counts, above the composer."
             />
           </div>
         </div>
